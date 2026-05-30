@@ -1,5 +1,4 @@
 #include "ring_buffer.h"
-#include <algorithm>
 
 namespace fthr {
 
