@@ -2489,6 +2489,37 @@ class _SettingsPage(QWidget):
     close_requested        = pyqtSignal()
     imported_folders_changed = pyqtSignal()
 
+    _AUTOSTART_KEY  = r'Software\Microsoft\Windows\CurrentVersion\Run'
+    _AUTOSTART_NAME = 'FTHRClips'
+
+    def _init_autostart_checkbox(self):
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._AUTOSTART_KEY)
+            winreg.QueryValueEx(key, self._AUTOSTART_NAME)
+            winreg.CloseKey(key)
+            self.autostart_check.setChecked(True)
+        except (FileNotFoundError, OSError):
+            self.autostart_check.setChecked(False)
+
+    def _on_autostart_changed(self, state):
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._AUTOSTART_KEY,
+                                 0, winreg.KEY_SET_VALUE)
+            if state == 2:  # Qt.CheckState.Checked
+                exe = sys.executable
+                winreg.SetValueEx(key, self._AUTOSTART_NAME, 0, winreg.REG_SZ,
+                                  f'"{exe}"')
+            else:
+                try:
+                    winreg.DeleteValue(key, self._AUTOSTART_NAME)
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+        except OSError:
+            pass
+
     def __init__(self, settings_manager: SettingsManager = None, parent=None):
         super().__init__(parent)
         self.sm = settings_manager
@@ -2607,6 +2638,10 @@ class _SettingsPage(QWidget):
         if sys.platform != 'win32':
             self.autostart_check.setVisible(False)
         layout.addWidget(self.autostart_check)
+        if sys.platform == 'win32':
+            self._init_autostart_checkbox()
+        if sys.platform == 'win32':
+            self.autostart_check.stateChanged.connect(self._on_autostart_changed)
 
         # ── Import Clips ──────────────────────────────────────────────────
         layout.addSpacing(28)
