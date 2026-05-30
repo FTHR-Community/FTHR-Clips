@@ -4,8 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build_output"
 APPDIR="$BUILD_DIR/AppDir"
-PYTHON_VERSION="$(python3 --version | cut -d' ' -f2 | cut -d'.' -f1,2)"
-PYTHON_BIN="$(which python3)"
 
 echo "=== FTHR Clips Linux AppImage Builder ==="
 echo "Python: $(python3 --version)"
@@ -29,14 +27,20 @@ pkg-config --exists libavcodec libpulse-simple wayland-client || {
     echo "  Ubuntu: sudo apt install libavcodec-dev libpulse-dev libwayland-dev"
     exit 1
 }
+
+python3 -c "import PyQt6, keyboard, cv2, imageio_ffmpeg, sounddevice, numpy" 2>/dev/null || {
+    echo "ERROR: Missing Python dependencies."
+    echo "Install: pip install -r requirements.txt"
+    exit 1
+}
 echo "    All dependencies found."
 
 # ── 2. Build C++ engine ────────────────────────────────────────────────────
 echo ""
 echo ">>> Building C++ capture engine..."
 cd "$SCRIPT_DIR/FTHRcapture_linux"
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$APPDIR/usr" > /dev/null
-cmake --build build -j"$(nproc)" 2>&1 | grep -E "^\[|error:|warning:.*error" || true
+cmake -B build -DCMAKE_BUILD_TYPE=Release > /dev/null
+cmake --build build -j"$(nproc)" 2>&1 | grep -E "^\[|error:" || true
 echo "    Engine built: FTHRcapture_linux/build/FTHRclips"
 cd "$SCRIPT_DIR"
 
@@ -48,8 +52,6 @@ mkdir -p "$APPDIR/usr/bin"
 mkdir -p "$APPDIR/usr/share/fthr-clips"
 mkdir -p "$APPDIR/usr/share/applications"
 mkdir -p "$APPDIR/usr/share/icons"
-mkdir -p "$APPDIR/usr/lib"
-mkdir -p "$APPDIR/usr/plugins/platforms"
 
 # C++ engine
 cp "$SCRIPT_DIR/FTHRcapture_linux/build/FTHRclips" "$APPDIR/usr/bin/FTHRclips"
@@ -66,58 +68,7 @@ cp "$SCRIPT_DIR/AppDir/fthr-clips.png"     "$APPDIR/usr/share/icons/"
 cp "$SCRIPT_DIR/AppDir/AppRun"             "$APPDIR/AppRun"
 chmod +x "$APPDIR/AppRun"
 
-# ── 4. Bundle Python interpreter ───────────────────────────────────────────
-echo ""
-echo ">>> Bundling Python $PYTHON_VERSION interpreter..."
-cp "$PYTHON_BIN" "$APPDIR/usr/bin/python3"
-
-# Python stdlib
-PY_STDLIB="$(python3 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
-PY_PLATSTDLIB="$(python3 -c 'import sysconfig; print(sysconfig.get_path("platstdlib"))')"
-mkdir -p "$APPDIR/usr/lib/python${PYTHON_VERSION}"
-cp -r "$PY_STDLIB/." "$APPDIR/usr/lib/python${PYTHON_VERSION}/"
-# lib-dynload (C extensions like _ssl, _hashlib)
-DYNLOAD="$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib") + "/../lib-dynload")' 2>/dev/null || echo "")"
-[ -d "$DYNLOAD" ] && cp -r "$DYNLOAD" "$APPDIR/usr/lib/python${PYTHON_VERSION}/lib-dynload" || true
-
-# ── 5. Bundle pip deps ─────────────────────────────────────────────────────
-echo ""
-echo ">>> Installing pip dependencies into AppDir..."
-VENV="$BUILD_DIR/venv"
-python3 -m venv "$VENV"
-"$VENV/bin/pip" install --quiet --upgrade pip
-"$VENV/bin/pip" install --quiet -r "$SCRIPT_DIR/requirements.txt"
-
-SITE_PACKAGES="$VENV/lib/python${PYTHON_VERSION}/site-packages"
-mkdir -p "$APPDIR/usr/lib/python${PYTHON_VERSION}/dist-packages"
-cp -r "$SITE_PACKAGES/." "$APPDIR/usr/lib/python${PYTHON_VERSION}/dist-packages/"
-
-# ── 6. Bundle Qt6 platform plugins ────────────────────────────────────────
-echo ""
-echo ">>> Bundling Qt6 platform plugins..."
-# Search common locations: PyQt6 wheel bundle, system Qt, distro Qt6
-QT_PLATFORMS=""
-for candidate in \
-    "$(python3 -c 'import PyQt6, os; print(os.path.dirname(PyQt6.__file__))')/Qt6/plugins/platforms" \
-    "/usr/lib/qt6/plugins/platforms" \
-    "/usr/lib/qt/plugins/platforms" \
-    "/usr/lib/x86_64-linux-gnu/qt6/plugins/platforms"; do
-    [ -d "$candidate" ] && QT_PLATFORMS="$candidate" && break
-done
-
-if [ -n "$QT_PLATFORMS" ]; then
-    echo "    Found plugins at: $QT_PLATFORMS"
-    for so in "$QT_PLATFORMS"/libqxcb.so "$QT_PLATFORMS"/libqwayland*.so; do
-        [ -f "$so" ] && cp "$so" "$APPDIR/usr/plugins/platforms/" && echo "    Copied: $(basename $so)"
-    done
-else
-    echo "    Warning: Qt6 platform plugins not found — AppImage may not launch without them"
-fi
-
-# Fix AppRun Python version placeholder
-sed -i "s|python3/dist-packages|python${PYTHON_VERSION}/dist-packages|g" "$APPDIR/AppRun"
-
-# ── 7. Download appimagetool ───────────────────────────────────────────────
+# ── 4. Download appimagetool ───────────────────────────────────────────────
 APPIMAGETOOL="$BUILD_DIR/appimagetool-x86_64.AppImage"
 if [ ! -f "$APPIMAGETOOL" ]; then
     echo ""
@@ -127,11 +78,11 @@ if [ ! -f "$APPIMAGETOOL" ]; then
     chmod +x "$APPIMAGETOOL"
 fi
 
-# ── 8. Build AppImage ──────────────────────────────────────────────────────
+# ── 5. Build AppImage ──────────────────────────────────────────────────────
 echo ""
 echo ">>> Building AppImage..."
 OUTPUT="$SCRIPT_DIR/FTHRClips-x86_64.AppImage"
-ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$OUTPUT" 2>&1
+ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$OUTPUT" 2>&1 | grep -v "^Please consider\|appimage.github"
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
@@ -140,7 +91,10 @@ echo "╠═══════════════════════�
 printf "║  Output: %-40s║\n" "FTHRClips-x86_64.AppImage"
 printf "║  Size:   %-40s║\n" "$(du -sh "$OUTPUT" | cut -f1)"
 echo "╠══════════════════════════════════════════════════╣"
-echo "║  Before first run:                               ║"
+echo "║  Requirements on target system:                  ║"
+echo "║    python3, PyQt6, keyboard, cv2, sounddevice    ║"
+echo "║                                                  ║"
+echo "║  For global hotkeys (one-time setup):            ║"
 echo "║    sudo usermod -aG input \$USER                  ║"
-echo "║    (then log out and back in for hotkeys)        ║"
+echo "║    (then log out and back in)                    ║"
 echo "╚══════════════════════════════════════════════════╝"
