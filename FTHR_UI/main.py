@@ -1828,9 +1828,7 @@ class MainWindow(QMainWindow):
                 self.engine_process.kill()
             self.engine_process = None
         else:
-            if sys.platform == 'win32':
-                subprocess.run(['taskkill', '/F', '/IM', 'FTHRClips.exe'],
-                               capture_output=True)
+            pass  # no known PID — do not kill by name to avoid affecting other instances
 
     def _restart_capture_engine(self):
         self._set_status('RESTARTING', STATUS_IDLE)
