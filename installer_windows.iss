@@ -1,5 +1,9 @@
 ; FTHR Clips — Inno Setup 6 installer script
 ; Build on Windows: iscc installer_windows.iss
+; PREREQUISITE: Download vc_redist.x64.exe from Microsoft and place it at:
+;   redist\vc_redist.x64.exe
+; (relative to this .iss file)
+; https://aka.ms/vs/17/release/vc_redist.x64.exe
 
 #define MyAppName      "FTHR Clips"
 #define MyAppVersion   "1.0.0-alpha"
@@ -29,6 +33,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "dist\FTHRClips\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{group}\{#MyAppName}";              Filename: "{app}\{#MyAppExeName}"
@@ -36,6 +41,7 @@ Name: "{group}\Uninstall {#MyAppName}";    Filename: "{uninstallexe}"
 Name: "{commondesktop}\{#MyAppName}";      Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/quiet /norestart"; StatusMsg: "Installing Visual C++ Runtime..."; Flags: waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
