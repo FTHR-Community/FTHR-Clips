@@ -20,6 +20,7 @@ a = Analysis(
         (str(ASSETS_DIR / 'fthr_logo.png'),   'assets'),
         (str(ASSETS_DIR / 'fonts'),            'assets/fonts'),
         (str(ASSETS_DIR / 'icons'),            'assets/icons'),
+        (str(ASSETS_DIR / 'sounds'),           'assets/sounds'),
     ],
     hiddenimports=[
         'PyQt6.QtMultimedia',
