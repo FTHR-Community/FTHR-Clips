@@ -1228,6 +1228,12 @@ class MainWindow(QMainWindow):
         # in Python and ffmpeg-mux it into each clip after save.
         self._start_mic_recorder()
 
+        # Launch the capture engine once the event loop is running. Deferring
+        # past __init__ keeps the window responsive while the engine boots and
+        # the bridge polls for its shared memory. Once running, the status timer
+        # below handles transparent reconnection if the engine ever dies.
+        QTimer.singleShot(0, self.start_engine)
+
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._update_status)
         self.status_timer.start(500)
