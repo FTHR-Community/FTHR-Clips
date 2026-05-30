@@ -21,6 +21,7 @@ a = Analysis(
         (str(ASSETS_DIR / 'fonts'),            'assets/fonts'),
         (str(ASSETS_DIR / 'icons'),            'assets/icons'),
         (str(ASSETS_DIR / 'sounds'),           'assets/sounds'),
+        (str(UI_DIR / 'ui' / 'capture_card_process.py'), 'ui'),
     ],
     hiddenimports=[
         'PyQt6.QtMultimedia',

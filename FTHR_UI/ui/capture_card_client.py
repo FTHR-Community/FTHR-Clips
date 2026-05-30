@@ -13,11 +13,24 @@ Public API matches CaptureCard exactly:
     client.close()
 """
 
+import os
 import sys
 import subprocess
 from pathlib import Path
 
-_PROCESS_SCRIPT = Path(__file__).parent / 'capture_card_process.py'
+# When frozen by PyInstaller, sys.executable is the .exe launcher, not python,
+# and the process script lives inside the extracted _MEIPASS bundle.
+if getattr(sys, 'frozen', False):
+    _PROCESS_SCRIPT = Path(sys._MEIPASS) / 'ui' / 'capture_card_process.py'
+
+    # sys.executable is the .exe launcher; find the real interpreter instead.
+    _PYTHON_EXE = os.path.join(sys._MEIPASS, '..', 'python.exe')
+    if not os.path.exists(_PYTHON_EXE):
+        # Fallback: look for python.exe next to the exe.
+        _PYTHON_EXE = os.path.join(os.path.dirname(sys.executable), 'python.exe')
+else:
+    _PROCESS_SCRIPT = Path(__file__).parent / 'capture_card_process.py'
+    _PYTHON_EXE = sys.executable
 
 # Suppress the console window flash on Windows.
 _CREATE_NO_WINDOW = 0x08000000
@@ -34,7 +47,7 @@ class CaptureCardClient:
     def _launch(self):
         try:
             self._proc = subprocess.Popen(
-                [sys.executable, str(_PROCESS_SCRIPT)],
+                [_PYTHON_EXE, str(_PROCESS_SCRIPT)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
