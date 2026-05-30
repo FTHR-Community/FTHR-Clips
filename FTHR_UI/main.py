@@ -3513,6 +3513,13 @@ def _prewarm_heavy_modules():
 
 
 def main():
+    # When the frozen Windows exe is relaunched as the capture-card subprocess,
+    # route into the card process instead of the main application.
+    if '--card-process' in sys.argv:
+        from ui.capture_card_process import main as _card_main
+        _card_main()
+        return
+
     print("Main.py successfully initiated")
     app = QApplication(sys.argv)
     app.setApplicationName('FTHR Clips')

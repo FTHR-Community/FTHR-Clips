@@ -18,19 +18,15 @@ import sys
 import subprocess
 from pathlib import Path
 
-# When frozen by PyInstaller, sys.executable is the .exe launcher, not python,
-# and the process script lives inside the extracted _MEIPASS bundle.
-if getattr(sys, 'frozen', False):
-    _PROCESS_SCRIPT = Path(sys._MEIPASS) / 'ui' / 'capture_card_process.py'
-
-    # sys.executable is the .exe launcher; find the real interpreter instead.
-    _PYTHON_EXE = os.path.join(sys._MEIPASS, '..', 'python.exe')
-    if not os.path.exists(_PYTHON_EXE):
-        # Fallback: look for python.exe next to the exe.
-        _PYTHON_EXE = os.path.join(os.path.dirname(sys.executable), 'python.exe')
+# When frozen by PyInstaller there is no python.exe in the bundle.
+# Instead, relaunch the frozen exe itself with --card-process so main.py
+# routes it into the card event loop rather than the main application.
+_FROZEN = getattr(sys, 'frozen', False)
+if _FROZEN:
+    _LAUNCH_CMD = [sys.executable, '--card-process']
 else:
     _PROCESS_SCRIPT = Path(__file__).parent / 'capture_card_process.py'
-    _PYTHON_EXE = sys.executable
+    _LAUNCH_CMD = [sys.executable, str(_PROCESS_SCRIPT)]
 
 # Suppress the console window flash on Windows.
 _CREATE_NO_WINDOW = 0x08000000
@@ -47,7 +43,7 @@ class CaptureCardClient:
     def _launch(self):
         try:
             self._proc = subprocess.Popen(
-                [_PYTHON_EXE, str(_PROCESS_SCRIPT)],
+                _LAUNCH_CMD,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
