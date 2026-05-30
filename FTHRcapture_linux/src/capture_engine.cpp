@@ -289,12 +289,22 @@ void CaptureEngine::CaptureLoop() {
     if (!ctx.sc_mgr) {
         std::cerr << "[Capture] zwlr_screencopy_manager_v1 not available — "
                      "compositor must support wlr-screencopy" << std::endl;
+        if (ctx.sc_mgr)    zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
+        if (ctx.output)    wl_output_destroy(ctx.output);
+        if (ctx.shm)       wl_shm_destroy(ctx.shm);
+        if (ctx.compositor) wl_compositor_destroy(ctx.compositor);
+        if (ctx.registry)  wl_registry_destroy(ctx.registry);
         wl_display_disconnect(ctx.display);
         running_.store(false);
         return;
     }
     if (!ctx.output) {
         std::cerr << "[Capture] No wl_output found" << std::endl;
+        if (ctx.sc_mgr)    zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
+        if (ctx.output)    wl_output_destroy(ctx.output);
+        if (ctx.shm)       wl_shm_destroy(ctx.shm);
+        if (ctx.compositor) wl_compositor_destroy(ctx.compositor);
+        if (ctx.registry)  wl_registry_destroy(ctx.registry);
         wl_display_disconnect(ctx.display);
         running_.store(false);
         return;
@@ -318,6 +328,11 @@ void CaptureEngine::CaptureLoop() {
         if (ctx.frame_failed || ctx.fb.width == 0) {
             std::cerr << "[Capture] Failed to probe output resolution" << std::endl;
             zwlr_screencopy_frame_v1_destroy(ctx.sc_frame);
+            if (ctx.sc_mgr)    zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
+            if (ctx.output)    wl_output_destroy(ctx.output);
+            if (ctx.shm)       wl_shm_destroy(ctx.shm);
+            if (ctx.compositor) wl_compositor_destroy(ctx.compositor);
+            if (ctx.registry)  wl_registry_destroy(ctx.registry);
             wl_display_disconnect(ctx.display);
             running_.store(false);
             return;
@@ -326,6 +341,11 @@ void CaptureEngine::CaptureLoop() {
         if (!alloc_framebuffer(&ctx)) {
             std::cerr << "[Capture] Failed to allocate probe framebuffer" << std::endl;
             zwlr_screencopy_frame_v1_destroy(ctx.sc_frame);
+            if (ctx.sc_mgr)    zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
+            if (ctx.output)    wl_output_destroy(ctx.output);
+            if (ctx.shm)       wl_shm_destroy(ctx.shm);
+            if (ctx.compositor) wl_compositor_destroy(ctx.compositor);
+            if (ctx.registry)  wl_registry_destroy(ctx.registry);
             wl_display_disconnect(ctx.display);
             running_.store(false);
             return;
@@ -372,6 +392,11 @@ void CaptureEngine::CaptureLoop() {
     if (!encoder_.Open(enc_cfg, codec_used)) {
         std::cerr << "[Capture] Encoder open failed" << std::endl;
         free_framebuffer(ctx.fb);
+        if (ctx.sc_mgr)    zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
+        if (ctx.output)    wl_output_destroy(ctx.output);
+        if (ctx.shm)       wl_shm_destroy(ctx.shm);
+        if (ctx.compositor) wl_compositor_destroy(ctx.compositor);
+        if (ctx.registry)  wl_registry_destroy(ctx.registry);
         wl_display_disconnect(ctx.display);
         running_.store(false);
         return;
