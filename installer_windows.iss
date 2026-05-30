@@ -2,7 +2,7 @@
 ; Build on Windows: iscc installer_windows.iss
 
 #define MyAppName      "FTHR Clips"
-#define MyAppVersion   "0.1.0-alpha"
+#define MyAppVersion   "1.0.0-alpha"
 #define MyAppPublisher "FTHR"
 #define MyAppExeName   "FTHRClips.exe"
 
