@@ -81,14 +81,14 @@ fi
 # ── 5. Build AppImage ──────────────────────────────────────────────────────
 echo ""
 echo ">>> Building AppImage..."
-OUTPUT="$SCRIPT_DIR/FTHRClips-x86_64.AppImage"
+OUTPUT="$SCRIPT_DIR/FTHRClips-1.0.0-alpha-x86_64.AppImage"
 ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$OUTPUT" 2>&1 | grep -v "^Please consider\|appimage.github"
 
 echo ""
 echo "╔══════════════════════════════════════════════════╗"
 echo "║           FTHR Clips AppImage Ready!             ║"
 echo "╠══════════════════════════════════════════════════╣"
-printf "║  Output: %-40s║\n" "FTHRClips-x86_64.AppImage"
+printf "║  Output: %-40s║\n" "FTHRClips-1.0.0-alpha-x86_64.AppImage"
 printf "║  Size:   %-40s║\n" "$(du -sh "$OUTPUT" | cut -f1)"
 echo "╠══════════════════════════════════════════════════╣"
 echo "║  Requirements on target system:                  ║"

@@ -1213,7 +1213,7 @@ class MainWindow(QMainWindow):
         # Window drag state
         self._drag_pos: QPoint | None = None
 
-        self.setWindowTitle('FTHR Clips')
+        self.setWindowTitle('FTHR Clips 1.0.0-alpha')
         self.setMinimumSize(1100, 720)
 
         self._setup_ui()
@@ -3479,6 +3479,7 @@ def main():
     print("Main.py successfully initiated")
     app = QApplication(sys.argv)
     app.setApplicationName('FTHR Clips')
+    app.setApplicationVersion('1.0.0-alpha')
 
     _load_fonts()
     _prewarm_heavy_modules()
