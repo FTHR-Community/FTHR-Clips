@@ -2600,6 +2600,8 @@ class _SettingsPage(QWidget):
         layout.addWidget(_flat_section_header('System'))
         layout.addSpacing(12)
         self.autostart_check = QCheckBox('Autostart with Windows')
+        if sys.platform != 'win32':
+            self.autostart_check.setVisible(False)
         layout.addWidget(self.autostart_check)
 
         # ── Import Clips ──────────────────────────────────────────────────
