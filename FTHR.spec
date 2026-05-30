@@ -63,7 +63,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    icon=str(ASSETS_DIR / 'fthr_logo.png'),
+    icon=str(ASSETS_DIR / 'fthr_logo.ico'),
 )
 
 coll = COLLECT(
