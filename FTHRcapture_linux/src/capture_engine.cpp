@@ -323,7 +323,13 @@ void CaptureEngine::CaptureLoop() {
             return;
         }
 
-        alloc_framebuffer(&ctx);
+        if (!alloc_framebuffer(&ctx)) {
+            std::cerr << "[Capture] Failed to allocate probe framebuffer" << std::endl;
+            zwlr_screencopy_frame_v1_destroy(ctx.sc_frame);
+            wl_display_disconnect(ctx.display);
+            running_.store(false);
+            return;
+        }
         zwlr_screencopy_frame_v1_copy(ctx.sc_frame, ctx.fb.buffer);
         while (!ctx.frame_ready && !ctx.frame_failed)
             wl_display_dispatch(ctx.display);
