@@ -1187,7 +1187,9 @@ class MainWindow(QMainWindow):
             ]
         else:
             linux_root     = Path(__file__).parent.parent / 'FTHRcapture_linux'
+            _env_engine    = os.environ.get('FTHR_ENGINE', '')
             possible_paths = [
+                *([ Path(_env_engine) ] if _env_engine else []),
                 linux_root / 'build' / 'FTHRclips',
             ]
         self.engine_path = None
