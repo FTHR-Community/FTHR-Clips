@@ -31,4 +31,5 @@ elif [ -n "$DISPLAY" ]; then
     export QT_QPA_PLATFORM="xcb"
 fi
 
+export PYTHONUNBUFFERED=1
 exec "$PYTHON" "$HERE/usr/share/fthr-clips/FTHR_UI/main.py" "$@"

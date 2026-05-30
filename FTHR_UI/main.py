@@ -3462,17 +3462,15 @@ def _prewarm_heavy_modules():
     except Exception as e:
         print(f'[Prewarm] imageio-ffmpeg unavailable: {e}')
 
-    try:
-        from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-        # Constructing and dropping a QMediaPlayer pays the one-time cost of
-        # MediaFoundation init. We don't keep references — Qt will delete them.
-        _warm_player = QMediaPlayer()
-        _warm_audio  = QAudioOutput()
-        _warm_player.setAudioOutput(_warm_audio)
-        # Explicit deletion isn't needed; Python's refcount drops them at
-        # function exit. Qt cleans up cleanly because we never set a source.
-    except Exception as e:
-        print(f'[Prewarm] Qt multimedia init failed: {e}')
+    if sys.platform == 'win32':
+        try:
+            from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+            # Pays the one-time cost of MediaFoundation init on Windows.
+            _warm_player = QMediaPlayer()
+            _warm_audio  = QAudioOutput()
+            _warm_player.setAudioOutput(_warm_audio)
+        except Exception as e:
+            print(f'[Prewarm] Qt multimedia init failed: {e}')
 
 
 def main():
