@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=FTHR Clips
+Comment=Game capture and clip management
+Exec=fthr-clips
+Icon=fthr-clips
+Categories=AudioVideo;Video;Game;
+Terminal=false

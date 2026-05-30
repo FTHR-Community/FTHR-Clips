@@ -1,0 +1,5 @@
+build_output/
+FTHRClips-x86_64.AppImage
+FTHRcapture_linux/build/
+__pycache__/
+*.pyc
