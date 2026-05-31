@@ -1,5 +1,17 @@
+# build artifacts — these get regenerated, no reason to track them
 build_output/
-FTHRClips-x86_64.AppImage
+build/
+dist/
+AppDir/
+*.AppImage
 FTHRcapture_linux/build/
+
+# recorded sample clips / user captures — not source
+Desktop/
+Exported/
+Shared/
+*.docx
+
+# python junk
 __pycache__/
 *.pyc

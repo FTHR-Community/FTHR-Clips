@@ -1,0 +1,54 @@
+#pragma once
+#include "encoder.h"
+#include "ring_buffer.h"
+#include "audio_capture.h"
+#include "shared_memory.h"
+#include <string>
+#include <thread>
+#include <atomic>
+#include <cstdint>
+
+namespace fthr {
+
+struct CaptureConfig {
+    uint32_t fps;
+    uint32_t buffer_seconds;
+    uint32_t target_width;   // 0 = native
+    uint32_t target_height;  // 0 = native
+    uint32_t bitrate_kbps;
+    uint32_t scaling_mode;   // 0 = stretch, 1 = fit (letterbox)
+};
+
+class CaptureEngine {
+public:
+    CaptureEngine() = default;
+    ~CaptureEngine() { Shutdown(); }
+
+    bool Initialize(const CaptureConfig& cfg);
+    void Shutdown();
+
+    // Captures a clip of duration_sec seconds and writes it to path.
+    // Updates shm status fields during save. Blocking call.
+    bool SaveClip(const std::string& path, uint32_t duration_sec,
+                  SharedMemoryLayout* shm);
+
+    bool     IsNvencActive() const { return nvenc_active_.load(); }
+    uint64_t GetFrameCount()  const { return frame_count_.load(); }
+
+private:
+    void CaptureLoop();
+
+    // Wayland state (managed entirely within CaptureLoop)
+    struct WaylandState;
+
+    CaptureConfig           cfg_{};
+    Encoder                 encoder_;
+    EncodedRingBuffer*      ring_     = nullptr;
+    AudioCapture            audio_;
+    std::thread             cap_thread_;
+    std::atomic<bool>       running_{false};
+    std::atomic<bool>       nvenc_active_{false};
+    std::atomic<uint64_t>   frame_count_{0};
+};
+
+} // namespace fthr

@@ -1,8 +1,24 @@
 """
-capture_card.py — Animated "Clip Captured" notification overlay.
+capture_card.py — that slick little "CLIP CAPTURED" toast that slides in from
+the corner when you grab a clip. The dopamine hit. The whole vibe.
 
-Public API
-----------
+Architecture, because it's not obvious:
+- The card is ONE frameless translucent window and EVERYTHING in it is hand-drawn
+  in paintEvent() with QPainter — the camera icon, the text, the shimmer, the
+  draining progress bar. No child widgets. Drawing it ourselves means it's pixel
+  perfect, themeable, and cheap. Trying to do this shimmer/progress thing with
+  real QWidgets and stylesheets would be a nightmare and look worse.
+- The slide in → hold → slide out motion is a QSequentialAnimationGroup: three
+  animations played back to back (slide in, pause, slide out). Qt does the
+  tweening, we just describe the keyframes.
+- The progress bar drain and the shimmer sweep are driven by their own ~60fps
+  QTimers, kicked off at staggered delays so it all feels choreographed.
+
+Heads up: in the real app this whole thing runs in a SEPARATE PROCESS (see
+capture_card_client.py for the why). This file is the actual card; the client is
+the remote control.
+
+Public API:
     card = CaptureCard()
     card.show_clip(duration_s, fps, resolution_label)
     card.show_screenshot()
@@ -53,12 +69,25 @@ _MCI_ALIAS = 'fthr_card'
 # ---------------------------------------------------------------------------
 
 def _play_mp3(path: Path) -> None:
-    """Fire-and-forget MP3. Uses Windows MCI on Windows, ffplay on Linux."""
+    """Fire-and-forget MP3 playback. And yes, this is THE sound playback hack.
+
+    You'd think "just use QMediaPlayer" — and I did, for a while. But spinning up
+    a QMediaPlayer for a 200ms blip is heavy, leaks if you don't babysit it, and
+    on Linux it would straight up HANG the prewarm on some setups. So instead we
+    go full caveman and shell out to whatever the OS already has:
+      - Windows: the ancient MCI API via winmm. Close any old handle, open, play.
+        It's from like Windows 3.1 and it just works. don't fix what ain't broke.
+      - Linux: shell out to ffplay (ships with ffmpeg, which we already depend on)
+        with no display, auto-exit, dead silent logging.
+    Fire and forget. We never wait for it. This is fine. 🔥
+    """
     if not path.exists():
         return
     if sys.platform == 'win32':
         try:
             mci = ctypes.windll.winmm.mciSendStringW
+            # Close any previous playback first or MCI gets cranky about the alias
+            # already being in use when you clip twice in a row.
             mci(f'close {_MCI_ALIAS}', None, 0, None)
             mci(f'open "{path}" type mpegvideo alias {_MCI_ALIAS}', None, 0, None)
             mci(f'play {_MCI_ALIAS}', None, 0, None)
@@ -134,8 +163,13 @@ class CaptureCard(QWidget):
         self._progress_delay.setSingleShot(True)
         self._progress_delay.timeout.connect(self._start_progress)
 
-        # Animation group — no Qt parent so Python refcount is the sole owner.
-        # Replacing self._seq drops refcount to 0 and destroys it immediately.
+        # The animation group has NO Qt parent on purpose. That means plain old
+        # Python refcounting owns it: the moment we reassign self._seq, the old
+        # group's refcount hits zero and Qt tears it down cleanly. If we gave it
+        # a Qt parent instead, old animation groups would pile up as children and
+        # fight the new one for control of self.pos. Spamming the clip hotkey
+        # would then make the card teleport around like it's possessed. ask me
+        # how I know.
         self._seq: QSequentialAnimationGroup | None = None
 
     # ------------------------------------------------------------------
@@ -200,7 +234,9 @@ class CaptureCard(QWidget):
         # Determine positions and scale for this screen
         screen = QApplication.primaryScreen().availableGeometry()
 
-        # Scale card down on lower-resolution screens; cap at 1.0 for 1080p+
+        # Scale the card relative to a 1080p baseline so it doesn't look like a
+        # billboard on a 768p laptop or a postage stamp on 4K. Clamp to [0.65, 1.0]
+        # — never bigger than the design size, never microscopic.
         self._scale = min(1.0, max(0.65, screen.height() / 1080))
         w = int(_W * self._scale)
         h = int(_H * self._scale)
@@ -245,9 +281,11 @@ class CaptureCard(QWidget):
         self._seq.finished.connect(self.hide)
         self._seq.start()
 
-        # Shimmer sweeps once, starting 150ms into slide-in
+        # The choreography. Shimmer fires 150ms into the slide so it sweeps as the
+        # card arrives (feels reactive, not pre-baked). The progress bar only
+        # starts draining once the card has fully landed — draining mid-slide
+        # looks broken. These two magic numbers are pure feel, tuned by eyeball.
         self._shimmer_delay.start(150)
-        # Progress drain starts after slide-in completes
         self._progress_delay.start(_SLIDE_IN + 30)
 
     def _start_progress(self) -> None:
