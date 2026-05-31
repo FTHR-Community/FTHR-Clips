@@ -605,19 +605,21 @@ class _PopupPanel(QFrame):
     def show_below(self, button: QWidget):
         pos = button.mapToGlobal(QPoint(0, button.height()))
         self.move(pos)
-        self.setWindowOpacity(0.0)
         self.show()
         self.raise_()
-        # Fade in — uses the module-level PANEL_FADE_MS so all opening
-        # surfaces in the app (popups + settings page + clip viewer) land
-        # on the same timing.
-        anim = QPropertyAnimation(self, b'windowOpacity', self)
-        anim.setDuration(PANEL_FADE_MS)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._show_anim = anim
-        anim.start()
+        # setWindowOpacity on Popup windows is not supported on Wayland —
+        # the compositor just ignores it and spams a warning every frame.
+        # Skip the fade on Wayland; just show instantly. Looks fine.
+        app = QApplication.instance()
+        if app and app.platformName() != 'wayland':
+            self.setWindowOpacity(0.0)
+            anim = QPropertyAnimation(self, b'windowOpacity', self)
+            anim.setDuration(PANEL_FADE_MS)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._show_anim = anim
+            anim.start()
 
 
 # ---------------------------------------------------------------------------

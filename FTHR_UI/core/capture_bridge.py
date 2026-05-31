@@ -202,10 +202,13 @@ class CaptureBridge:
 
     def shutdown(self):
         if sys.platform != 'win32':
+            # Must release the ctypes from_buffer reference BEFORE closing the
+            # mmap — otherwise Python raises BufferError: cannot close exported
+            # pointers exist. Order matters here, ask me how I know.
+            self._layout = None
             if self._linux_mmap is not None:
                 self._linux_mmap.close()
                 self._linux_mmap = None
-            self._layout = None
         else:
             if self._layout:
                 ctypes.windll.kernel32.UnmapViewOfFile(

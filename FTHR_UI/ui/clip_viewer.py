@@ -1401,13 +1401,18 @@ class ClipViewer(QDialog):
         self._apply_styles()
         self._refresh_quick_crop_btn()
 
-        self.setWindowOpacity(0.0)
-        self._fade_in_anim = QPropertyAnimation(self, b'windowOpacity')
-        # Match main.py PANEL_FADE_MS so all opening surfaces feel consistent.
-        self._fade_in_anim.setDuration(180)
-        self._fade_in_anim.setStartValue(0.0)
-        self._fade_in_anim.setEndValue(1.0)
-        self._fade_in_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # setWindowOpacity not supported on Wayland — skip fade there
+        from PyQt6.QtWidgets import QApplication as _App
+        _app = _App.instance()
+        _wayland = _app and _app.platformName() == 'wayland'
+        self._fade_in_anim = None
+        if not _wayland:
+            self.setWindowOpacity(0.0)
+            self._fade_in_anim = QPropertyAnimation(self, b'windowOpacity')
+            self._fade_in_anim.setDuration(180)
+            self._fade_in_anim.setStartValue(0.0)
+            self._fade_in_anim.setEndValue(1.0)
+            self._fade_in_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         self._ph_timer = QTimer(self)
         self._ph_timer.setInterval(80)
@@ -2601,7 +2606,8 @@ class ClipViewer(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self._fade_in_anim.start()
+        if self._fade_in_anim is not None:
+            self._fade_in_anim.start()
         if self._thumb_pixmap and not self._thumb_pixmap.isNull():
             self._install_thumb_overlay()
         if not self._native_style_applied:
