@@ -988,9 +988,14 @@ class ShareWindow(QDialog):
         # Start export
         threading.Thread(target=self._export_worker, daemon=True).start()
 
-    # Mirrors ClipViewer._AUDIO_TRACK_ORDER. Kept duplicated rather than
-    # imported to keep this dialog self-contained.
-    _AUDIO_TRACK_ORDER = ('game', 'browser', 'music', 'discord')
+    # Track order must match the stream order the engine writes into the clip.
+    # Windows: per-app WASAPI loopback streams (game, browser, music, discord).
+    # Linux:   PulseAudio desktop capture + Python mic mux — always 2 streams.
+    _AUDIO_TRACK_ORDER = (
+        ('game', 'browser', 'music', 'discord')
+        if sys.platform == 'win32' else
+        ('desktop', 'mic')
+    )
 
     def _build_audio_filter_chain(self) -> tuple[list[str], str | None]:
         """Return (filter snippets, output label) for the per-source audio mix.
@@ -1206,13 +1211,22 @@ class VolumePopup(QDialog):
     master_changed = pyqtSignal(int)            # 0–100
     source_changed = pyqtSignal(str, int)       # (source_key, 0–100)
 
-    _SOURCES = [
-        ('master',  'MASTER'),
-        ('game',    'GAME'),
-        ('browser', 'BROWSER'),
-        ('music',   'MUSIC APP'),
-        ('discord', 'DISCORD'),
-    ]
+    # Windows shows per-app WASAPI sources; Linux shows Desktop + Mic.
+    _SOURCES = (
+        [
+            ('master',  'MASTER'),
+            ('game',    'GAME'),
+            ('browser', 'BROWSER'),
+            ('music',   'MUSIC APP'),
+            ('discord', 'DISCORD'),
+        ]
+        if sys.platform == 'win32' else
+        [
+            ('master',  'MASTER'),
+            ('desktop', 'DESKTOP'),
+            ('mic',     'MIC'),
+        ]
+    )
 
     def __init__(self, master_vol: int,
                  source_volumes: dict | None = None,
@@ -1608,12 +1622,18 @@ class ClipViewer(QDialog):
         else:
             self._master_volume = 80
             stored_sources = {}
-        self._source_volumes: dict[str, int] = {
-            'game':    int(stored_sources.get('game',    100)),
-            'browser': int(stored_sources.get('browser', 100)),
-            'music':   int(stored_sources.get('music',   100)),
-            'discord': int(stored_sources.get('discord', 100)),
-        }
+        if sys.platform == 'win32':
+            self._source_volumes: dict[str, int] = {
+                'game':    int(stored_sources.get('game',    100)),
+                'browser': int(stored_sources.get('browser', 100)),
+                'music':   int(stored_sources.get('music',   100)),
+                'discord': int(stored_sources.get('discord', 100)),
+            }
+        else:
+            self._source_volumes: dict[str, int] = {
+                'desktop': int(stored_sources.get('desktop', 100)),
+                'mic':     int(stored_sources.get('mic',     100)),
+            }
         # Multi-track detection runs `ffmpeg -i` as a subprocess (up to 4 s).
         # Doing it synchronously froze the editor on first open. Default to
         # single-track and let _detect_multitrack_audio_async upgrade the flag
@@ -2406,9 +2426,14 @@ class ClipViewer(QDialog):
             daemon=True,
         ).start()
 
-    # Fixed track order for multi-track audio. The C++ engine writes streams
-    # in this order when per-process loopback capture is enabled.
-    _AUDIO_TRACK_ORDER = ('game', 'browser', 'music', 'discord')
+    # Stream order must match what the engine writes.
+    # Windows: per-process WASAPI loopback (game, browser, music, discord).
+    # Linux: PulseAudio desktop + mic mux = 2 streams, always in this order.
+    _AUDIO_TRACK_ORDER = (
+        ('game', 'browser', 'music', 'discord')
+        if sys.platform == 'win32' else
+        ('desktop', 'mic')
+    )
 
     def _build_export_cmd(self, ffmpeg: str, start_s: float, duration_s: float,
                           out_path: str, crop_rect, video_args: list) -> list:
