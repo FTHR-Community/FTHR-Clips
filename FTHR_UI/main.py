@@ -1186,12 +1186,16 @@ class MainWindow(QMainWindow):
                 project_root / 'Debug'            / 'FTHRClips.exe',
             ]
         else:
-            linux_root     = Path(__file__).parent.parent / 'FTHRcapture_linux'
-            _env_engine    = os.environ.get('FTHR_ENGINE', '')
-            possible_paths = [
-                *([ Path(_env_engine) ] if _env_engine else []),
-                linux_root / 'build' / 'FTHRclips',
-            ]
+            _env_engine = os.environ.get('FTHR_ENGINE', '')
+            if getattr(sys, 'frozen', False):
+                # In frozen PyInstaller build the engine is in _internal/ (_MEIPASS)
+                possible_paths = [Path(sys._MEIPASS) / 'FTHRclips']
+            else:
+                linux_root = Path(__file__).parent.parent / 'FTHRcapture_linux'
+                possible_paths = [
+                    *([ Path(_env_engine) ] if _env_engine else []),
+                    linux_root / 'build' / 'FTHRclips',
+                ]
         self.engine_path = None
         for p in possible_paths:
             if p.exists():
