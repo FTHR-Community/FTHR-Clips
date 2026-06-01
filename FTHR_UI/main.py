@@ -3304,6 +3304,79 @@ class _SettingsPage(QWidget):
         _wm_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
         layout.addWidget(_wm_hint)
 
+        # ── Kamera ────────────────────────────────────────────────────────
+        layout.addSpacing(28)
+        layout.addWidget(_flat_section_header('Kamera'))
+        layout.addSpacing(12)
+
+        self.camera_check = QCheckBox('Kamera-Overlay in Clips einbrennen')
+        self.camera_check.setStyleSheet(CHECKBOX_QSS)
+        self.camera_check.setChecked(self.sm.get('camera_enabled', False))
+        self.camera_check.toggled.connect(self._on_camera_toggled)
+        layout.addWidget(self.camera_check)
+        layout.addSpacing(8)
+
+        cam_dev_row = QHBoxLayout()
+        cam_dev_row.setSpacing(8)
+        _dev_lbl = QLabel('GERÄT')
+        _dev_lbl.setStyleSheet(_LABEL_STYLE)
+        _dev_lbl.setFixedWidth(80)
+        cam_dev_row.addWidget(_dev_lbl)
+        self.camera_device_combo = _DropdownCombo()
+        self.camera_device_combo.setStyleSheet(_COMBO_STYLE)
+        self._populate_camera_devices()
+        self.camera_device_combo.currentIndexChanged.connect(self._on_camera_device_changed)
+        cam_dev_row.addWidget(self.camera_device_combo, 1)
+        layout.addLayout(cam_dev_row)
+        layout.addSpacing(6)
+
+        cam_pos_row = QHBoxLayout()
+        cam_pos_row.setSpacing(8)
+        _pos_lbl = QLabel('POSITION')
+        _pos_lbl.setStyleSheet(_LABEL_STYLE)
+        _pos_lbl.setFixedWidth(80)
+        cam_pos_row.addWidget(_pos_lbl)
+        self.camera_pos_combo = _DropdownCombo()
+        self.camera_pos_combo.addItems(['Unten rechts', 'Unten links', 'Oben rechts', 'Oben links'])
+        self.camera_pos_combo.setStyleSheet(_COMBO_STYLE)
+        _pos_keys = ['bottom-right', 'bottom-left', 'top-right', 'top-left']
+        saved_pos = self.sm.get('camera_position', 'bottom-right')
+        self.camera_pos_combo.setCurrentIndex(
+            _pos_keys.index(saved_pos) if saved_pos in _pos_keys else 0)
+        self.camera_pos_combo.currentIndexChanged.connect(self._on_camera_pos_changed)
+        cam_pos_row.addWidget(self.camera_pos_combo)
+
+        _sz_lbl = QLabel('GRÖSSE')
+        _sz_lbl.setStyleSheet(_LABEL_STYLE)
+        _sz_lbl.setFixedWidth(64)
+        cam_pos_row.addWidget(_sz_lbl)
+        self.camera_size_combo = _DropdownCombo()
+        self.camera_size_combo.addItems(['Klein', 'Mittel', 'Groß'])
+        self.camera_size_combo.setStyleSheet(_COMBO_STYLE)
+        _sz_keys = ['small', 'medium', 'large']
+        saved_sz = self.sm.get('camera_size', 'medium')
+        self.camera_size_combo.setCurrentIndex(
+            _sz_keys.index(saved_sz) if saved_sz in _sz_keys else 1)
+        self.camera_size_combo.currentIndexChanged.connect(self._on_camera_size_changed)
+        cam_pos_row.addWidget(self.camera_size_combo)
+        layout.addLayout(cam_pos_row)
+        layout.addSpacing(8)
+
+        self.camera_preview_lbl = QLabel('Kamera deaktiviert')
+        self.camera_preview_lbl.setFixedSize(160, 90)
+        self.camera_preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.camera_preview_lbl.setStyleSheet(
+            f'background: {Colors.BG_CARD}; color: {Colors.TEXT_DIM}; '
+            f'border: 1px solid {Colors.BORDER};')
+        layout.addWidget(self.camera_preview_lbl)
+        layout.addSpacing(4)
+
+        self._camera_preview_timer = QTimer(self)
+        self._camera_preview_timer.setInterval(100)
+        self._camera_preview_timer.timeout.connect(self._update_camera_preview)
+        if self.sm.get('camera_enabled', False):
+            self._camera_preview_timer.start()
+
         # ── Anticheat Detection ───────────────────────────────────────────
         layout.addSpacing(28)
         layout.addWidget(_flat_section_header('Anticheat Detection'))
@@ -3910,6 +3983,76 @@ class _SettingsPage(QWidget):
             main_win._focus_monitor.stop()
             if hasattr(main_win, 'bridge') and main_win.bridge.is_connected():
                 main_win.bridge.resume_recording()
+
+    def _populate_camera_devices(self):
+        from core.camera_recorder import CameraRecorder
+        self.camera_device_combo.clear()
+        if not CameraRecorder.is_available():
+            self.camera_device_combo.addItem('cv2 nicht verfügbar')
+            return
+        import cv2 as _cv2
+        found = []
+        for i in range(5):
+            cap = _cv2.VideoCapture(i)
+            if cap.isOpened():
+                found.append(f'Kamera {i}')
+                cap.release()
+        if not found:
+            self.camera_device_combo.addItem('Keine Kamera gefunden')
+        else:
+            self.camera_device_combo.addItems(found)
+            saved = self.sm.get('camera_device_index', 0)
+            if saved < len(found):
+                self.camera_device_combo.setCurrentIndex(saved)
+
+    def _on_camera_toggled(self, checked: bool):
+        self.sm.set('camera_enabled', checked)
+        self.sm.save_settings()
+        from core.camera_recorder import CameraRecorder
+        if checked and CameraRecorder.is_available():
+            idx = self.sm.get('camera_device_index', 0)
+            CameraRecorder().start(idx)
+            self._camera_preview_timer.start()
+        else:
+            CameraRecorder().stop()
+            self._camera_preview_timer.stop()
+            self.camera_preview_lbl.setPixmap(QPixmap())
+            self.camera_preview_lbl.setText('Kamera deaktiviert')
+
+    def _on_camera_device_changed(self, idx: int):
+        self.sm.set('camera_device_index', idx)
+        self.sm.save_settings()
+        if self.sm.get('camera_enabled', False):
+            from core.camera_recorder import CameraRecorder
+            CameraRecorder().start(idx)
+
+    def _on_camera_pos_changed(self, idx: int):
+        keys = ['bottom-right', 'bottom-left', 'top-right', 'top-left']
+        self.sm.set('camera_position', keys[idx] if idx < len(keys) else 'bottom-right')
+        self.sm.save_settings()
+
+    def _on_camera_size_changed(self, idx: int):
+        keys = ['small', 'medium', 'large']
+        self.sm.set('camera_size', keys[idx] if idx < len(keys) else 'medium')
+        self.sm.save_settings()
+
+    def _update_camera_preview(self):
+        from core.camera_recorder import CameraRecorder
+        frame = CameraRecorder().latest_frame
+        if frame is None:
+            return
+        import cv2 as _cv2
+        from PyQt6.QtGui import QImage, QPixmap as _QPixmap
+        rgb = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        qi = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
+        pix = _QPixmap.fromImage(qi).scaled(
+            160, 90,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.camera_preview_lbl.setPixmap(pix)
+        self.camera_preview_lbl.setText('')
 
     def _refresh_preset_combo(self):
         self.preset_combo.blockSignals(True)
