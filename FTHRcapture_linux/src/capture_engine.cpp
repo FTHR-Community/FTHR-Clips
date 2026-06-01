@@ -568,6 +568,7 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
         uint32_t fps,
         uint32_t width,
         uint32_t height,
+        AVCodecID video_codec_id,
         SharedMemoryLayout* shm
     );
 
@@ -581,6 +582,7 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
         cfg_.fps,
         encoder_.GetWidth(),
         encoder_.GetHeight(),
+        encoder_.GetCodecID(),
         shm
     );
 }

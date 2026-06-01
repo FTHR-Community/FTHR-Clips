@@ -95,6 +95,8 @@ int main(int argc, char* argv[]) {
     layout->cfg_target_height= cfg.target_height;
     layout->nvenc_active     = engine.IsNvencActive();
     memset(layout->active_codec, 0, sizeof(layout->active_codec));
+    layout->cfg_codec_pref = static_cast<uint32_t>(cfg.codec_pref);
+    layout->cfg_preset     = static_cast<uint32_t>(cfg.preset);
 
     std::cout << "[FTHR] Ready. Waiting for commands..." << std::endl;
 

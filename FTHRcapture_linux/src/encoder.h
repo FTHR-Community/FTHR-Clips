@@ -49,6 +49,10 @@ public:
 
     bool IsOpen() const { return codec_ctx_ != nullptr; }
 
+    AVCodecID GetCodecID() const {
+        return codec_ctx_ ? codec_ctx_->codec->id : AV_CODEC_ID_NONE;
+    }
+
 private:
     bool TryOpen(const char* codec_name, const EncoderConfig& cfg);
 

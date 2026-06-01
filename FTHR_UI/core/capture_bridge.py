@@ -352,3 +352,11 @@ class CaptureBridge:
             return raw.decode('utf-8', errors='ignore').rstrip('\x00')
         except Exception:
             return ''
+
+    def get_active_preset(self) -> int:
+        if not self.is_connected():
+            return 4
+        try:
+            return int(self._layout.cfg_preset) or 4
+        except Exception:
+            return 4

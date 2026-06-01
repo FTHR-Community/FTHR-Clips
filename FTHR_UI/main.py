@@ -2168,7 +2168,7 @@ class MainWindow(QMainWindow):
             return
         codec = self.bridge.get_active_codec()
         if codec:
-            preset = self.settings_manager.get('encoder_preset', 4)
+            preset = self.bridge.get_active_preset()
             new_enc_text = f'{codec} — P{preset}'
             lbl = self._settings_page_widget.active_encoder_lbl
             if lbl.text() != new_enc_text:
@@ -3445,7 +3445,7 @@ class _SettingsPage(QWidget):
         self.codec_combo.currentIndexChanged.connect(self._on_encoder_setting_changed)
         self.preset_combo.currentIndexChanged.connect(self._on_encoder_setting_changed)
 
-        enc_note = QLabel('Änderungen werden nach dem Neustart aktiv.')
+        enc_note = QLabel('Anwenden unterbricht die Aufnahme kurz und löscht den aktuellen Puffer.')
         enc_note.setStyleSheet(label_body(Colors.TEXT_DIM,
             Fonts.SIZE_SMALL if hasattr(Fonts, 'SIZE_SMALL') else Fonts.SIZE_BODY))
         layout.addWidget(enc_note)

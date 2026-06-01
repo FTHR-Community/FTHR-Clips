@@ -32,6 +32,9 @@ bool save_clip_to_file(
     int                              audio_channels,
     const std::vector<uint8_t>&      extradata,
     uint32_t                         fps,
+    uint32_t                         width,
+    uint32_t                         height,
+    AVCodecID                        video_codec_id,
     SharedMemoryLayout*              shm
 ) {
     if (video_packets.empty()) {
@@ -64,10 +67,9 @@ bool save_clip_to_file(
 
     AVCodecParameters* vpar = vid_stream->codecpar;
     vpar->codec_type   = AVMEDIA_TYPE_VIDEO;
-    vpar->codec_id     = AV_CODEC_ID_H264;
-    // We store the first packet's dimensions; use a heuristic from packet size
-    // or just leave 0 — the muxer works without them for fragmented MP4.
-    // A proper impl would track width/height through the encoder.
+    vpar->codec_id     = video_codec_id;
+    vpar->width        = static_cast<int>(width);
+    vpar->height       = static_cast<int>(height);
     vpar->format       = AV_PIX_FMT_YUV420P;
 
     if (!extradata.empty()) {
