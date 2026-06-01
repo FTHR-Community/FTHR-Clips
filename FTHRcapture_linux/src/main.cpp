@@ -56,6 +56,7 @@ int main(int argc, char* argv[]) {
     cfg.preset     = (argc > 12) ? static_cast<int>(arg_u32(argv, 12, 4)) : 4;
     if (cfg.preset < 1) cfg.preset = 1;
     if (cfg.preset > 7) cfg.preset = 7;
+    cfg.multiband_enabled = (argc > 13) && (arg_u32(argv, 13, 0) == 1);
 
     // Clamp
     if (cfg.fps            < 1)     cfg.fps            = 1;
@@ -64,6 +65,61 @@ int main(int argc, char* argv[]) {
     if (cfg.buffer_seconds > 300)   cfg.buffer_seconds = 300;
     if (cfg.bitrate_kbps   < 500)   cfg.bitrate_kbps   = 500;
     if (cfg.bitrate_kbps   > 60000) cfg.bitrate_kbps   = 60000;
+
+    // Load audio category config written by Python before engine start.
+    // File format: one JSON object per line: {"name":"X","sink":"Y","patterns":["a","b"]}
+    if (cfg.multiband_enabled) {
+        const char* home = getenv("HOME");
+        std::string cat_path = (home ? std::string(home) : "") + "/.fthr/audio_categories.json";
+        FILE* fp = fopen(cat_path.c_str(), "r");
+        if (fp) {
+            char line[2048];
+            while (fgets(line, sizeof(line), fp)) {
+                fthr::AudioCategoryConfig c;
+
+                // Extract quoted string value for a given key
+                auto extract = [](const char* s, const char* key) -> std::string {
+                    std::string k = std::string("\"") + key + "\":\"";
+                    const char* p = strstr(s, k.c_str());
+                    if (!p) return {};
+                    p += k.size();
+                    const char* e = strchr(p, '"');
+                    return e ? std::string(p, e) : std::string{};
+                };
+
+                c.name      = extract(line, "name");
+                c.sink_name = extract(line, "sink");
+                if (c.name.empty()) continue;
+
+                // Extract patterns array
+                const char* pat_start = strstr(line, "\"patterns\":");
+                if (pat_start) {
+                    const char* arr     = strchr(pat_start, '[');
+                    const char* arr_end = arr ? strchr(arr, ']') : nullptr;
+                    if (arr && arr_end) {
+                        const char* p = arr;
+                        while (p < arr_end) {
+                            p = strchr(p, '"');
+                            if (!p || p >= arr_end) break;
+                            ++p;
+                            const char* e = strchr(p, '"');
+                            if (!e || e >= arr_end) break;
+                            c.patterns.push_back(std::string(p, e));
+                            p = e + 1;
+                        }
+                    }
+                }
+                cfg.audio_categories.push_back(std::move(c));
+            }
+            fclose(fp);
+            std::cout << "[FTHR] Loaded " << cfg.audio_categories.size()
+                      << " audio categories\n";
+        } else {
+            std::cerr << "[FTHR] multiband enabled but " << cat_path
+                      << " not found — disabling multiband\n";
+            cfg.multiband_enabled = false;
+        }
+    }
 
     std::cout << "[FTHR] Linux capture engine starting" << std::endl;
     std::cout << "[FTHR] fps=" << cfg.fps
@@ -74,7 +130,7 @@ int main(int argc, char* argv[]) {
 
     // Shared memory
     fthr::SharedMemory shm;
-    if (!shm.Initialize("FTHR_SharedMemory_v2")) {
+    if (!shm.Initialize("FTHR_SharedMemory_v3")) {
         std::cerr << "[FTHR] Shared memory init failed — exiting" << std::endl;
         return 1;
     }
@@ -95,6 +151,8 @@ int main(int argc, char* argv[]) {
     layout->cfg_target_height= cfg.target_height;
     layout->nvenc_active     = engine.IsNvencActive();
     memset(layout->active_codec, 0, sizeof(layout->active_codec));
+    layout->multiband_enabled = cfg.multiband_enabled;
+    memset(layout->active_audio_mappings, 0, sizeof(layout->active_audio_mappings));
     layout->cfg_codec_pref = static_cast<uint32_t>(cfg.codec_pref);
     layout->cfg_preset     = static_cast<uint32_t>(cfg.preset);
 
@@ -197,6 +255,14 @@ int main(int argc, char* argv[]) {
             strncpy(layout->active_codec, ac.c_str(),
                     sizeof(layout->active_codec) - 1);
             layout->active_codec[sizeof(layout->active_codec) - 1] = '\0';
+        }
+        if (cfg.multiband_enabled) {
+            std::string json = engine.GetAudioMappingsJson();
+            if (json.size() < sizeof(layout->active_audio_mappings)) {
+                strncpy(layout->active_audio_mappings, json.c_str(),
+                        sizeof(layout->active_audio_mappings) - 1);
+                layout->active_audio_mappings[sizeof(layout->active_audio_mappings) - 1] = '\0';
+            }
         }
         // Linux captures continuously — no discrete recording state
         layout->is_recording    = false;
