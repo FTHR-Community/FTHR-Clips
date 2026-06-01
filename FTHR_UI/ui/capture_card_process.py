@@ -9,6 +9,7 @@ Protocol (one UTF-8 line per command):
     screenshot
     error[|<detail>]
     upload[|<filename>]
+    prompt|<text>
     quit
 """
 
@@ -66,6 +67,9 @@ def main():
         elif cmd.startswith('upload'):
             filename = cmd[7:] if len(cmd) > 7 else ''
             card.show_upload(filename)
+        elif cmd.startswith('prompt|'):
+            text = cmd[7:]
+            card.show_prompt(text)
 
     reader = _StdinReader()
     reader.command.connect(handle)

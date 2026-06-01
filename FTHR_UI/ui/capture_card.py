@@ -26,6 +26,7 @@ Public API:
 """
 
 import ctypes
+import os
 import sys
 import subprocess as _subprocess
 from pathlib import Path
@@ -200,6 +201,11 @@ class CaptureCard(QWidget):
         self._stats = [(filename, '')] if filename else []
         self._show(_SND_CLIP)
 
+    def show_prompt(self, text: str) -> None:
+        self._headline = text
+        self._stats = []
+        self._show(_SND_ERROR)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -231,8 +237,18 @@ class CaptureCard(QWidget):
 
         _play_mp3(sound)
 
-        # Determine positions and scale for this screen
-        screen = QApplication.primaryScreen().availableGeometry()
+        # Determine positions and scale for this screen.
+        # FTHR_CARD_SCREEN_NAME is set by CaptureCardClient based on the user's
+        # notification_monitor setting. 'auto' falls back to highest refresh rate.
+        screens = QApplication.screens()
+        target = os.environ.get('FTHR_CARD_SCREEN_NAME', 'auto')
+        if target != 'auto':
+            active_screen = next((s for s in screens if s.name() == target), None)
+        else:
+            active_screen = None
+        if active_screen is None:
+            active_screen = max(screens, key=lambda s: s.refreshRate()) if screens else QApplication.primaryScreen()
+        screen = active_screen.availableGeometry()
 
         # Scale the card relative to a 1080p baseline so it doesn't look like a
         # billboard on a 768p laptop or a postage stamp on 4K. Clamp to [0.65, 1.0]

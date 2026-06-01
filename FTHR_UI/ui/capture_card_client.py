@@ -50,12 +50,19 @@ _NO_WINDOW = {'creationflags': _CREATE_NO_WINDOW} if sys.platform == 'win32' els
 class CaptureCardClient:
     """Sends show commands to a CaptureCard subprocess over stdin."""
 
-    def __init__(self):
+    def __init__(self, settings_manager=None):
+        self._sm = settings_manager
         self._proc: subprocess.Popen | None = None
         self._launch()
 
     def _launch(self):
         try:
+            # Force XWayland so the card subprocess can position its own window.
+            # On Wayland, compositors ignore client-side move() calls for toplevel
+            # windows and center them instead. xcb/X11 via XWayland respects them.
+            env = {**os.environ, 'QT_QPA_PLATFORM': 'xcb', 'DISPLAY': os.environ.get('DISPLAY', ':0')}
+            monitor = self._sm.get('notification_monitor', 'auto') if self._sm else 'auto'
+            env['FTHR_CARD_SCREEN_NAME'] = monitor
             self._proc = subprocess.Popen(
                 _LAUNCH_CMD,
                 stdin=subprocess.PIPE,
@@ -63,11 +70,23 @@ class CaptureCardClient:
                 stderr=subprocess.DEVNULL,
                 text=True,
                 encoding='utf-8',
+                env=env,
                 **_NO_WINDOW,
             )
         except Exception as e:
             print(f'[CaptureCard] Failed to launch card process: {e}')
             self._proc = None
+
+    def restart(self):
+        """Terminate the card subprocess; it will relaunch on the next show call."""
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+        self._proc = None
+        self._launch()
 
     def _send(self, cmd: str) -> None:
         if self._proc is None:
@@ -96,6 +115,9 @@ class CaptureCardClient:
 
     def show_upload(self, filename: str = '') -> None:
         self._send(f'upload|{filename}')
+
+    def show_prompt(self, text: str) -> None:
+        self._send(f'prompt|{text}')
 
     def close(self) -> None:
         self._send('quit')
