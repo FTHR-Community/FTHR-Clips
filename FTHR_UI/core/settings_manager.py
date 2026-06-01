@@ -71,6 +71,8 @@ class SettingsManager:
             'multiband_audio_enabled': False,
             'game_detection_enabled':  False,
             'audio_capture_enabled':   True,
+            'watermark_enabled':  False,
+            'watermark_text':     'FTHR',
             'audio_categories': [
                 {'name': 'Game',     'volume': 100, 'patterns': []},
                 {'name': 'Discord',  'volume': 100, 'patterns': ['discord', 'Discord', 'WebRTC']},

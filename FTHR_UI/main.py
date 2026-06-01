@@ -2147,6 +2147,8 @@ class MainWindow(QMainWindow):
                 if multiband_on:
                     self._mux_multiband_into_clip(
                         str(output_path), duration_seconds, mic_end_time)
+                if not mic_active and not multiband_on:
+                    self._finalize_clip(str(output_path), duration_seconds)
             else:
                 self.capture_card.show_error()
                 QMessageBox.warning(self, 'Save Failed', 'Could not save clip.')
@@ -2283,6 +2285,7 @@ class MainWindow(QMainWindow):
                 try:
                     os.replace(mixed_mp4, clip_path)
                     print(f'[Mic] Mixed mic into {os.path.basename(clip_path)}')
+                    self._apply_watermark(clip_path, ffmpeg)
                 except OSError as e:
                     print(f'[Mic] Could not replace clip: {e}')
         finally:
@@ -2379,6 +2382,83 @@ class MainWindow(QMainWindow):
 
         if not ok:
             print('[MultiAudio] Mix failed')
+        if ok:
+            self._apply_watermark(clip_path, ffmpeg)
+
+    def _apply_watermark(self, clip_path: str, ffmpeg: str) -> None:
+        if not self.settings_manager.get('watermark_enabled', False):
+            return
+        text = self.settings_manager.get('watermark_text', 'FTHR') or 'FTHR'
+        import tempfile as _tf
+        tmp = _tf.NamedTemporaryFile(
+            suffix='.mp4',
+            dir=os.path.dirname(clip_path),
+            delete=False,
+        )
+        tmp_path = tmp.name
+        tmp.close()
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg, '-y',
+                    '-i', clip_path,
+                    '-vf', (
+                        f"drawtext=text='{text}'"
+                        ":fontsize=28:fontcolor=white@0.5"
+                        ":x=w-tw-16:y=h-th-16"
+                    ),
+                    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
+                    '-c:a', 'copy',
+                    tmp_path,
+                ],
+                capture_output=True,
+                **_NO_WINDOW,
+            )
+            if result.returncode == 0:
+                os.replace(tmp_path, clip_path)
+                print(f'[Watermark] Applied to {os.path.basename(clip_path)}')
+            else:
+                err = result.stderr.decode(errors='replace').strip().splitlines()
+                print(f'[Watermark] ffmpeg failed: {err[-1] if err else "(no stderr)"}')
+        except Exception as e:
+            print(f'[Watermark] Error: {e}')
+        finally:
+            try:
+                os.remove(tmp_path)
+            except FileNotFoundError:
+                pass
+
+    def _finalize_clip(self, clip_path: str, duration_seconds: int):
+        if not self.settings_manager.get('watermark_enabled', False):
+            return
+        threading.Thread(
+            target=self._finalize_clip_worker,
+            args=(clip_path, duration_seconds),
+            daemon=True,
+        ).start()
+
+    def _finalize_clip_worker(self, clip_path: str, duration_seconds: int):
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except (ImportError, RuntimeError):
+            return
+        deadline = time.monotonic() + max(duration_seconds * 2, 15)
+        last_size = -1
+        while time.monotonic() < deadline:
+            try:
+                if os.path.exists(clip_path):
+                    size = os.path.getsize(clip_path)
+                    if size > 0 and size == last_size:
+                        break
+                    last_size = size
+            except OSError:
+                pass
+            time.sleep(0.25)
+        else:
+            print(f'[Finalize] Clip did not stabilize — skipping watermark')
+            return
+        self._apply_watermark(clip_path, ffmpeg)
 
     # =======================================================================
     # UI state
