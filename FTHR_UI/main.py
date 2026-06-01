@@ -2022,12 +2022,14 @@ class MainWindow(QMainWindow):
                 # Notify the upload manager and get the clip-ready event.
                 # The event is set immediately if there's no mic mux pending;
                 # otherwise the mux worker sets it after os.replace() completes.
-                mic_active = MicRecorder.is_available() and MicRecorder().is_running()
+                multiband_on = self.settings_manager.get('multiband_audio_enabled', False)
+                mic_active = (not multiband_on and
+                              MicRecorder.is_available() and MicRecorder().is_running())
                 clip_ready = self.upload_manager.notify_clip_saved(
                     str(output_path), has_mic_mux=mic_active)
                 self._mux_mic_into_clip(
                     str(output_path), duration_seconds, mic_end_time, clip_ready)
-                if self.settings_manager.get('multiband_audio_enabled', False):
+                if multiband_on:
                     self._mux_multiband_into_clip(
                         str(output_path), duration_seconds, mic_end_time)
             else:
@@ -2227,12 +2229,36 @@ class MainWindow(QMainWindow):
             print('[MultiAudio] No category WAVs found — skipping mix')
             return
 
+        # Include mic audio in the multiband mix if mic recorder is active
+        mic_wav_path = None
+        try:
+            from core.mic_recorder import MicRecorder, write_wav
+            if MicRecorder.is_available() and MicRecorder().is_running():
+                samples = MicRecorder().extract_segment(audio_end_time, duration_seconds)
+                if samples is not None and samples.size > 0:
+                    import tempfile as _tf
+                    mic_tmp = _tf.NamedTemporaryFile(suffix='_mic.wav', delete=False)
+                    mic_wav_path = mic_tmp.name
+                    mic_tmp.close()
+                    if write_wav(mic_wav_path, samples):
+                        category_wavs['Mikrofon'] = mic_wav_path
+                        volumes['Mikrofon'] = self.settings_manager.get('mic_volume', 100) / 100.0
+        except Exception as e:
+            print(f'[MultiAudio] Mic include error: {e}')
+
         ok = mix_multiband_clip(clip_path, category_wavs, volumes, ffmpeg)
 
         # Clean up WAV files regardless of mix result
         for wav in category_wavs.values():
             try:
                 os.remove(wav)
+            except OSError:
+                pass
+
+        # Clean up mic temp file
+        if mic_wav_path and os.path.exists(mic_wav_path):
+            try:
+                os.remove(mic_wav_path)
             except OSError:
                 pass
 
