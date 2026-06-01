@@ -66,6 +66,15 @@ class SettingsManager:
             # Encoder codec + preset (v2 settings)
             'codec_pref':     'auto',   # 'auto' | 'h264' | 'hevc' | 'av1'
             'encoder_preset': 4,        # 1–7
+            # Multiband audio
+            'multiband_audio_enabled': False,
+            'audio_categories': [
+                {'name': 'Game',     'volume': 100, 'patterns': []},
+                {'name': 'Discord',  'volume': 100, 'patterns': ['discord', 'Discord', 'WebRTC']},
+                {'name': 'Browser',  'volume': 100, 'patterns': ['firefox', 'chrome', 'chromium', 'brave']},
+                {'name': 'Musik',    'volume': 80,  'patterns': ['spotify', 'Spotify', 'vlc', 'mpv']},
+                {'name': 'Sonstige', 'volume': 100, 'patterns': []},
+            ],
         }
         
         if not self.config_file.exists():
@@ -84,6 +93,17 @@ class SettingsManager:
                     merged[k] = {**merged[k], **v}
                 else:
                     merged[k] = v
+            # Migrate old source_volumes to audio_categories if present in loaded config
+            if 'source_volumes' in loaded and 'audio_categories' not in loaded:
+                sv = loaded['source_volumes']
+                name_map = {'game': 'Game', 'discord': 'Discord',
+                            'browser': 'Browser', 'music': 'Musik'}
+                cats = merged['audio_categories']
+                for old_key, new_name in name_map.items():
+                    if old_key in sv:
+                        for cat in cats:
+                            if cat['name'] == new_name:
+                                cat['volume'] = sv[old_key]
             return merged
         except Exception as e:
             print(f"Failed to load settings: {e}")
