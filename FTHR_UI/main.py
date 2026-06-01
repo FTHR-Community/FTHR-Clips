@@ -30,7 +30,7 @@ from PyQt6.QtCore import (
     QPropertyAnimation, QAbstractAnimation, QEasingCurve,
     QParallelAnimationGroup,
 )
-from PyQt6.QtGui import QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, QColor, QIcon, QBrush, QPolygonF
+from PyQt6.QtGui import QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, QColor, QIcon, QBrush, QPolygonF, QPalette
 
 from core.capture_bridge import CaptureBridge
 from core.hotkey_manager import HotkeyManager, AVAILABLE_KEYS
@@ -395,6 +395,18 @@ class _DropdownCombo(QComboBox):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._popup_open = False
+        # Force the popup list to use our dark colors via palette, because on
+        # Qt6/Linux the stylesheet alone doesn't reliably override the system
+        # palette for the floating item view (white-on-white issue).
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Base,            QColor(Colors.SURFACE_2))
+        pal.setColor(QPalette.ColorRole.Text,            QColor(Colors.TEXT))
+        pal.setColor(QPalette.ColorRole.Highlight,       QColor(Colors.SURFACE_3))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor(Colors.ACCENT))
+        pal.setColor(QPalette.ColorRole.Window,          QColor(Colors.SURFACE_2))
+        pal.setColor(QPalette.ColorRole.WindowText,      QColor(Colors.TEXT))
+        self.setPalette(pal)
+        self.view().setPalette(pal)
 
     def showPopup(self):
         self._popup_open = True
@@ -791,8 +803,9 @@ class SourcePopup(_PopupPanel):
     def __init__(self, settings_manager: SettingsManager, parent=None):
         super().__init__(parent)
         self.sm = settings_manager
-        self.cur_mode = self.sm.get('capture_mode', 'desktop')
-        self.cur_hwnd = self.sm.get('target_hwnd',  0)
+        self.cur_mode    = self.sm.get('capture_mode',    'desktop')
+        self.cur_hwnd    = self.sm.get('target_hwnd',     0)
+        self.cur_monitor = self.sm.get('capture_monitor', '')
         self._window_list: list = []
         self._setup_ui()
 
@@ -847,6 +860,23 @@ class SourcePopup(_PopupPanel):
         win_row.addWidget(self.refresh_btn)
         layout.addLayout(win_row)
 
+        # Monitor selector (desktop mode only)
+        self.monitor_combo = _DropdownCombo()
+        self.monitor_combo.setStyleSheet(_COMBO_STYLE)
+        self.monitor_combo.addItem('Erster Bildschirm (Standard)', userData='')
+        for s in QApplication.screens():
+            g = s.availableGeometry()
+            self.monitor_combo.addItem(
+                f'{s.name()}  ({g.width()}×{g.height()} @ {int(s.refreshRate())}Hz)',
+                userData=s.name(),
+            )
+        saved_mon = self.cur_monitor
+        idx = self.monitor_combo.findData(saved_mon)
+        if idx >= 0:
+            self.monitor_combo.setCurrentIndex(idx)
+        self.monitor_combo.currentIndexChanged.connect(self._on_monitor_changed)
+        layout.addWidget(self.monitor_combo)
+
         self.restart_btn = QPushButton('APPLY + RESTART')
         self.restart_btn.setStyleSheet(BUTTON_PRIMARY_QSS)
         self.restart_btn.setVisible(False)
@@ -861,6 +891,14 @@ class SourcePopup(_PopupPanel):
         show = (self.cur_mode == 'window')
         self.window_combo.setVisible(show)
         self.refresh_btn.setVisible(show)
+        self.monitor_combo.setVisible(not show)
+
+    def _on_monitor_changed(self, _idx: int):
+        self.cur_monitor = self.monitor_combo.currentData()
+        self.sm.set('capture_monitor', self.cur_monitor)
+        self.sm.save_settings()
+        self.restart_btn.setVisible(True)
+        self._emit_summary()
 
     def _on_mode_changed(self, idx):
         self.cur_mode = 'window' if idx == 1 else 'desktop'
@@ -1213,7 +1251,7 @@ class MainWindow(QMainWindow):
 
         self.hotkey_manager  = HotkeyManager()
         self.is_capturing    = True
-        self.capture_card    = CaptureCardClient()
+        self.capture_card    = CaptureCardClient(self.settings_manager)
         self._encoder_type   = 'DETECTING'
 
         # Window drag state
@@ -1436,6 +1474,10 @@ class MainWindow(QMainWindow):
             self._toggle_settings_page)
         self._settings_page_widget.imported_folders_changed.connect(
             self.clip_grid.force_refresh)
+        self._settings_page_widget.notification_monitor_changed.connect(
+            self.capture_card.restart)
+        self._settings_page_widget.encoder_config_changed.connect(
+            self._on_encoder_config_changed)
         self.main_stack.addWidget(self._settings_page_widget)
 
         # Wire upload manager → clip grid + start
@@ -1786,10 +1828,11 @@ class MainWindow(QMainWindow):
         mb_needed       = max(64, (frames_needed * bytes_per_frame + (1024*1024-1)) // (1024*1024))
         max_buffer_mb   = min(int(mb_needed) + 64, 2048)   # hard 2 GB ceiling
 
-        capture_mode = self.settings_manager.get('capture_mode', 'desktop')
-        target_hwnd  = self.settings_manager.get('target_hwnd',  0)
-        mode_arg     = '1' if (capture_mode == 'window' and target_hwnd) else '0'
-        hwnd_arg     = str(int(target_hwnd))
+        capture_mode    = self.settings_manager.get('capture_mode',    'desktop')
+        target_hwnd     = self.settings_manager.get('target_hwnd',     0)
+        capture_monitor = self.settings_manager.get('capture_monitor', '')
+        mode_arg        = '1' if (capture_mode == 'window' and target_hwnd) else '0'
+        hwnd_arg        = str(int(target_hwnd))
 
         # 0 = stretch (default), 1 = fit (letterbox/pillarbox)
         scaling_mode = self.settings_manager.get('scaling_mode', 'stretch')
@@ -1798,14 +1841,20 @@ class MainWindow(QMainWindow):
         print(f"Starting engine  |  FPS={self.capture_fps}  "
               f"Buffer={self.buffer_seconds}s  "
               f"Bitrate={self.capture_bitrate}kbps  Pool={max_buffer_mb}MB  "
-              f"Scale={scaling_mode}")
+              f"Scale={scaling_mode}"
+              + (f"  Monitor={capture_monitor}" if capture_monitor else ""))
+        codec_pref_int = {
+            'auto': 0, 'h264': 1, 'hevc': 2, 'av1': 3
+        }.get(self.settings_manager.get('codec_pref', 'auto'), 0)
+        encoder_preset = self.settings_manager.get('encoder_preset', 4)
         try:
             self.engine_process = subprocess.Popen(
                 [str(self.engine_path),
                  str(self.capture_fps), str(self.buffer_seconds),
                  str(self.capture_width), str(self.capture_height),
                  str(self.capture_bitrate), str(max_buffer_mb),
-                 mode_arg, hwnd_arg, scale_arg],
+                 mode_arg, hwnd_arg, scale_arg, capture_monitor,
+                 str(codec_pref_int), str(encoder_preset)],
                 **_NO_WINDOW
             )
             for _ in range(20):
@@ -1840,6 +1889,15 @@ class MainWindow(QMainWindow):
         self._set_status('RESTARTING', STATUS_IDLE)
         self.stop_engine()
         QTimer.singleShot(1000, self._finish_restart)
+
+    def _on_encoder_config_changed(self):
+        codec  = self.settings_manager.get('codec_pref',     'auto')
+        preset = self.settings_manager.get('encoder_preset', 4)
+        if self.bridge.is_connected():
+            self.bridge.set_encoder_config(codec, preset)
+            self._set_status('APPLYING…', STATUS_IDLE)
+        else:
+            self._set_status('GESPEICHERT', STATUS_IDLE)
 
     def _finish_restart(self):
         self.bridge = CaptureBridge()
@@ -2108,6 +2166,13 @@ class MainWindow(QMainWindow):
             self._set_status('DISCONNECTED', STATUS_WARNING)
             self._set_rec_dot_state('disconnected')
             return
+        codec = self.bridge.get_active_codec()
+        if codec:
+            preset = self.settings_manager.get('encoder_preset', 4)
+            new_enc_text = f'{codec} — P{preset}'
+            lbl = self._settings_page_widget.active_encoder_lbl
+            if lbl.text() != new_enc_text:
+                lbl.setText(new_enc_text)
         if self.is_capturing:
             frames   = status.get('frames_captured', 0)
             new_text = f'CAPTURING  {frames:,}f'
@@ -2492,8 +2557,10 @@ class SlidingStackedWidget(QWidget):
 # ---------------------------------------------------------------------------
 
 class _SettingsPage(QWidget):
-    close_requested        = pyqtSignal()
-    imported_folders_changed = pyqtSignal()
+    close_requested           = pyqtSignal()
+    imported_folders_changed  = pyqtSignal()
+    notification_monitor_changed = pyqtSignal()
+    encoder_config_changed    = pyqtSignal()
 
     _AUTOSTART_KEY  = r'Software\Microsoft\Windows\CurrentVersion\Run'
     _AUTOSTART_NAME = 'FTHRClips'
@@ -2922,20 +2989,14 @@ class _SettingsPage(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(_flat_section_header('Video Encoding'))
+        layout.addWidget(_flat_section_header('Clip Settings'))
         layout.addSpacing(12)
-        enc_row = QHBoxLayout()
-        enc_row.setSpacing(10)
-        enc_lbl = QLabel('Hardware Encoder')
-        enc_lbl.setFixedWidth(140)
-        enc_row.addWidget(enc_lbl)
-        self.encoder_combo = _DropdownCombo()
-        self.encoder_combo.addItems([
-            'Auto-detect', 'NVENC (NVIDIA)', 'AMF (AMD)',
-            'QuickSync (Intel)', 'Software (CPU)',
-        ])
-        enc_row.addWidget(self.encoder_combo, 1)
-        layout.addLayout(enc_row)
+        hint = QLabel(
+            'Clip length, frame rate, resolution and bitrate are\n'
+            'configured via the top bar capture button (▶ CAP).'
+        )
+        hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(hint)
         layout.addStretch()
         return page
 
@@ -3072,6 +3133,27 @@ class _SettingsPage(QWidget):
             right_layout.addLayout(row)
             right_layout.addSpacing(8)
 
+        right_layout.addSpacing(20)
+        right_layout.addWidget(_flat_section_header('Notifications'))
+        right_layout.addSpacing(12)
+
+        mon_row = QHBoxLayout()
+        mon_row.setSpacing(8)
+        mon_lbl = QLabel('Monitor:')
+        mon_lbl.setFixedWidth(150)
+        mon_row.addWidget(mon_lbl)
+        self.notif_monitor_combo = _DropdownCombo()
+        self.notif_monitor_combo.addItem('Auto (höchste Hz)', userData='auto')
+        for s in QApplication.screens():
+            g = s.availableGeometry()
+            self.notif_monitor_combo.addItem(
+                f'{s.name()}  ({g.width()}×{g.height()} @ {int(s.refreshRate())}Hz)',
+                userData=s.name(),
+            )
+        self.notif_monitor_combo.currentIndexChanged.connect(self._on_notif_monitor_changed)
+        mon_row.addWidget(self.notif_monitor_combo, 1)
+        right_layout.addLayout(mon_row)
+
         right_layout.addStretch()
         cols.addWidget(right, 1)
 
@@ -3131,6 +3213,7 @@ class _SettingsPage(QWidget):
         self.mic_combo.blockSignals(True)
         self.mic_vol_slider.blockSignals(True)
         self.mic_loopback_check.blockSignals(True)
+        self.notif_monitor_combo.blockSignals(True)
         try:
             name = self.sm.get('mic_device_name')
             if name:
@@ -3142,10 +3225,23 @@ class _SettingsPage(QWidget):
             self.mic_vol_value.setText(f'{vol}%')
             self.mic_level_meter.set_gain(vol / 100.0)
             self.mic_loopback_check.setChecked(bool(self.sm.get('mic_loopback', False)))
+            saved_mon = self.sm.get('notification_monitor', 'auto')
+            idx = self.notif_monitor_combo.findData(saved_mon)
+            if idx >= 0:
+                self.notif_monitor_combo.setCurrentIndex(idx)
         finally:
             self.mic_combo.blockSignals(False)
             self.mic_vol_slider.blockSignals(False)
             self.mic_loopback_check.blockSignals(False)
+            self.notif_monitor_combo.blockSignals(False)
+
+    def _on_notif_monitor_changed(self, _idx: int):
+        if self.sm is None:
+            return
+        val = self.notif_monitor_combo.currentData()
+        self.sm.set('notification_monitor', val)
+        self.sm.save_settings()
+        self.notification_monitor_changed.emit()
 
     def _save_audio_settings(self):
         if self.sm is None:
@@ -3291,7 +3387,98 @@ class _SettingsPage(QWidget):
             top._apply_theme()
 
     def _make_performance_page(self):
-        return QWidget()
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        layout.addWidget(_flat_section_header('Video Encoding'))
+        layout.addSpacing(12)
+
+        def _row(label_text, widget):
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(140)
+            lbl.setStyleSheet(_LABEL_STYLE)
+            row.addWidget(lbl)
+            row.addWidget(widget, 1)
+            return row
+
+        # Codec
+        self.codec_combo = _DropdownCombo()
+        self.codec_combo.addItems(['Auto', 'H.264', 'HEVC', 'AV1'])
+        self.codec_combo.setStyleSheet(_COMBO_STYLE)
+        saved_codec = self.sm.get('codec_pref', 'auto')
+        self.codec_combo.setCurrentIndex(
+            {'auto': 0, 'h264': 1, 'hevc': 2, 'av1': 3}.get(saved_codec, 0))
+        layout.addLayout(_row('CODEC', self.codec_combo))
+        layout.addSpacing(8)
+
+        # Preset
+        self.preset_combo = _DropdownCombo()
+        self.preset_combo.addItems([
+            'P1 — Schnellst', 'P2', 'P3', 'P4 — Ausgeglichen',
+            'P5', 'P6', 'P7 — Beste Qualität',
+        ])
+        self.preset_combo.setStyleSheet(_COMBO_STYLE)
+        saved_preset = self.sm.get('encoder_preset', 4)
+        self.preset_combo.setCurrentIndex(max(0, min(6, saved_preset - 1)))
+        layout.addLayout(_row('PRESET', self.preset_combo))
+        layout.addSpacing(8)
+
+        # Active encoder (read-only label)
+        self.active_encoder_lbl = QLabel('—')
+        self.active_encoder_lbl.setStyleSheet(
+            label_body(Colors.ACCENT, Fonts.SIZE_BODY))
+        layout.addLayout(_row('AKTIVER ENCODER', self.active_encoder_lbl))
+        layout.addSpacing(12)
+
+        # Apply button (hidden until user changes something)
+        self.encoder_apply_btn = QPushButton('ÜBERNEHMEN')
+        self.encoder_apply_btn.setStyleSheet(BUTTON_PRIMARY_QSS)
+        self.encoder_apply_btn.setVisible(False)
+        self.encoder_apply_btn.clicked.connect(self._on_encoder_apply)
+        layout.addWidget(self.encoder_apply_btn)
+
+        self.codec_combo.currentIndexChanged.connect(self._on_encoder_setting_changed)
+        self.preset_combo.currentIndexChanged.connect(self._on_encoder_setting_changed)
+
+        enc_note = QLabel('Änderungen werden nach dem Neustart aktiv.')
+        enc_note.setStyleSheet(label_body(Colors.TEXT_DIM,
+            Fonts.SIZE_SMALL if hasattr(Fonts, 'SIZE_SMALL') else Fonts.SIZE_BODY))
+        layout.addWidget(enc_note)
+
+        layout.addSpacing(28)
+        layout.addWidget(_settings_hsep())
+        layout.addSpacing(20)
+
+        layout.addWidget(_flat_section_header('Capture Buffer'))
+        layout.addSpacing(12)
+
+        buf_note = QLabel(
+            'Buffer length is set via the top bar capture button.\n'
+            'A larger buffer uses more RAM but lets you save longer clips.'
+        )
+        buf_note.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(buf_note)
+
+        layout.addStretch()
+        return page
+
+    def _on_encoder_setting_changed(self, _idx: int):
+        self.encoder_apply_btn.setVisible(True)
+
+    def _on_encoder_apply(self):
+        codec_map = {0: 'auto', 1: 'h264', 2: 'hevc', 3: 'av1'}
+        codec  = codec_map.get(self.codec_combo.currentIndex(), 'auto')
+        preset = self.preset_combo.currentIndex() + 1   # 0-indexed combo → 1-7
+        self.sm.set('codec_pref',     codec)
+        self.sm.set('encoder_preset', preset)
+        self.sm.save_settings()
+        self.encoder_apply_btn.setVisible(False)
+        self.encoder_config_changed.emit()
 
     def _make_version_page(self):
         page = QWidget()
