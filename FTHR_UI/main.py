@@ -641,8 +641,9 @@ class _PopupPanel(QFrame):
 class CaptureSettingsPopup(_PopupPanel):
     """Dropdown panel: clip length, fps, resolution, quality."""
 
-    clip_length_changed = pyqtSignal(int)
-    framerate_changed   = pyqtSignal(int)
+    clip_length_changed   = pyqtSignal(int)
+    extended_clip_changed = pyqtSignal(int)
+    framerate_changed     = pyqtSignal(int)
     resolution_changed  = pyqtSignal(int, int)
     bitrate_changed     = pyqtSignal(int)
     restart_needed      = pyqtSignal()
@@ -650,6 +651,8 @@ class CaptureSettingsPopup(_PopupPanel):
 
     _CLIP_VALUES  = [5, 10, 15, 30, 45, 60, 120, 180, 300, 600, 900]
     _CLIP_LABELS  = ['5s','10s','15s','30s','45s','1m','2m','3m','5m','10m','15m']
+    _EXT_VALUES   = [30, 45, 60, 120, 180, 300, 600, 900]
+    _EXT_LABELS   = ['30s','45s','1m','2m','3m','5m','10m','15m']
     _FPS_VALUES   = [30, 60, 120, 144, 165, 240, 360]
     _RES_LABELS   = ['480p','720p','1080p','1440p','Source']
     _RES_KEYS     = ['480p','720p','1080p','1440p','source']
@@ -662,6 +665,7 @@ class CaptureSettingsPopup(_PopupPanel):
         self._restart_pending = False
 
         self.cur_clip   = self.sm.get('clip_length',    30)
+        self.cur_ext    = self.sm.get('extended_clip_length',  60)
         self.cur_fps    = self.sm.get('framerate',       60)
         self.cur_res    = self.sm.get('resolution',   'source')
         self.cur_qual   = self.sm.get('bitrate_level', 'high')
@@ -689,6 +693,13 @@ class CaptureSettingsPopup(_PopupPanel):
         self.clip_combo = self._make_combo(self._CLIP_LABELS, clip_idx,
                                            self._on_clip_changed)
         layout.addLayout(_row('CLIP LENGTH', self.clip_combo))
+
+        # Extended clip length
+        ext_idx = self._EXT_VALUES.index(self.cur_ext) \
+            if self.cur_ext in self._EXT_VALUES else 2  # default index for '1m'
+        self.ext_combo = self._make_combo(self._EXT_LABELS, ext_idx,
+                                          self._on_ext_clip_changed)
+        layout.addLayout(_row('EXT. CLIP', self.ext_combo))
 
         # FPS
         fps_idx = self._FPS_VALUES.index(self.cur_fps) \
@@ -732,6 +743,12 @@ class CaptureSettingsPopup(_PopupPanel):
         self.sm.save_settings()
         self.clip_length_changed.emit(self.cur_clip)
         self._update_summary()
+
+    def _on_ext_clip_changed(self, idx):
+        self.cur_ext = self._EXT_VALUES[idx]
+        self.sm.set('extended_clip_length', self.cur_ext)
+        self.sm.save_settings()
+        self.extended_clip_changed.emit(self.cur_ext)
 
     def _on_fps_changed(self, idx):
         self.cur_fps = self._FPS_VALUES[idx]
