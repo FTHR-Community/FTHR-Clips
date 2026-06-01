@@ -38,6 +38,7 @@ int main(int argc, char* argv[]) {
     //   [7] capture_mode   (0=desktop, 1=window — Linux only supports 0)
     //   [8] target_hwnd    (ignored on Linux)
     //   [9] scaling_mode   (0=stretch, 1=fit)
+    //   [10] target_output  (wl_output name, e.g. "DP-3" — empty = first output)
 
     fthr::CaptureConfig cfg{};
     cfg.fps            = (argc > 1) ? arg_u32(argv, 1, 60)     : 60;
@@ -49,6 +50,12 @@ int main(int argc, char* argv[]) {
     // argv[7] = capture_mode  — ignored (always desktop)
     // argv[8] = target_hwnd   — ignored
     cfg.scaling_mode   = (argc > 9) ? arg_u32(argv, 9, 0)      : 0;
+    cfg.target_output  = (argc > 10 && argv[10] && argv[10][0]) ? argv[10] : "";
+    cfg.codec_pref = static_cast<fthr::CodecPref>(
+        (argc > 11) ? arg_u32(argv, 11, 0) : 0);
+    cfg.preset     = (argc > 12) ? static_cast<int>(arg_u32(argv, 12, 4)) : 4;
+    if (cfg.preset < 1) cfg.preset = 1;
+    if (cfg.preset > 7) cfg.preset = 7;
 
     // Clamp
     if (cfg.fps            < 1)     cfg.fps            = 1;
@@ -67,7 +74,7 @@ int main(int argc, char* argv[]) {
 
     // Shared memory
     fthr::SharedMemory shm;
-    if (!shm.Initialize("FTHR_SharedMemory_v1")) {
+    if (!shm.Initialize("FTHR_SharedMemory_v2")) {
         std::cerr << "[FTHR] Shared memory init failed — exiting" << std::endl;
         return 1;
     }
@@ -87,6 +94,7 @@ int main(int argc, char* argv[]) {
     layout->cfg_target_width = cfg.target_width;
     layout->cfg_target_height= cfg.target_height;
     layout->nvenc_active     = engine.IsNvencActive();
+    memset(layout->active_codec, 0, sizeof(layout->active_codec));
 
     std::cout << "[FTHR] Ready. Waiting for commands..." << std::endl;
 
@@ -131,6 +139,24 @@ int main(int argc, char* argv[]) {
                 layout->engine_param1 = engine.IsNvencActive() ? 1 : 0;
                 break;
 
+            case fthr::CommandType::RECONFIGURE_ENCODER: {
+                uint32_t new_codec_pref = layout->cfg_codec_pref;
+                int      new_preset     = static_cast<int>(layout->cfg_preset);
+                if (new_preset < 1) new_preset = 1;
+                if (new_preset > 7) new_preset = 7;
+
+                std::cout << "[FTHR] RECONFIGURE_ENCODER  codec_pref="
+                          << new_codec_pref << "  preset=" << new_preset << std::endl;
+
+                engine.Reconfigure(new_codec_pref, new_preset);
+
+                memset(layout->active_codec, 0, sizeof(layout->active_codec));
+                layout->nvenc_active    = engine.IsNvencActive();
+                layout->engine_response =
+                    static_cast<uint32_t>(fthr::ResponseType::STATUS_UPDATE);
+                break;
+            }
+
             case fthr::CommandType::SET_RESOLUTION:
                 layout->cfg_target_width  = layout->ui_param1;
                 layout->cfg_target_height = layout->ui_param2;
@@ -163,6 +189,13 @@ int main(int argc, char* argv[]) {
         // Update live status in shared memory
         layout->frames_captured = engine.GetFrameCount();
         layout->nvenc_active    = engine.IsNvencActive();
+        // Keep active_codec in shared memory up to date
+        const std::string& ac = engine.GetActiveCodec();
+        if (!ac.empty()) {
+            strncpy(layout->active_codec, ac.c_str(),
+                    sizeof(layout->active_codec) - 1);
+            layout->active_codec[sizeof(layout->active_codec) - 1] = '\0';
+        }
         // Linux captures continuously — no discrete recording state
         layout->is_recording    = false;
 

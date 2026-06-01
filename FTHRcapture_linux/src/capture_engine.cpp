@@ -31,16 +31,27 @@ struct FrameBuffer {
     uint32_t     format  = 0;   // WL_SHM_FORMAT_*
 };
 
+// Per-output tracking — each wl_output gets its own entry as listener user-data.
+struct OutputEntry {
+    wl_output*   handle = nullptr;
+    std::string  name;
+    bool         done   = false;
+};
+
 struct WaylandCtx {
     // Globals
     wl_display*                  display   = nullptr;
     wl_registry*                 registry  = nullptr;
     wl_compositor*               compositor= nullptr;
     wl_shm*                      shm       = nullptr;
-    wl_output*                   output    = nullptr;
+    wl_output*                   output    = nullptr;  // selected after roundtrip
     bool                         output_done = false;
     zwlr_screencopy_manager_v1*  sc_mgr    = nullptr;
     zxdg_output_manager_v1*      xdg_out_mgr = nullptr;
+
+    // All discovered outputs; target_output is the requested name (empty = first)
+    std::vector<OutputEntry*>    all_outputs;
+    std::string                  target_output;
 
     // Frame state (reset each capture round)
     zwlr_screencopy_frame_v1*    sc_frame  = nullptr;
@@ -74,12 +85,12 @@ static void registry_global(void* data, wl_registry* registry,
         ctx->shm = static_cast<wl_shm*>(
             wl_registry_bind(registry, name, &wl_shm_interface, 1));
     } else if (strcmp(interface, wl_output_interface.name) == 0) {
-        if (!ctx->output) {
-            ctx->output = static_cast<wl_output*>(
-                wl_registry_bind(registry, name, &wl_output_interface,
-                                 std::min(version, 4u)));
-            wl_output_add_listener(ctx->output, &kOutputListener, ctx);
-        }
+        auto* entry = new OutputEntry{};
+        entry->handle = static_cast<wl_output*>(
+            wl_registry_bind(registry, name, &wl_output_interface,
+                             std::min(version, 4u)));
+        ctx->all_outputs.push_back(entry);
+        wl_output_add_listener(entry->handle, &kOutputListener, entry);
     } else if (strcmp(interface, zwlr_screencopy_manager_v1_interface.name) == 0) {
         ctx->sc_mgr = static_cast<zwlr_screencopy_manager_v1*>(
             wl_registry_bind(registry, name,
@@ -108,11 +119,12 @@ static void output_geometry(void*, wl_output*, int32_t, int32_t, int32_t, int32_
                              int32_t, const char*, const char*, int32_t) {}
 static void output_mode(void*, wl_output*, uint32_t, int32_t, int32_t, int32_t) {}
 static void output_done(void* data, wl_output*) {
-    auto* ctx = static_cast<WaylandCtx*>(data);
-    ctx->output_done = true;
+    static_cast<OutputEntry*>(data)->done = true;
 }
 static void output_scale(void*, wl_output*, int32_t) {}
-static void output_name(void*, wl_output*, const char*) {}
+static void output_name(void* data, wl_output*, const char* name) {
+    if (name) static_cast<OutputEntry*>(data)->name = name;
+}
 static void output_description(void*, wl_output*, const char*) {}
 
 const wl_output_listener kOutputListener = {
@@ -275,14 +287,37 @@ void CaptureEngine::CaptureLoop() {
         return;
     }
 
+    ctx.target_output = cfg_.target_output;
+
     ctx.registry = wl_display_get_registry(ctx.display);
     wl_registry_add_listener(ctx.registry, &kRegistryListener, &ctx);
-    wl_display_roundtrip(ctx.display);
-    wl_display_roundtrip(ctx.display);
+    wl_display_roundtrip(ctx.display);  // discovers all globals + outputs
+    wl_display_roundtrip(ctx.display);  // flushes output name/done events
+
+    // Select the target wl_output by name; fall back to first available.
+    {
+        OutputEntry* selected = nullptr;
+        if (!ctx.target_output.empty()) {
+            for (auto* e : ctx.all_outputs) {
+                if (e->name == ctx.target_output) { selected = e; break; }
+            }
+            if (!selected)
+                std::cerr << "[Capture] Output '" << ctx.target_output
+                          << "' not found — falling back to first" << std::endl;
+        }
+        if (!selected && !ctx.all_outputs.empty())
+            selected = ctx.all_outputs[0];
+
+        if (selected) {
+            ctx.output      = selected->handle;
+            ctx.output_done = selected->done;
+            std::cerr << "[Capture] Using output: '"
+                      << (selected->name.empty() ? "(unnamed)" : selected->name)
+                      << "'" << std::endl;
+        }
+    }
 
     // Wait for wl_output to be fully committed before using it.
-    // Hyprland sends a 'done' event after all output properties are sent.
-    // Calling capture_output before 'done' yields "invalid arguments".
     while (ctx.output && !ctx.output_done)
         wl_display_dispatch(ctx.display);
 
@@ -290,7 +325,7 @@ void CaptureEngine::CaptureLoop() {
         std::cerr << "[Capture] zwlr_screencopy_manager_v1 not available — "
                      "compositor must support wlr-screencopy" << std::endl;
         if (ctx.sc_mgr)    zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
-        if (ctx.output)    wl_output_destroy(ctx.output);
+        for (auto* e : ctx.all_outputs) { wl_output_destroy(e->handle); delete e; } ctx.all_outputs.clear();
         if (ctx.shm)       wl_shm_destroy(ctx.shm);
         if (ctx.compositor) wl_compositor_destroy(ctx.compositor);
         if (ctx.registry)  wl_registry_destroy(ctx.registry);
@@ -301,7 +336,7 @@ void CaptureEngine::CaptureLoop() {
     if (!ctx.output) {
         std::cerr << "[Capture] No wl_output found" << std::endl;
         if (ctx.sc_mgr)    zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
-        if (ctx.output)    wl_output_destroy(ctx.output);
+        for (auto* e : ctx.all_outputs) { wl_output_destroy(e->handle); delete e; } ctx.all_outputs.clear();
         if (ctx.shm)       wl_shm_destroy(ctx.shm);
         if (ctx.compositor) wl_compositor_destroy(ctx.compositor);
         if (ctx.registry)  wl_registry_destroy(ctx.registry);
@@ -329,7 +364,7 @@ void CaptureEngine::CaptureLoop() {
             std::cerr << "[Capture] Failed to probe output resolution" << std::endl;
             zwlr_screencopy_frame_v1_destroy(ctx.sc_frame);
             if (ctx.sc_mgr)    zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
-            if (ctx.output)    wl_output_destroy(ctx.output);
+            for (auto* e : ctx.all_outputs) { wl_output_destroy(e->handle); delete e; } ctx.all_outputs.clear();
             if (ctx.shm)       wl_shm_destroy(ctx.shm);
             if (ctx.compositor) wl_compositor_destroy(ctx.compositor);
             if (ctx.registry)  wl_registry_destroy(ctx.registry);
@@ -342,7 +377,7 @@ void CaptureEngine::CaptureLoop() {
             std::cerr << "[Capture] Failed to allocate probe framebuffer" << std::endl;
             zwlr_screencopy_frame_v1_destroy(ctx.sc_frame);
             if (ctx.sc_mgr)    zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
-            if (ctx.output)    wl_output_destroy(ctx.output);
+            for (auto* e : ctx.all_outputs) { wl_output_destroy(e->handle); delete e; } ctx.all_outputs.clear();
             if (ctx.shm)       wl_shm_destroy(ctx.shm);
             if (ctx.compositor) wl_compositor_destroy(ctx.compositor);
             if (ctx.registry)  wl_registry_destroy(ctx.registry);
@@ -387,13 +422,15 @@ void CaptureEngine::CaptureLoop() {
     enc_cfg.enc_height  = enc_h;
     enc_cfg.fps         = cfg_.fps;
     enc_cfg.bitrate_kbps = cfg_.bitrate_kbps;
+    enc_cfg.codec_pref  = cfg_.codec_pref;
+    enc_cfg.preset      = cfg_.preset;
 
     std::string codec_used;
     if (!encoder_.Open(enc_cfg, codec_used)) {
         std::cerr << "[Capture] Encoder open failed" << std::endl;
         free_framebuffer(ctx.fb);
         if (ctx.sc_mgr)    zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
-        if (ctx.output)    wl_output_destroy(ctx.output);
+        for (auto* e : ctx.all_outputs) { wl_output_destroy(e->handle); delete e; } ctx.all_outputs.clear();
         if (ctx.shm)       wl_shm_destroy(ctx.shm);
         if (ctx.compositor) wl_compositor_destroy(ctx.compositor);
         if (ctx.registry)  wl_registry_destroy(ctx.registry);
@@ -403,6 +440,7 @@ void CaptureEngine::CaptureLoop() {
     }
 
     nvenc_active_.store(codec_used.find("nvenc") != std::string::npos);
+    active_codec_ = codec_used;
 
     // Frame timing
     int64_t frame_ns = 1'000'000'000LL / cfg_.fps;
@@ -488,7 +526,7 @@ void CaptureEngine::CaptureLoop() {
 
     free_framebuffer(ctx.fb);
     if (ctx.sc_mgr)  zwlr_screencopy_manager_v1_destroy(ctx.sc_mgr);
-    if (ctx.output)  wl_output_destroy(ctx.output);
+    for (auto* e : ctx.all_outputs) { wl_output_destroy(e->handle); delete e; }
     if (ctx.shm)     wl_shm_destroy(ctx.shm);
     if (ctx.registry)wl_registry_destroy(ctx.registry);
     wl_display_disconnect(ctx.display);
@@ -528,6 +566,8 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
         int audio_channels,
         const std::vector<uint8_t>& extradata,
         uint32_t fps,
+        uint32_t width,
+        uint32_t height,
         SharedMemoryLayout* shm
     );
 
@@ -539,8 +579,22 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
         AudioCapture::kChannels,
         encoder_.GetExtradata(),
         cfg_.fps,
+        encoder_.GetWidth(),
+        encoder_.GetHeight(),
         shm
     );
+}
+
+// ---------------------------------------------------------------------------
+// CaptureEngine::Reconfigure — hot-swap codec/preset without full reinit
+// ---------------------------------------------------------------------------
+
+void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
+    Shutdown();
+    cfg_.codec_pref = static_cast<CodecPref>(codec_pref);
+    cfg_.preset     = preset;
+    running_.store(true);
+    cap_thread_ = std::thread(&CaptureEngine::CaptureLoop, this);
 }
 
 } // namespace fthr

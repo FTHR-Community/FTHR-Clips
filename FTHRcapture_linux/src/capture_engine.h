@@ -11,12 +11,15 @@
 namespace fthr {
 
 struct CaptureConfig {
-    uint32_t fps;
-    uint32_t buffer_seconds;
-    uint32_t target_width;   // 0 = native
-    uint32_t target_height;  // 0 = native
-    uint32_t bitrate_kbps;
-    uint32_t scaling_mode;   // 0 = stretch, 1 = fit (letterbox)
+    uint32_t    fps;
+    uint32_t    buffer_seconds;
+    uint32_t    target_width;    // 0 = native
+    uint32_t    target_height;   // 0 = native
+    uint32_t    bitrate_kbps;
+    uint32_t    scaling_mode;    // 0 = stretch, 1 = fit (letterbox)
+    std::string target_output;   // wl_output name, e.g. "HDMI-A-1" — empty = first
+    CodecPref codec_pref = CodecPref::Auto;
+    int       preset     = 4;
 };
 
 class CaptureEngine {
@@ -34,6 +37,8 @@ public:
 
     bool     IsNvencActive() const { return nvenc_active_.load(); }
     uint64_t GetFrameCount()  const { return frame_count_.load(); }
+    void Reconfigure(uint32_t codec_pref, int preset);
+    const std::string& GetActiveCodec() const { return active_codec_; }
 
 private:
     void CaptureLoop();
@@ -49,6 +54,7 @@ private:
     std::atomic<bool>       running_{false};
     std::atomic<bool>       nvenc_active_{false};
     std::atomic<uint64_t>   frame_count_{0};
+    std::string active_codec_;
 };
 
 } // namespace fthr

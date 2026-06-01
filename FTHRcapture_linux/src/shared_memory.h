@@ -24,6 +24,12 @@ struct SharedMemoryLayout {
     uint32_t cfg_target_width;
     uint32_t cfg_target_height;
     bool     nvenc_active;
+
+    // Encoder config — written by UI before RECONFIGURE_ENCODER command.
+    // active_codec is written by the engine after Open() succeeds.
+    uint32_t cfg_codec_pref;     // 0=auto 1=h264 2=hevc 3=av1
+    uint32_t cfg_preset;         // 1–7
+    char     active_codec[64];   // e.g. "hevc_nvenc\0"
 };
 
 enum class CommandType : uint32_t {
