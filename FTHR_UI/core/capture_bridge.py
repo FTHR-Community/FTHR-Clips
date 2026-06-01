@@ -82,6 +82,9 @@ if sys.platform == 'win32':
             ('cfg_codec_pref',    c_uint32),
             ('cfg_preset',        c_uint32),
             ('active_codec',      ctypes.c_char * 64),
+            # v3 fields
+            ('multiband_enabled',     c_bool),
+            ('active_audio_mappings', ctypes.c_char * 1024),
         ]
 else:
     class SharedMemoryLayout(Structure):
@@ -108,6 +111,9 @@ else:
             ('cfg_codec_pref',    c_uint32),
             ('cfg_preset',        c_uint32),
             ('active_codec',      ctypes.c_char * 64),
+            # v3 fields
+            ('multiband_enabled',     c_bool),
+            ('active_audio_mappings', ctypes.c_char * 1024),
         ]
 
 
@@ -115,7 +121,7 @@ class CaptureBridge:
     # Bumped the _v1 suffix the day I changed the struct layout and spent two
     # hours wondering why an old engine kept reading my new fields wrong.
     # Versioned name = old + new never accidentally share the same mapping.
-    SHARED_MEM_NAME = 'FTHR_SharedMemory_v2'
+    SHARED_MEM_NAME = 'FTHR_SharedMemory_v3'
 
     # Singleton. There is exactly one engine and one mapping, so one bridge.
     # Anything else just hands you back the same object.
@@ -360,3 +366,25 @@ class CaptureBridge:
             return int(self._layout.cfg_preset) or 4
         except Exception:
             return 4
+
+    def get_audio_mappings(self) -> dict:
+        """Returns {app_name: category_name} from shared memory."""
+        if not self.is_connected():
+            return {}
+        try:
+            raw  = self._layout.active_audio_mappings
+            text = raw.decode('utf-8', errors='ignore').rstrip('\x00')
+            if not text or text == '{}':
+                return {}
+            import json
+            return json.loads(text)
+        except Exception:
+            return {}
+
+    def is_multiband_active(self) -> bool:
+        if not self.is_connected():
+            return False
+        try:
+            return bool(self._layout.multiband_enabled)
+        except Exception:
+            return False
