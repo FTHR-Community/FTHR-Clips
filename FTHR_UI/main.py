@@ -2922,6 +2922,23 @@ class _SettingsPage(QWidget):
         if sys.platform == 'win32':
             self.autostart_check.stateChanged.connect(self._on_autostart_changed)
 
+        # ── Game Detection ────────────────────────────────────────────────
+        layout.addSpacing(28)
+        layout.addWidget(_flat_section_header('Game Detection'))
+        layout.addSpacing(12)
+
+        self.game_detection_check = QCheckBox('Games erkennen und zum Aufnehmen vorschlagen')
+        self.game_detection_check.setStyleSheet(CHECKBOX_QSS)
+        self.game_detection_check.setChecked(self.sm.get('game_detection_enabled', False))
+        self.game_detection_check.toggled.connect(self._on_game_detection_toggled)
+        layout.addWidget(self.game_detection_check)
+        layout.addSpacing(4)
+
+        _gd_hint = QLabel('Drücke F8 um aufzunehmen wenn ein Game erkannt wird.')
+        _gd_hint.setWordWrap(True)
+        _gd_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(_gd_hint)
+
         # ── Import Clips ──────────────────────────────────────────────────
         layout.addSpacing(28)
         layout.addWidget(_flat_section_header('Import Clips'))
@@ -3488,6 +3505,16 @@ class _SettingsPage(QWidget):
             self._mappings_timer.start()
         else:
             self._mappings_timer.stop()
+
+    def _on_game_detection_toggled(self, checked: bool):
+        self.sm.set('game_detection_enabled', checked)
+        self.sm.save_settings()
+        main_win = self.window()
+        if hasattr(main_win, '_game_detector'):
+            if checked:
+                main_win._game_detector.start()
+            else:
+                main_win._game_detector.stop()
 
     def _on_cat_volume(self, idx: int, vol: int, lbl: QLabel):
         lbl.setText(f'{vol}%')
