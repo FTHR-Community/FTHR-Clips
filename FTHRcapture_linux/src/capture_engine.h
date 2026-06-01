@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <cstdint>
 
 namespace fthr {
@@ -38,7 +39,10 @@ public:
     bool     IsNvencActive() const { return nvenc_active_.load(); }
     uint64_t GetFrameCount()  const { return frame_count_.load(); }
     void Reconfigure(uint32_t codec_pref, int preset);
-    const std::string& GetActiveCodec() const { return active_codec_; }
+    std::string GetActiveCodec() const {
+        std::lock_guard<std::mutex> lk(codec_mutex_);
+        return active_codec_;
+    }
 
 private:
     void CaptureLoop();
@@ -55,6 +59,7 @@ private:
     std::atomic<bool>       nvenc_active_{false};
     std::atomic<uint64_t>   frame_count_{0};
     std::string active_codec_;
+    mutable std::mutex codec_mutex_;
 };
 
 } // namespace fthr

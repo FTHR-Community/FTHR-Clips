@@ -440,7 +440,7 @@ void CaptureEngine::CaptureLoop() {
     }
 
     nvenc_active_.store(codec_used.find("nvenc") != std::string::npos);
-    active_codec_ = codec_used;
+    { std::lock_guard<std::mutex> lk(codec_mutex_); active_codec_ = codec_used; }
 
     // Frame timing
     int64_t frame_ns = 1'000'000'000LL / cfg_.fps;
@@ -590,9 +590,20 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
 // ---------------------------------------------------------------------------
 
 void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
-    Shutdown();
+    Shutdown();   // stops thread, deletes ring_, stops audio
     cfg_.codec_pref = static_cast<CodecPref>(codec_pref);
     cfg_.preset     = preset;
+    if (cfg_.preset < 1) cfg_.preset = 1;
+    if (cfg_.preset > 7) cfg_.preset = 7;
+    // Re-allocate ring (Shutdown() freed it)
+    size_t ring_ms = (static_cast<size_t>(cfg_.buffer_seconds) + 5) * 1000;
+    ring_ = new EncodedRingBuffer(ring_ms);
+    // Restart audio (Shutdown() stopped it)
+    audio_.Start("");
+    // Reset stale state
+    nvenc_active_.store(false);
+    { std::lock_guard<std::mutex> lk(codec_mutex_); active_codec_.clear(); }
+    // Restart capture thread
     running_.store(true);
     cap_thread_ = std::thread(&CaptureEngine::CaptureLoop, this);
 }
