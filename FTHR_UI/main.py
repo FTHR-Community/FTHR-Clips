@@ -3366,7 +3366,7 @@ class _SettingsPage(QWidget):
         self.camera_preview_lbl.setFixedSize(160, 90)
         self.camera_preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.camera_preview_lbl.setStyleSheet(
-            f'background: {Colors.BG_CARD}; color: {Colors.TEXT_DIM}; '
+            f'background: {Colors.CARD_BG}; color: {Colors.TEXT_DIM}; '
             f'border: 1px solid {Colors.BORDER};')
         layout.addWidget(self.camera_preview_lbl)
         layout.addSpacing(4)
