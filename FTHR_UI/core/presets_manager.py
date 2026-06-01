@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 from pathlib import Path
 
 
@@ -24,8 +26,19 @@ class PresetsManager:
 
     def _write(self, data: dict):
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, 'w') as f:
-            json.dump(data, f, indent=2)
+        # Write to a temp file first, then atomically replace — prevents wiping
+        # all presets if json.dump raises (e.g. non-serialisable value).
+        fd, tmp = tempfile.mkstemp(dir=self._path.parent, suffix='.json.tmp')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, self._path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except FileNotFoundError:
+                pass
+            raise
 
     def names(self) -> list[str]:
         return sorted(self._read().keys())

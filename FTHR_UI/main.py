@@ -1877,8 +1877,10 @@ class MainWindow(QMainWindow):
         self._pending_game_window = window
         game_name = window.get('display_name', 'Game')
         hotkey = self.hotkey_manager.hotkeys.get('confirm_game_detection', 'F8')
+        dismiss = self.hotkey_manager.hotkeys.get('dismiss_game_detection', 'F7')
         self.capture_card.show_prompt(
-            f'{game_name} erkannt — [{hotkey}] Aufnehmen  [Esc] Ablehnen')
+            f'{game_name} detected — [{hotkey}] Record  [{dismiss}] Dismiss')
+        self._game_dismiss_timer.stop()   # cancel any existing prompt timer first
         self._game_dismiss_timer.start(15000)
 
     def _on_game_closed(self, hwnd: int):
@@ -1889,7 +1891,7 @@ class MainWindow(QMainWindow):
         self.settings_manager.set('target_hwnd', 0)
         self.settings_manager.save_settings()
         self._restart_capture_engine()
-        self.capture_card.show_prompt('Game geschlossen — zurück auf Desktop')
+        self.capture_card.show_prompt('Game closed — switched back to Desktop')
 
     def _on_confirm_game_detection(self):
         if self._pending_game_window is None:
@@ -2214,6 +2216,14 @@ class MainWindow(QMainWindow):
         If there is no mic to mux, the event is set here before returning.
         """
         if not MicRecorder.is_available() or not MicRecorder().is_running():
+            if clip_ready is not None:
+                clip_ready.set()
+            return
+
+        # When multiband is active the mic is included inside _multiband_mux_worker.
+        # Running both workers on the same clip causes two concurrent os.replace()
+        # calls that corrupt the final file.
+        if self.settings_manager.get('multiband_audio_enabled', False):
             if clip_ready is not None:
                 clip_ready.set()
             return

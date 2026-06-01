@@ -45,7 +45,7 @@ class HotkeyManager(QObject):
             'save_extended_clip': 'F10',
             'save_screenshot': 'F11',
             'confirm_game_detection':  'F8',
-            'dismiss_game_detection':  'Escape',
+            'dismiss_game_detection':  'F7',
         }
 
         # We track what we've actually registered so we can cleanly unhook later.
@@ -202,7 +202,12 @@ class HotkeyManager(QObject):
                     try:
                         data = conn.recv(64).decode().strip()
                         if data in _dispatch:
-                            _dispatch[data].emit()
+                            # Emit on the Qt main thread via QTimer.singleShot —
+                            # emitting PyQt signals directly from a non-QThread
+                            # thread is not thread-safe with direct connections.
+                            sig = _dispatch[data]
+                            from PyQt6.QtCore import QTimer
+                            QTimer.singleShot(0, sig.emit)
                         else:
                             print(f"[Hotkey] Unknown command: {data!r}")
                     except Exception:

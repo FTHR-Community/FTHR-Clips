@@ -29,17 +29,20 @@ static uint32_t arg_u32(char** argv, int idx, uint32_t def) {
 
 int main(int argc, char* argv[]) {
     // Argv contract (identical to Windows version):
-    //   [1] fps            (1-360,   default 60)
-    //   [2] buffer_sec     (1-300,   default 30)
-    //   [3] target_width   (0=native)
-    //   [4] target_height  (0=native)
-    //   [5] bitrate_kbps   (500-60000, default 16000)
-    //   [6] max_buffer_mb  (ignored on Linux)
-    //   [7] capture_mode   (0=desktop, 1=window — Linux only supports 0)
-    //   [8] target_hwnd    (ignored on Linux)
-    //   [9] scaling_mode   (0=stretch, 1=fit)
+    //   [1]  fps            (1-360,   default 60)
+    //   [2]  buffer_sec     (1-300,   default 30)
+    //   [3]  target_width   (0=native)
+    //   [4]  target_height  (0=native)
+    //   [5]  bitrate_kbps   (500-60000, default 16000)
+    //   [6]  max_buffer_mb  (ignored on Linux)
+    //   [7]  capture_mode   (0=desktop, 1=window — Linux always desktop)
+    //   [8]  target_hwnd    (ignored on Linux)
+    //   [9]  scaling_mode   (0=stretch, 1=fit)
     //   [10] target_output  (wl_output name, e.g. "DP-3" — empty = first output)
-    //   [14] audio_enabled (1=on default, 0=off)
+    //   [11] codec_pref     (0=auto, 1=h264, 2=hevc, 3=av1)
+    //   [12] encoder_preset (1-7, default 4)
+    //   [13] multiband      (0=off, 1=on)
+    //   [14] audio_enabled  (1=on default, 0=off)
 
     fthr::CaptureConfig cfg{};
     cfg.fps            = (argc > 1) ? arg_u32(argv, 1, 60)     : 60;
