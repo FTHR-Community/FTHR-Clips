@@ -2,6 +2,7 @@
 #include "encoder.h"
 #include "ring_buffer.h"
 #include "audio_capture.h"
+#include "audio_multi_capture.h"
 #include "shared_memory.h"
 #include <string>
 #include <thread>
@@ -19,6 +20,8 @@ struct CaptureConfig {
     uint32_t    bitrate_kbps;
     uint32_t    scaling_mode;    // 0 = stretch, 1 = fit (letterbox)
     std::string target_output;   // wl_output name, e.g. "HDMI-A-1" — empty = first
+    bool      multiband_enabled = false;
+    std::vector<AudioCategoryConfig> audio_categories;
     CodecPref codec_pref = CodecPref::Auto;
     int       preset     = 4;
 };
@@ -43,6 +46,7 @@ public:
         std::lock_guard<std::mutex> lk(codec_mutex_);
         return active_codec_;
     }
+    std::string GetAudioMappingsJson() const;
 
 private:
     void CaptureLoop();
@@ -60,6 +64,7 @@ private:
     std::atomic<uint64_t>   frame_count_{0};
     std::string active_codec_;
     mutable std::mutex codec_mutex_;
+    AudioMultiCapture   multi_audio_;
 };
 
 } // namespace fthr

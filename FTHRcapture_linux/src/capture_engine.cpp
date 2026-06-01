@@ -250,7 +250,11 @@ bool CaptureEngine::Initialize(const CaptureConfig& cfg) {
     ring_ = new EncodedRingBuffer(ring_ms);
 
     // Start audio capture (loopback via PulseAudio monitor)
-    audio_.Start("");
+    if (cfg.multiband_enabled && !cfg.audio_categories.empty()) {
+        multi_audio_.Start(cfg.audio_categories);
+    } else {
+        audio_.Start("");
+    }
 
     // Start capture loop thread
     running_.store(true);
@@ -268,6 +272,7 @@ void CaptureEngine::Shutdown() {
     if (cap_thread_.joinable())
         cap_thread_.join();
     audio_.Stop();
+    multi_audio_.Stop();
     encoder_.Close();
     delete ring_;
     ring_ = nullptr;
@@ -536,6 +541,48 @@ void CaptureEngine::CaptureLoop() {
 }
 
 // ---------------------------------------------------------------------------
+// write_pcm_wav — writes IEEE float32 WAV file
+// ---------------------------------------------------------------------------
+
+static void write_pcm_wav(const std::string& path,
+                            const std::vector<float>& pcm,
+                            int sample_rate, int channels) {
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return;
+
+    uint32_t data_bytes  = (uint32_t)(pcm.size() * sizeof(float));
+    uint32_t file_size   = 36 + data_bytes;
+
+    // RIFF header
+    fwrite("RIFF", 1, 4, f);
+    fwrite(&file_size,  4, 1, f);
+    fwrite("WAVE", 1, 4, f);
+
+    // fmt chunk — IEEE float PCM (format tag 3)
+    fwrite("fmt ", 1, 4, f);
+    uint32_t fmt_size    = 16;
+    uint16_t audio_fmt   = 3;
+    uint16_t ch          = (uint16_t)channels;
+    uint32_t sr          = (uint32_t)sample_rate;
+    uint32_t byte_rate   = sr * ch * 4;
+    uint16_t block_align = (uint16_t)(ch * 4);
+    uint16_t bits        = 32;
+    fwrite(&fmt_size,    4, 1, f);
+    fwrite(&audio_fmt,   2, 1, f);
+    fwrite(&ch,          2, 1, f);
+    fwrite(&sr,          4, 1, f);
+    fwrite(&byte_rate,   4, 1, f);
+    fwrite(&block_align, 2, 1, f);
+    fwrite(&bits,        2, 1, f);
+
+    // data chunk
+    fwrite("data", 1, 4, f);
+    fwrite(&data_bytes, 4, 1, f);
+    fwrite(pcm.data(), sizeof(float), pcm.size(), f);
+    fclose(f);
+}
+
+// ---------------------------------------------------------------------------
 // CaptureEngine::SaveClip
 // ---------------------------------------------------------------------------
 
@@ -556,6 +603,24 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
     clock_gettime(CLOCK_MONOTONIC, &ts);
     int64_t now_ns = static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
     std::vector<float> audio_pcm = audio_.ExtractSegment(now_ns, duration_ms);
+
+    // Write per-category WAVs when multiband is active.
+    // Python reads these, mixes with preset volumes, and deletes them.
+    if (cfg_.multiband_enabled) {
+        for (const auto& cat_cfg : cfg_.audio_categories) {
+            std::vector<float> pcm = multi_audio_.ExtractSegment(
+                cat_cfg.name, now_ns, duration_ms);
+            if (pcm.empty()) continue;
+            // Derive WAV path: strip extension, append _fthr_<sinkname>.wav
+            std::string wav_path = path;
+            size_t dot = wav_path.rfind('.');
+            if (dot != std::string::npos) wav_path = wav_path.substr(0, dot);
+            wav_path += "_fthr_" + cat_cfg.sink_name + ".wav";
+            write_pcm_wav(wav_path, pcm,
+                          AudioMultiCapture::kSampleRate,
+                          AudioMultiCapture::kChannels);
+        }
+    }
 
     // Delegate to save_clip module
     extern bool save_clip_to_file(
@@ -601,13 +666,36 @@ void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
     size_t ring_ms = (static_cast<size_t>(cfg_.buffer_seconds) + 5) * 1000;
     ring_ = new EncodedRingBuffer(ring_ms);
     // Restart audio (Shutdown() stopped it)
-    audio_.Start("");
+    if (cfg_.multiband_enabled && !cfg_.audio_categories.empty()) {
+        multi_audio_.Start(cfg_.audio_categories);
+    } else {
+        audio_.Start("");
+    }
     // Reset stale state
     nvenc_active_.store(false);
     { std::lock_guard<std::mutex> lk(codec_mutex_); active_codec_.clear(); }
     // Restart capture thread
     running_.store(true);
     cap_thread_ = std::thread(&CaptureEngine::CaptureLoop, this);
+}
+
+// ---------------------------------------------------------------------------
+// CaptureEngine::GetAudioMappingsJson
+// ---------------------------------------------------------------------------
+
+std::string CaptureEngine::GetAudioMappingsJson() const {
+    if (!cfg_.multiband_enabled) return "{}";
+    auto maps = multi_audio_.GetCurrentMappings();
+    std::string json = "{";
+    bool first = true;
+    for (auto& [app, cat] : maps) {
+        if (!first) json += ",";
+        // Simple JSON string escaping — PA process names won't contain quotes
+        json += "\"" + app + "\":\"" + cat + "\"";
+        first = false;
+    }
+    json += "}";
+    return json;
 }
 
 } // namespace fthr
