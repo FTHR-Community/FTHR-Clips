@@ -1847,6 +1847,10 @@ class MainWindow(QMainWindow):
             'auto': 0, 'h264': 1, 'hevc': 2, 'av1': 3
         }.get(self.settings_manager.get('codec_pref', 'auto'), 0)
         encoder_preset = self.settings_manager.get('encoder_preset', 4)
+        multiband_enabled = self.settings_manager.get('multiband_audio_enabled', False)
+        if multiband_enabled:
+            self._write_audio_categories_json()
+        multiband_arg = '1' if multiband_enabled else '0'
         try:
             self.engine_process = subprocess.Popen(
                 [str(self.engine_path),
@@ -1854,7 +1858,8 @@ class MainWindow(QMainWindow):
                  str(self.capture_width), str(self.capture_height),
                  str(self.capture_bitrate), str(max_buffer_mb),
                  mode_arg, hwnd_arg, scale_arg, capture_monitor,
-                 str(codec_pref_int), str(encoder_preset)],
+                 str(codec_pref_int), str(encoder_preset),
+                 multiband_arg],
                 **_NO_WINDOW
             )
             for _ in range(20):
@@ -1898,6 +1903,23 @@ class MainWindow(QMainWindow):
             self._set_status('APPLYING…', STATUS_IDLE)
         else:
             self._set_status('GESPEICHERT', STATUS_IDLE)
+
+    def _write_audio_categories_json(self):
+        """Write ~/.fthr/audio_categories.json for the C++ engine to read at startup."""
+        import json as _json
+        cats = self.settings_manager.get('audio_categories', [])
+        path = Path.home() / '.fthr' / 'audio_categories.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'w') as f:
+            for cat in cats:
+                sink_name = 'fthr_' + ''.join(
+                    c if c.isalnum() else '_' for c in cat['name'].lower())
+                obj = {
+                    'name':     cat['name'],
+                    'sink':     sink_name,
+                    'patterns': cat.get('patterns', []),
+                }
+                f.write(_json.dumps(obj, ensure_ascii=True) + '\n')
 
     def _finish_restart(self):
         self.bridge = CaptureBridge()
@@ -1996,6 +2018,9 @@ class MainWindow(QMainWindow):
                     str(output_path), has_mic_mux=mic_active)
                 self._mux_mic_into_clip(
                     str(output_path), duration_seconds, mic_end_time, clip_ready)
+                if self.settings_manager.get('multiband_audio_enabled', False):
+                    self._mux_multiband_into_clip(
+                        str(output_path), duration_seconds, mic_end_time)
             else:
                 self.capture_card.show_error()
                 QMessageBox.warning(self, 'Save Failed', 'Could not save clip.')
@@ -2138,6 +2163,72 @@ class MainWindow(QMainWindow):
             # Always unblock the upload worker, regardless of success or failure.
             if clip_ready is not None:
                 clip_ready.set()
+
+    def _mux_multiband_into_clip(self, clip_path: str, duration_seconds: int,
+                                  audio_end_time: float):
+        """Start a background thread to mix per-category WAVs into the clip."""
+        threading.Thread(
+            target=self._multiband_mux_worker,
+            args=(clip_path, duration_seconds, audio_end_time),
+            daemon=True,
+        ).start()
+
+    def _multiband_mux_worker(self, clip_path: str, duration_seconds: int,
+                               audio_end_time: float):
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except (ImportError, RuntimeError):
+            print('[MultiAudio] imageio-ffmpeg missing — skipping multiband mix')
+            return
+
+        from core.audio_mixer import mix_multiband_clip
+
+        # Wait for clip file to stabilize (same pattern as mic mux)
+        deadline = time.monotonic() + max(duration_seconds * 2, 15)
+        last_size = -1
+        while time.monotonic() < deadline:
+            try:
+                if os.path.exists(clip_path):
+                    size = os.path.getsize(clip_path)
+                    if size > 0 and size == last_size:
+                        break
+                    last_size = size
+            except OSError:
+                pass
+            time.sleep(0.25)
+        else:
+            print(f'[MultiAudio] Clip {clip_path} did not stabilize — skipping mix')
+            return
+
+        # Find per-category WAV files written by the C++ engine next to the clip
+        base = os.path.splitext(clip_path)[0]
+        cats = self.settings_manager.get('audio_categories', [])
+        category_wavs = {}
+        volumes = {}
+        for cat in cats:
+            sink_name = 'fthr_' + ''.join(
+                c if c.isalnum() else '_' for c in cat['name'].lower())
+            wav_path = f'{base}_{sink_name}.wav'
+            if os.path.exists(wav_path):
+                category_wavs[cat['name']] = wav_path
+                volumes[cat['name']] = cat.get('volume', 100) / 100.0
+
+        if not category_wavs:
+            print('[MultiAudio] No category WAVs found — skipping mix')
+            return
+
+        ok = mix_multiband_clip(clip_path, category_wavs, volumes, ffmpeg)
+
+        # Clean up WAV files regardless of mix result
+        for wav in category_wavs.values():
+            try:
+                os.remove(wav)
+            except OSError:
+                pass
+
+        if not ok:
+            print('[MultiAudio] Mix failed')
 
     # =======================================================================
     # UI state
