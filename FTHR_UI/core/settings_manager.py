@@ -70,6 +70,7 @@ class SettingsManager:
             # Multiband audio
             'multiband_audio_enabled': False,
             'game_detection_enabled':  False,
+            'audio_capture_enabled':   True,
             'audio_categories': [
                 {'name': 'Game',     'volume': 100, 'patterns': []},
                 {'name': 'Discord',  'volume': 100, 'patterns': ['discord', 'Discord', 'WebRTC']},

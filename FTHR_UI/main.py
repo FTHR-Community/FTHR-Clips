@@ -1940,6 +1940,8 @@ class MainWindow(QMainWindow):
         if multiband_enabled:
             self._write_audio_categories_json()
         multiband_arg = '1' if multiband_enabled else '0'
+        audio_enabled = self.settings_manager.get('audio_capture_enabled', True)
+        audio_arg = '1' if audio_enabled else '0'
         try:
             self.engine_process = subprocess.Popen(
                 [str(self.engine_path),
@@ -1948,7 +1950,7 @@ class MainWindow(QMainWindow):
                  str(self.capture_bitrate), str(max_buffer_mb),
                  mode_arg, hwnd_arg, scale_arg, capture_monitor,
                  str(codec_pref_int), str(encoder_preset),
-                 multiband_arg],
+                 multiband_arg, audio_arg],
                 **_NO_WINDOW
             )
             for _ in range(20):
@@ -2102,8 +2104,9 @@ class MainWindow(QMainWindow):
                 # Notify the upload manager and get the clip-ready event.
                 # The event is set immediately if there's no mic mux pending;
                 # otherwise the mux worker sets it after os.replace() completes.
-                multiband_on = self.settings_manager.get('multiband_audio_enabled', False)
-                mic_active = (not multiband_on and
+                audio_on = self.settings_manager.get('audio_capture_enabled', True)
+                multiband_on = audio_on and self.settings_manager.get('multiband_audio_enabled', False)
+                mic_active = (audio_on and not multiband_on and
                               MicRecorder.is_available() and MicRecorder().is_running())
                 clip_ready = self.upload_manager.notify_clip_saved(
                     str(output_path), has_mic_mux=mic_active)
@@ -3516,6 +3519,10 @@ class _SettingsPage(QWidget):
             else:
                 main_win._game_detector.stop()
 
+    def _on_audio_capture_toggled(self, checked: bool):
+        self.sm.set('audio_capture_enabled', checked)
+        self.sm.save_settings()
+
     def _on_cat_volume(self, idx: int, vol: int, lbl: QLabel):
         lbl.setText(f'{vol}%')
         cats = self.sm.get('audio_categories', [])
@@ -3860,6 +3867,25 @@ class _SettingsPage(QWidget):
         )
         buf_note.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
         layout.addWidget(buf_note)
+
+        layout.addSpacing(28)
+        layout.addWidget(_settings_hsep())
+        layout.addSpacing(20)
+
+        layout.addWidget(_flat_section_header('Audio Capture'))
+        layout.addSpacing(12)
+
+        self.audio_capture_check = QCheckBox('Audio aufnehmen')
+        self.audio_capture_check.setStyleSheet(CHECKBOX_QSS)
+        self.audio_capture_check.setChecked(self.sm.get('audio_capture_enabled', True))
+        self.audio_capture_check.toggled.connect(self._on_audio_capture_toggled)
+        layout.addWidget(self.audio_capture_check)
+        layout.addSpacing(4)
+
+        _ac_hint = QLabel('Deaktivieren spart CPU. Änderung gilt beim nächsten Engine-Neustart.')
+        _ac_hint.setWordWrap(True)
+        _ac_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(_ac_hint)
 
         layout.addStretch()
         return page
