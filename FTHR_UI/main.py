@@ -2285,6 +2285,7 @@ class MainWindow(QMainWindow):
                 try:
                     os.replace(mixed_mp4, clip_path)
                     print(f'[Mic] Mixed mic into {os.path.basename(clip_path)}')
+                    self._apply_crop(clip_path, ffmpeg)
                     self._apply_watermark(clip_path, ffmpeg)
                 except OSError as e:
                     print(f'[Mic] Could not replace clip: {e}')
@@ -2383,6 +2384,7 @@ class MainWindow(QMainWindow):
         if not ok:
             print('[MultiAudio] Mix failed')
         if ok:
+            self._apply_crop(clip_path, ffmpeg)
             self._apply_watermark(clip_path, ffmpeg)
 
     def _apply_watermark(self, clip_path: str, ffmpeg: str) -> None:
@@ -2428,6 +2430,59 @@ class MainWindow(QMainWindow):
             except FileNotFoundError:
                 pass
 
+    def _apply_crop(self, clip_path: str, ffmpeg: str) -> None:
+        if not self.settings_manager.get('auto_crop_enabled', False):
+            return
+        import re as _re
+        probe = subprocess.run(
+            [ffmpeg, '-i', clip_path,
+             '-vf', 'cropdetect=limit=24:round=16:reset=0',
+             '-frames:v', '60', '-f', 'null', '-'],
+            capture_output=True, **_NO_WINDOW,
+        )
+        matches = _re.findall(r'crop=(\d+:\d+:\d+:\d+)',
+                              probe.stderr.decode(errors='replace'))
+        if not matches:
+            print('[AutoCrop] cropdetect found nothing — skipping')
+            return
+        crop = matches[-1]
+        w, h, x, y = (int(v) for v in crop.split(':'))
+        info = subprocess.run([ffmpeg, '-i', clip_path],
+                              capture_output=True, **_NO_WINDOW)
+        dim = _re.search(r'(\d{3,5})x(\d{3,5})',
+                         info.stderr.decode(errors='replace'))
+        if dim:
+            src_w, src_h = int(dim.group(1)), int(dim.group(2))
+            if x <= 8 and y <= 8 and src_w - (x + w) <= 8 and src_h - (y + h) <= 8:
+                print('[AutoCrop] No significant bars detected — skipping')
+                return
+        import tempfile as _tf
+        tmp = _tf.NamedTemporaryFile(
+            suffix='.mp4', dir=os.path.dirname(clip_path), delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        try:
+            result = subprocess.run(
+                [ffmpeg, '-y', '-i', clip_path,
+                 '-vf', f'crop={crop}',
+                 '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
+                 '-c:a', 'copy', tmp_path],
+                capture_output=True, **_NO_WINDOW,
+            )
+            if result.returncode == 0:
+                os.replace(tmp_path, clip_path)
+                print(f'[AutoCrop] crop={crop} applied to {os.path.basename(clip_path)}')
+            else:
+                err = result.stderr.decode(errors='replace').strip().splitlines()
+                print(f'[AutoCrop] ffmpeg failed: {err[-1] if err else "(no stderr)"}')
+        except Exception as e:
+            print(f'[AutoCrop] Error: {e}')
+        finally:
+            try:
+                os.remove(tmp_path)
+            except FileNotFoundError:
+                pass
+
     def _finalize_clip(self, clip_path: str, duration_seconds: int):
         if not self.settings_manager.get('watermark_enabled', False):
             return
@@ -2458,6 +2513,7 @@ class MainWindow(QMainWindow):
         else:
             print(f'[Finalize] Clip did not stabilize — skipping watermark')
             return
+        self._apply_crop(clip_path, ffmpeg)
         self._apply_watermark(clip_path, ffmpeg)
 
     # =======================================================================

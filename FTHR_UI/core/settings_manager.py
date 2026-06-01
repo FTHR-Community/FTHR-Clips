@@ -73,6 +73,7 @@ class SettingsManager:
             'audio_capture_enabled':   True,
             'watermark_enabled':  False,
             'watermark_text':     'FTHR',
+            'auto_crop_enabled':  False,
             'audio_categories': [
                 {'name': 'Game',     'volume': 100, 'patterns': []},
                 {'name': 'Discord',  'volume': 100, 'patterns': ['discord', 'Discord', 'WebRTC']},
