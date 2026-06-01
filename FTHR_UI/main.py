@@ -3111,6 +3111,37 @@ class _SettingsPage(QWidget):
         self._upload_settings_widget = UploadSettingsWidget(self.sm, no_scroll=True)
         layout.addWidget(self._upload_settings_widget)
 
+        # ── Wasserzeichen ─────────────────────────────────────────────────
+        layout.addSpacing(28)
+        layout.addWidget(_flat_section_header('Wasserzeichen'))
+        layout.addSpacing(12)
+
+        self.watermark_check = QCheckBox('Wasserzeichen in Clips einbrennen')
+        self.watermark_check.setStyleSheet(CHECKBOX_QSS)
+        self.watermark_check.setChecked(self.sm.get('watermark_enabled', False))
+        self.watermark_check.toggled.connect(self._on_watermark_toggled)
+        layout.addWidget(self.watermark_check)
+        layout.addSpacing(8)
+
+        wm_row = QHBoxLayout()
+        wm_row.setSpacing(8)
+        wm_lbl = QLabel('TEXT')
+        wm_lbl.setStyleSheet(_LABEL_STYLE)
+        wm_lbl.setFixedWidth(60)
+        wm_row.addWidget(wm_lbl)
+        self.watermark_text_edit = QLineEdit(self.sm.get('watermark_text', 'FTHR'))
+        self.watermark_text_edit.setMaxLength(30)
+        self.watermark_text_edit.setStyleSheet(_COMBO_STYLE)
+        self.watermark_text_edit.textChanged.connect(self._on_watermark_text_changed)
+        wm_row.addWidget(self.watermark_text_edit)
+        layout.addLayout(wm_row)
+        layout.addSpacing(4)
+
+        _wm_hint = QLabel('Kleines Text-Overlay unten rechts. Standard: deaktiviert.')
+        _wm_hint.setWordWrap(True)
+        _wm_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(_wm_hint)
+
         # ── Settings Presets ──────────────────────────────────────────────
         layout.addSpacing(28)
         layout.addWidget(_flat_section_header('Settings-Presets'))
@@ -3668,6 +3699,14 @@ class _SettingsPage(QWidget):
 
     def _on_audio_capture_toggled(self, checked: bool):
         self.sm.set('audio_capture_enabled', checked)
+        self.sm.save_settings()
+
+    def _on_watermark_toggled(self, checked: bool):
+        self.sm.set('watermark_enabled', checked)
+        self.sm.save_settings()
+
+    def _on_watermark_text_changed(self, text: str):
+        self.sm.set('watermark_text', text)
         self.sm.save_settings()
 
     def _refresh_preset_combo(self):
