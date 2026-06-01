@@ -75,6 +75,10 @@ class SettingsManager:
             'watermark_text':     'FTHR',
             'auto_crop_enabled':  False,
             'anticheat_detection_enabled': False,
+            'camera_enabled':       False,
+            'camera_device_index':  0,
+            'camera_position':      'bottom-right',
+            'camera_size':          'medium',
             'audio_categories': [
                 {'name': 'Game',     'volume': 100, 'patterns': []},
                 {'name': 'Discord',  'volume': 100, 'patterns': ['discord', 'Discord', 'WebRTC']},

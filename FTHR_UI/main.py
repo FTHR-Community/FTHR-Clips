@@ -1327,6 +1327,12 @@ class MainWindow(QMainWindow):
             self._focus_monitor.set_target(target)
             self._focus_monitor.start()
 
+        from core.camera_recorder import CameraRecorder
+        if (CameraRecorder.is_available()
+                and self.settings_manager.get('camera_enabled', False)):
+            device_idx = self.settings_manager.get('camera_device_index', 0)
+            CameraRecorder().start(device_idx)
+
         self.is_capturing    = True
         self.capture_card    = CaptureCardClient(self.settings_manager)
         self._encoder_type   = 'DETECTING'
@@ -2169,7 +2175,7 @@ class MainWindow(QMainWindow):
                     self._mux_multiband_into_clip(
                         str(output_path), duration_seconds, mic_end_time)
                 if not mic_active and not multiband_on:
-                    self._finalize_clip(str(output_path), duration_seconds)
+                    self._finalize_clip(str(output_path), duration_seconds, mic_end_time)
             else:
                 self.capture_card.show_error()
                 QMessageBox.warning(self, 'Save Failed', 'Could not save clip.')
@@ -2308,6 +2314,7 @@ class MainWindow(QMainWindow):
                     print(f'[Mic] Mixed mic into {os.path.basename(clip_path)}')
                     self._apply_crop(clip_path, ffmpeg)
                     self._apply_watermark(clip_path, ffmpeg)
+                    self._apply_camera_overlay(clip_path, ffmpeg, mic_end_time, duration_seconds)
                 except OSError as e:
                     print(f'[Mic] Could not replace clip: {e}')
         finally:
@@ -2407,6 +2414,79 @@ class MainWindow(QMainWindow):
         if ok:
             self._apply_crop(clip_path, ffmpeg)
             self._apply_watermark(clip_path, ffmpeg)
+            self._apply_camera_overlay(clip_path, ffmpeg, audio_end_time, duration_seconds)
+
+    def _apply_camera_overlay(self, clip_path: str, ffmpeg: str,
+                               clip_end_time: float, duration_sec: int) -> None:
+        if not self.settings_manager.get('camera_enabled', False):
+            return
+        from core.camera_recorder import CameraRecorder
+        if not CameraRecorder.is_available() or not CameraRecorder().is_running():
+            return
+        import re as _re
+        import tempfile as _tf
+
+        cam_tmp = _tf.NamedTemporaryFile(
+            suffix='.mp4', dir=os.path.dirname(clip_path), delete=False)
+        cam_path = cam_tmp.name
+        cam_tmp.close()
+
+        if not CameraRecorder().write_segment(cam_path, clip_end_time, duration_sec, 30.0):
+            try:
+                os.remove(cam_path)
+            except FileNotFoundError:
+                pass
+            return
+
+        info = subprocess.run([ffmpeg, '-i', clip_path],
+                              capture_output=True, **_NO_WINDOW)
+        dim = _re.search(r'(\d{3,5})x(\d{3,5})', info.stderr.decode(errors='replace'))
+        clip_w = int(dim.group(1)) if dim else 1920
+
+        size_map  = {'small': 0.20, 'medium': 0.25, 'large': 0.33}
+        factor    = size_map.get(self.settings_manager.get('camera_size', 'medium'), 0.25)
+        cam_w     = int(clip_w * factor)
+
+        pos = self.settings_manager.get('camera_position', 'bottom-right')
+        pos_map = {
+            'top-left':     '10:10',
+            'top-right':    'W-w-10:10',
+            'bottom-left':  '10:H-h-10',
+            'bottom-right': 'W-w-10:H-h-10',
+        }
+        overlay_pos = pos_map.get(pos, 'W-w-10:H-h-10')
+
+        out_tmp = _tf.NamedTemporaryFile(
+            suffix='.mp4', dir=os.path.dirname(clip_path), delete=False)
+        out_path = out_tmp.name
+        out_tmp.close()
+
+        try:
+            result = subprocess.run(
+                [ffmpeg, '-y',
+                 '-i', clip_path,
+                 '-i', cam_path,
+                 '-filter_complex',
+                 f'[1:v]scale={cam_w}:-1[cam];[0:v][cam]overlay={overlay_pos}',
+                 '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
+                 '-c:a', 'copy',
+                 out_path],
+                capture_output=True, **_NO_WINDOW,
+            )
+            if result.returncode == 0:
+                os.replace(out_path, clip_path)
+                print(f'[Camera] Overlay applied to {os.path.basename(clip_path)}')
+            else:
+                err = result.stderr.decode(errors='replace').strip().splitlines()
+                print(f'[Camera] ffmpeg failed: {err[-1] if err else "(no stderr)"}')
+        except Exception as e:
+            print(f'[Camera] Error: {e}')
+        finally:
+            for p in (cam_path, out_path):
+                try:
+                    os.remove(p)
+                except FileNotFoundError:
+                    pass
 
     def _apply_watermark(self, clip_path: str, ffmpeg: str) -> None:
         if not self.settings_manager.get('watermark_enabled', False):
@@ -2504,16 +2584,20 @@ class MainWindow(QMainWindow):
             except FileNotFoundError:
                 pass
 
-    def _finalize_clip(self, clip_path: str, duration_seconds: int):
-        if not self.settings_manager.get('watermark_enabled', False):
+    def _finalize_clip(self, clip_path: str, duration_seconds: int,
+                       clip_end_time: float = 0.0):
+        if not (self.settings_manager.get('watermark_enabled', False)
+                or self.settings_manager.get('auto_crop_enabled', False)
+                or self.settings_manager.get('camera_enabled', False)):
             return
         threading.Thread(
             target=self._finalize_clip_worker,
-            args=(clip_path, duration_seconds),
+            args=(clip_path, duration_seconds, clip_end_time),
             daemon=True,
         ).start()
 
-    def _finalize_clip_worker(self, clip_path: str, duration_seconds: int):
+    def _finalize_clip_worker(self, clip_path: str, duration_seconds: int,
+                               clip_end_time: float = 0.0):
         try:
             import imageio_ffmpeg
             ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
@@ -2536,6 +2620,7 @@ class MainWindow(QMainWindow):
             return
         self._apply_crop(clip_path, ffmpeg)
         self._apply_watermark(clip_path, ffmpeg)
+        self._apply_camera_overlay(clip_path, ffmpeg, clip_end_time, duration_seconds)
 
     # =======================================================================
     # UI state
