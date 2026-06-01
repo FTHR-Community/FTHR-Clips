@@ -30,6 +30,10 @@ struct SharedMemoryLayout {
     uint32_t cfg_codec_pref;     // 0=auto 1=h264 2=hevc 3=av1
     uint32_t cfg_preset;         // 1–7
     char     active_codec[64];   // e.g. "hevc_nvenc\0"
+
+    // v3 fields
+    bool     multiband_enabled;
+    char     active_audio_mappings[1024];
 };
 
 enum class CommandType : uint32_t {
