@@ -1,4 +1,5 @@
 #include "capture_engine.h"
+#include <chrono>
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
@@ -460,6 +461,10 @@ void CaptureEngine::CaptureLoop() {
               << " @ " << cfg_.fps << "fps  codec=" << codec_used << std::endl;
 
     while (running_.load()) {
+        if (paused_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
         // Request a new frame
         ctx.frame_ready  = false;
         ctx.frame_failed = false;

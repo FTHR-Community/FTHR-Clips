@@ -41,6 +41,8 @@ public:
                   SharedMemoryLayout* shm);
 
     bool     IsNvencActive() const { return nvenc_active_.load(); }
+    void SetPaused(bool p) { paused_.store(p); }
+    bool IsPaused()  const { return paused_.load(); }
     uint64_t GetFrameCount()  const { return frame_count_.load(); }
     void Reconfigure(uint32_t codec_pref, int preset);
     std::string GetActiveCodec() const {
@@ -61,6 +63,7 @@ private:
     AudioCapture            audio_;
     std::thread             cap_thread_;
     std::atomic<bool>       running_{false};
+    std::atomic<bool>       paused_{false};
     std::atomic<bool>       nvenc_active_{false};
     std::atomic<uint64_t>   frame_count_{0};
     std::string active_codec_;

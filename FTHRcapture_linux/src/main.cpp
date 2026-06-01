@@ -233,12 +233,13 @@ int main(int argc, char* argv[]) {
                 break;
 
             case fthr::CommandType::STOP_RECORDING:
-                // Linux engine captures continuously; STOP is a no-op
+                engine.SetPaused(true);
                 layout->engine_response =
                     static_cast<uint32_t>(fthr::ResponseType::RECORDING_STOPPED);
                 break;
 
             case fthr::CommandType::START_RECORDING:
+                engine.SetPaused(false);
                 layout->engine_response =
                     static_cast<uint32_t>(fthr::ResponseType::RECORDING_STARTED);
                 break;
