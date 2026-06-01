@@ -15,3 +15,17 @@ Shared/
 # python junk
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# user data / runtime
+~/.fthr/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

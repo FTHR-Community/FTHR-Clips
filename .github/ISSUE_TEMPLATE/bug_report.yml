@@ -1,0 +1,68 @@
+name: Bug Report
+description: Something isn't working
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more detail you include, the faster we can fix it.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux (Wayland — Hyprland)
+        - Linux (Wayland — KDE Plasma)
+        - Linux (Wayland — GNOME)
+        - Windows 10
+        - Windows 11
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: FTHR Clips version
+      placeholder: "e.g. 1.0.0-alpha"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open FTHR Clips
+        2. Press F9
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output
+      description: Paste any relevant output from the terminal or the app.
+      render: shell
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      placeholder: "e.g. NVIDIA RTX 4070, AMD RX 7800 XT, Intel Arc A770"
