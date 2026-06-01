@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QScrollArea, QFrame, QMessageBox, QComboBox,
     QGraphicsOpacityEffect, QSizePolicy, QStackedWidget,
     QListWidget, QListWidgetItem, QGroupBox, QCheckBox, QSlider,
-    QToolButton, QButtonGroup, QFileDialog,
+    QToolButton, QButtonGroup, QFileDialog, QLineEdit,
 )
 from PyQt6.QtCore import (
     QTimer, pyqtSignal, Qt, QPoint, QPointF, QSize, QRect,
@@ -1693,11 +1693,20 @@ class MainWindow(QMainWindow):
             anim.setEasingCurve(QEasingCurve.Type.InCubic)
             anim.finished.connect(lambda: self.main_stack.setCurrentIndex(0))
             self._settings_fade_out = anim
+            try:
+                self._settings_page_widget._mappings_timer.stop()
+            except AttributeError:
+                pass
             anim.start()
             self.main_mode_cluster.setVisible(True)
             self.settings_mode_cluster.setVisible(False)
         else:
             self.main_stack.setCurrentIndex(1)
+            if self.settings_manager.get('multiband_audio_enabled', False):
+                try:
+                    self._settings_page_widget._mappings_timer.start()
+                except AttributeError:
+                    pass
             self.main_mode_cluster.setVisible(False)
             self.settings_mode_cluster.setVisible(True)
             # Close any open dropdowns from main mode
@@ -3257,7 +3266,171 @@ class _SettingsPage(QWidget):
         # loop tick so widget construction stays I/O-free.
         self.mic_combo.addItem('System Default', userData=None)
         QTimer.singleShot(0, self._populate_mic_devices)
+
+        # ── Multiband Audio ───────────────────────────────────────────────
+        outer.addSpacing(24)
+        outer.addWidget(_settings_hsep())
+        outer.addSpacing(20)
+        outer.addWidget(_flat_section_header('Multiband Audio'))
+        outer.addSpacing(8)
+
+        mb_desc = QLabel(
+            'Nimmt jede App-Kategorie separat auf und brennt Lautstärke-Presets '
+            'beim Clip-Save ein. Deaktiviere für maximale Performance.')
+        mb_desc.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        mb_desc.setWordWrap(True)
+        outer.addWidget(mb_desc)
+        outer.addSpacing(12)
+
+        self.multiband_check = QCheckBox('Multiband Audio aktivieren')
+        self.multiband_check.setStyleSheet(CHECKBOX_QSS)
+        self.multiband_check.setChecked(self.sm.get('multiband_audio_enabled', False))
+        self.multiband_check.toggled.connect(self._on_multiband_toggled)
+        outer.addWidget(self.multiband_check)
+        outer.addSpacing(12)
+
+        # Category list container — shown only when multiband is enabled
+        self.multiband_container = QWidget()
+        mb_inner = QVBoxLayout(self.multiband_container)
+        mb_inner.setContentsMargins(0, 0, 0, 0)
+        mb_inner.setSpacing(6)
+        self._cat_rows = []
+        self._rebuild_category_rows(mb_inner)
+        outer.addWidget(self.multiband_container)
+        self.multiband_container.setVisible(self.sm.get('multiband_audio_enabled', False))
+
+        # Recognised app→category label (updated by timer when page is visible)
+        self.mappings_lbl = QLabel('Erkannte Apps: —')
+        self.mappings_lbl.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        self.mappings_lbl.setWordWrap(True)
+        outer.addWidget(self.mappings_lbl)
+        outer.addSpacing(8)
+
+        # + Add category row
+        add_row = QHBoxLayout()
+        self.new_cat_name = QLineEdit()
+        self.new_cat_name.setPlaceholderText('Name (z.B. "Musik")')
+        self.new_cat_name.setStyleSheet(COMBO_QSS)
+        self.new_cat_patterns = QLineEdit()
+        self.new_cat_patterns.setPlaceholderText('Patterns: spotify,Spotify,vlc')
+        self.new_cat_patterns.setStyleSheet(COMBO_QSS)
+        add_btn = QPushButton('+ Hinzufügen')
+        add_btn.setStyleSheet(BUTTON_OUTLINE_QSS)
+        add_btn.clicked.connect(self._on_add_category)
+        add_row.addWidget(self.new_cat_name, 1)
+        add_row.addWidget(self.new_cat_patterns, 2)
+        add_row.addWidget(add_btn)
+        outer.addLayout(add_row)
+
+        # Timer to refresh mappings label every 2s while page is visible
+        self._mappings_timer = QTimer(self)
+        self._mappings_timer.setInterval(2000)
+        self._mappings_timer.timeout.connect(self._update_mappings_label)
+
         return page
+
+    # ── Multiband Audio helpers ──────────────────────────────────────────
+
+    def _rebuild_category_rows(self, layout: QVBoxLayout):
+        """Clear and repopulate the category volume rows."""
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._cat_rows = []
+
+        for i, cat in enumerate(self.sm.get('audio_categories', [])):
+            row_w = QWidget()
+            row_h = QHBoxLayout(row_w)
+            row_h.setContentsMargins(0, 0, 0, 0)
+            row_h.setSpacing(8)
+
+            name_lbl = QLabel(cat['name'])
+            name_lbl.setFixedWidth(100)
+            name_lbl.setStyleSheet(label_body(Colors.TEXT, Fonts.SIZE_BODY))
+
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setStyleSheet(SLIDER_QSS)
+            slider.setRange(0, 100)
+            slider.setValue(cat.get('volume', 100))
+
+            val_lbl = QLabel(f"{cat.get('volume', 100)}%")
+            val_lbl.setFixedWidth(38)
+            val_lbl.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            slider.valueChanged.connect(
+                lambda v, idx=i, lbl=val_lbl: self._on_cat_volume(idx, v, lbl))
+
+            del_btn = QPushButton('✕')
+            del_btn.setFixedSize(24, 24)
+            del_btn.setStyleSheet(BUTTON_OUTLINE_QSS)
+            del_btn.clicked.connect(lambda _, idx=i: self._on_delete_category(idx))
+
+            row_h.addWidget(name_lbl)
+            row_h.addWidget(slider, 1)
+            row_h.addWidget(val_lbl)
+            row_h.addWidget(del_btn)
+            layout.addWidget(row_w)
+            self._cat_rows.append((name_lbl, slider, val_lbl, del_btn))
+
+    def _on_multiband_toggled(self, checked: bool):
+        self.sm.set('multiband_audio_enabled', checked)
+        self.sm.save_settings()
+        self.multiband_container.setVisible(checked)
+        if checked:
+            self._mappings_timer.start()
+        else:
+            self._mappings_timer.stop()
+
+    def _on_cat_volume(self, idx: int, vol: int, lbl: QLabel):
+        lbl.setText(f'{vol}%')
+        cats = self.sm.get('audio_categories', [])
+        if 0 <= idx < len(cats):
+            cats[idx]['volume'] = vol
+            self.sm.set('audio_categories', cats)
+            self.sm.save_settings()
+
+    def _on_delete_category(self, idx: int):
+        cats = self.sm.get('audio_categories', [])
+        if 0 <= idx < len(cats):
+            cats.pop(idx)
+            self.sm.set('audio_categories', cats)
+            self.sm.save_settings()
+            mb_inner = self.multiband_container.layout()
+            self._rebuild_category_rows(mb_inner)
+
+    def _on_add_category(self):
+        name = self.new_cat_name.text().strip()
+        if not name:
+            return
+        patterns = [p.strip() for p in self.new_cat_patterns.text().split(',')
+                    if p.strip()]
+        cats = self.sm.get('audio_categories', [])
+        cats.append({'name': name, 'volume': 100, 'patterns': patterns})
+        self.sm.set('audio_categories', cats)
+        self.sm.save_settings()
+        self.new_cat_name.clear()
+        self.new_cat_patterns.clear()
+        self._rebuild_category_rows(self.multiband_container.layout())
+
+    def _update_mappings_label(self):
+        """Refresh the recognised-apps label from the bridge."""
+        try:
+            # Walk up Qt parent hierarchy: SettingsPage → QStackedWidget → MainWindow
+            main_win = self.parent()
+            while main_win is not None and not hasattr(main_win, 'bridge'):
+                main_win = main_win.parent()
+            if main_win is None:
+                return
+            mappings = main_win.bridge.get_audio_mappings()
+            if not mappings:
+                self.mappings_lbl.setText('Erkannte Apps: (keine)')
+            else:
+                parts = [f'{app} → {cat} ✓' for app, cat in mappings.items()]
+                self.mappings_lbl.setText('Erkannte Apps: ' + '   '.join(parts))
+        except Exception:
+            pass
 
     # ── Microphone helpers ───────────────────────────────────────────────
 
