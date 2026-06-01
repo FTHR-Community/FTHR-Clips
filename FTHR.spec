@@ -1,19 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for FTHR Clips Windows bundle.
+# PyInstaller spec for FTHR Clips — Windows bundle.
 # Run on Windows: pyinstaller FTHR.spec --clean
-import glob as _glob
 from pathlib import Path
-
-block_cipher = None
+import glob as _glob
 
 ROOT       = Path(SPECPATH)
 UI_DIR     = ROOT / 'FTHR_UI'
 ASSETS_DIR = UI_DIR / 'assets'
 ENGINE_EXE = ROOT / 'FTHRcapture' / 'x64' / 'Release' / 'FTHRClips.exe'
 
-# FFmpeg DLLs the C++ capture engine (FTHRClips.exe) links against dynamically.
-# These must sit next to the engine or it fails to load on a clean machine.
-# On Linux the glob returns an empty list (no DLLs / not needed), which is correct.
+# FFmpeg DLLs the C++ engine links against on Windows
 _FFMPEG_BIN  = ROOT / 'FTHRcapture' / 'FTHRclips' / 'third_party' / 'ffmpeg' / 'bin'
 _FFMPEG_DLLS = _glob.glob(str(_FFMPEG_BIN / '*.dll'))
 
@@ -39,18 +35,53 @@ a = Analysis(
         'cv2',
         'imageio_ffmpeg',
         'keyboard',
+        # UI submodules
+        'ui.capture_card',
+        'ui.capture_card_client',
+        'ui.capture_card_process',
+        'ui.capture_settings_widget',
+        'ui.clip_grid',
+        'ui.clip_viewer',
+        'ui.customize_page',
+        'ui.screenshot_editor',
+        'ui.splash_screen',
+        'ui.style',
+        'ui.upload_settings_widget',
+        # Core submodules
+        'core.audio_mixer',
+        'core.camera_recorder',
+        'core.capture_bridge',
+        'core.focus_monitor',
+        'core.game_detector',
+        'core.hotkey_manager',
+        'core.mic_recorder',
+        'core.presets_manager',
+        'core.settings_manager',
+        'core.theme_manager',
+        'core.upload_manager',
     ],
     hookspath=[],
-    hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # Qt modules unused on Windows (no Wayland, no QML)
+        'PyQt6.QtQuick', 'PyQt6.QtQml', 'PyQt6.QtWebEngine',
+        'PyQt6.QtWebEngineCore', 'PyQt6.QtBluetooth', 'PyQt6.QtPositioning',
+        'PyQt6.QtSensors', 'PyQt6.QtLocation', 'PyQt6.Qt3D',
+        'PyQt6.QtPdf', 'PyQt6.QtPdfWidgets', 'PyQt6.QtNfc',
+        # Standard library bloat
+        'tkinter', 'unittest', 'email', 'html', 'http', 'xmlrpc',
+        'xml', 'pydoc', 'doctest', 'difflib', 'ftplib', 'imaplib',
+        'poplib', 'smtplib', 'telnetlib', 'nntplib',
+        # Scientific stack not used
+        'matplotlib', 'scipy', 'pandas', 'PIL', 'IPython',
+        'sklearn', 'skimage', 'sympy',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
@@ -60,7 +91,7 @@ exe = EXE(
     name='FTHRClips',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=False,      # strip doesn't work reliably on Windows DLLs
     upx=True,
     console=False,
     icon=str(ASSETS_DIR / 'fthr_logo.ico'),
@@ -73,6 +104,10 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=[
+        # Don't UPX-compress these — they either break or gain nothing
+        'vcruntime*.dll', 'api-ms-*.dll', 'msvcp*.dll',
+        'FTHRClips.exe',  # the C++ engine
+    ],
     name='FTHRClips',
 )

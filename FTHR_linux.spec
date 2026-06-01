@@ -1,15 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for FTHR Clips — self-contained Linux bundle.
+# PyInstaller spec for FTHR Clips — Linux AppImage bundle.
 # Run on Linux: pyinstaller FTHR_linux.spec --clean
 from pathlib import Path
-import glob as _glob
 
 ROOT       = Path(SPECPATH)
 UI_DIR     = ROOT / 'FTHR_UI'
 ASSETS_DIR = UI_DIR / 'assets'
 ENGINE_BIN = ROOT / 'FTHRcapture_linux' / 'build' / 'FTHRclips'
 
-# Qt6 plugin directories — bundle Wayland + XCB so the app works on both
+# Qt6 plugin dirs — bundle Wayland + XCB so the app works on both
 _QT6_PLUG = Path('/usr/lib/qt6/plugins')
 
 def _so(subdir, dest):
@@ -22,11 +21,11 @@ a = Analysis(
     binaries=[
         (str(ENGINE_BIN), '.'),
         ('/usr/lib/libportaudio.so.2', '.'),
-        *_so('platforms',                             'PyQt6/Qt6/plugins/platforms'),
-        *_so('wayland-decoration-client',             'PyQt6/Qt6/plugins/wayland-decoration-client'),
-        *_so('wayland-shell-integration',             'PyQt6/Qt6/plugins/wayland-shell-integration'),
-        *_so('wayland-graphics-integration-client',   'PyQt6/Qt6/plugins/wayland-graphics-integration-client'),
-        *_so('imageformats',                          'PyQt6/Qt6/plugins/imageformats'),
+        *_so('platforms',                           'PyQt6/Qt6/plugins/platforms'),
+        *_so('wayland-decoration-client',           'PyQt6/Qt6/plugins/wayland-decoration-client'),
+        *_so('wayland-shell-integration',           'PyQt6/Qt6/plugins/wayland-shell-integration'),
+        *_so('wayland-graphics-integration-client', 'PyQt6/Qt6/plugins/wayland-graphics-integration-client'),
+        *_so('imageformats',                        'PyQt6/Qt6/plugins/imageformats'),
     ],
     datas=[
         (str(ASSETS_DIR / 'fthr_logo.png'),  'assets'),
@@ -42,7 +41,7 @@ a = Analysis(
         'cv2',
         'imageio_ffmpeg',
         'keyboard',
-        # All UI/core submodules (PyInstaller may miss dynamic imports)
+        # UI submodules
         'ui.capture_card',
         'ui.capture_card_client',
         'ui.capture_card_process',
@@ -54,8 +53,10 @@ a = Analysis(
         'ui.splash_screen',
         'ui.style',
         'ui.upload_settings_widget',
-        'core.capture_bridge',
+        # Core submodules
+        'core.audio_mixer',
         'core.camera_recorder',
+        'core.capture_bridge',
         'core.focus_monitor',
         'core.game_detector',
         'core.hotkey_manager',
@@ -68,7 +69,7 @@ a = Analysis(
     hookspath=[],
     runtime_hooks=[],
     excludes=[
-        # Qt modules we don't use
+        # Qt modules we don't use (Widgets-only app)
         'PyQt6.QtQuick', 'PyQt6.QtQml', 'PyQt6.QtWebEngine',
         'PyQt6.QtWebEngineCore', 'PyQt6.QtBluetooth', 'PyQt6.QtPositioning',
         'PyQt6.QtSensors', 'PyQt6.QtLocation', 'PyQt6.Qt3D',
@@ -77,7 +78,7 @@ a = Analysis(
         'tkinter', 'unittest', 'email', 'html', 'http', 'xmlrpc',
         'xml', 'pydoc', 'doctest', 'difflib', 'ftplib', 'imaplib',
         'poplib', 'smtplib', 'telnetlib', 'nntplib',
-        # Scientific stack we don't use
+        # Scientific stack not used
         'matplotlib', 'scipy', 'pandas', 'PIL', 'IPython',
         'sklearn', 'skimage', 'sympy',
     ],
@@ -94,7 +95,7 @@ exe = EXE(
     name='FTHRClips',
     debug=False,
     strip=True,
-    upx=False,
+    upx=False,    # AppImage has its own compression; UPX on .so files can break things
     console=False,
 )
 

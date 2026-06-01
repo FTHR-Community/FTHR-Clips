@@ -1,9 +1,7 @@
-; FTHR Clips — Inno Setup 6 installer script
-; Build on Windows: iscc installer_windows.iss
-; PREREQUISITE: Download vc_redist.x64.exe from Microsoft and place it at:
-;   redist\vc_redist.x64.exe
-; (relative to this .iss file)
-; https://aka.ms/vs/17/release/vc_redist.x64.exe
+; FTHR Clips — Windows Installer (Inno Setup 6)
+; Windows-only: bundles the DXGI capture engine. Does NOT include the Linux engine.
+; Build: iscc installer_windows.iss
+; Prerequisite: redist\vc_redist.x64.exe — https://aka.ms/vs/17/release/vc_redist.x64.exe
 
 #define MyAppName      "FTHR Clips"
 #define MyAppVersion   "1.0.0-alpha"
@@ -17,7 +15,7 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\FTHRClips
 DefaultGroupName={#MyAppName}
-OutputBaseFilename=FTHRClips_Setup
+OutputBaseFilename=FTHRClips_Setup_Windows
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
