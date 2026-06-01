@@ -749,6 +749,7 @@ class CaptureSettingsPopup(_PopupPanel):
         self.sm.set('extended_clip_length', self.cur_ext)
         self.sm.save_settings()
         self.extended_clip_changed.emit(self.cur_ext)
+        self._update_summary()
 
     def _on_fps_changed(self, idx):
         self.cur_fps = self._FPS_VALUES[idx]
