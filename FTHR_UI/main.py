@@ -3765,6 +3765,10 @@ class _SettingsPage(QWidget):
         self.sm.set('watermark_text', text)
         self.sm.save_settings()
 
+    def _on_auto_crop_toggled(self, checked: bool):
+        self.sm.set('auto_crop_enabled', checked)
+        self.sm.save_settings()
+
     def _refresh_preset_combo(self):
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
@@ -4055,6 +4059,25 @@ class _SettingsPage(QWidget):
         self.splash_check = QCheckBox('Enable startup splash screen')
         self.splash_check.setChecked(True)
         layout.addWidget(self.splash_check)
+
+        layout.addSpacing(28)
+        layout.addWidget(_flat_section_header('Auto-Crop'))
+        layout.addSpacing(12)
+
+        self.auto_crop_check = QCheckBox('Schwarzbalken automatisch entfernen')
+        self.auto_crop_check.setStyleSheet(CHECKBOX_QSS)
+        self.auto_crop_check.setChecked(self.sm.get('auto_crop_enabled', False))
+        self.auto_crop_check.toggled.connect(self._on_auto_crop_toggled)
+        layout.addWidget(self.auto_crop_check)
+        layout.addSpacing(4)
+
+        _ac_hint = QLabel(
+            'Erkennt Letterbox/Pillarbox-Balken nach dem Aufnehmen und schneidet sie heraus. '
+            'Standard: deaktiviert. Verlangsamt die Clip-Verarbeitung.'
+        )
+        _ac_hint.setWordWrap(True)
+        _ac_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(_ac_hint)
 
         layout.addStretch()
         return page
