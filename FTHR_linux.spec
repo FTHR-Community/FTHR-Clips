@@ -55,15 +55,32 @@ a = Analysis(
         'ui.style',
         'ui.upload_settings_widget',
         'core.capture_bridge',
+        'core.camera_recorder',
+        'core.focus_monitor',
+        'core.game_detector',
         'core.hotkey_manager',
         'core.mic_recorder',
+        'core.presets_manager',
         'core.settings_manager',
         'core.theme_manager',
         'core.upload_manager',
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # Qt modules we don't use
+        'PyQt6.QtQuick', 'PyQt6.QtQml', 'PyQt6.QtWebEngine',
+        'PyQt6.QtWebEngineCore', 'PyQt6.QtBluetooth', 'PyQt6.QtPositioning',
+        'PyQt6.QtSensors', 'PyQt6.QtLocation', 'PyQt6.Qt3D',
+        'PyQt6.QtPdf', 'PyQt6.QtPdfWidgets', 'PyQt6.QtNfc',
+        # Standard library bloat
+        'tkinter', 'unittest', 'email', 'html', 'http', 'xmlrpc',
+        'xml', 'pydoc', 'doctest', 'difflib', 'ftplib', 'imaplib',
+        'poplib', 'smtplib', 'telnetlib', 'nntplib',
+        # Scientific stack we don't use
+        'matplotlib', 'scipy', 'pandas', 'PIL', 'IPython',
+        'sklearn', 'skimage', 'sympy',
+    ],
     noarchive=False,
 )
 
@@ -76,7 +93,7 @@ exe = EXE(
     exclude_binaries=True,
     name='FTHRClips',
     debug=False,
-    strip=False,
+    strip=True,
     upx=False,
     console=False,
 )
@@ -86,7 +103,7 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    strip=False,
+    strip=True,
     upx=False,
     name='FTHRClips',
 )

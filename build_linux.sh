@@ -54,7 +54,49 @@ if [ ! -f "$PYINST_DIR/FTHRClips" ]; then
 fi
 echo "    PyInstaller bundle ready: $(du -sh "$PYINST_DIR" | cut -f1)"
 
-# ── 4. Set up fresh AppDir ─────────────────────────────────────────────────
+# ── 4. Strip unused libraries from PyInstaller bundle ─────────────────────
+echo ""
+echo ">>> Stripping unused libraries..."
+STRIP_DIR="$PYINST_DIR/_internal"
+
+_strip_glob() {
+    find "$STRIP_DIR" -maxdepth 1 -name "$1" -delete 2>/dev/null && true
+}
+
+# VTK — 141 MB, pulled in by full OpenCV, completely unused
+_strip_glob "libvtk*.so*"
+
+# OpenCV modules we don't use (we only need core, imgproc, videoio)
+for mod in dnn dnn_superres gapi ml objdetect stitching calib3d \
+           features2d flann photo video highgui imgcodecs \
+           alphamat aruco bgsegm bioinspired ccalib \
+           face freetype fuzzy hdf hfs hfs img_hash \
+           intensity_transform line_descriptor mcc optflow \
+           phase_unwrapping plot quality rapid reg rgbd \
+           saliency shape signal stereo structured_light \
+           surface_matching text tracking viz wechat_qrcode \
+           xfeatures2d ximgproc xphoto; do
+    _strip_glob "libopencv_${mod}.so*"
+done
+
+# Qt Quick / QML — unused (we use Qt Widgets only)
+_strip_glob "libQt6Quick*.so*"
+_strip_glob "libQt6Qml*.so*"
+_strip_glob "libQt6Quick3D*.so*"
+_strip_glob "libQt6Pdf*.so*"
+_strip_glob "libQt6WebEngine*.so*"
+_strip_glob "libQt6Location*.so*"
+_strip_glob "libQt6Positioning*.so*"
+_strip_glob "libQt6VirtualKeyboard*.so*"
+
+# HDF5 + protobuf (OpenCV ML / DNN deps, no longer needed)
+_strip_glob "libhdf5*.so*"
+_strip_glob "libprotobuf*.so*"
+
+# Print savings
+echo "    Done. Bundle size: $(du -sh "$PYINST_DIR" | cut -f1)"
+
+# ── 5. Set up fresh AppDir ─────────────────────────────────────────────────
 echo ""
 echo ">>> Setting up AppDir..."
 rm -rf "$APPDIR"
@@ -83,7 +125,7 @@ exec "$HERE/FTHRClips" "$@"
 APPRUN_EOF
 chmod +x "$APPDIR/AppRun"
 
-# ── 5. Download appimagetool ───────────────────────────────────────────────
+# ── 6. Download appimagetool ───────────────────────────────────────────────
 APPIMAGETOOL="$BUILD_DIR/appimagetool-x86_64.AppImage"
 if [ ! -f "$APPIMAGETOOL" ]; then
     echo ""
@@ -93,7 +135,7 @@ if [ ! -f "$APPIMAGETOOL" ]; then
     chmod +x "$APPIMAGETOOL"
 fi
 
-# ── 6. Build AppImage ──────────────────────────────────────────────────────
+# ── 7. Build AppImage ──────────────────────────────────────────────────────
 echo ""
 echo ">>> Building AppImage..."
 OUTPUT="$SCRIPT_DIR/FTHRClips-1.0.0-alpha-x86_64.AppImage"
