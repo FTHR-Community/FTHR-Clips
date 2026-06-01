@@ -34,6 +34,7 @@ from PyQt6.QtGui import QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, 
 
 from core.capture_bridge import CaptureBridge
 from core.hotkey_manager import HotkeyManager, AVAILABLE_KEYS
+from core.game_detector import GameDetector
 from core.settings_manager import SettingsManager
 from core.theme_manager import ThemeManager
 from core.mic_recorder import MicRecorder, write_wav
@@ -1269,6 +1270,20 @@ class MainWindow(QMainWindow):
             (Path.home() / 'FTHR_Clips' / _folder).mkdir(parents=True, exist_ok=True)
 
         self.hotkey_manager  = HotkeyManager()
+
+        self._pending_game_window: dict | None = None
+        self._active_game_hwnd:    int  | None = None
+        self._game_dismiss_timer = QTimer(self)
+        self._game_dismiss_timer.setSingleShot(True)
+        self._game_dismiss_timer.timeout.connect(self._on_game_prompt_timeout)
+
+        self._game_detector = GameDetector()
+        self._game_detector.game_appeared.connect(self._on_game_appeared)
+        self._game_detector.game_closed.connect(self._on_game_closed)
+
+        if self.settings_manager.get('game_detection_enabled', False):
+            self._game_detector.start()
+
         self.is_capturing    = True
         self.capture_card    = CaptureCardClient(self.settings_manager)
         self._encoder_type   = 'DETECTING'
@@ -1796,6 +1811,10 @@ class MainWindow(QMainWindow):
             self._on_hotkey_save_extended_clip)
         self.hotkey_manager.save_screenshot_triggered.connect(
             self._on_hotkey_save_screenshot)
+        self.hotkey_manager.confirm_game_detection_triggered.connect(
+            self._on_confirm_game_detection)
+        self.hotkey_manager.dismiss_game_detection_triggered.connect(
+            self._on_dismiss_game_detection)
         self.hotkey_manager.register_all()
         print("Hotkeys registered.")
 
@@ -1804,6 +1823,43 @@ class MainWindow(QMainWindow):
     def _on_hotkey_save_screenshot(self):
         self.capture_card.show_screenshot()
         QMessageBox.information(self, 'Coming Soon', 'Screenshot feature coming soon!')
+
+    def _on_game_appeared(self, window: dict):
+        self._pending_game_window = window
+        game_name = window.get('display_name', 'Game')
+        hotkey = self.hotkey_manager.hotkeys.get('confirm_game_detection', 'F8')
+        self.capture_card.show_prompt(
+            f'{game_name} erkannt — [{hotkey}] Aufnehmen  [Esc] Ablehnen')
+        self._game_dismiss_timer.start(15000)
+
+    def _on_game_closed(self, hwnd: int):
+        if hwnd != self._active_game_hwnd:
+            return
+        self._active_game_hwnd = None
+        self.settings_manager.set('capture_mode', 'desktop')
+        self.settings_manager.set('target_hwnd', 0)
+        self.settings_manager.save_settings()
+        self._restart_capture_engine()
+        self.capture_card.show_prompt('Game geschlossen — zurück auf Desktop')
+
+    def _on_confirm_game_detection(self):
+        if self._pending_game_window is None:
+            return
+        hwnd = self._pending_game_window['hwnd']
+        self._active_game_hwnd = hwnd
+        self.settings_manager.set('capture_mode', 'window')
+        self.settings_manager.set('target_hwnd', hwnd)
+        self.settings_manager.save_settings()
+        self._pending_game_window = None
+        self._game_dismiss_timer.stop()
+        self._restart_capture_engine()
+
+    def _on_dismiss_game_detection(self):
+        self._pending_game_window = None
+        self._game_dismiss_timer.stop()
+
+    def _on_game_prompt_timeout(self):
+        self._pending_game_window = None
 
     # =======================================================================
     # Settings handlers
