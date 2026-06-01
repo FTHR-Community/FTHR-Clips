@@ -78,6 +78,10 @@ if sys.platform == 'win32':
             ('cfg_target_width',  c_uint32),
             ('cfg_target_height', c_uint32),
             ('nvenc_active',      c_bool),
+            # v2 fields — must match shared_memory.h byte-for-byte
+            ('cfg_codec_pref',    c_uint32),
+            ('cfg_preset',        c_uint32),
+            ('active_codec',      ctypes.c_char * 64),
         ]
 else:
     class SharedMemoryLayout(Structure):
@@ -100,6 +104,10 @@ else:
             ('cfg_target_width',  c_uint32),
             ('cfg_target_height', c_uint32),
             ('nvenc_active',      c_bool),
+            # v2 fields — must match shared_memory.h byte-for-byte
+            ('cfg_codec_pref',    c_uint32),
+            ('cfg_preset',        c_uint32),
+            ('active_codec',      ctypes.c_char * 64),
         ]
 
 
@@ -107,13 +115,13 @@ class CaptureBridge:
     # Bumped the _v1 suffix the day I changed the struct layout and spent two
     # hours wondering why an old engine kept reading my new fields wrong.
     # Versioned name = old + new never accidentally share the same mapping.
-    SHARED_MEM_NAME = 'FTHR_SharedMemory_v1'
+    SHARED_MEM_NAME = 'FTHR_SharedMemory_v2'
 
     # Singleton. There is exactly one engine and one mapping, so one bridge.
     # Anything else just hands you back the same object.
     _instance = None
 
-    def __new__(cls):
+    def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
@@ -321,3 +329,26 @@ class CaptureBridge:
             }
         except Exception:
             return {'connected': False}
+
+    _CODEC_PREF_MAP = {'auto': 0, 'h264': 1, 'hevc': 2, 'av1': 3}
+
+    def set_encoder_config(self, codec_pref: str, preset: int) -> bool:
+        if not self.is_connected():
+            return False
+        pref_int = self._CODEC_PREF_MAP.get(codec_pref.lower(), 0)
+        if codec_pref.lower() not in self._CODEC_PREF_MAP:
+            print(f'[CaptureBridge] Unknown codec_pref "{codec_pref}", falling back to auto')
+        preset   = max(1, min(7, preset))
+        self._layout.cfg_codec_pref = pref_int
+        self._layout.cfg_preset     = preset
+        self._layout.ui_command     = CommandType.RECONFIGURE_ENCODER
+        return True
+
+    def get_active_codec(self) -> str:
+        if not self.is_connected():
+            return ''
+        try:
+            raw = self._layout.active_codec
+            return raw.decode('utf-8', errors='ignore').rstrip('\x00')
+        except Exception:
+            return ''
