@@ -1,19 +1,27 @@
 """
 Hotkey Manager - global keyboard shortcuts for FTHR Clips.
 
-This is what lets you smash F9 mid-game and clip the play without alt-tabbing.
-We lean on the `keyboard` library, which hooks input at the OS level.
+On Linux/Wayland the preferred trigger path is via Hyprland binds that send
+commands to a Unix socket at /tmp/fthr_hotkey.sock.  This file starts that
+socket server automatically so the Hyprland config just needs:
 
-LINUX FOOTGUN, READ THIS: if you're at 2am wondering why nothing happens when
-you press the hotkey — the `keyboard` lib needs raw access to /dev/input on
-Linux, which means you either run as root (don't) or your user is in the
-'input' group. `sudo usermod -aG input $USER`, log out, log back in. See README.
-You're welcome.
+    bind = , F9,  exec, echo -n "save_clip"          | nc -U /tmp/fthr_hotkey.sock
+    bind = , F10, exec, echo -n "save_extended_clip" | nc -U /tmp/fthr_hotkey.sock
+    bind = , F11, exec, echo -n "save_screenshot"    | nc -U /tmp/fthr_hotkey.sock
+
+The `keyboard` library fallback is kept for non-Wayland / Windows use, but
+it needs the user in the 'input' group on Linux and may not work on Wayland.
 """
 import keyboard
+import socket
+import os
+import sys
+import threading
 from PyQt6.QtCore import QObject, pyqtSignal
 import json
 from pathlib import Path
+
+HOTKEY_SOCKET_PATH = '/tmp/fthr_hotkey.sock'
 
 
 class HotkeyManager(QObject):
@@ -23,6 +31,8 @@ class HotkeyManager(QObject):
     save_clip_triggered = pyqtSignal()
     save_extended_clip_triggered = pyqtSignal()
     save_screenshot_triggered = pyqtSignal()
+    confirm_game_detection_triggered  = pyqtSignal()
+    dismiss_game_detection_triggered  = pyqtSignal()
     
     def __init__(self):
         super().__init__()
@@ -33,13 +43,18 @@ class HotkeyManager(QObject):
         self.hotkeys = {
             'save_clip': 'F9',
             'save_extended_clip': 'F10',
-            'save_screenshot': 'F11'
+            'save_screenshot': 'F11',
+            'confirm_game_detection':  'F8',
+            'dismiss_game_detection':  'Escape',
         }
 
         # We track what we've actually registered so we can cleanly unhook later.
         # The `keyboard` lib gets cranky if you remove a hotkey you never added.
         self._registered_hotkeys = []
-        
+
+        self._socket_running = False
+        self._socket_thread: threading.Thread | None = None
+
         # Load saved hotkeys
         self._load_hotkeys()
     
@@ -95,6 +110,10 @@ class HotkeyManager(QObject):
             self._register_save_extended_clip()
         elif action == 'save_screenshot':
             self._register_save_screenshot()
+        elif action == 'confirm_game_detection':
+            self._register_confirm_game_detection()
+        elif action == 'dismiss_game_detection':
+            self._register_dismiss_game_detection()
         
         return True
     
@@ -102,54 +121,101 @@ class HotkeyManager(QObject):
         """Get the current hotkey for an action"""
         return self.hotkeys.get(action, '')
     
+    def _register_keyboard_hotkey(self, key: str, signal):
+        """Register one hotkey via the keyboard library. Silent on Linux if it
+        fails — the socket server is the primary hotkey path on Linux/Wayland."""
+        try:
+            keyboard.add_hotkey(key, lambda: signal.emit())
+            if key not in self._registered_hotkeys:
+                self._registered_hotkeys.append(key)
+        except Exception as e:
+            if sys.platform != 'linux':
+                print(f"Failed to register hotkey {key}: {e}")
+
     def _register_save_clip(self):
-        """Register the save clip hotkey"""
-        key = self.hotkeys['save_clip']
-        if not key:
-            return
-        
-        try:
-            keyboard.add_hotkey(key, lambda: self.save_clip_triggered.emit())
-            if key not in self._registered_hotkeys:
-                self._registered_hotkeys.append(key)
-            print(f"Registered hotkey: {key} -> Save Clip")
-        except Exception as e:
-            print(f"Failed to register hotkey {key}: {e}")
-    
+        self._register_keyboard_hotkey(
+            self.hotkeys['save_clip'], self.save_clip_triggered)
+
     def _register_save_extended_clip(self):
-        """Register the save extended clip hotkey"""
-        key = self.hotkeys['save_extended_clip']
-        if not key:
-            return
-        
-        try:
-            keyboard.add_hotkey(key, lambda: self.save_extended_clip_triggered.emit())
-            if key not in self._registered_hotkeys:
-                self._registered_hotkeys.append(key)
-            print(f"Registered hotkey: {key} -> Save Extended Clip")
-        except Exception as e:
-            print(f"Failed to register hotkey {key}: {e}")
-    
+        self._register_keyboard_hotkey(
+            self.hotkeys['save_extended_clip'], self.save_extended_clip_triggered)
+
     def _register_save_screenshot(self):
-        """Register the save screenshot hotkey"""
-        key = self.hotkeys['save_screenshot']
-        if not key:
-            return
-        
-        try:
-            keyboard.add_hotkey(key, lambda: self.save_screenshot_triggered.emit())
-            if key not in self._registered_hotkeys:
-                self._registered_hotkeys.append(key)
-            print(f"Registered hotkey: {key} -> Save Screenshot")
-        except Exception as e:
-            print(f"Failed to register hotkey {key}: {e}")
-    
+        self._register_keyboard_hotkey(
+            self.hotkeys['save_screenshot'], self.save_screenshot_triggered)
+
+    def _register_confirm_game_detection(self):
+        self._register_keyboard_hotkey(
+            self.hotkeys['confirm_game_detection'],
+            self.confirm_game_detection_triggered)
+
+    def _register_dismiss_game_detection(self):
+        self._register_keyboard_hotkey(
+            self.hotkeys['dismiss_game_detection'],
+            self.dismiss_game_detection_triggered)
+
     def register_all(self):
         """Register all hotkeys"""
         self._register_save_clip()
         self._register_save_extended_clip()
         self._register_save_screenshot()
-    
+        self._register_confirm_game_detection()
+        self._register_dismiss_game_detection()
+        self._start_socket_server()
+
+    def _start_socket_server(self):
+        """Listen on HOTKEY_SOCKET_PATH for Hyprland bind commands."""
+        try:
+            os.unlink(HOTKEY_SOCKET_PATH)
+        except FileNotFoundError:
+            pass
+
+        try:
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv.bind(HOTKEY_SOCKET_PATH)
+            srv.listen(8)
+            srv.settimeout(1.0)
+        except Exception as e:
+            print(f"[Hotkey] Socket server failed to start: {e}")
+            return
+
+        self._socket_running = True
+        print(f"[Hotkey] Socket server listening on {HOTKEY_SOCKET_PATH}")
+
+        _dispatch = {
+            'save_clip':               self.save_clip_triggered,
+            'save_extended_clip':      self.save_extended_clip_triggered,
+            'save_screenshot':         self.save_screenshot_triggered,
+            'confirm_game_detection':  self.confirm_game_detection_triggered,
+            'dismiss_game_detection':  self.dismiss_game_detection_triggered,
+        }
+
+        def _serve():
+            while self._socket_running:
+                try:
+                    conn, _ = srv.accept()
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+                with conn:
+                    try:
+                        data = conn.recv(64).decode().strip()
+                        if data in _dispatch:
+                            _dispatch[data].emit()
+                        else:
+                            print(f"[Hotkey] Unknown command: {data!r}")
+                    except Exception:
+                        pass
+            srv.close()
+            try:
+                os.unlink(HOTKEY_SOCKET_PATH)
+            except FileNotFoundError:
+                pass
+
+        self._socket_thread = threading.Thread(target=_serve, daemon=True, name='fthr-hotkey-socket')
+        self._socket_thread.start()
+
     def unregister_all(self):
         """Unregister all hotkeys"""
         for key in self._registered_hotkeys:
@@ -158,10 +224,13 @@ class HotkeyManager(QObject):
             except Exception:
                 pass
         self._registered_hotkeys.clear()
-    
+
     def cleanup(self):
         """Clean up hotkeys on exit"""
         self.unregister_all()
+        self._socket_running = False
+        if self._socket_thread:
+            self._socket_thread.join(timeout=2.0)
 
 
 # The dropdown options in settings. Not exhaustive on purpose — these are the

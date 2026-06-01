@@ -69,6 +69,7 @@ class SettingsManager:
             'encoder_preset': 4,        # 1–7
             # Multiband audio
             'multiband_audio_enabled': False,
+            'game_detection_enabled':  False,
             'audio_categories': [
                 {'name': 'Game',     'volume': 100, 'patterns': []},
                 {'name': 'Discord',  'volume': 100, 'patterns': ['discord', 'Discord', 'WebRTC']},
