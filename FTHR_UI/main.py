@@ -1224,13 +1224,14 @@ class MainWindow(QMainWindow):
             if hasattr(Colors, _tk):
                 setattr(Colors, _tk, _val)
 
-        self.clip_duration   = self.settings_manager.get('clip_length',    30)
-        self.capture_fps     = self.settings_manager.get('framerate',       60)
-        self.capture_bitrate = self.settings_manager.get('bitrate_kbps', 16000)
+        self.clip_duration          = self.settings_manager.get('clip_length',          30)
+        self.extended_clip_duration = self.settings_manager.get('extended_clip_length',  60)
+        self.capture_fps            = self.settings_manager.get('framerate',             60)
+        self.capture_bitrate        = self.settings_manager.get('bitrate_kbps',       16000)
 
         saved_res = self.settings_manager.get('resolution', 'source')
         self.capture_width, self.capture_height = _resolution_to_dims(saved_res)
-        self.buffer_seconds = self.clip_duration + 2
+        self.buffer_seconds = max(self.clip_duration, self.extended_clip_duration) + 2
 
         self.engine_process = None
         self.bridge         = CaptureBridge()
@@ -1349,6 +1350,7 @@ class MainWindow(QMainWindow):
 
         self.cap_settings_popup = CaptureSettingsPopup(self.settings_manager, self)
         self.cap_settings_popup.clip_length_changed.connect(self._on_clip_length_changed)
+        self.cap_settings_popup.extended_clip_changed.connect(self._on_extended_clip_length_changed)
         self.cap_settings_popup.framerate_changed.connect(self._on_framerate_changed)
         self.cap_settings_popup.resolution_changed.connect(self._on_resolution_changed)
         self.cap_settings_popup.bitrate_changed.connect(self._on_bitrate_changed)
@@ -1798,7 +1800,7 @@ class MainWindow(QMainWindow):
         print("Hotkeys registered.")
 
     def _on_hotkey_save_clip(self):          self._save_clip(self.clip_duration)
-    def _on_hotkey_save_extended_clip(self): self._save_clip(self.clip_duration * 2)
+    def _on_hotkey_save_extended_clip(self): self._save_clip(self.extended_clip_duration)
     def _on_hotkey_save_screenshot(self):
         self.capture_card.show_screenshot()
         QMessageBox.information(self, 'Coming Soon', 'Screenshot feature coming soon!')
@@ -1809,7 +1811,11 @@ class MainWindow(QMainWindow):
 
     def _on_clip_length_changed(self, duration: int):
         self.clip_duration  = duration
-        self.buffer_seconds = duration + 2
+        self.buffer_seconds = max(duration, self.extended_clip_duration) + 2
+
+    def _on_extended_clip_length_changed(self, duration: int):
+        self.extended_clip_duration = duration
+        self.buffer_seconds = max(self.clip_duration, duration) + 2
 
     def _on_framerate_changed(self, fps: int):        self.capture_fps = fps
     def _on_resolution_changed(self, w: int, h: int): self.capture_width, self.capture_height = w, h
