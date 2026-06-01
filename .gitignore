@@ -1,3 +1,6 @@
+# third-party binaries — not source, too large for git
+FTHRcapture/FTHRclips/third_party/
+
 # build artifacts — these get regenerated, no reason to track them
 build_output/
 build/
