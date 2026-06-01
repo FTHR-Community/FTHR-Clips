@@ -35,6 +35,7 @@ from PyQt6.QtGui import QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, 
 from core.capture_bridge import CaptureBridge
 from core.hotkey_manager import HotkeyManager, AVAILABLE_KEYS
 from core.game_detector import GameDetector
+from core.presets_manager import PresetsManager, PRESET_KEYS
 from core.settings_manager import SettingsManager
 from core.theme_manager import ThemeManager
 from core.mic_recorder import MicRecorder, write_wav
@@ -750,6 +751,37 @@ class CaptureSettingsPopup(_PopupPanel):
         self.sm.set('extended_clip_length', self.cur_ext)
         self.sm.save_settings()
         self.extended_clip_changed.emit(self.cur_ext)
+        self._update_summary()
+
+    def reload_from_settings(self):
+        self.cur_clip = self.sm.get('clip_length', 30)
+        self.cur_ext  = self.sm.get('extended_clip_length', 60)
+        self.cur_fps  = self.sm.get('framerate', 60)
+        self.cur_res  = self.sm.get('resolution', 'source')
+        self.cur_qual = self.sm.get('bitrate_level', 'high')
+
+        for combo, values, val in [
+            (self.clip_combo, self._CLIP_VALUES, self.cur_clip),
+            (self.ext_combo,  self._EXT_VALUES,  self.cur_ext),
+            (self.fps_combo,  self._FPS_VALUES,   self.cur_fps),
+        ]:
+            idx = values.index(val) if val in values else 0
+            combo.blockSignals(True)
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+
+        res_idx = self._RES_KEYS.index(self.cur_res.lower()) \
+            if self.cur_res.lower() in self._RES_KEYS else 4
+        self.res_combo.blockSignals(True)
+        self.res_combo.setCurrentIndex(res_idx)
+        self.res_combo.blockSignals(False)
+
+        qual_idx = self._QUAL_KEYS.index(self.cur_qual) \
+            if self.cur_qual in self._QUAL_KEYS else 2
+        self.qual_combo.blockSignals(True)
+        self.qual_combo.setCurrentIndex(qual_idx)
+        self.qual_combo.blockSignals(False)
+
         self._update_summary()
 
     def _on_fps_changed(self, idx):
@@ -2807,6 +2839,7 @@ class _SettingsPage(QWidget):
         self.sm = settings_manager
         self.setObjectName('settingsPage')
         self._loopback_stream = None
+        self._presets_mgr = PresetsManager()
         self._setup_ui()
         self._apply_styles()
         self._load_audio_settings()
@@ -2997,6 +3030,40 @@ class _SettingsPage(QWidget):
         layout.addSpacing(28)
         self._upload_settings_widget = UploadSettingsWidget(self.sm, no_scroll=True)
         layout.addWidget(self._upload_settings_widget)
+
+        # ── Settings Presets ──────────────────────────────────────────────
+        layout.addSpacing(28)
+        layout.addWidget(_flat_section_header('Settings-Presets'))
+        layout.addSpacing(12)
+
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(8)
+
+        self.preset_combo = _DropdownCombo()
+        self.preset_combo.setStyleSheet(_COMBO_STYLE)
+        self.preset_combo.setMinimumWidth(160)
+        self._refresh_preset_combo()
+        preset_row.addWidget(self.preset_combo, 1)
+
+        load_btn = QPushButton('LADEN')
+        load_btn.setStyleSheet(BUTTON_PRIMARY_QSS)
+        load_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        load_btn.clicked.connect(self._on_preset_load)
+        preset_row.addWidget(load_btn)
+
+        save_btn = QPushButton('SPEICHERN')
+        save_btn.setStyleSheet(BUTTON_OUTLINE_QSS)
+        save_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        save_btn.clicked.connect(self._on_preset_save)
+        preset_row.addWidget(save_btn)
+
+        del_btn = QPushButton('LÖSCHEN')
+        del_btn.setStyleSheet(BUTTON_OUTLINE_QSS)
+        del_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        del_btn.clicked.connect(self._on_preset_delete)
+        preset_row.addWidget(del_btn)
+
+        layout.addLayout(preset_row)
 
         layout.addStretch()
 
@@ -3522,6 +3589,52 @@ class _SettingsPage(QWidget):
     def _on_audio_capture_toggled(self, checked: bool):
         self.sm.set('audio_capture_enabled', checked)
         self.sm.save_settings()
+
+    def _refresh_preset_combo(self):
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        names = self._presets_mgr.names()
+        if names:
+            self.preset_combo.addItems(names)
+        else:
+            self.preset_combo.addItem('— kein Preset —')
+        self.preset_combo.blockSignals(False)
+
+    def _on_preset_save(self):
+        from PyQt6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(
+            self, 'Preset speichern', 'Name:',
+            text=self.preset_combo.currentText() if self._presets_mgr.names() else '')
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        data = {k: self.sm.get(k) for k in PRESET_KEYS}
+        self._presets_mgr.save(name, data)
+        self._refresh_preset_combo()
+        idx = self.preset_combo.findText(name)
+        if idx >= 0:
+            self.preset_combo.setCurrentIndex(idx)
+
+    def _on_preset_load(self):
+        name = self.preset_combo.currentText()
+        data = self._presets_mgr.load(name)
+        if data is None:
+            return
+        for k, v in data.items():
+            self.sm.set(k, v)
+        self.sm.save_settings()
+        main_win = self.window()
+        if hasattr(main_win, 'cap_settings_popup'):
+            main_win.cap_settings_popup.reload_from_settings()
+        if hasattr(main_win, '_restart_capture_engine'):
+            main_win._restart_capture_engine()
+
+    def _on_preset_delete(self):
+        name = self.preset_combo.currentText()
+        if not self._presets_mgr.names():
+            return
+        self._presets_mgr.delete(name)
+        self._refresh_preset_combo()
 
     def _on_cat_volume(self, idx: int, vol: int, lbl: QLabel):
         lbl.setText(f'{vol}%')
