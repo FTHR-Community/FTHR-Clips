@@ -250,10 +250,12 @@ bool CaptureEngine::Initialize(const CaptureConfig& cfg) {
     ring_ = new EncodedRingBuffer(ring_ms);
 
     // Start audio capture (loopback via PulseAudio monitor)
-    if (cfg.multiband_enabled && !cfg.audio_categories.empty()) {
-        multi_audio_.Start(cfg.audio_categories);
-    } else {
-        audio_.Start("");
+    if (cfg.audio_enabled) {
+        if (cfg.multiband_enabled && !cfg.audio_categories.empty()) {
+            multi_audio_.Start(cfg.audio_categories);
+        } else {
+            audio_.Start("");
+        }
     }
 
     // Start capture loop thread
@@ -271,8 +273,10 @@ void CaptureEngine::Shutdown() {
     running_.store(false);
     if (cap_thread_.joinable())
         cap_thread_.join();
-    audio_.Stop();
-    multi_audio_.Stop();
+    if (cfg_.audio_enabled) {
+        audio_.Stop();
+        multi_audio_.Stop();
+    }
     encoder_.Close();
     delete ring_;
     ring_ = nullptr;
@@ -666,10 +670,12 @@ void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
     size_t ring_ms = (static_cast<size_t>(cfg_.buffer_seconds) + 5) * 1000;
     ring_ = new EncodedRingBuffer(ring_ms);
     // Restart audio (Shutdown() stopped it)
-    if (cfg_.multiband_enabled && !cfg_.audio_categories.empty()) {
-        multi_audio_.Start(cfg_.audio_categories);
-    } else {
-        audio_.Start("");
+    if (cfg_.audio_enabled) {
+        if (cfg_.multiband_enabled && !cfg_.audio_categories.empty()) {
+            multi_audio_.Start(cfg_.audio_categories);
+        } else {
+            audio_.Start("");
+        }
     }
     // Reset stale state
     nvenc_active_.store(false);

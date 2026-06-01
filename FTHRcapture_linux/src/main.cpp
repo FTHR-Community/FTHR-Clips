@@ -39,6 +39,7 @@ int main(int argc, char* argv[]) {
     //   [8] target_hwnd    (ignored on Linux)
     //   [9] scaling_mode   (0=stretch, 1=fit)
     //   [10] target_output  (wl_output name, e.g. "DP-3" — empty = first output)
+    //   [14] audio_enabled (1=on default, 0=off)
 
     fthr::CaptureConfig cfg{};
     cfg.fps            = (argc > 1) ? arg_u32(argv, 1, 60)     : 60;
@@ -57,6 +58,7 @@ int main(int argc, char* argv[]) {
     if (cfg.preset < 1) cfg.preset = 1;
     if (cfg.preset > 7) cfg.preset = 7;
     cfg.multiband_enabled = (argc > 13) && (arg_u32(argv, 13, 0) == 1);
+    cfg.audio_enabled = !((argc > 14) && (arg_u32(argv, 14, 1) == 0));
 
     // Clamp
     if (cfg.fps            < 1)     cfg.fps            = 1;

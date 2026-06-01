@@ -21,6 +21,7 @@ struct CaptureConfig {
     uint32_t    scaling_mode;    // 0 = stretch, 1 = fit (letterbox)
     std::string target_output;   // wl_output name, e.g. "HDMI-A-1" — empty = first
     bool      multiband_enabled = false;
+    bool      audio_enabled    = true;
     std::vector<AudioCategoryConfig> audio_categories;
     CodecPref codec_pref = CodecPref::Auto;
     int       preset     = 4;
