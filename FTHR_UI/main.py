@@ -3990,20 +3990,12 @@ class _SettingsPage(QWidget):
         if not CameraRecorder.is_available():
             self.camera_device_combo.addItem('cv2 nicht verfügbar')
             return
-        import cv2 as _cv2
-        found = []
-        for i in range(5):
-            cap = _cv2.VideoCapture(i)
-            if cap.isOpened():
-                found.append(f'Kamera {i}')
-                cap.release()
-        if not found:
-            self.camera_device_combo.addItem('Keine Kamera gefunden')
-        else:
-            self.camera_device_combo.addItems(found)
-            saved = self.sm.get('camera_device_index', 0)
-            if saved < len(found):
-                self.camera_device_combo.setCurrentIndex(saved)
+        # Populate statically — blocking cv2.VideoCapture scan at startup freezes UI
+        # for ~5s per device. User can pick index and test via the toggle.
+        self.camera_device_combo.addItems(
+            [f'Kamera {i}' for i in range(4)])
+        saved = self.sm.get('camera_device_index', 0)
+        self.camera_device_combo.setCurrentIndex(min(saved, 3))
 
     def _on_camera_toggled(self, checked: bool):
         self.sm.set('camera_enabled', checked)

@@ -214,9 +214,19 @@ COMBO_QSS = f'''
         outline: none;
     }}
     QComboBox QAbstractItemView::item {{
+        background-color: {Colors.SURFACE_2};
+        color: {Colors.TEXT};
         min-height: 26px;
         padding-left: 10px;
         border-radius: 0px;
+    }}
+    QComboBox QAbstractItemView::item:hover {{
+        background-color: {Colors.SURFACE_3};
+        color: {Colors.TEXT};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background-color: {Colors.SURFACE_3};
+        color: {Colors.ACCENT};
     }}
 '''
 
