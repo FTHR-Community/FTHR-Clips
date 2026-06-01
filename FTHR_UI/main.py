@@ -2022,10 +2022,14 @@ class MainWindow(QMainWindow):
                     self._set_rec_dot_state('capturing')
                     QTimer.singleShot(2000, self._check_hardware_encoding_status)
                     return True
+            # initialize() never succeeded — kill the orphaned process
+            print("Engine did not respond — terminating.")
+            self.stop_engine()
             self._set_status('DISCONNECTED', STATUS_WARNING)
             return False
         except Exception as e:
             print(f"Engine start error: {e}")
+            self.stop_engine()
             self._set_status('ERROR', STATUS_WARNING)
             return False
 
@@ -2169,13 +2173,14 @@ class MainWindow(QMainWindow):
                 multiband_on = audio_on and self.settings_manager.get('multiband_audio_enabled', False)
                 mic_active = (audio_on and not multiband_on and
                               MicRecorder.is_available() and MicRecorder().is_running())
+                has_async_mux = mic_active or multiband_on
                 clip_ready = self.upload_manager.notify_clip_saved(
-                    str(output_path), has_mic_mux=mic_active)
+                    str(output_path), has_mic_mux=has_async_mux)
                 self._mux_mic_into_clip(
                     str(output_path), duration_seconds, mic_end_time, clip_ready)
                 if multiband_on:
                     self._mux_multiband_into_clip(
-                        str(output_path), duration_seconds, mic_end_time)
+                        str(output_path), duration_seconds, mic_end_time, clip_ready)
                 if not mic_active and not multiband_on:
                     self._finalize_clip(str(output_path), duration_seconds, mic_end_time)
             else:
@@ -2245,6 +2250,12 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except RuntimeError:
+            print('[Mic] ffmpeg not found — skipping mic mux')
+            return
+
+        try:
             # Wait for the clip file to actually appear and stabilize. The engine
             # runs SaveClipThread in the background; for short clips this is
             # usually <1s, but worst-case x264 path can take ~clip-duration.
@@ -2264,167 +2275,156 @@ class MainWindow(QMainWindow):
                 print(f'[Mic] Clip {clip_path} did not stabilize — skipping mux')
                 return
 
-            # Pull the mic samples covering the same window the clip captured.
-            # The clip ends at mic_end_time and started duration_seconds earlier.
+            # Try to mix mic audio into the clip. Any failure is non-fatal:
+            # watermark/crop/camera still apply to the original clip below.
             samples = MicRecorder().extract_segment(mic_end_time, duration_seconds)
-            if samples is None or samples.size == 0:
+            if samples is not None and samples.size > 0:
+                with tempfile.TemporaryDirectory() as td:
+                    mic_wav = os.path.join(td, 'mic.wav')
+                    mixed_mp4 = os.path.join(td, 'mixed.mp4')
+                    if write_wav(mic_wav, samples):
+                        cmd = [
+                            ffmpeg, '-y',
+                            '-i', clip_path,
+                            '-i', mic_wav,
+                            '-filter_complex',
+                            '[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0[aout]',
+                            '-map', '0:v',
+                            '-map', '[aout]',
+                            '-c:v', 'copy',
+                            '-c:a', 'aac', '-b:a', '192k',
+                            '-shortest',
+                            mixed_mp4,
+                        ]
+                        try:
+                            result = subprocess.run(
+                                cmd, capture_output=True, timeout=120,
+                                **_NO_WINDOW,
+                            )
+                            if result.returncode == 0:
+                                try:
+                                    os.replace(mixed_mp4, clip_path)
+                                    print(f'[Mic] Mixed mic into {os.path.basename(clip_path)}')
+                                except OSError as e:
+                                    print(f'[Mic] Could not replace clip: {e}')
+                            else:
+                                err = result.stderr.decode(errors='replace').strip().splitlines()
+                                print(f'[Mic] ffmpeg failed: {err[-1] if err else "(no stderr)"}')
+                        except subprocess.TimeoutExpired:
+                            print('[Mic] ffmpeg timed out after 120s — skipping mux')
+                        except Exception as e:
+                            print(f'[Mic] ffmpeg mux error: {e}')
+            else:
                 print('[Mic] No mic samples for this clip window')
-                return
 
-            try:
-                ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-            except RuntimeError:
-                print('[Mic] ffmpeg not found — skipping mic mux')
-                return
-
-            # Write mic to a temp wav, then run ffmpeg to mix wav + clip's audio
-            # back into a new mp4. Replace the original on success.
-            with tempfile.TemporaryDirectory() as td:
-                mic_wav = os.path.join(td, 'mic.wav')
-                if not write_wav(mic_wav, samples):
-                    return
-                mixed_mp4 = os.path.join(td, 'mixed.mp4')
-
-                # -filter_complex: take the first input's audio (system) and the
-                # second input's audio (mic), mix them with amix=inputs=2.
-                # duration=first keeps the clip length; dropout_transition=0
-                # avoids amix attenuating when one input drops.
-                cmd = [
-                    ffmpeg, '-y',
-                    '-i', clip_path,
-                    '-i', mic_wav,
-                    '-filter_complex',
-                    '[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0[aout]',
-                    '-map', '0:v',
-                    '-map', '[aout]',
-                    '-c:v', 'copy',
-                    '-c:a', 'aac', '-b:a', '192k',
-                    '-shortest',
-                    mixed_mp4,
-                ]
-
-                try:
-                    result = subprocess.run(
-                        cmd, capture_output=True,
-                        **_NO_WINDOW,
-                    )
-                except Exception as e:
-                    print(f'[Mic] ffmpeg mux error: {e}')
-                    return
-
-                if result.returncode != 0:
-                    err = result.stderr.decode(errors='replace').strip().splitlines()
-                    last = err[-1] if err else '(no stderr)'
-                    print(f'[Mic] ffmpeg failed: {last}')
-                    return
-
-                # Replace the original clip with the mixed version.
-                try:
-                    os.replace(mixed_mp4, clip_path)
-                    print(f'[Mic] Mixed mic into {os.path.basename(clip_path)}')
-                    self._apply_crop(clip_path, ffmpeg)
-                    self._apply_watermark(clip_path, ffmpeg)
-                    self._apply_camera_overlay(clip_path, ffmpeg, mic_end_time, duration_seconds)
-                except OSError as e:
-                    print(f'[Mic] Could not replace clip: {e}')
+            # Always apply post-processing to whatever clip exists now
+            # (either the muxed version or the original if mux failed).
+            self._apply_crop(clip_path, ffmpeg)
+            self._apply_watermark(clip_path, ffmpeg)
+            self._apply_camera_overlay(clip_path, ffmpeg, mic_end_time, duration_seconds)
         finally:
             # Always unblock the upload worker, regardless of success or failure.
             if clip_ready is not None:
                 clip_ready.set()
 
     def _mux_multiband_into_clip(self, clip_path: str, duration_seconds: int,
-                                  audio_end_time: float):
+                                  audio_end_time: float, clip_ready=None):
         """Start a background thread to mix per-category WAVs into the clip."""
         threading.Thread(
             target=self._multiband_mux_worker,
-            args=(clip_path, duration_seconds, audio_end_time),
+            args=(clip_path, duration_seconds, audio_end_time, clip_ready),
             daemon=True,
         ).start()
 
     def _multiband_mux_worker(self, clip_path: str, duration_seconds: int,
-                               audio_end_time: float):
+                               audio_end_time: float, clip_ready=None):
         try:
             import imageio_ffmpeg
             ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         except (ImportError, RuntimeError):
             print('[MultiAudio] imageio-ffmpeg missing — skipping multiband mix')
+            if clip_ready is not None:
+                clip_ready.set()
             return
 
         from core.audio_mixer import mix_multiband_clip
 
-        # Wait for clip file to stabilize (same pattern as mic mux)
-        deadline = time.monotonic() + max(duration_seconds * 2, 15)
-        last_size = -1
-        while time.monotonic() < deadline:
-            try:
-                if os.path.exists(clip_path):
-                    size = os.path.getsize(clip_path)
-                    if size > 0 and size == last_size:
-                        break
-                    last_size = size
-            except OSError:
-                pass
-            time.sleep(0.25)
-        else:
-            print(f'[MultiAudio] Clip {clip_path} did not stabilize — skipping mix')
-            return
-
-        # Find per-category WAV files written by the C++ engine next to the clip
-        base = os.path.splitext(clip_path)[0]
-        cats = self.settings_manager.get('audio_categories', [])
-        category_wavs = {}
-        volumes = {}
-        for cat in cats:
-            sink_name = 'fthr_' + ''.join(
-                c if c.isalnum() else '_' for c in cat['name'].lower())
-            wav_path = f'{base}_{sink_name}.wav'
-            if os.path.exists(wav_path):
-                category_wavs[cat['name']] = wav_path
-                volumes[cat['name']] = cat.get('volume', 100) / 100.0
-
-        if not category_wavs:
-            print('[MultiAudio] No category WAVs found — skipping mix')
-            return
-
-        # Include mic audio in the multiband mix if mic recorder is active
-        mic_wav_path = None
         try:
-            from core.mic_recorder import MicRecorder, write_wav
-            if MicRecorder.is_available() and MicRecorder().is_running():
-                samples = MicRecorder().extract_segment(audio_end_time, duration_seconds)
-                if samples is not None and samples.size > 0:
-                    import tempfile as _tf
-                    mic_tmp = _tf.NamedTemporaryFile(suffix='_mic.wav', delete=False)
-                    mic_wav_path = mic_tmp.name
-                    mic_tmp.close()
-                    if write_wav(mic_wav_path, samples):
-                        category_wavs['Mikrofon'] = mic_wav_path
-                        volumes['Mikrofon'] = self.settings_manager.get('mic_volume', 100) / 100.0
-        except Exception as e:
-            print(f'[MultiAudio] Mic include error: {e}')
+            # Wait for clip file to stabilize (same pattern as mic mux)
+            deadline = time.monotonic() + max(duration_seconds * 2, 15)
+            last_size = -1
+            while time.monotonic() < deadline:
+                try:
+                    if os.path.exists(clip_path):
+                        size = os.path.getsize(clip_path)
+                        if size > 0 and size == last_size:
+                            break
+                        last_size = size
+                except OSError:
+                    pass
+                time.sleep(0.25)
+            else:
+                print(f'[MultiAudio] Clip {clip_path} did not stabilize — skipping mix')
+                return
 
-        ok = mix_multiband_clip(clip_path, category_wavs, volumes, ffmpeg)
+            # Find per-category WAV files written by the C++ engine next to the clip
+            base = os.path.splitext(clip_path)[0]
+            cats = self.settings_manager.get('audio_categories', [])
+            category_wavs = {}
+            volumes = {}
+            for cat in cats:
+                sink_name = 'fthr_' + ''.join(
+                    c if c.isalnum() else '_' for c in cat['name'].lower())
+                wav_path = f'{base}_{sink_name}.wav'
+                if os.path.exists(wav_path):
+                    category_wavs[cat['name']] = wav_path
+                    volumes[cat['name']] = cat.get('volume', 100) / 100.0
 
-        # Clean up WAV files regardless of mix result
-        for wav in category_wavs.values():
+            if not category_wavs:
+                print('[MultiAudio] No category WAVs found — skipping mix')
+                return
+
+            # Include mic audio in the multiband mix if mic recorder is active
+            mic_wav_path = None
             try:
-                os.remove(wav)
-            except OSError:
-                pass
+                from core.mic_recorder import MicRecorder, write_wav
+                if MicRecorder.is_available() and MicRecorder().is_running():
+                    samples = MicRecorder().extract_segment(audio_end_time, duration_seconds)
+                    if samples is not None and samples.size > 0:
+                        import tempfile as _tf
+                        mic_tmp = _tf.NamedTemporaryFile(suffix='_mic.wav', delete=False)
+                        mic_wav_path = mic_tmp.name
+                        mic_tmp.close()
+                        if write_wav(mic_wav_path, samples):
+                            category_wavs['Mikrofon'] = mic_wav_path
+                            volumes['Mikrofon'] = self.settings_manager.get('mic_volume', 100) / 100.0
+            except Exception as e:
+                print(f'[MultiAudio] Mic include error: {e}')
 
-        # Clean up mic temp file
-        if mic_wav_path and os.path.exists(mic_wav_path):
-            try:
-                os.remove(mic_wav_path)
-            except OSError:
-                pass
+            ok = mix_multiband_clip(clip_path, category_wavs, volumes, ffmpeg)
 
-        if not ok:
-            print('[MultiAudio] Mix failed')
-        if ok:
+            # Clean up WAV files regardless of mix result
+            for wav in category_wavs.values():
+                try:
+                    os.remove(wav)
+                except OSError:
+                    pass
+
+            # Clean up mic temp file
+            if mic_wav_path and os.path.exists(mic_wav_path):
+                try:
+                    os.remove(mic_wav_path)
+                except OSError:
+                    pass
+
+            if not ok:
+                print('[MultiAudio] Mix failed')
             self._apply_crop(clip_path, ffmpeg)
             self._apply_watermark(clip_path, ffmpeg)
             self._apply_camera_overlay(clip_path, ffmpeg, audio_end_time, duration_seconds)
+        finally:
+            if clip_ready is not None:
+                clip_ready.set()
 
     def _apply_camera_overlay(self, clip_path: str, ffmpeg: str,
                                clip_end_time: float, duration_sec: int) -> None:
@@ -2449,7 +2449,7 @@ class MainWindow(QMainWindow):
             return
 
         info = subprocess.run([ffmpeg, '-i', clip_path],
-                              capture_output=True, **_NO_WINDOW)
+                              capture_output=True, timeout=30, **_NO_WINDOW)
         dim = _re.search(r'(\d{3,5})x(\d{3,5})', info.stderr.decode(errors='replace'))
         clip_w = int(dim.group(1)) if dim else 1920
 
@@ -2481,7 +2481,7 @@ class MainWindow(QMainWindow):
                  '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
                  '-c:a', 'copy',
                  out_path],
-                capture_output=True, **_NO_WINDOW,
+                capture_output=True, timeout=120, **_NO_WINDOW,
             )
             if result.returncode == 0:
                 os.replace(out_path, clip_path)
@@ -2524,7 +2524,7 @@ class MainWindow(QMainWindow):
                     '-c:a', 'copy',
                     tmp_path,
                 ],
-                capture_output=True,
+                capture_output=True, timeout=120,
                 **_NO_WINDOW,
             )
             if result.returncode == 0:
@@ -2549,7 +2549,7 @@ class MainWindow(QMainWindow):
             [ffmpeg, '-i', clip_path,
              '-vf', 'cropdetect=limit=24:round=16:reset=0',
              '-frames:v', '60', '-f', 'null', '-'],
-            capture_output=True, **_NO_WINDOW,
+            capture_output=True, timeout=60, **_NO_WINDOW,
         )
         matches = _re.findall(r'crop=(\d+:\d+:\d+:\d+)',
                               probe.stderr.decode(errors='replace'))
@@ -2559,7 +2559,7 @@ class MainWindow(QMainWindow):
         crop = matches[-1]
         w, h, x, y = (int(v) for v in crop.split(':'))
         info = subprocess.run([ffmpeg, '-i', clip_path],
-                              capture_output=True, **_NO_WINDOW)
+                              capture_output=True, timeout=30, **_NO_WINDOW)
         dim = _re.search(r'(\d{3,5})x(\d{3,5})',
                          info.stderr.decode(errors='replace'))
         if dim:
@@ -2578,7 +2578,7 @@ class MainWindow(QMainWindow):
                  '-vf', f'crop={crop}',
                  '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
                  '-c:a', 'copy', tmp_path],
-                capture_output=True, **_NO_WINDOW,
+                capture_output=True, timeout=120, **_NO_WINDOW,
             )
             if result.returncode == 0:
                 os.replace(tmp_path, clip_path)

@@ -63,3 +63,35 @@ def test_mix_runs_with_ffmpeg(tmp_path):
     )
     assert result is True
     assert os.path.exists(clip)
+
+
+def test_mix_subprocess_has_timeout(tmp_path, monkeypatch):
+    """BUG-03: mix_multiband_clip must pass timeout= to subprocess.run() to prevent
+    permanent hang when ffmpeg stalls on a large or corrupt file."""
+    import subprocess
+    import unittest.mock as mock
+
+    captured_kwargs = []
+
+    def mock_run(cmd, **kwargs):
+        captured_kwargs.append(kwargs)
+        m = mock.MagicMock()
+        m.returncode = 0
+        return m
+
+    monkeypatch.setattr(subprocess, 'run', mock_run)
+
+    clip = str(tmp_path / 'clip.wav')
+    _make_wav(clip)
+    game_wav = str(tmp_path / 'game.wav')
+    _make_wav(game_wav)
+
+    from core.audio_mixer import mix_multiband_clip
+    mix_multiband_clip(clip, {'Game': game_wav}, {'Game': 1.0}, '/usr/bin/ffmpeg')
+
+    assert len(captured_kwargs) > 0, "subprocess.run was never called"
+    for call_kw in captured_kwargs:
+        assert 'timeout' in call_kw, (
+            f"subprocess.run called without timeout= — can hang permanently. "
+            f"kwargs were: {call_kw}"
+        )

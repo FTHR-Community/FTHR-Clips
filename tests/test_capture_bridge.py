@@ -58,3 +58,74 @@ def test_set_encoder_config_clamps_preset():
     assert layout.cfg_preset == 1
     bridge.set_encoder_config('h264', 99)   # above max
     assert layout.cfg_preset == 7
+
+
+def test_save_clip_timeout_survives_backward_clock_jump(monkeypatch):
+    """H-01: save_clip() must not hang when system clock jumps backward (NTP).
+    Uses a watchdog thread to detect an infinite loop within 5 seconds."""
+    import time as _time
+    import threading
+
+    layout, buf = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+    # engine_response stays NONE — engine never acks, so timeout must fire
+
+    original_time = _time.time
+    call_count = [0]
+
+    def patched_time():
+        call_count[0] += 1
+        # After a few calls simulate NTP adjusting clock backward by 10 seconds
+        if call_count[0] > 5:
+            return original_time() - 10.0
+        return original_time()
+
+    monkeypatch.setattr(_time, 'time', patched_time)
+
+    result = [None]
+    def run():
+        result[0] = bridge.save_clip('/tmp/test.mp4', 30)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout=5.0)
+
+    assert not t.is_alive(), (
+        "save_clip() hung — time.time() clock-jump caused infinite loop; "
+        "use time.monotonic() instead"
+    )
+    assert result[0] is False
+
+
+def test_wait_for_clip_timeout_survives_backward_clock_jump(monkeypatch):
+    """H-01: wait_for_clip_completion() must not hang when clock jumps backward."""
+    import time as _time
+    import threading
+
+    layout, buf = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+
+    original_time = _time.time
+    call_count = [0]
+
+    def patched_time():
+        call_count[0] += 1
+        if call_count[0] > 5:
+            return original_time() - 10.0
+        return original_time()
+
+    monkeypatch.setattr(_time, 'time', patched_time)
+
+    result = [None]
+    def run():
+        result[0] = bridge.wait_for_clip_completion(timeout_ms=500)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout=5.0)
+
+    assert not t.is_alive(), (
+        "wait_for_clip_completion() hung — clock-jump with time.time(); "
+        "use time.monotonic() instead"
+    )
+    assert result[0] is False

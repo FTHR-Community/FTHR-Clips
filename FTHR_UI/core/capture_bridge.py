@@ -274,10 +274,10 @@ class CaptureBridge:
 
         # Spin until the engine acks. Should be near-instant; the 1s ceiling is
         # purely so a dead/hung engine doesn't lock the UI forever.
-        start = time.time() * 1000
+        start = time.monotonic()
         while self._layout.engine_response not in (ResponseType.SAVE_STARTED,
                                                      ResponseType.ERROR_OCCURRED):
-            if (time.time() * 1000 - start) > 1000:  # 1 second timeout
+            if time.monotonic() - start > 1.0:
                 print('Timeout waiting for SAVE_STARTED')
                 return False
             time.sleep(0.001)
@@ -324,9 +324,10 @@ class CaptureBridge:
         if not self.is_connected():
             return False
         
-        start = time.time() * 1000
+        timeout_sec = timeout_ms / 1000.0
+        start = time.monotonic()
         while self._layout.engine_response != ResponseType.CLIP_SAVED:
-            if (time.time() * 1000 - start) > timeout_ms:
+            if time.monotonic() - start > timeout_sec:
                 print(f'Timeout waiting for clip completion ({timeout_ms}ms)')
                 return False
             time.sleep(0.010)  # 10ms poll interval

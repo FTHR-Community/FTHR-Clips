@@ -55,7 +55,10 @@ def mix_multiband_clip(
                '-shortest', out_path]
         )
         try:
-            result = subprocess.run(cmd, capture_output=True)
+            result = subprocess.run(cmd, capture_output=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            print('[AudioMixer] ffmpeg timed out after 120s — skipping mix')
+            return False
         except Exception as e:
             print(f'[AudioMixer] ffmpeg error: {e}')
             return False
