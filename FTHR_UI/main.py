@@ -3205,14 +3205,14 @@ class _SettingsPage(QWidget):
         layout.addWidget(_flat_section_header('Game Detection'))
         layout.addSpacing(12)
 
-        self.game_detection_check = QCheckBox('Games erkennen und zum Aufnehmen vorschlagen')
+        self.game_detection_check = QCheckBox('Detect games and suggest recording')
         self.game_detection_check.setStyleSheet(CHECKBOX_QSS)
         self.game_detection_check.setChecked(self.sm.get('game_detection_enabled', False))
         self.game_detection_check.toggled.connect(self._on_game_detection_toggled)
         layout.addWidget(self.game_detection_check)
         layout.addSpacing(4)
 
-        _gd_hint = QLabel('Drücke F8 um aufzunehmen wenn ein Game erkannt wird.')
+        _gd_hint = QLabel('Press F8 to start recording when a game is detected.')
         _gd_hint.setWordWrap(True)
         _gd_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
         layout.addWidget(_gd_hint)
@@ -3273,116 +3273,12 @@ class _SettingsPage(QWidget):
         self._upload_settings_widget = UploadSettingsWidget(self.sm, no_scroll=True)
         layout.addWidget(self._upload_settings_widget)
 
-        # ── Wasserzeichen ─────────────────────────────────────────────────
-        layout.addSpacing(28)
-        layout.addWidget(_flat_section_header('Wasserzeichen'))
-        layout.addSpacing(12)
-
-        self.watermark_check = QCheckBox('Wasserzeichen in Clips einbrennen')
-        self.watermark_check.setStyleSheet(CHECKBOX_QSS)
-        self.watermark_check.setChecked(self.sm.get('watermark_enabled', False))
-        self.watermark_check.toggled.connect(self._on_watermark_toggled)
-        layout.addWidget(self.watermark_check)
-        layout.addSpacing(8)
-
-        wm_row = QHBoxLayout()
-        wm_row.setSpacing(8)
-        wm_lbl = QLabel('TEXT')
-        wm_lbl.setStyleSheet(_LABEL_STYLE)
-        wm_lbl.setFixedWidth(60)
-        wm_row.addWidget(wm_lbl)
-        self.watermark_text_edit = QLineEdit(self.sm.get('watermark_text', 'FTHR'))
-        self.watermark_text_edit.setMaxLength(30)
-        self.watermark_text_edit.setStyleSheet(_COMBO_STYLE)
-        self.watermark_text_edit.textChanged.connect(self._on_watermark_text_changed)
-        wm_row.addWidget(self.watermark_text_edit)
-        layout.addLayout(wm_row)
-        layout.addSpacing(4)
-
-        _wm_hint = QLabel('Kleines Text-Overlay unten rechts. Standard: deaktiviert.')
-        _wm_hint.setWordWrap(True)
-        _wm_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
-        layout.addWidget(_wm_hint)
-
-        # ── Kamera ────────────────────────────────────────────────────────
-        layout.addSpacing(28)
-        layout.addWidget(_flat_section_header('Kamera'))
-        layout.addSpacing(12)
-
-        self.camera_check = QCheckBox('Kamera-Overlay in Clips einbrennen')
-        self.camera_check.setStyleSheet(CHECKBOX_QSS)
-        self.camera_check.setChecked(self.sm.get('camera_enabled', False))
-        self.camera_check.toggled.connect(self._on_camera_toggled)
-        layout.addWidget(self.camera_check)
-        layout.addSpacing(8)
-
-        cam_dev_row = QHBoxLayout()
-        cam_dev_row.setSpacing(8)
-        _dev_lbl = QLabel('GERÄT')
-        _dev_lbl.setStyleSheet(_LABEL_STYLE)
-        _dev_lbl.setFixedWidth(80)
-        cam_dev_row.addWidget(_dev_lbl)
-        self.camera_device_combo = _DropdownCombo()
-        self.camera_device_combo.setStyleSheet(_COMBO_STYLE)
-        self._populate_camera_devices()
-        self.camera_device_combo.currentIndexChanged.connect(self._on_camera_device_changed)
-        cam_dev_row.addWidget(self.camera_device_combo, 1)
-        layout.addLayout(cam_dev_row)
-        layout.addSpacing(6)
-
-        cam_pos_row = QHBoxLayout()
-        cam_pos_row.setSpacing(8)
-        _pos_lbl = QLabel('POSITION')
-        _pos_lbl.setStyleSheet(_LABEL_STYLE)
-        _pos_lbl.setFixedWidth(80)
-        cam_pos_row.addWidget(_pos_lbl)
-        self.camera_pos_combo = _DropdownCombo()
-        self.camera_pos_combo.addItems(['Unten rechts', 'Unten links', 'Oben rechts', 'Oben links'])
-        self.camera_pos_combo.setStyleSheet(_COMBO_STYLE)
-        _pos_keys = ['bottom-right', 'bottom-left', 'top-right', 'top-left']
-        saved_pos = self.sm.get('camera_position', 'bottom-right')
-        self.camera_pos_combo.setCurrentIndex(
-            _pos_keys.index(saved_pos) if saved_pos in _pos_keys else 0)
-        self.camera_pos_combo.currentIndexChanged.connect(self._on_camera_pos_changed)
-        cam_pos_row.addWidget(self.camera_pos_combo)
-
-        _sz_lbl = QLabel('GRÖSSE')
-        _sz_lbl.setStyleSheet(_LABEL_STYLE)
-        _sz_lbl.setFixedWidth(64)
-        cam_pos_row.addWidget(_sz_lbl)
-        self.camera_size_combo = _DropdownCombo()
-        self.camera_size_combo.addItems(['Klein', 'Mittel', 'Groß'])
-        self.camera_size_combo.setStyleSheet(_COMBO_STYLE)
-        _sz_keys = ['small', 'medium', 'large']
-        saved_sz = self.sm.get('camera_size', 'medium')
-        self.camera_size_combo.setCurrentIndex(
-            _sz_keys.index(saved_sz) if saved_sz in _sz_keys else 1)
-        self.camera_size_combo.currentIndexChanged.connect(self._on_camera_size_changed)
-        cam_pos_row.addWidget(self.camera_size_combo)
-        layout.addLayout(cam_pos_row)
-        layout.addSpacing(8)
-
-        self.camera_preview_lbl = QLabel('Kamera deaktiviert')
-        self.camera_preview_lbl.setFixedSize(160, 90)
-        self.camera_preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.camera_preview_lbl.setStyleSheet(
-            f'background: {Colors.CARD_BG}; color: {Colors.TEXT_DIM}; '
-            f'border: 1px solid {Colors.BORDER};')
-        layout.addWidget(self.camera_preview_lbl)
-        layout.addSpacing(4)
-
-        self._camera_preview_timer = QTimer(self)
-        self._camera_preview_timer.setInterval(100)
-        self._camera_preview_timer.timeout.connect(self._update_camera_preview)
-        if self.sm.get('camera_enabled', False):
-            self._camera_preview_timer.start()
-
         # ── Anticheat Detection ───────────────────────────────────────────
         layout.addSpacing(28)
         layout.addWidget(_flat_section_header('Anticheat Detection'))
         layout.addSpacing(12)
 
-        self.anticheat_check = QCheckBox('Aufnahme pausieren wenn Game unfokussiert')
+        self.anticheat_check = QCheckBox('Pause recording when game is unfocused')
         self.anticheat_check.setStyleSheet(CHECKBOX_QSS)
         self.anticheat_check.setChecked(
             self.sm.get('anticheat_detection_enabled', False))
@@ -3391,8 +3287,8 @@ class _SettingsPage(QWidget):
         layout.addSpacing(4)
 
         _at_hint = QLabel(
-            'Nur aktiv bei Fenster-Aufnahme. Pausiert den Buffer wenn das Game '
-            'nicht im Vordergrund ist. Standard: deaktiviert.'
+            'Window capture only. Pauses the ring buffer when the game '
+            'is not in the foreground. Off by default.'
         )
         _at_hint.setWordWrap(True)
         _at_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
@@ -3400,7 +3296,7 @@ class _SettingsPage(QWidget):
 
         # ── Settings Presets ──────────────────────────────────────────────
         layout.addSpacing(28)
-        layout.addWidget(_flat_section_header('Settings-Presets'))
+        layout.addWidget(_flat_section_header('Settings Presets'))
         layout.addSpacing(12)
 
         preset_row = QHBoxLayout()
@@ -3412,19 +3308,19 @@ class _SettingsPage(QWidget):
         self._refresh_preset_combo()
         preset_row.addWidget(self.preset_combo, 1)
 
-        load_btn = QPushButton('LADEN')
+        load_btn = QPushButton('LOAD')
         load_btn.setStyleSheet(BUTTON_PRIMARY_QSS)
         load_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         load_btn.clicked.connect(self._on_preset_load)
         preset_row.addWidget(load_btn)
 
-        save_btn = QPushButton('SPEICHERN')
+        save_btn = QPushButton('SAVE')
         save_btn.setStyleSheet(BUTTON_OUTLINE_QSS)
         save_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         save_btn.clicked.connect(self._on_preset_save)
         preset_row.addWidget(save_btn)
 
-        del_btn = QPushButton('LÖSCHEN')
+        del_btn = QPushButton('DELETE')
         del_btn.setStyleSheet(BUTTON_OUTLINE_QSS)
         del_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         del_btn.clicked.connect(self._on_preset_delete)
@@ -3647,8 +3543,9 @@ class _SettingsPage(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 0, 16, 32)
         layout.setSpacing(0)
+
         layout.addWidget(_flat_section_header('Clip Settings'))
         layout.addSpacing(12)
         hint = QLabel(
@@ -3657,6 +3554,58 @@ class _SettingsPage(QWidget):
         )
         hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
         layout.addWidget(hint)
+
+        # ── Watermark ─────────────────────────────────────────────────────
+        layout.addSpacing(28)
+        layout.addWidget(_flat_section_header('Watermark'))
+        layout.addSpacing(12)
+
+        self.watermark_check = QCheckBox('Burn watermark into clips')
+        self.watermark_check.setStyleSheet(CHECKBOX_QSS)
+        self.watermark_check.setChecked(self.sm.get('watermark_enabled', False))
+        self.watermark_check.toggled.connect(self._on_watermark_toggled)
+        layout.addWidget(self.watermark_check)
+        layout.addSpacing(8)
+
+        wm_row = QHBoxLayout()
+        wm_row.setSpacing(8)
+        wm_lbl = QLabel('TEXT')
+        wm_lbl.setStyleSheet(_LABEL_STYLE)
+        wm_lbl.setFixedWidth(60)
+        wm_row.addWidget(wm_lbl)
+        self.watermark_text_edit = QLineEdit(self.sm.get('watermark_text', 'FTHR'))
+        self.watermark_text_edit.setMaxLength(30)
+        self.watermark_text_edit.setStyleSheet(_COMBO_STYLE)
+        self.watermark_text_edit.textChanged.connect(self._on_watermark_text_changed)
+        wm_row.addWidget(self.watermark_text_edit)
+        layout.addLayout(wm_row)
+        layout.addSpacing(4)
+
+        _wm_hint = QLabel('Small text overlay in the bottom-right corner. Off by default.')
+        _wm_hint.setWordWrap(True)
+        _wm_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(_wm_hint)
+
+        # ── Auto-Crop ─────────────────────────────────────────────────────
+        layout.addSpacing(28)
+        layout.addWidget(_flat_section_header('Auto-Crop'))
+        layout.addSpacing(12)
+
+        self.auto_crop_check = QCheckBox('Automatically remove black bars')
+        self.auto_crop_check.setStyleSheet(CHECKBOX_QSS)
+        self.auto_crop_check.setChecked(self.sm.get('auto_crop_enabled', False))
+        self.auto_crop_check.toggled.connect(self._on_auto_crop_toggled)
+        layout.addWidget(self.auto_crop_check)
+        layout.addSpacing(4)
+
+        _crop_hint = QLabel(
+            'Detects letterbox/pillarbox bars after recording and removes them. '
+            'Off by default. Slows down clip processing.'
+        )
+        _crop_hint.setWordWrap(True)
+        _crop_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(_crop_hint)
+
         layout.addStretch()
         return page
 
@@ -3835,14 +3784,14 @@ class _SettingsPage(QWidget):
         outer.addSpacing(8)
 
         mb_desc = QLabel(
-            'Nimmt jede App-Kategorie separat auf und brennt Lautstärke-Presets '
-            'beim Clip-Save ein. Deaktiviere für maximale Performance.')
+            'Records each app category separately and bakes volume levels into the clip. '
+            'Disable for maximum performance.')
         mb_desc.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
         mb_desc.setWordWrap(True)
         outer.addWidget(mb_desc)
         outer.addSpacing(12)
 
-        self.multiband_check = QCheckBox('Multiband Audio aktivieren')
+        self.multiband_check = QCheckBox('Enable Multiband Audio')
         self.multiband_check.setStyleSheet(CHECKBOX_QSS)
         self.multiband_check.setChecked(self.sm.get('multiband_audio_enabled', False))
         self.multiband_check.toggled.connect(self._on_multiband_toggled)
@@ -3860,7 +3809,7 @@ class _SettingsPage(QWidget):
         self.multiband_container.setVisible(self.sm.get('multiband_audio_enabled', False))
 
         # Recognised app→category label (updated by timer when page is visible)
-        self.mappings_lbl = QLabel('Erkannte Apps: —')
+        self.mappings_lbl = QLabel('Detected apps: —')
         self.mappings_lbl.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
         self.mappings_lbl.setWordWrap(True)
         outer.addWidget(self.mappings_lbl)
@@ -3874,7 +3823,7 @@ class _SettingsPage(QWidget):
         self.new_cat_patterns = QLineEdit()
         self.new_cat_patterns.setPlaceholderText('Patterns: spotify,Spotify,vlc')
         self.new_cat_patterns.setStyleSheet(COMBO_QSS)
-        add_btn = QPushButton('+ Hinzufügen')
+        add_btn = QPushButton('+ Add')
         add_btn.setStyleSheet(BUTTON_OUTLINE_QSS)
         add_btn.clicked.connect(self._on_add_category)
         add_row.addWidget(self.new_cat_name, 1)
@@ -3886,6 +3835,23 @@ class _SettingsPage(QWidget):
         self._mappings_timer = QTimer(self)
         self._mappings_timer.setInterval(2000)
         self._mappings_timer.timeout.connect(self._update_mappings_label)
+
+        # ── Audio Capture ─────────────────────────────────────────────────
+        outer.addSpacing(28)
+        outer.addWidget(_flat_section_header('Audio Capture'))
+        outer.addSpacing(12)
+
+        self.audio_capture_check = QCheckBox('Enable audio capture')
+        self.audio_capture_check.setStyleSheet(CHECKBOX_QSS)
+        self.audio_capture_check.setChecked(self.sm.get('audio_capture_enabled', True))
+        self.audio_capture_check.toggled.connect(self._on_audio_capture_toggled)
+        outer.addWidget(self.audio_capture_check)
+        outer.addSpacing(4)
+
+        _aud_hint = QLabel('Disabling saves CPU. Takes effect on next engine restart.')
+        _aud_hint.setWordWrap(True)
+        _aud_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        outer.addWidget(_aud_hint)
 
         return page
 
@@ -4009,7 +3975,7 @@ class _SettingsPage(QWidget):
             CameraRecorder().stop()
             self._camera_preview_timer.stop()
             self.camera_preview_lbl.setPixmap(QPixmap())
-            self.camera_preview_lbl.setText('Kamera deaktiviert')
+            self.camera_preview_lbl.setText('Camera disabled')
 
     def _on_camera_device_changed(self, idx: int):
         self.sm.set('camera_device_index', idx)
@@ -4053,13 +4019,13 @@ class _SettingsPage(QWidget):
         if names:
             self.preset_combo.addItems(names)
         else:
-            self.preset_combo.addItem('— kein Preset —')
+            self.preset_combo.addItem('— no presets —')
         self.preset_combo.blockSignals(False)
 
     def _on_preset_save(self):
         from PyQt6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(
-            self, 'Preset speichern', 'Name:',
+            self, 'Save Preset', 'Name:',
             text=self.preset_combo.currentText() if self._presets_mgr.names() else '')
         if not ok or not name.strip():
             return
@@ -4134,10 +4100,10 @@ class _SettingsPage(QWidget):
                 return
             mappings = main_win.bridge.get_audio_mappings()
             if not mappings:
-                self.mappings_lbl.setText('Erkannte Apps: (keine)')
+                self.mappings_lbl.setText('Detected apps: (none)')
             else:
                 parts = [f'{app} → {cat} ✓' for app, cat in mappings.items()]
-                self.mappings_lbl.setText('Erkannte Apps: ' + '   '.join(parts))
+                self.mappings_lbl.setText('Detected apps: ' + '   '.join(parts))
         except Exception:
             pass
 
@@ -4327,7 +4293,7 @@ class _SettingsPage(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 0, 16, 32)
         layout.setSpacing(0)
 
         layout.addWidget(_flat_section_header('Startup'))
@@ -4337,27 +4303,94 @@ class _SettingsPage(QWidget):
         self.splash_check.setChecked(True)
         layout.addWidget(self.splash_check)
 
+        # ── Camera Overlay ────────────────────────────────────────────────
         layout.addSpacing(28)
-        layout.addWidget(_flat_section_header('Auto-Crop'))
+        layout.addWidget(_flat_section_header('Camera Overlay'))
         layout.addSpacing(12)
 
-        self.auto_crop_check = QCheckBox('Schwarzbalken automatisch entfernen')
-        self.auto_crop_check.setStyleSheet(CHECKBOX_QSS)
-        self.auto_crop_check.setChecked(self.sm.get('auto_crop_enabled', False))
-        self.auto_crop_check.toggled.connect(self._on_auto_crop_toggled)
-        layout.addWidget(self.auto_crop_check)
+        self.camera_check = QCheckBox('Burn camera overlay into clips')
+        self.camera_check.setStyleSheet(CHECKBOX_QSS)
+        self.camera_check.setChecked(self.sm.get('camera_enabled', False))
+        self.camera_check.toggled.connect(self._on_camera_toggled)
+        layout.addWidget(self.camera_check)
+        layout.addSpacing(8)
+
+        cam_dev_row = QHBoxLayout()
+        cam_dev_row.setSpacing(8)
+        _dev_lbl = QLabel('DEVICE')
+        _dev_lbl.setStyleSheet(_LABEL_STYLE)
+        _dev_lbl.setFixedWidth(80)
+        cam_dev_row.addWidget(_dev_lbl)
+        self.camera_device_combo = _DropdownCombo()
+        self.camera_device_combo.setStyleSheet(_COMBO_STYLE)
+        self._populate_camera_devices()
+        self.camera_device_combo.currentIndexChanged.connect(self._on_camera_device_changed)
+        cam_dev_row.addWidget(self.camera_device_combo, 1)
+        layout.addLayout(cam_dev_row)
+        layout.addSpacing(6)
+
+        cam_pos_row = QHBoxLayout()
+        cam_pos_row.setSpacing(8)
+        _pos_lbl = QLabel('POSITION')
+        _pos_lbl.setStyleSheet(_LABEL_STYLE)
+        _pos_lbl.setFixedWidth(80)
+        cam_pos_row.addWidget(_pos_lbl)
+        self.camera_pos_combo = _DropdownCombo()
+        self.camera_pos_combo.addItems(['Bottom Right', 'Bottom Left', 'Top Right', 'Top Left'])
+        self.camera_pos_combo.setStyleSheet(_COMBO_STYLE)
+        _pos_keys = ['bottom-right', 'bottom-left', 'top-right', 'top-left']
+        saved_pos = self.sm.get('camera_position', 'bottom-right')
+        self.camera_pos_combo.setCurrentIndex(
+            _pos_keys.index(saved_pos) if saved_pos in _pos_keys else 0)
+        self.camera_pos_combo.currentIndexChanged.connect(self._on_camera_pos_changed)
+        cam_pos_row.addWidget(self.camera_pos_combo)
+
+        _sz_lbl = QLabel('SIZE')
+        _sz_lbl.setStyleSheet(_LABEL_STYLE)
+        _sz_lbl.setFixedWidth(48)
+        cam_pos_row.addWidget(_sz_lbl)
+        self.camera_size_combo = _DropdownCombo()
+        self.camera_size_combo.addItems(['Small', 'Medium', 'Large'])
+        self.camera_size_combo.setStyleSheet(_COMBO_STYLE)
+        _sz_keys = ['small', 'medium', 'large']
+        saved_sz = self.sm.get('camera_size', 'medium')
+        self.camera_size_combo.setCurrentIndex(
+            _sz_keys.index(saved_sz) if saved_sz in _sz_keys else 1)
+        self.camera_size_combo.currentIndexChanged.connect(self._on_camera_size_changed)
+        cam_pos_row.addWidget(self.camera_size_combo)
+        layout.addLayout(cam_pos_row)
+        layout.addSpacing(8)
+
+        self.camera_preview_lbl = QLabel('Camera disabled')
+        self.camera_preview_lbl.setFixedSize(160, 90)
+        self.camera_preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.camera_preview_lbl.setStyleSheet(
+            f'background: {Colors.CARD_BG}; color: {Colors.TEXT_DIM}; '
+            f'border: 1px solid {Colors.BORDER};')
+        layout.addWidget(self.camera_preview_lbl)
         layout.addSpacing(4)
 
-        _ac_hint = QLabel(
-            'Erkennt Letterbox/Pillarbox-Balken nach dem Aufnehmen und schneidet sie heraus. '
-            'Standard: deaktiviert. Verlangsamt die Clip-Verarbeitung.'
-        )
-        _ac_hint.setWordWrap(True)
-        _ac_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
-        layout.addWidget(_ac_hint)
+        self._camera_preview_timer = QTimer(self)
+        self._camera_preview_timer.setInterval(100)
+        self._camera_preview_timer.timeout.connect(self._update_camera_preview)
+        if self.sm.get('camera_enabled', False):
+            self._camera_preview_timer.start()
 
         layout.addStretch()
-        return page
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet(scrollbar_qss())
+        scroll.setWidget(page)
+
+        wrapper = QWidget()
+        wrapper.setStyleSheet('background: transparent;')
+        wl = QVBoxLayout(wrapper)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.setSpacing(0)
+        wl.addWidget(scroll)
+        return wrapper
 
     def _on_theme_applied(self):
         """Re-apply the full app stylesheet using current theme colors."""
@@ -4411,8 +4444,8 @@ class _SettingsPage(QWidget):
         # Preset
         self.preset_combo = _DropdownCombo()
         self.preset_combo.addItems([
-            'P1 — Schnellst', 'P2', 'P3', 'P4 — Ausgeglichen',
-            'P5', 'P6', 'P7 — Beste Qualität',
+            'P1 — Fastest', 'P2', 'P3', 'P4 — Balanced',
+            'P5', 'P6', 'P7 — Best Quality',
         ])
         self.preset_combo.setStyleSheet(_COMBO_STYLE)
         saved_preset = self.sm.get('encoder_preset', 4)
@@ -4424,11 +4457,11 @@ class _SettingsPage(QWidget):
         self.active_encoder_lbl = QLabel('—')
         self.active_encoder_lbl.setStyleSheet(
             label_body(Colors.ACCENT, Fonts.SIZE_BODY))
-        layout.addLayout(_row('AKTIVER ENCODER', self.active_encoder_lbl))
+        layout.addLayout(_row('ACTIVE ENCODER', self.active_encoder_lbl))
         layout.addSpacing(12)
 
         # Apply button (hidden until user changes something)
-        self.encoder_apply_btn = QPushButton('ÜBERNEHMEN')
+        self.encoder_apply_btn = QPushButton('APPLY')
         self.encoder_apply_btn.setStyleSheet(BUTTON_PRIMARY_QSS)
         self.encoder_apply_btn.setVisible(False)
         self.encoder_apply_btn.clicked.connect(self._on_encoder_apply)
@@ -4437,7 +4470,7 @@ class _SettingsPage(QWidget):
         self.codec_combo.currentIndexChanged.connect(self._on_encoder_setting_changed)
         self.preset_combo.currentIndexChanged.connect(self._on_encoder_setting_changed)
 
-        enc_note = QLabel('Anwenden unterbricht die Aufnahme kurz und löscht den aktuellen Puffer.')
+        enc_note = QLabel('Applying will briefly interrupt recording and clear the current buffer.')
         enc_note.setStyleSheet(label_body(Colors.TEXT_DIM,
             Fonts.SIZE_SMALL if hasattr(Fonts, 'SIZE_SMALL') else Fonts.SIZE_BODY))
         layout.addWidget(enc_note)
@@ -4455,25 +4488,6 @@ class _SettingsPage(QWidget):
         )
         buf_note.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
         layout.addWidget(buf_note)
-
-        layout.addSpacing(28)
-        layout.addWidget(_settings_hsep())
-        layout.addSpacing(20)
-
-        layout.addWidget(_flat_section_header('Audio Capture'))
-        layout.addSpacing(12)
-
-        self.audio_capture_check = QCheckBox('Audio aufnehmen')
-        self.audio_capture_check.setStyleSheet(CHECKBOX_QSS)
-        self.audio_capture_check.setChecked(self.sm.get('audio_capture_enabled', True))
-        self.audio_capture_check.toggled.connect(self._on_audio_capture_toggled)
-        layout.addWidget(self.audio_capture_check)
-        layout.addSpacing(4)
-
-        _ac_hint = QLabel('Deaktivieren spart CPU. Änderung gilt beim nächsten Engine-Neustart.')
-        _ac_hint.setWordWrap(True)
-        _ac_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
-        layout.addWidget(_ac_hint)
 
         layout.addStretch()
         return page
