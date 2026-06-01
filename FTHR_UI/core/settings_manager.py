@@ -52,6 +52,8 @@ class SettingsManager:
                 'music':   100,
                 'discord': 100,
             },
+            'notification_monitor': 'auto',  # 'auto' = highest refresh rate, or screen name e.g. 'DP-3'
+            'capture_monitor': '',           # wl_output name for desktop capture, '' = first output
             'imported_clip_folders': [],  # additional folders from other clipping software
             # ── Upload ────────────────────────────────────────────────────
             'upload_enabled':          False,
@@ -61,6 +63,9 @@ class SettingsManager:
             'upload_interval_value':   5,
             'upload_interval_unit':    'minutes',   # 'minutes' | 'hours' | 'days'
             'upload_auto_delete':      False,
+            # Encoder codec + preset (v2 settings)
+            'codec_pref':     'auto',   # 'auto' | 'h264' | 'hevc' | 'av1'
+            'encoder_preset': 4,        # 1–7
         }
         
         if not self.config_file.exists():
