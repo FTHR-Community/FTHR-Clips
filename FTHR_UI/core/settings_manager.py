@@ -26,6 +26,7 @@ class SettingsManager:
         """Load settings from config file"""
         default_settings = {
             'clip_length': 30,       # seconds
+            'extended_clip_length': 60,  # seconds — used by F10 / EXT. CLIP hotkey
             'framerate': 60,         # FPS
             'resolution': 'source',  # 480p/720p/1080p/1440p/source
             'bitrate_level': 'medium',  # low/medium/high
