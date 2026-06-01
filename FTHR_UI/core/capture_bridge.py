@@ -295,6 +295,18 @@ class CaptureBridge:
         return True
 
 
+    def pause_recording(self) -> bool:
+        if not self.is_connected():
+            return False
+        self._layout.ui_command = CommandType.STOP_RECORDING
+        return True
+
+    def resume_recording(self) -> bool:
+        if not self.is_connected():
+            return False
+        self._layout.ui_command = CommandType.START_RECORDING
+        return True
+
     def wait_for_clip_completion(self, timeout_ms: int = 30000) -> bool:
         """
         Optional: Wait for the queued clip to finish encoding.

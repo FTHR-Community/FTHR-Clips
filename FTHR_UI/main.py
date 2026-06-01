@@ -35,6 +35,7 @@ from PyQt6.QtGui import QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, 
 from core.capture_bridge import CaptureBridge
 from core.hotkey_manager import HotkeyManager, AVAILABLE_KEYS
 from core.game_detector import GameDetector
+from core.focus_monitor import FocusMonitor
 from core.presets_manager import PresetsManager, PRESET_KEYS
 from core.settings_manager import SettingsManager
 from core.theme_manager import ThemeManager
@@ -1316,6 +1317,16 @@ class MainWindow(QMainWindow):
         if self.settings_manager.get('game_detection_enabled', False):
             self._game_detector.start()
 
+        self._focus_monitor = FocusMonitor()
+        self._focus_monitor.focus_lost.connect(self._on_focus_lost)
+        self._focus_monitor.focus_regained.connect(self._on_focus_regained)
+
+        if (self.settings_manager.get('anticheat_detection_enabled', False)
+                and self.settings_manager.get('capture_mode', 'desktop') == 'window'):
+            target = self.settings_manager.get('target_window_name', '')
+            self._focus_monitor.set_target(target)
+            self._focus_monitor.start()
+
         self.is_capturing    = True
         self.capture_card    = CaptureCardClient(self.settings_manager)
         self._encoder_type   = 'DETECTING'
@@ -1892,6 +1903,16 @@ class MainWindow(QMainWindow):
 
     def _on_game_prompt_timeout(self):
         self._pending_game_window = None
+
+    def _on_focus_lost(self):
+        if self.bridge.is_connected():
+            self.bridge.pause_recording()
+            self._set_status('PAUSED — GAME UNFOCUSED', STATUS_WARNING)
+
+    def _on_focus_regained(self):
+        if self.bridge.is_connected():
+            self.bridge.resume_recording()
+            self._set_status('CAPTURING', STATUS_ACTIVE)
 
     # =======================================================================
     # Settings handlers
@@ -3198,6 +3219,27 @@ class _SettingsPage(QWidget):
         _wm_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
         layout.addWidget(_wm_hint)
 
+        # ── Anticheat Detection ───────────────────────────────────────────
+        layout.addSpacing(28)
+        layout.addWidget(_flat_section_header('Anticheat Detection'))
+        layout.addSpacing(12)
+
+        self.anticheat_check = QCheckBox('Aufnahme pausieren wenn Game unfokussiert')
+        self.anticheat_check.setStyleSheet(CHECKBOX_QSS)
+        self.anticheat_check.setChecked(
+            self.sm.get('anticheat_detection_enabled', False))
+        self.anticheat_check.toggled.connect(self._on_anticheat_toggled)
+        layout.addWidget(self.anticheat_check)
+        layout.addSpacing(4)
+
+        _at_hint = QLabel(
+            'Nur aktiv bei Fenster-Aufnahme. Pausiert den Buffer wenn das Game '
+            'nicht im Vordergrund ist. Standard: deaktiviert.'
+        )
+        _at_hint.setWordWrap(True)
+        _at_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(_at_hint)
+
         # ── Settings Presets ──────────────────────────────────────────────
         layout.addSpacing(28)
         layout.addWidget(_flat_section_header('Settings-Presets'))
@@ -3768,6 +3810,21 @@ class _SettingsPage(QWidget):
     def _on_auto_crop_toggled(self, checked: bool):
         self.sm.set('auto_crop_enabled', checked)
         self.sm.save_settings()
+
+    def _on_anticheat_toggled(self, checked: bool):
+        self.sm.set('anticheat_detection_enabled', checked)
+        self.sm.save_settings()
+        main_win = self.window()
+        if not hasattr(main_win, '_focus_monitor'):
+            return
+        if checked and self.sm.get('capture_mode', 'desktop') == 'window':
+            target = self.sm.get('target_window_name', '')
+            main_win._focus_monitor.set_target(target)
+            main_win._focus_monitor.start()
+        else:
+            main_win._focus_monitor.stop()
+            if hasattr(main_win, 'bridge') and main_win.bridge.is_connected():
+                main_win.bridge.resume_recording()
 
     def _refresh_preset_combo(self):
         self.preset_combo.blockSignals(True)
