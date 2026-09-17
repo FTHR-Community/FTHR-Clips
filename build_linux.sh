@@ -33,7 +33,7 @@ echo ""
 
 # 1. Check requirements
 echo ">>> Checking dependencies..."
-for cmd in cmake gcc pkg-config wayland-scanner curl readelf file; do
+for cmd in cmake gcc pkg-config wayland-scanner curl readelf file sha256sum; do
     command -v "$cmd" >/dev/null 2>&1 || {
         echo "ERROR: '$cmd' not found."
         exit 1
@@ -377,12 +377,17 @@ ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 \
 }
 cp "$NATIVE_OUTPUT" "$OUTPUT"
 
+# Ship a checksum beside the artifact so users and release automation can
+# verify that they downloaded the intended binary.
+( cd "$(dirname "$OUTPUT")" && sha256sum "$(basename "$OUTPUT")" > "$(basename "$OUTPUT").sha256" )
+
 SIZE="$(du -sh "$OUTPUT" | cut -f1)"
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║              FTHR Clips Linux AppImage Ready                ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
 printf "║  Output: %-52s║\n" "build_output/FTHRClips-${APP_VERSION}-x86_64.AppImage"
+printf "║  SHA256: %-51s║\n" "build_output/FTHRClips-${APP_VERSION}-x86_64.AppImage.sha256"
 printf "║  Size:   %-52s║\n" "$SIZE"
 echo "╠══════════════════════════════════════════════════════════════╣"
 echo "║  Linux-only — contains the Linux capture engine only.       ║"
