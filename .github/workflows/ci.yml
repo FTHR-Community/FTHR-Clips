@@ -76,6 +76,8 @@ jobs:
         run: |
           sudo apt-get install -q -y cmake g++ pkg-config libpulse-dev libx11-dev libxext-dev libxfixes-dev libwayland-dev wayland-protocols
           python tools/fetch_third_party.py --ffmpeg-linux
+          echo "LD_LIBRARY_PATH=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "PATH=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg/bin:${PATH}" >> "$GITHUB_ENV"
           cmake -B FTHRcapture_linux/build -S FTHRcapture_linux -DCMAKE_BUILD_TYPE=Release -DFTHR_FFMPEG_ROOT=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg
           cmake --build FTHRcapture_linux/build -j"$(nproc)"
 
