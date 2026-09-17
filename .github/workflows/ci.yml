@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, linux]
     tags: ['v*']
   pull_request:
-    branches: [main, master]
+    branches: [main, master, linux]
 
 # Keep CI read-only and free of secrets; release verification scans untrusted changes.
 permissions:
