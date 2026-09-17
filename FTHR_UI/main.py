@@ -3422,7 +3422,7 @@ class MainWindow(QMainWindow):
                 0, self._settings_page_widget._populate_mic_devices)
 
     def _init_gary_mode(self):
-        default_image = Path(__file__).parent / 'assets' / 'fthr_logo.png'
+        default_image = Path(__file__).parent / 'assets' / 'gary.png'
         self._gary_overlay = GaryOverlay(default_image, anchor=self)
         self._gary_current_intensity = 0.0
         self._gary_enabled = False
@@ -10704,7 +10704,7 @@ class _SettingsPage(QWidget):
             candidate = Path(self.gary_image_path).expanduser()
             if candidate.is_file():
                 return candidate
-        return Path(__file__).parent / 'assets' / 'fthr_logo.png'
+        return Path(__file__).parent / 'assets' / 'gary.png'
 
     def _refresh_gary_preview(self):
         path = self._effective_gary_image_path()
