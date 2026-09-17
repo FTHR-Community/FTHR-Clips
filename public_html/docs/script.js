@@ -1,24 +1,30 @@
-// Documentation-site helpers shared by the Linux documentation bundle.
-// The failure-code registry is intentionally kept in this file so the
-// rendered documentation and the runtime diagnostics use the same identifiers.
+// FTHR Clips documentation failure-code registry.
 const FTHR_FAILURE_CODES = Object.freeze({
-  AUDIT_005: 'AUDIT-005',
-  AUDIT_008: 'AUDIT-008',
-  AUDIT_009: 'AUDIT-009',
-  AUDIT_013: 'AUDIT-013',
-  CAPTURE_BACKEND_UNAVAILABLE: 'CAPTURE-BACKEND-UNAVAILABLE',
-  CAPTURE_START_FAILED: 'CAPTURE-START-FAILED',
-  ENCODER_UNAVAILABLE: 'ENCODER-UNAVAILABLE',
-  FFMPEG_UNAVAILABLE: 'FFMPEG-UNAVAILABLE',
-  INVALID_CAPTURE_CONFIGURATION: 'INVALID-CAPTURE-CONFIGURATION',
-  WAYLAND_UNAVAILABLE: 'WAYLAND-UNAVAILABLE',
+  'Error 001': 'CAPTURE FAILED',
+  'Error 002': 'CAPTURE UNAVAILABLE',
+  'Error 003': 'ENGINE NOT FOUND',
+  'Error 004': 'ENGINE NOT RESPONDING',
+  'Error 005': 'ENGINE COULD NOT START',
+  'Error 006': 'ENGINE STOPPED',
+  'Error 007': 'MANUAL RECORDING FAILED',
+  'Error 008': 'RECORDING COULD NOT START',
+  'Error 009': 'RECORDING COULD NOT STOP',
+  'Error 010': 'RECORDING FOLDER UNAVAILABLE',
+  'Error 011': 'RECORDING PATH TOO LONG',
+  'Error 012': 'NOT ENOUGH DISK SPACE',
+  'Error 013': 'CLIP NOT SAVED',
+  'Error 014': 'CLIP SAVE FAILED',
+  'Error 015': 'CLIP WAS NOT SAVED',
+  'Error 016': 'CLIP PATH TOO LONG',
+  'Error 017': 'CLIP FINALIZATION FAILED',
+  'Error 018': 'EXPORT FAILED',
+  'Error 019': 'SHARE FAILED',
+  'Error 020': 'UPLOAD FAILED',
+  'Error 021': 'UPLOAD NOT CONFIGURED',
+  'Error 022': 'UPLOAD CONNECTION FAILED',
+  'Error 023': 'COMPRESSION FAILED',
 });
-
-function failureCode(code) {
-  return FTHR_FAILURE_CODES[code] || code;
-}
 
 if (typeof window !== 'undefined') {
   window.FTHR_FAILURE_CODES = FTHR_FAILURE_CODES;
-  window.failureCode = failureCode;
 }
