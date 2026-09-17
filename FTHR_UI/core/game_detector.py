@@ -13,6 +13,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import ntpath
 import subprocess
 import sys
 import threading
@@ -408,7 +409,7 @@ def normalise_custom_game_rules(rules: object) -> tuple[dict[str, object], ...]:
         folder_path = str(raw_rule.get('folder_path', '') or '').strip()
         exe_name = str(raw_rule.get('exe_name', '') or '').strip()
         if not exe_name and exe_path:
-            exe_name = Path(exe_path).name
+            exe_name = ntpath.basename(exe_path) or Path(exe_path).name
         if not title and not exe_path and not folder_path and not exe_name:
             continue
 

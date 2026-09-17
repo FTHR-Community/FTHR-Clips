@@ -394,7 +394,7 @@ jobs:
           image="build_output/FTHRClips-$(python -c "import sys; sys.path.insert(0,'FTHR_UI'); import version; print(version.__version__)")-x86_64.AppImage"
           test -x "$image"
           test -s "$image.sha256"
-          sha256sum -c "$image.sha256"
+          (cd "$(dirname "$image")" && sha256sum -c "$(basename "$image.sha256")")
           file "$image" | grep -qi appimage
           APPIMAGE_EXTRACT_AND_RUN=1 "$image" --appimage-extract >/dev/null
           test -x squashfs-root/AppRun
