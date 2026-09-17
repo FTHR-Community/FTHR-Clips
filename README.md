@@ -137,8 +137,8 @@ Visual Studio 2022 + Python 3.14. See [`BUILDING.md`](BUILDING.md) for the full 
 ## Architecture
 
 ```
-┌─────────────────────┐     Shared Memory (v4)     ┌────────────────────────┐
-│   FTHR_UI (Python)  │ ◄─────────────────────────► │  Native capture engine │
+┌─────────────────────┐     Shared Memory (v4)       ┌────────────────────────┐
+│   FTHR_UI (Python)  │ ◄─────────────────────────►  │  Native capture engine │
 │   PySide6 frontend  │                              │  Windows: WGC + GPU    │
 │   Consent / Queue   │                              │  Linux: Wayland/X11    │
 │   Clip browser      │                              │  Platform audio input  │
@@ -148,7 +148,7 @@ Visual Studio 2022 + Python 3.14. See [`BUILDING.md`](BUILDING.md) for the full 
 ┌─────────────────────┐       Lustful only       ┌────────────────────────┐
 │ Optional Uploader   │ ───────────────────────► │ Optional Hardware ID   │
 │ Catbox / Lustful    │   derived UUID only      │ local machine-ID read  │
-└─────────────────────┘                           └────────────────────────┘
+└─────────────────────┘                          └────────────────────────┘
 ```
 
 The native capture engine runs as a separate process and communicates with the
