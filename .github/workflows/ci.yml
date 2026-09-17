@@ -348,8 +348,9 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -q -y \
             cmake g++ pkg-config curl file binutils \
-            libpulse-dev libx11-dev libxext-dev libxfixes-dev \
-            libwayland-dev wayland-protocols
+            libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
+            libswscale-dev libswresample-dev libpulse-dev libx11-dev \
+            libxext-dev libxfixes-dev libwayland-dev wayland-protocols
           python -m pip install --upgrade pip
           python -m pip install -r requirements-alpha.txt pyinstaller
 
