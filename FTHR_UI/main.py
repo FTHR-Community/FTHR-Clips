@@ -4858,7 +4858,7 @@ class MainWindow(QMainWindow):
                 bitrate = BITRATE_PRESETS[resolution].get(
                     quality, BITRATE_PRESETS[resolution]['high'])
         monitor = self.settings_manager.get('capture_monitor', '')
-        current_choices = enumerate_windows_monitors() if sys.platform == 'win32' else []
+        current_choices = enumerate_windows_monitors()
         if current_choices and not is_valid_monitor_device_path(monitor, current_choices):
                 monitor = default_windows_monitor_path(current_choices)
                 if monitor:

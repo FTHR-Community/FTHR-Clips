@@ -446,8 +446,8 @@ def matching_custom_game_rule(
         if rule_title and rule_title not in title:
             continue
         if rule_path and rule_path != path:
-            # A title-qualified rule can survive a runtime directory update.
-            if not (rule_title and rule_exe_name and rule_exe_name == exe_name):
+            # A Java runtime may move while the title remains the stable identity.
+            if not (rule_title and rule_title in title and rule_exe_name and rule_exe_name == exe_name):
                 continue
         elif rule_folder:
             folder_prefix = rule_folder.rstrip('/\\') + os.sep
