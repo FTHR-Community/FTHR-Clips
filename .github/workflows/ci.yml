@@ -71,6 +71,14 @@ jobs:
           fi
           echo "imageio-ffmpeg absent."
 
+      - name: Install Windows FFmpeg runtime for media tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python tools/fetch_third_party.py --ffmpeg
+          $ffmpeg = "${{ github.workspace }}\\FTHRcapture\\FTHRclips\\third_party\\ffmpeg\\bin"
+          "Path=$ffmpeg;$env:Path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+
       - name: Prepare Linux test artifacts
         if: runner.os == 'Linux'
         run: |
