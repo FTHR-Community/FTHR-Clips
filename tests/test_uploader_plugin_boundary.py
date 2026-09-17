@@ -9,6 +9,8 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'FTHR_UI'))
@@ -256,7 +258,17 @@ def test_consent_ui_is_the_only_activation_callsite():
     assert callsites == ['FTHR_UI/ui/upload_settings_widget.py']
 
 
-def test_built_dormant_packages_match_core_release_bindings():
+@pytest.fixture
+def built_windows_plugins():
+    if sys.platform != 'win32':
+        pytest.skip('frozen optional packages contain Windows executables')
+    packages = ROOT / 'plugin-packages'
+    if not all((packages / name).is_file() for name in (
+            'FTHR-Uploader.fthrplugin', 'FTHR-Hardware-Identity.fthrplugin')):
+        pytest.skip('build optional packages with tools/build_optional_uploaders.py first')
+
+
+def test_built_dormant_packages_match_core_release_bindings(built_windows_plugins):
     uploader = ROOT / 'plugin-packages' / 'FTHR-Uploader.fthrplugin'
     hardware = ROOT / 'plugin-packages' / 'FTHR-Hardware-Identity.fthrplugin'
     assert _sha256(uploader) == core_uploader.EXPECTED_UPLOADER_BUNDLE_SHA256
@@ -277,7 +289,7 @@ def test_built_dormant_packages_match_core_release_bindings():
         }
 
 
-def test_built_one_shot_packages_activate_and_run_locally(tmp_path):
+def test_built_one_shot_packages_activate_and_run_locally(tmp_path, built_windows_plugins):
     uploader_root = tmp_path / 'uploader'
     hardware_root = tmp_path / 'hardware'
     settings_file = tmp_path / 'settings.json'

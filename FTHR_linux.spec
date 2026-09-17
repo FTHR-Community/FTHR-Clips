@@ -136,6 +136,7 @@ a = Analysis(
         (str(ASSETS_DIR / 'favicon.ico'),    'assets'),
         (str(ASSETS_DIR / 'fthr_logo.png'),  'assets'),
         (str(ASSETS_DIR / 'preview_desktop.png'), 'assets'),
+        (str(ASSETS_DIR / 'gary.png'), 'assets'),
         # Licence paperwork must travel INSIDE the bundle (AUDIT-005), so a
         # portable copy is as complete as an installed one.
         (str(ROOT / 'LICENSE'), '.'),

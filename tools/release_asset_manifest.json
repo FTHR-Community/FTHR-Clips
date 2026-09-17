@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "last_verified": "2026-08-31",
+  "last_verified": "2026-09-17",
   "allowed_redistribution_status": "approved",
   "scanned_source_roots": [
     ".github",
@@ -27,6 +27,11 @@
     ".woff2"
   ],
   "origins": {
+    "fthr-original-gary": {
+      "type": "project-original",
+      "description": "Original Gary artwork created by FTHR, confirmed by the project owner on 2026-09-17; retained as a source image, not an output of the release asset generator.",
+      "notice": "licenses/FTHR-GENERATED-ASSETS.txt"
+    },
     "fthr-generator-v1": {
       "type": "project-generated",
       "generator": "tools/generate_release_assets.py",
@@ -56,7 +61,8 @@
     }
   },
   "assets": [
-    {"path": ".github/social_preview.png", "sha256": "a8973c63b5a364032f9f1c9d0bc12f354735e508a75e7a8b2759bfc7999a3b85", "media_type": "image/png", "usage": ["repository social preview"], "distributions": ["repository-only"], "artifact_paths": {}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
+    {"path": "FTHR_UI/assets/gary.png", "sha256": "4ccfb741b009977f0af444ba114c08340a070769d250dd163e279a28ccdc8571", "media_type": "image/png", "usage": ["Gary mode default image"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/gary.png"], "linux": ["_internal/assets/gary.png"]}, "packaging_references": ["FTHR.spec", "FTHR_linux.spec"], "license": "MIT", "copyright": "Copyright (c) 2026 Haakon Schaller, trading as FTHR-Software", "origin": "fthr-original-gary", "redistribution_status": "approved"},
+    {"path": ".github/social_preview.png", "sha256": "ea90be692d4c58f23cc70f139021938ca196b7039255d98e098820962cbefe14", "media_type": "image/png", "usage": ["repository social preview"], "distributions": ["repository-only"], "artifact_paths": {}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
     {"path": "AppDir/fthr-clips.png", "sha256": "0266ea11270d48a927c09805d59a2fd957e2cceb035f6793bff29fd7d8b50e08", "media_type": "image/png", "usage": ["AppImage desktop icon"], "distributions": ["linux"], "artifact_paths": {"linux": ["fthr-clips.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
     {"path": "FTHR_UI/assets/fonts/Oswald-Bold.ttf", "sha256": "eb7d46f856dd57f18a8c03d033c57802692bf127f01dbd95ba8984338e6b5135", "media_type": "font/ttf", "usage": ["application display font"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/fonts/Oswald-Bold.ttf"], "linux": ["_internal/assets/fonts/Oswald-Bold.ttf"]}, "license": "OFL-1.1", "copyright": "Copyright 2016 The Oswald Project Authors (https://github.com/googlefonts/OswaldFont)", "origin": "oswald-4.103", "redistribution_status": "approved"},
     {"path": "FTHR_UI/assets/fthr_logo.ico", "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936", "media_type": "image/vnd.microsoft.icon", "usage": ["Windows executable icon"], "distributions": ["windows-executable-embedded"], "artifact_paths": {}, "packaging_references": ["FTHR.spec"], "license": "User-provided", "copyright": "Workspace owner supplied brand icon", "origin": "user-provided-brand-icon", "redistribution_status": "approved"},

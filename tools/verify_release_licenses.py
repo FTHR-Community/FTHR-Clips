@@ -56,11 +56,12 @@ REQUIRED_TREE_FILES = (
     'tools/release_asset_manifest.json',
 )
 
-# Exact LF-normalized GPLv3 text supplied for the project licence. Pinning the
-# full document prevents a truncated, edited, or stale MIT licence from being
-# shipped while the UI and README claim GPL-3.0-only.
+# Exact project notice plus unchanged GPLv3 text in LICENSE. The notice added
+# in 933578a changes the document hash; the GPL body still hashes to
+# 1b3782ccad7b8614100cda30d3faf42fc39f2e97932908c543005053b654ca68.
+# Keep pinning the full document so edits or truncation remain release errors.
 PROJECT_LICENSE_SHA256 = (
-    '1b3782ccad7b8614100cda30d3faf42fc39f2e97932908c543005053b654ca68'
+    'fa20afae8ae04600b02a8092abf8363d4fe4f5245ea8c56dd2de90b7d8439802'
 )
 
 # Linux ships its own pinned LGPL FFmpeg (AUDIT-014) with its own manifest.
