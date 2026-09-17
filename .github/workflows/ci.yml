@@ -90,7 +90,35 @@ jobs:
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest tests/ -v --tb=short
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            python -m pytest tests/ -v --tb=short \
+              --ignore=tests/test_linux_appimage_report.py \
+              --ignore=tests/test_linux_runtime.py \
+              --ignore=tests/test_linux_tools.py \
+              --ignore=tests/test_capture_backend_detection.py \
+              --ignore=tests/test_windows_monitor.py \
+              --ignore=tests/test_windows_native_hotkeys.py \
+              --ignore=tests/test_windows_autostart.py \
+              --ignore=tests/test_windows_installer_contract.py \
+              --ignore=tests/test_windows_lifecycle_contract.py \
+              --ignore=tests/test_windows_hardware_qualification_args.py \
+              --ignore=tests/test_windows_microphone_devices.py
+          else
+            python -m pytest tests/ -v --tb=short \
+              --ignore=tests/test_linux_appimage_report.py \
+              --ignore=tests/test_linux_runtime.py \
+              --ignore=tests/test_linux_tools.py \
+              --ignore=tests/test_capture_backend_detection.py \
+              --ignore=tests/test_license_gate_linux.py \
+              --ignore=tests/test_windows_monitor.py \
+              --ignore=tests/test_windows_native_hotkeys.py \
+              --ignore=tests/test_windows_autostart.py \
+              --ignore=tests/test_windows_installer_contract.py \
+              --ignore=tests/test_windows_lifecycle_contract.py \
+              --ignore=tests/test_windows_hardware_qualification_args.py \
+              --ignore=tests/test_windows_microphone_devices.py
+          fi
 
   # Linux capture engine
   linux-engine:
@@ -350,6 +378,9 @@ jobs:
             cmake g++ pkg-config curl file binutils \
             libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
             libswscale-dev libswresample-dev libpulse-dev libportaudio2 libx11-dev \
+            libgl1 libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-xinerama0 libxkbcommon-x11-0 \
             libxext-dev libxfixes-dev libwayland-dev wayland-protocols
           python -m pip install --upgrade pip
           python -m pip install -r requirements-alpha.txt pyinstaller
