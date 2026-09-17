@@ -181,5 +181,49 @@ def test_provider_actions_require_versioned_consent():
         raise AssertionError('Lustful action accepted a missing hardware capability')
 
 
-def test_custom_provider_does_not_require_third_party_consent():
+def test_custom_server_does_not_require_third_party_consent():
     uploader_service._require_provider_consent('custom', {}, {})
+
+
+def test_permanent_http_upload_failure_is_not_retried(tmp_path, monkeypatch):
+    clip = tmp_path / 'clip.mp4'
+    clip.write_bytes(b'clip-data')
+    attempts = 0
+
+    def multipart(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        return 413, b'file too large'
+
+    monkeypatch.setattr(upload_runtime, '_multipart_post', multipart)
+    monkeypatch.setattr(upload_runtime, 'HISTORY_FILE', tmp_path / 'history.json')
+    runtime = upload_runtime.UploadRuntime({'upload_provider': 'catbox'})
+
+    ok, message, _info = runtime.upload(str(clip))
+
+    assert not ok
+    assert 'file too large' in message
+    assert attempts == 1
+
+
+def test_server_error_upload_is_retried(tmp_path, monkeypatch):
+    clip = tmp_path / 'clip.mp4'
+    clip.write_bytes(b'clip-data')
+    attempts = 0
+
+    def multipart(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return 503, b'temporarily unavailable'
+        return 200, b'https://files.catbox.moe/example.mp4'
+
+    monkeypatch.setattr(upload_runtime, '_multipart_post', multipart)
+    monkeypatch.setattr(upload_runtime, 'HISTORY_FILE', tmp_path / 'history.json')
+    monkeypatch.setattr(upload_runtime.time, 'sleep', lambda _delay: None)
+    runtime = upload_runtime.UploadRuntime({'upload_provider': 'catbox'})
+
+    ok, message, _info = runtime.upload(str(clip))
+
+    assert ok, message
+    assert attempts == 2
