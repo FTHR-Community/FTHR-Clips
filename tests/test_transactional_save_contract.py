@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -52,6 +53,8 @@ def test_linux_success_is_after_transaction_completion() -> None:
 
 
 def test_native_fault_injection_contract(tmp_path: Path) -> None:
+    if sys.platform == 'win32':
+        pytest.skip('Linux native fault-injection binary is not a Windows test')
     compiler = shutil.which('g++') or shutil.which('c++')
     if compiler is None:
         pytest.skip('native C++ compiler not installed')
