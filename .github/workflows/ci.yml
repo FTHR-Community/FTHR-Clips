@@ -88,6 +88,7 @@ jobs:
         run: python -m ruff check .
 
       - name: Tests
+        shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
@@ -375,9 +376,9 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -q -y \
-            cmake g++ pkg-config curl file binutils \
+            cmake g++ pkg-config curl file binutils libportaudio2 \
             libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
-            libswscale-dev libswresample-dev libpulse-dev libportaudio2 libx11-dev \
+            libswscale-dev libswresample-dev libpulse-dev libx11-dev \
             libgl1 libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
             libxcb-xinerama0 libxkbcommon-x11-0 \

@@ -53,7 +53,11 @@ def _candidate_paths() -> list[Path]:
 
     # Development runtime beside the native engine; parents[2] is the repo root.
     root = here.parents[2]
-    out.append(root / 'FTHRcapture' / 'FTHRclips' / 'third_party' / 'ffmpeg' / 'bin' / _EXE_NAME)
+    for relative in (
+        ('FTHRcapture', 'FTHRclips', 'third_party', 'ffmpeg', 'bin'),
+        ('FTHRcapture_linux', 'third_party', 'ffmpeg', 'bin'),
+    ):
+        out.append(root.joinpath(*relative, _EXE_NAME))
 
     return out
 
