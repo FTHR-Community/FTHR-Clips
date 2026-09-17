@@ -1289,8 +1289,14 @@ class HotkeyManager(QObject):
 
     def setup_instructions(self, compositor: str) -> str:
         """Return compositor instructions built from the real private socket."""
+        # Keep this helper usable with side-effect-free stand-ins in diagnostics
+        # and documentation tests; socket_command itself remains the canonical
+        # command builder for real HotkeyManager instances.
+        command_builder = getattr(self, 'socket_command', None)
+        if not callable(command_builder):
+            command_builder = lambda action: HotkeyManager.socket_command(self, action)
         commands = {
-            action: self.socket_command(action)
+            action: command_builder(action)
             for action in ('save_clip', 'save_screenshot')
         }
         if compositor == 'kwin':

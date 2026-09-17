@@ -4877,8 +4877,7 @@ class MainWindow(QMainWindow):
                 active_game,
                 self.settings_manager.get('game_detection_custom_games', []),
             )
-        crop_enabled = bool(
-            sys.platform == 'win32' and crop and crop.get('enabled', True))
+        crop_enabled = bool(crop and crop.get('enabled', True))
         return CaptureConfig(
             fps=fps,
             buffer_seconds=compute_buffer_seconds(
