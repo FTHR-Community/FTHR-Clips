@@ -81,7 +81,11 @@ def test_main_window_constructs_with_side_effect_boundaries(
     window._on_close_to_tray_changed(False)
     assert window.power_btn.isHidden()
     window._on_close_to_tray_changed(True)
-    assert not window.power_btn.isHidden()
+    if main.sys.platform == 'win32':
+        assert not window.power_btn.isHidden()
+    else:
+        # Linux does not expose the Windows-only full-shutdown title-bar button.
+        assert window.power_btn.isHidden()
 
     # Exercise the actual title-bar control through the shared cleanup path.
     # Run the deferred callback inline and keep pytest's QApplication alive.
