@@ -40,6 +40,10 @@ def test_windows_bundle_is_built_only_after_the_engine() -> None:
         "python -m PyInstaller"
     )
     assert "verify_release_licenses.py --windows-dist" in windows_job
+    assert windows_job.index('python tools/build_optional_uploaders.py') < windows_job.index(
+        'python -m PyInstaller'
+    )
+    assert 'python -m pytest tests/test_uploader_plugin_boundary.py' in windows_job
 
 
 def test_windows_package_and_source_loader_use_supported_mixer_outputs() -> None:

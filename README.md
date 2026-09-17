@@ -58,8 +58,8 @@ or compile the code yourself with this repo.
 ```bash
 cd FTHR-Clips
 bash build_linux.sh
-chmod +x build_output/FTHRClips-1.0.0-alpha-x86_64.AppImage
-./build_output/FTHRClips-1.0.0-alpha-x86_64.AppImage
+chmod +x build_output/FTHRClips-1.1.0-alpha-x86_64.AppImage
+./build_output/FTHRClips-1.1.0-alpha-x86_64.AppImage
 ```
 
 The generated AppImage is ignored by Git. A successful WSL2 package build and

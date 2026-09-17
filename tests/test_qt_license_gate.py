@@ -35,6 +35,21 @@ def test_project_license_rejects_mit_or_truncated_text(tmp_path):
                for failure in rep.failures)
 
 
+@pytest.mark.parametrize('change', ['truncate', 'edit_body', 'edit_notice'])
+def test_project_license_still_rejects_changes_with_project_notice(tmp_path, change):
+    text = (ROOT / 'LICENSE').read_text(encoding='utf-8')
+    if change == 'truncate':
+        text = text[:len(text) // 2]
+    elif change == 'edit_body':
+        text = text.replace('29 June 2007', '29 June 2008')
+    else:
+        text = text.replace('GPL-3.0-only', 'GPL-3.0-or-later')
+    _write(tmp_path / 'LICENSE', text)
+    rep = vrl.Report()
+    vrl.check_project_license(tmp_path, rep, 'fixture')
+    assert rep.failures
+
+
 def _manifest_root(tmp_path: Path) -> Path:
     (tmp_path / 'tools').mkdir(parents=True, exist_ok=True)
     shutil.copy2(REAL_MANIFEST, tmp_path / 'tools' / 'qt_runtime_manifest.json')

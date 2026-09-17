@@ -147,7 +147,7 @@ python tools/build_windows_installer.py
 
 It verifies the Microsoft VC++ redistributable, the bundle licence manifest,
 and the Windows lifecycle contract before invoking Inno Setup. Output:
-`Output\FTHRClips-Setup-1.0.0-alpha-x64.exe` for the current version.
+`Output\FTHRClips-Setup-1.1.0-alpha-x64.exe` for the current version.
 
 The frameless, app-style setup starts with a required Privacy Policy checkbox
 linking to `https://policies.fthrclips.com`, then presents the application and
@@ -205,7 +205,7 @@ pip cannot supply these.
 ```bash
 # Debian / Ubuntu
 sudo apt install build-essential cmake pkg-config \
-  libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
+  libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev libavdevice-dev \
   libswscale-dev libswresample-dev \
   libwayland-dev wayland-protocols libwayland-bin \
   libpulse-dev libportaudio2 \
@@ -234,6 +234,8 @@ bash tools/linux_system_report.sh
 ```
 
 ### 2. Build the capture engine
+
+Use CMake 3.21 or newer (the pinned-library lookup uses `find_library(NO_CACHE)`).
 
 First install the pinned LGPL FFmpeg the engine is built against (AUDIT-014):
 

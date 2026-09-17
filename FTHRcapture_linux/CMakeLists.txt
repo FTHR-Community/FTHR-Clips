@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.21)
 project(FTHRclips_linux CXX C)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -134,7 +134,7 @@ else()
 endif()
 
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-    libavcodec libavformat libavutil libavdevice libswscale libswresample)
+    libavcodec libavfilter libavformat libavutil libavdevice libswscale libswresample)
 pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
 
 message(STATUS "FFmpeg libavcodec version : ${FFMPEG_libavcodec_VERSION}")
@@ -160,7 +160,7 @@ if(FTHR_FFMPEG_BUNDLED)
     # distribution's GPL FFmpeg into this nominally pinned LGPL build.  Resolve
     # every direct engine dependency inside the verified tree and fail closed.
     set(FTHR_FFMPEG_LINK_LIBRARIES)
-    foreach(_lib avdevice avformat avcodec swscale swresample avutil)
+    foreach(_lib avdevice avfilter avformat avcodec swscale swresample avutil)
         find_library(FTHR_${_lib}_LIBRARY NAMES ${_lib}
             PATHS "${FTHR_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH NO_CACHE)
         if(NOT FTHR_${_lib}_LIBRARY)
@@ -346,7 +346,10 @@ set_target_properties(FTHRPlaybackMixer PROPERTIES
     INSTALL_RPATH "$ORIGIN:$ORIGIN/lib:$ORIGIN/../lib:$ORIGIN/../third_party/ffmpeg/lib"
     INSTALL_RPATH_USE_LINK_PATH FALSE
     BUILD_RPATH_USE_ORIGIN TRUE)
-target_link_options(FTHRPlaybackMixer PRIVATE "-Wl,--disable-new-dtags")
+# Shared-library links otherwise allow unresolved symbols, leaving ctypes to
+# discover a missing FFmpeg dependency only when the editor opens a clip.
+target_link_options(FTHRPlaybackMixer PRIVATE
+    "-Wl,--disable-new-dtags" "-Wl,-z,defs")
 if(FTHR_FFMPEG_BUNDLED)
     # libavdevice has transitive siblings (notably libavfilter).  Give the
     # static linker the same closed pinned search set used by the runtime RPATH.
@@ -357,6 +360,13 @@ if(FTHR_FFMPEG_BUNDLED)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(fthr_playback_bridge_load_test
+        tests/playback_bridge_load_test.cpp)
+    target_link_libraries(fthr_playback_bridge_load_test PRIVATE ${CMAKE_DL_LIBS})
+    add_dependencies(fthr_playback_bridge_load_test FTHRPlaybackMixer)
+    add_test(NAME playback_bridge_load
+        COMMAND fthr_playback_bridge_load_test $<TARGET_FILE:FTHRPlaybackMixer>)
+
     if(FTHR_X11_CAPTURE)
         add_executable(fthr_x11_frame_converter_test
             tests/x11_frame_converter_test.cpp

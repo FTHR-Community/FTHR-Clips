@@ -222,6 +222,13 @@ were removed, and none is allowlisted for a release. Machine-readable evidence
 is recorded in `tools/release_asset_manifest.json` and enforced by
 `tools/verify_release_licenses.py`; any failure keeps public release blocked.
 
+### Original Gary artwork
+
+`FTHR_UI/assets/gary.png` is original FTHR artwork, confirmed by the project
+owner on 2026-09-17. It is maintained as a source image rather than generated
+by the release asset script. It uses the project's MIT asset terms; see
+`licenses/FTHR-GENERATED-ASSETS.txt` for the copyright and licence notice.
+
 ### Oswald Bold
 
 | | |

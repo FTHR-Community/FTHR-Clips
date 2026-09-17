@@ -214,10 +214,19 @@ jobs:
           python -m pip install -r requirements-alpha.txt -r requirements-dev.txt
           python -m pip check
 
+      - name: Build sealed optional upload packages
+        run: python tools/build_optional_uploaders.py
+
+      - name: Test built optional upload packages
+        run: >
+          python -m pytest tests/test_uploader_plugin_boundary.py
+          -k "test_built_" --tb=short
+
       - name: Build and verify the Windows bundle
         shell: pwsh
         run: |
           python -m PyInstaller FTHR.spec --clean --noconfirm --log-level WARN
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path "dist\FTHRClips\FTHRClips.exe")) { throw "UI binary not produced" }
           if (-not (Test-Path "dist\FTHRClips\_internal\engine\FTHRClips.exe")) { throw "bundled engine not produced" }
           python tools/verify_release_licenses.py --windows-dist dist\FTHRClips

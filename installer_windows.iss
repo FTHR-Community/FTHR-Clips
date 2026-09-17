@@ -4,7 +4,7 @@
 ; Prerequisite: redist\vc_redist.x64.exe — https://aka.ms/vs/17/release/vc_redist.x64.exe
 
 #define MyAppName      "FTHR Clips"
-#define MyAppVersion   "1.0.0-alpha"
+#define MyAppVersion   "1.1.0-alpha"
 #define MyAppPublisher "FTHR Community"
 #define MyAppExeName   "FTHRClips.exe"
 #define MyAppURL       "https://github.com/fthr/clips"
@@ -45,9 +45,9 @@ VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=FTHR Clips Windows Setup
 VersionInfoProductName={#MyAppName}
 ; PE ProductVersion is numeric; keep the alpha suffix in the textual field.
-VersionInfoProductVersion=1.0.0.0
+VersionInfoProductVersion=1.1.0.0
 VersionInfoTextVersion={#MyAppVersion}
-VersionInfoVersion=1.0.0.0
+VersionInfoVersion=1.1.0.0
 
 ; Compression — maximum, solid
 Compression=lzma2/max
