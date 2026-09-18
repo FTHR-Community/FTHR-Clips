@@ -57,6 +57,7 @@ or compile the code yourself with this repo.
 ## Linux Setup
 
 ```bash
+git clone https://github.com/FTHR-Community/FTHR-Clips.git
 cd FTHR-Clips
 bash build_linux.sh
 chmod +x build_output/FTHRClips-1.1.0-alpha-x86_64.AppImage
