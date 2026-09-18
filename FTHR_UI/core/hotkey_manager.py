@@ -23,6 +23,9 @@ from core import linux_runtime, linux_tools
 
 _FTHR_HYPR_CONF    = Path.home() / '.config' / 'hypr' / 'fthr-hotkeys.conf'
 _HYPR_CONF         = Path.home() / '.config' / 'hypr' / 'hyprland.conf'
+_HYPR_LUA_CONF     = Path.home() / '.config' / 'hypr' / 'hyprland.lua'
+_HYPR_CUSTOM_LUA   = Path.home() / '.config' / 'hypr' / 'custom' / 'keybinds.lua'
+_FTHR_LUA_MARKER   = '-- FTHR Clips hotkeys (managed)'
 
 # Older builds stored each binding as ``{'keyboard': 'F9', 'controller': ...}``
 # and used the longer game-detection action names.  Keep the user's keyboard
@@ -1289,8 +1292,14 @@ class HotkeyManager(QObject):
 
     def setup_instructions(self, compositor: str) -> str:
         """Return compositor instructions built from the real private socket."""
+        # Keep this helper usable with side-effect-free stand-ins in diagnostics
+        # and documentation tests; socket_command itself remains the canonical
+        # command builder for real HotkeyManager instances.
+        command_builder = getattr(self, 'socket_command', None)
+        if not callable(command_builder):
+            command_builder = lambda action: HotkeyManager.socket_command(self, action)
         commands = {
-            action: self.socket_command(action)
+            action: command_builder(action)
             for action in ('save_clip', 'save_screenshot')
         }
         if compositor == 'kwin':
@@ -1332,6 +1341,28 @@ class HotkeyManager(QObject):
             except OSError:
                 pass
 
+    def _write_hyprland_lua_config(self, path: Path = _HYPR_CUSTOM_LUA) -> None:
+        """Add/update bindings in a Lua-based Hyprland custom keybind file."""
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            existing = path.read_text() if path.exists() else ''
+            if _FTHR_LUA_MARKER in existing:
+                existing = existing[:existing.index(_FTHR_LUA_MARKER)].rstrip() + '\n'
+            lines = [existing.rstrip(), '', _FTHR_LUA_MARKER]
+            for action in ('save_clip', 'save_screenshot'):
+                key = self.hotkeys.get(action, '')
+                if not key:
+                    continue
+                combo = ' + '.join(part.upper() for part in key.split('+'))
+                command = self.socket_command(action).replace('\\', '\\\\').replace('"', '\\"')
+                lines.append(
+                    f'hl.bind("{combo}", hl.dsp.exec_cmd("{command}"), '
+                    f'{{ description = "FTHR Clips: {action}" }})')
+            path.write_text('\n'.join(lines).rstrip() + '\n')
+            print(f'[Hotkey] Written Lua bindings to {path}')
+        except OSError as e:
+            print(f'[Hotkey] Failed to write Lua bindings: {e}')
+
     def _ensure_hyprland_source(self) -> None:
         """Add a source line to hyprland.conf if it doesn't already exist.
 
@@ -1366,8 +1397,11 @@ class HotkeyManager(QObject):
             return
         if comp != 'hyprland':
             return
-        self._write_hyprland_config()
-        self._ensure_hyprland_source()
+        if _HYPR_CUSTOM_LUA.exists() or _HYPR_LUA_CONF.exists():
+            self._write_hyprland_lua_config()
+        else:
+            self._write_hyprland_config()
+            self._ensure_hyprland_source()
         # Apply live without a full reload — one keyword per binding.
         # hyprctl keyword bind accepts the same format as the config file.
         if os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'):

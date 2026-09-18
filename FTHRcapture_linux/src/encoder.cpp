@@ -3,10 +3,13 @@
 #include <iostream>
 #include <cstring>
 #include <iterator>
+#include <cstdlib>
+
 
 extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/error.h>
+#include <libavutil/hwcontext.h>
 }
 
 namespace fthr {
@@ -92,21 +95,58 @@ bool Encoder::TryOpen(const char* codec_name, const EncoderConfig& cfg) {
     ctx->colorspace = AVCOL_SPC_BT709;
     ctx->chroma_sample_location = AVCHROMA_LOC_LEFT;
 
-    bool is_hw = (strstr(codec_name, "nvenc") || strstr(codec_name, "amf") ||
-                  strstr(codec_name, "qsv"));
-    ctx->pix_fmt = is_hw ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+    const bool is_vaapi = strstr(codec_name, "_vaapi") != nullptr;
+    const bool is_hw = (strstr(codec_name, "nvenc") || strstr(codec_name, "amf") ||
+                        strstr(codec_name, "qsv") || is_vaapi);
+    AVBufferRef* device = nullptr;
+    AVBufferRef* frames = nullptr;
+    if (is_vaapi) {
+        const char* device_path = std::getenv("FTHR_VAAPI_DEVICE");
+        if (!device_path || !*device_path) device_path = "/dev/dri/renderD128";
+        if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VAAPI,
+                                   device_path, nullptr, 0) < 0) {
+            avcodec_free_context(&ctx);
+            return false;
+        }
+        frames = av_hwframe_ctx_alloc(device);
+        if (!frames) {
+            av_buffer_unref(&device);
+            avcodec_free_context(&ctx);
+            return false;
+        }
+        auto* frames_ctx = reinterpret_cast<AVHWFramesContext*>(frames->data);
+        frames_ctx->format = AV_PIX_FMT_VAAPI;
+        frames_ctx->sw_format = AV_PIX_FMT_NV12;
+        frames_ctx->width = ctx->width;
+        frames_ctx->height = ctx->height;
+        frames_ctx->initial_pool_size = 8;
+        if (av_hwframe_ctx_init(frames) < 0) {
+            av_buffer_unref(&frames);
+            av_buffer_unref(&device);
+            avcodec_free_context(&ctx);
+            return false;
+        }
+        ctx->hw_device_ctx = av_buffer_ref(device);
+        ctx->hw_frames_ctx = av_buffer_ref(frames);
+        ctx->pix_fmt = AV_PIX_FMT_VAAPI;
+    } else {
+        ctx->pix_fmt = is_hw ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+    }
 
     ApplyPreset(ctx, codec_name, cfg.preset);
-
     ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
     if (avcodec_open2(ctx, codec, nullptr) < 0) {
+        av_buffer_unref(&frames);
+        av_buffer_unref(&device);
         avcodec_free_context(&ctx);
         return false;
     }
 
     codec_ctx_ = ctx;
-    cfg_       = cfg;
+    hw_device_ctx_ = device;
+    hw_frames_ctx_ = frames;
+    cfg_ = cfg;
     return true;
 }
 
@@ -129,6 +169,11 @@ static void BuildCodecList(
             if (codec_allowed(CodecPref::HEVC)) out.push_back("hevc_nvenc");
             if (codec_allowed(CodecPref::AV1)) out.push_back("av1_nvenc");
         } else if (backend == EncoderPref::Amd) {
+            // VA-API is the native Linux AMD path. AMF remains a fallback for
+            // systems that provide AMD's separate AMF runtime.
+            if (codec_allowed(CodecPref::H264)) out.push_back("h264_vaapi");
+            if (codec_allowed(CodecPref::HEVC)) out.push_back("hevc_vaapi");
+            if (codec_allowed(CodecPref::AV1)) out.push_back("av1_vaapi");
             if (codec_allowed(CodecPref::H264)) out.push_back("h264_amf");
             if (codec_allowed(CodecPref::HEVC)) out.push_back("hevc_amf");
             if (codec_allowed(CodecPref::AV1)) out.push_back("av1_amf");
@@ -180,7 +225,8 @@ bool Encoder::Open(const EncoderConfig& cfg, std::string& codec_used_out) {
         return false;
     }
 
-    AVPixelFormat dst_fmt = codec_ctx_->pix_fmt;
+    const bool is_vaapi = IsVaapi();
+    AVPixelFormat dst_fmt = is_vaapi ? AV_PIX_FMT_NV12 : codec_ctx_->pix_fmt;
     sws_ctx_ = sws_getContext(
         static_cast<int>(cfg.src_width),
         static_cast<int>(cfg.src_height),
@@ -214,6 +260,10 @@ bool Encoder::Open(const EncoderConfig& cfg, std::string& codec_used_out) {
         Close();
         return false;
     }
+    if (is_vaapi) {
+        hw_frame_ = av_frame_alloc();
+        if (!hw_frame_) { Close(); return false; }
+    }
 
     pkt_ = av_packet_alloc();
     if (!pkt_) { Close(); return false; }
@@ -229,9 +279,12 @@ bool Encoder::Open(const EncoderConfig& cfg, std::string& codec_used_out) {
 
 void Encoder::Close() {
     if (pkt_)       { av_packet_free(&pkt_);       }
+    if (hw_frame_)  { av_frame_free(&hw_frame_);  }
     if (yuv_frame_) { av_frame_free(&yuv_frame_);  }
     if (sws_ctx_)   { sws_freeContext(sws_ctx_);   sws_ctx_   = nullptr; }
     if (codec_ctx_) { avcodec_free_context(&codec_ctx_); }
+    av_buffer_unref(&hw_frames_ctx_);
+    av_buffer_unref(&hw_device_ctx_);
     have_pts_epoch_ = false;
     pts_epoch_ns_ = 0;
     last_input_pts_ = -1;
@@ -285,7 +338,19 @@ bool Encoder::EncodeFrame(const uint8_t* bgra, uint32_t stride,
     else
         yuv_frame_->flags &= ~AV_FRAME_FLAG_KEY;
 
-    int ret = avcodec_send_frame(codec_ctx_, yuv_frame_);
+    AVFrame* frame_to_encode = yuv_frame_;
+    if (IsVaapi()) {
+        av_frame_unref(hw_frame_);
+        if (av_hwframe_get_buffer(codec_ctx_->hw_frames_ctx, hw_frame_, 0) < 0 ||
+            av_hwframe_transfer_data(hw_frame_, yuv_frame_, 0) < 0 ||
+            av_frame_copy_props(hw_frame_, yuv_frame_) < 0) {
+            std::cerr << "[Encoder] VA-API frame upload failed" << std::endl;
+            return false;
+        }
+        frame_to_encode = hw_frame_;
+    }
+
+    int ret = avcodec_send_frame(codec_ctx_, frame_to_encode);
     if (ret < 0) {
         char errbuf[128];
         av_strerror(ret, errbuf, sizeof(errbuf));

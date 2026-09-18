@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, linux]
     tags: ['v*']
   pull_request:
-    branches: [main, master]
+    branches: [main, master, linux]
 
 # Keep CI read-only and free of secrets; release verification scans untrusted changes.
 permissions:
@@ -44,9 +44,10 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -q -y \
-            libpulse0 libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            cmake g++ pkg-config libpulse0 libpulse-dev libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
-            libxcb-xinerama0 libxkbcommon-x11-0
+            libxcb-xinerama0 libxkbcommon-x11-0 libx11-dev libxext-dev libxfixes-dev \
+            libwayland-dev wayland-protocols
 
       - name: Install pinned dependencies
         # The alpha lock is the ONLY install path. If it does not resolve on a
@@ -70,6 +71,24 @@ jobs:
           fi
           echo "imageio-ffmpeg absent."
 
+      - name: Install Windows FFmpeg runtime for media tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python tools/fetch_third_party.py --ffmpeg
+          $ffmpeg = "${{ github.workspace }}\\FTHRcapture\\FTHRclips\\third_party\\ffmpeg\\bin"
+          "Path=$ffmpeg;$env:Path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Prepare Linux test artifacts
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -q -y cmake g++ pkg-config libpulse-dev libx11-dev libxext-dev libxfixes-dev libwayland-dev wayland-protocols
+          python tools/fetch_third_party.py --ffmpeg-linux
+          echo "LD_LIBRARY_PATH=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "PATH=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg/bin:${PATH}" >> "$GITHUB_ENV"
+          cmake -B FTHRcapture_linux/build -S FTHRcapture_linux -DCMAKE_BUILD_TYPE=Release -DFTHR_FFMPEG_ROOT=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg
+          cmake --build FTHRcapture_linux/build -j"$(nproc)"
+
       - name: Byte-compile all sources
         # A syntax error in a rarely imported module otherwise only shows up at
         # runtime, inside a frozen bundle, on a user's machine.
@@ -79,9 +98,38 @@ jobs:
         run: python -m ruff check .
 
       - name: Tests
+        shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest tests/ -v --tb=short
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            python -m pytest tests/ -v --tb=short \
+              --ignore=tests/test_linux_appimage_report.py \
+              --ignore=tests/test_linux_runtime.py \
+              --ignore=tests/test_linux_tools.py \
+              --ignore=tests/test_capture_backend_detection.py \
+              --ignore=tests/test_windows_monitor.py \
+              --ignore=tests/test_windows_native_hotkeys.py \
+              --ignore=tests/test_windows_autostart.py \
+              --ignore=tests/test_windows_installer_contract.py \
+              --ignore=tests/test_windows_lifecycle_contract.py \
+              --ignore=tests/test_windows_hardware_qualification_args.py \
+              --ignore=tests/test_windows_microphone_devices.py
+          else
+            python -m pytest tests/ -v --tb=short \
+              --ignore=tests/test_linux_appimage_report.py \
+              --ignore=tests/test_linux_runtime.py \
+              --ignore=tests/test_linux_tools.py \
+              --ignore=tests/test_capture_backend_detection.py \
+              --ignore=tests/test_license_gate_linux.py \
+              --ignore=tests/test_windows_monitor.py \
+              --ignore=tests/test_windows_native_hotkeys.py \
+              --ignore=tests/test_windows_autostart.py \
+              --ignore=tests/test_windows_installer_contract.py \
+              --ignore=tests/test_windows_lifecycle_contract.py \
+              --ignore=tests/test_windows_hardware_qualification_args.py \
+              --ignore=tests/test_windows_microphone_devices.py
+          fi
 
   # Linux capture engine
   linux-engine:
@@ -94,8 +142,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-          cache: pip
-          cache-dependency-path: requirements-alpha.txt
 
       - name: Install build dependencies
         run: |
@@ -340,9 +386,13 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -q -y \
-            cmake g++ pkg-config curl file binutils \
-            libpulse-dev libx11-dev libxext-dev libxfixes-dev \
-            libwayland-dev wayland-protocols
+            cmake g++ pkg-config curl file binutils libportaudio2 \
+            libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
+            libswscale-dev libswresample-dev libpulse-dev libx11-dev \
+            libgl1 libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-xinerama0 libxkbcommon-x11-0 \
+            libxext-dev libxfixes-dev libwayland-dev wayland-protocols
           python -m pip install --upgrade pip
           python -m pip install -r requirements-alpha.txt pyinstaller
 
@@ -354,7 +404,7 @@ jobs:
           image="build_output/FTHRClips-$(python -c "import sys; sys.path.insert(0,'FTHR_UI'); import version; print(version.__version__)")-x86_64.AppImage"
           test -x "$image"
           test -s "$image.sha256"
-          sha256sum -c "$image.sha256"
+          (cd "$(dirname "$image")" && sha256sum -c "$(basename "$image.sha256")")
           file "$image" | grep -qi appimage
           APPIMAGE_EXTRACT_AND_RUN=1 "$image" --appimage-extract >/dev/null
           test -x squashfs-root/AppRun

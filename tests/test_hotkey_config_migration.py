@@ -39,6 +39,35 @@ def test_unset_recording_hotkey_is_not_registered(monkeypatch):
     assert registrations == []
 
 
+def test_lua_hyprland_bindings_are_written_to_custom_keybinds(tmp_path):
+    manager = HotkeyManager.__new__(HotkeyManager)
+    manager.hotkeys = {'save_clip': 'Ctrl+F9', 'save_screenshot': 'F12'}
+    manager.socket_command = lambda action: (
+        f'echo -n {action} | /usr/bin/nc -U /run/user/1000/fthr/hotkey.sock')
+    manager._write_hyprland_lua_config(tmp_path / 'keybinds.lua')
+
+    content = (tmp_path / 'keybinds.lua').read_text()
+    assert 'hl.bind("CTRL + F9"' in content
+    assert 'hl.bind("F12"' in content
+    assert 'save_clip' in content
+    assert 'save_screenshot' in content
+
+
+def test_lua_hyprland_bindings_are_idempotent(tmp_path):
+    manager = HotkeyManager.__new__(HotkeyManager)
+    manager.hotkeys = {'save_clip': 'F9', 'save_screenshot': ''}
+    manager.socket_command = lambda action: f'echo -n {action} | nc -U /tmp/{action}'
+    path = tmp_path / 'keybinds.lua'
+    path.write_text('local existing = true\n')
+
+    manager._write_hyprland_lua_config(path)
+    manager._write_hyprland_lua_config(path)
+
+    content = path.read_text()
+    assert content.count('FTHR Clips hotkeys') == 1
+    assert content.count('hl.bind("F9"') == 1
+
+
 def test_load_hotkeys_migrates_legacy_nested_schema_without_losing_controller_bindings(tmp_path):
     manager = HotkeyManager.__new__(HotkeyManager)
     manager.config_file = tmp_path / 'hotkeys.json'

@@ -388,6 +388,30 @@ if(BUILD_TESTING)
             COMMAND fthr_x11_frame_converter_test)
     endif()
 
+    add_executable(fthr_linux_vaapi_encoder_test
+        tests/linux_vaapi_encoder_test.cpp
+        src/encoder.cpp)
+    target_include_directories(fthr_linux_vaapi_encoder_test PRIVATE src)
+    target_include_directories(fthr_linux_vaapi_encoder_test SYSTEM PRIVATE
+        ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(fthr_linux_vaapi_encoder_test PRIVATE
+        $<$<BOOL:${FTHR_FFMPEG_BUNDLED}>:${FTHR_FFMPEG_LINK_LIBRARIES}>
+        $<$<NOT:$<BOOL:${FTHR_FFMPEG_BUNDLED}>>:PkgConfig::FFMPEG>
+        pthread)
+    target_compile_options(fthr_linux_vaapi_encoder_test PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_options(fthr_linux_vaapi_encoder_test PRIVATE
+        "-Wl,--disable-new-dtags")
+    set_target_properties(fthr_linux_vaapi_encoder_test PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN/../third_party/ffmpeg/lib")
+    # VA-API requires a real render node. Keep the test in the suite on GPU
+    # hosts, but do not make headless CI pretend to qualify hardware encoding.
+    if(EXISTS "/dev/dri/renderD128")
+        add_test(NAME linux_vaapi_encoder
+            COMMAND fthr_linux_vaapi_encoder_test)
+    endif()
+
     add_executable(fthr_linux_encoder_timestamp_test
         tests/linux_encoder_timestamp_test.cpp
         src/encoder.cpp)

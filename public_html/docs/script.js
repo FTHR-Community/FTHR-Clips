@@ -1,0 +1,30 @@
+// FTHR Clips documentation failure-code registry.
+const FTHR_FAILURE_CODES = Object.freeze({
+  'Error 001': 'CAPTURE FAILED',
+  'Error 002': 'CAPTURE UNAVAILABLE',
+  'Error 003': 'ENGINE NOT FOUND',
+  'Error 004': 'ENGINE NOT RESPONDING',
+  'Error 005': 'ENGINE COULD NOT START',
+  'Error 006': 'ENGINE STOPPED',
+  'Error 007': 'MANUAL RECORDING FAILED',
+  'Error 008': 'RECORDING COULD NOT START',
+  'Error 009': 'RECORDING COULD NOT STOP',
+  'Error 010': 'RECORDING FOLDER UNAVAILABLE',
+  'Error 011': 'RECORDING PATH TOO LONG',
+  'Error 012': 'NOT ENOUGH DISK SPACE',
+  'Error 013': 'CLIP NOT SAVED',
+  'Error 014': 'CLIP SAVE FAILED',
+  'Error 015': 'CLIP WAS NOT SAVED',
+  'Error 016': 'CLIP PATH TOO LONG',
+  'Error 017': 'CLIP FINALIZATION FAILED',
+  'Error 018': 'EXPORT FAILED',
+  'Error 019': 'SHARE FAILED',
+  'Error 020': 'UPLOAD FAILED',
+  'Error 021': 'UPLOAD NOT CONFIGURED',
+  'Error 022': 'UPLOAD CONNECTION FAILED',
+  'Error 023': 'COMPRESSION FAILED',
+});
+
+if (typeof window !== 'undefined') {
+  window.FTHR_FAILURE_CODES = FTHR_FAILURE_CODES;
+}
