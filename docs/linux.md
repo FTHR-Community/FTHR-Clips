@@ -20,9 +20,16 @@ build as proof that graphical capture works on a native x86_64 desktop.
 
 ## Install the AppImage
 
+Download the latest Linux pre-release from the [GitHub release page](https://github.com/FTHR-Community/FTHR-Clips/releases/tag/v1.1.0-alpha):
+
+- [FTHRClips-1.1.0-alpha-x86_64.AppImage](https://github.com/FTHR-Community/FTHR-Clips/releases/download/v1.1.0-alpha/FTHRClips-1.1.0-alpha-x86_64.AppImage)
+- [SHA-256 checksum](https://github.com/FTHR-Community/FTHR-Clips/releases/download/v1.1.0-alpha/FTHRClips-1.1.0-alpha-x86_64.AppImage.sha256)
+
+Then run:
+
 ```bash
-chmod +x FTHRClips-<version>-x86_64.AppImage
-./FTHRClips-<version>-x86_64.AppImage
+chmod +x FTHRClips-1.1.0-alpha-x86_64.AppImage
+./FTHRClips-1.1.0-alpha-x86_64.AppImage
 ```
 
 If FUSE is unavailable:
