@@ -134,7 +134,7 @@ try:
     print(f'Qt {qVersion()} / PySide6 {PySide6.__version__}')
 except Exception as e:
     print(f'PySide6 unavailable: {e}')
-for m in ('numpy', 'cv2', 'sounddevice', 'keyboard'):
+for m in ('numpy', 'cv2', 'sounddevice', 'jeepney'):
     try:
         mod = __import__(m)
         print(f'{m} {getattr(mod, "__version__", "?")}')

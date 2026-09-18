@@ -162,3 +162,77 @@ def cleanup_legacy_socket() -> str | None:
         return (f'{LEGACY_SOCKET_PATH} exists but is not a stale socket of '
                 f'yours — left untouched')
     return None
+
+
+# Desktop identity for the XDG GlobalShortcuts portal
+
+DESKTOP_ID = 'fthr-clips'
+
+
+def _desktop_entry_exists() -> bool:
+    data_dirs = [Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share')]
+    data_dirs += [Path(p) for p in
+                  (os.environ.get('XDG_DATA_DIRS') or '/usr/local/share:/usr/share').split(':')
+                  if p]
+    return any((d / 'applications' / f'{DESKTOP_ID}.desktop').is_file() for d in data_dirs)
+
+
+def launch_command() -> str | None:
+    """Shell-quoted command that starts this build, or None for source runs.
+
+    The portal only grants global shortcuts to processes it can tie to a
+    .desktop file, so there is nothing sensible to write for ``python main.py``.
+    """
+    import shlex
+    appimage = os.environ.get('APPIMAGE')
+    if appimage and Path(appimage).is_file():
+        return shlex.quote(appimage)
+    if getattr(sys, 'frozen', False):
+        return shlex.quote(sys.executable)
+    return None
+
+
+def ensure_desktop_entry() -> bool:
+    """Install ~/.local/share/applications/fthr-clips.desktop if none exists.
+
+    xdg-desktop-portal derives our app id from the systemd scope AppRun puts
+    us in (app-fthr\\x2dclips-<pid>.scope) and rejects the id unless a
+    matching .desktop file is installed. Returns True when an entry exists.
+    """
+    if sys.platform == 'win32':
+        return False
+    if _desktop_entry_exists():
+        return True
+    command = launch_command()
+    if command is None:
+        return False
+    data_home = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share')
+    lines = [
+        '[Desktop Entry]',
+        'Type=Application',
+        'Name=FTHR Clips',
+        'Comment=Game capture and clip management',
+        f'Exec={command}',
+        'Icon=fthr-clips',
+        'Categories=AudioVideo;Video;Game;',
+        'Terminal=false',
+        '',
+    ]
+    try:
+        appdir = os.environ.get('APPDIR')
+        icon = Path(appdir) / 'fthr-clips.png' if appdir else None
+        if icon is not None and icon.is_file():
+            icon_dir = data_home / 'icons' / 'hicolor' / '256x256' / 'apps'
+            icon_dir.mkdir(parents=True, exist_ok=True)
+            (icon_dir / 'fthr-clips.png').write_bytes(icon.read_bytes())
+        target_dir = data_home / 'applications'
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f'{DESKTOP_ID}.desktop'
+        tmp = target.with_suffix('.desktop.tmp')
+        tmp.write_text('\n'.join(lines), encoding='utf-8')
+        os.replace(tmp, target)
+        print(f'[Runtime] Installed {target}')
+        return True
+    except OSError as exc:
+        print(f'[Runtime] Could not install desktop entry: {exc}')
+        return False

@@ -23,7 +23,7 @@ DEFAULT_ROOTS = [REPO / 'FTHR_UI']
 # : Ratchet for existing undocumented silent handlers. Only decrease this
 # : baseline as handlers are documented; new debt must fail CI. Bare except
 # : and BaseException are forbidden regardless of the baseline.
-BASELINE = 92
+BASELINE = 91
 
 #: Bodies that do nothing a reader can observe.
 _SILENT_NODES = (ast.Pass, ast.Continue, ast.Break)
