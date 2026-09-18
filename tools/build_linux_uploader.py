@@ -6,7 +6,7 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
+import re
 import subprocess
 import sys
 import zipfile
@@ -36,6 +36,23 @@ def sha256(path: Path) -> str:
 
 def run(command: list[str]) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
+
+
+def bind_linux_bundle_hash(existing: str, bundle_hash: str) -> str:
+    """Update only the generated Linux hash while preserving other bindings."""
+    linux_hash_line = (
+        f'EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = {bundle_hash!r}')
+    if 'EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256' in existing:
+        return re.sub(
+            r"^EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = .*?$",
+            linux_hash_line,
+            existing,
+            count=1,
+            flags=re.MULTILINE)
+    marker = f'EXPECTED_UPLOADER_BUNDLE_SHA256 = {bundle_hash!r}'
+    if marker not in existing:
+        raise ValueError('uploader manifest is missing the Windows bundle hash')
+    return existing.replace(marker, marker + '\n' + linux_hash_line, 1)
 
 
 def main() -> int:
@@ -86,20 +103,9 @@ def main() -> int:
     os.replace(temporary, BUNDLE)
     bundle_hash = sha256(BUNDLE)
 
-    text = f'''"""Generated release bindings for optional uploader packages."""
-
-UPLOADER_PLUGIN_ID = {PLUGIN_ID!r}
-UPLOADER_PLUGIN_VERSION = {PLUGIN_VERSION!r}
-UPLOADER_TERMS_VERSION = {TERMS_VERSION!r}
-UPLOADER_PRIVACY_VERSION = {PRIVACY_VERSION!r}
-EXPECTED_UPLOADER_BUNDLE_SHA256 = {bundle_hash!r}
-
-HARDWARE_PLUGIN_ID = 'com.fthrclips.hardware-identity'
-HARDWARE_PLUGIN_VERSION = '1.0.0'
-HARDWARE_POLICY_VERSION = 'lustful-2026-07-27-hwid-v1'
-EXPECTED_HARDWARE_BUNDLE_SHA256 = '437336b33aaa8cc7d9b7c0110b548369b7e45f1391f49a5d7cf39d0db60abff0'
-'''
-    MANIFEST_MODULE.write_text(text, encoding='utf-8')
+    existing = MANIFEST_MODULE.read_text(encoding='utf-8')
+    MANIFEST_MODULE.write_text(
+        bind_linux_bundle_hash(existing, bundle_hash), encoding='utf-8')
     print(f'Built {BUNDLE} ({bundle_hash})')
     return 0
 

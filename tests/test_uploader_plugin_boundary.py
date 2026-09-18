@@ -74,6 +74,26 @@ def test_linux_uploader_spec_uses_linux_bundle_and_entrypoint(monkeypatch):
     assert spec.entrypoint == 'FTHR-Uploader'
 
 
+def test_linux_uploader_manifest_binds_a_platform_specific_hash():
+    assert core_uploader.EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256
+    assert core_uploader.EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 != (
+        core_uploader.EXPECTED_UPLOADER_BUNDLE_SHA256)
+
+
+def test_linux_builder_preserves_other_manifest_bindings():
+    import runpy
+
+    builder = runpy.run_path(str(ROOT / 'tools' / 'build_linux_uploader.py'))
+    source = '''EXPECTED_UPLOADER_BUNDLE_SHA256 = 'windows'
+EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = 'old-linux'
+EXPECTED_HARDWARE_BUNDLE_SHA256 = 'hardware'
+'''
+    result = builder['bind_linux_bundle_hash'](source, 'new-linux')
+    assert "EXPECTED_UPLOADER_BUNDLE_SHA256 = 'windows'" in result
+    assert "EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = 'new-linux'" in result
+    assert "EXPECTED_HARDWARE_BUNDLE_SHA256 = 'hardware'" in result
+
+
 def test_uploader_and_hardware_identity_install_only_after_separate_consents(tmp_path, monkeypatch):
     monkeypatch.setattr(core_uploader.sys, 'platform', 'win32')
     uploader_bundle = _bundle(
