@@ -16,6 +16,8 @@ numpy>=2.4,<3
 sounddevice>=0.5,<0.6
 
 # Input
-# Windows global hotkeys. On Linux the app uses its own evdev/socket path
-# (core/hotkey_manager.py) and this is only a fallback.
-keyboard>=0.13.5,<0.14
+# Linux global hotkeys go through the XDG GlobalShortcuts portal over D-Bus
+# (core/portal_shortcuts.py). jeepney is pure Python and can marshal the
+# a(sa{sv}) struct arrays that PySide6's QtDBus cannot. Windows uses
+# RegisterHotKey natively; the app never reads input devices itself.
+jeepney>=0.8,<1.0; sys_platform != "win32"

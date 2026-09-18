@@ -164,9 +164,10 @@ a = Analysis(
         'sounddevice',
         'numpy',
         'cv2',
-        'keyboard',
-        'keyboard.mouse',
-        'keyboard._mouse_event',
+        'jeepney',
+        'jeepney.io.blocking',
+        'jeepney.io.threading',
+        'core.portal_shortcuts',
         # UI submodules
         'ui.capture_card',
         'ui.capture_card_client',

@@ -660,19 +660,6 @@ FTHR_TEAL_DIM = Colors.ACCENT_DIM
 PANEL_FADE_MS = 180
 
 
-def _check_linux_input_group() -> bool:
-    """Return True if this process has /dev/input access for global hotkeys."""
-    if sys.platform == 'win32':
-        return True
-    import grp
-    try:
-        input_gid = grp.getgrnam('input').gr_gid
-        # Check both supplementary groups and the primary group
-        return input_gid in os.getgroups() or input_gid == os.getgid()
-    except Exception:
-        return False
-
-
 # Canonical QSS / label fragments come from style.py; aliased so call-sites stay short.
 _saved_fonts = ThemeManager().get_fonts()
 Fonts.configure(_saved_fonts.get('display'), _saved_fonts.get('body'))
@@ -2828,17 +2815,41 @@ class HotkeyPopup(_PopupPanel):
             layout.addWidget(self._create_action_row(label_text, action_key))
 
         if sys.platform != 'win32':
-            from core.compositor import detect_compositor
-            compositor = detect_compositor()
-            instructions = self.hotkey_manager.setup_instructions(compositor)
-            instructions_label = QLabel(instructions)
-            instructions_label.setWordWrap(True)
-            instructions_label.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse)
-            instructions_label.setStyleSheet(
-                f'color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px; '
-                'font-family: monospace; padding-top: 6px;')
-            layout.addWidget(instructions_label)
+            if self.hotkey_manager.portal_active:
+                # The desktop owns these keys: pressing a key above only states
+                # a preference, and the compositor's answer is written back.
+                note = QLabel(
+                    'Your desktop manages these shortcuts. If it keeps a '
+                    'different key, change it in the desktop shortcut settings.')
+                note.setWordWrap(True)
+                note.setStyleSheet(
+                    f'color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px; '
+                    'padding-top: 6px;')
+                layout.addWidget(note)
+                desktop_btn = QPushButton('EDIT IN DESKTOP SETTINGS')
+                desktop_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                desktop_btn.setStyleSheet(_clear_button_qss())
+                desktop_btn.clicked.connect(
+                    self.hotkey_manager.open_desktop_shortcut_settings)
+                layout.addWidget(desktop_btn, 0, Qt.AlignmentFlag.AlignLeft)
+                self.hotkey_manager.desktop_bindings_changed.connect(
+                    self._refresh_binding_values)
+            else:
+                from core.compositor import detect_compositor
+                compositor = detect_compositor()
+                instructions = self.hotkey_manager.setup_instructions(compositor)
+                instructions_label = QLabel(instructions)
+                instructions_label.setWordWrap(True)
+                instructions_label.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse)
+                instructions_label.setStyleSheet(
+                    f'color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px; '
+                    'font-family: monospace; padding-top: 6px;')
+                layout.addWidget(instructions_label)
+
+    def _refresh_binding_values(self, *_args):
+        for button in self._binding_buttons:
+            button.refresh_value()
 
     def _create_action_row(self, label_text: str, action_key: str) -> QFrame:
         frame = QFrame()
@@ -3361,9 +3372,6 @@ class MainWindow(QMainWindow):
         self._create_system_tray()
         if not self._background_start:
             QTimer.singleShot(800, self.capture_card.play_startup)
-        if not _check_linux_input_group():
-            QTimer.singleShot(1500, self._warn_input_group)
-
         # Start Python microphone capture where needed; Windows uses native WASAPI.
         if self.settings_manager.get('audio_capture_enabled', True):
             self._start_mic_recorder()
@@ -4127,14 +4135,6 @@ class MainWindow(QMainWindow):
             anim.start()
 
     # Hotkeys
-
-    def _warn_input_group(self):
-        self.push_error(
-            'HOTKEYS DISABLED',
-            'Your user is not in the input group. Run '
-            '`sudo usermod -aG input $USER`, then log out and back in.',
-            level='warning',
-        )
 
     def _warn_no_engine(self):
         if getattr(sys, 'frozen', False):

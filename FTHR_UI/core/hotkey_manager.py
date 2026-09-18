@@ -1,12 +1,13 @@
-"""Global shortcuts through RegisterHotKey on Windows and compositor binds
-or the keyboard library on Linux.
+"""Global shortcuts through RegisterHotKey on Windows and the desktop on Linux.
 
-Wayland binds send commands to the private socket resolved by
-core.linux_runtime.hotkey_socket_path(). Hyprland configuration is written
-to ~/.config/hypr/fthr-hotkeys.conf when a shortcut changes.
+Linux never reads input devices itself. The XDG GlobalShortcuts portal
+(core.portal_shortcuts) is the primary path: the compositor owns the key grab
+and tells us over D-Bus when an action fires. Where no portal backend exists,
+compositor binds send commands to the private socket resolved by
+core.linux_runtime.hotkey_socket_path(); Hyprland configuration for that is
+written to ~/.config/hypr/fthr-hotkeys.conf when a shortcut changes.
 """
 import ctypes
-import keyboard
 import socket
 import os
 import re
@@ -19,7 +20,7 @@ from PySide6.QtCore import QObject, Signal, QTimer, Qt
 import json
 from pathlib import Path
 
-from core import linux_runtime, linux_tools
+from core import linux_runtime, linux_tools, portal_shortcuts
 
 _FTHR_HYPR_CONF    = Path.home() / '.config' / 'hypr' / 'fthr-hotkeys.conf'
 _HYPR_CONF         = Path.home() / '.config' / 'hypr' / 'hyprland.conf'
@@ -45,6 +46,17 @@ _HOTKEY_ACTIONS = (
     'confirm_game_detection',
     'dismiss_game_detection',
 )
+
+# Shown by the desktop's own shortcut dialog (KDE System Settings, GNOME
+# Settings) next to each portal shortcut, so keep them user-facing.
+_ACTION_DESCRIPTIONS = {
+    'save_clip': 'Save clip',
+    'save_screenshot': 'Save screenshot',
+    'start_recording': 'Start recording',
+    'stop_recording': 'Stop recording',
+    'confirm_game_detection': 'Confirm detected game',
+    'dismiss_game_detection': 'Dismiss game detection',
+}
 
 # The legacy Windows selector accepted controller chords as well as keyboard
 # combinations.  Keep the same names and ordering so existing controller
@@ -433,6 +445,8 @@ class HotkeyManager(QObject):
     dismiss_game_detection_triggered  = Signal()
     error_occurred = Signal(str, str, str)   # title, detail, level
     controller_buttons_changed = Signal(object)
+    # Linux portal path: the compositor reported which keys it really bound.
+    desktop_bindings_changed = Signal(dict)  # action -> trigger description
     
     def __init__(self):
         super().__init__()
@@ -452,9 +466,8 @@ class HotkeyManager(QObject):
         }
         self.controller_hotkeys = {action: '' for action in self.hotkeys}
 
-        # Non-Windows fallback registrations. Native Windows registrations are
-        # tracked by action/id below so they survive a hidden main window.
-        self._registered_hotkeys = []
+        # Native Windows registrations are tracked by action/id so they
+        # survive a hidden main window.
         self._windows_hotkey_actions: dict[int, str] = {}
         self._windows_hotkey_combos: dict[str, str] = {}
         self._windows_failed_actions: set[str] = set()
@@ -467,6 +480,11 @@ class HotkeyManager(QObject):
 
         self._socket_running = False
         self._socket_thread: threading.Thread | None = None
+        # XDG GlobalShortcuts portal (Linux). Created lazily on first
+        # registration so headless tests never touch the session bus.
+        self._portal: portal_shortcuts.PortalShortcuts | None = None
+        self._portal_requested: dict[str, str] = {}
+        self.desktop_triggers: dict[str, str] = {}
         self._input_capture_depth = 0
         self._xinput_get_state = _load_xinput_get_state()
         self._xinput_controller_buttons: set[str] = set()
@@ -626,6 +644,7 @@ class HotkeyManager(QObject):
 
         self._save_hotkeys()
 
+        self._bind_portal_shortcuts()
         self._apply_compositor_config()
         return True
     
@@ -647,22 +666,110 @@ class HotkeyManager(QObject):
             return True
         if sys.platform == 'win32':
             return self._register_windows_hotkey(action, key)
-        try:
-            keyboard.add_hotkey(key, lambda: signal.emit())
-            if key not in self._registered_hotkeys:
-                self._registered_hotkeys.append(key)
+        # Linux: the desktop portal binds every action in one batch from
+        # register_all()/set_hotkey(). Without a portal backend the socket
+        # server plus compositor binds remain, so only flag the failure here.
+        if self._ensure_portal():
             return True
-        except Exception as e:
-            self._keyboard_failed = True
-            if sys.platform != 'linux':
-                print(f"Failed to register hotkey {key}: {e}")
-                self.error_occurred.emit(
-                    'HOTKEY REGISTRATION FAILED',
-                    f'Could not register "{key}" — it may be in use by another '
-                    'app. Pick a different key in Hotkey settings.',
-                    'warning',
-                )
+        self._keyboard_failed = True
+        return False
+
+    # XDG GlobalShortcuts portal (Linux)
+
+    @property
+    def portal_active(self) -> bool:
+        return self._portal is not None
+
+    def _ensure_portal(self) -> bool:
+        if sys.platform == 'win32':
             return False
+        if self._portal is not None:
+            return True
+        if not portal_shortcuts.is_available():
+            return False
+        # The portal ties shortcuts to a desktop identity; give packaged
+        # builds one the first time they run.
+        linux_runtime.ensure_desktop_entry()
+        portal = portal_shortcuts.PortalShortcuts(self)
+        portal.activated.connect(self._on_portal_activated)
+        portal.bound.connect(self._on_portal_bound)
+        portal.failed.connect(self._on_portal_failed)
+        if not portal.start():
+            portal.deleteLater()
+            return False
+        self._portal = portal
+        return True
+
+    def _bind_portal_shortcuts(self) -> None:
+        """Announce every action to the portal with the saved key as preference."""
+        if self._portal is None:
+            return
+        # Actions without a key are announced too so the desktop's shortcut
+        # editor lists them and the user can bind them there.
+        self._portal_requested = {
+            action: normalize_keyboard_combo(self.hotkeys.get(action, ''))
+            for action in _HOTKEY_ACTIONS
+        }
+        self._portal.bind({
+            action: (_ACTION_DESCRIPTIONS[action], combo)
+            for action, combo in self._portal_requested.items()
+        })
+
+    def open_desktop_shortcut_settings(self) -> bool:
+        """Ask the desktop to show its own editor for our shortcuts."""
+        if self._portal is None:
+            return False
+        self._portal.configure()
+        return True
+
+    def _on_portal_activated(self, action: str) -> None:
+        if self._input_capture_depth > 0:
+            return
+        self._emit_action(action, source='keyboard')
+
+    def _on_portal_bound(self, triggers: dict) -> None:
+        self.desktop_triggers = dict(triggers)
+        # Once the desktop knows a shortcut it keeps that key and ignores a
+        # new preference, so the compositor's answer is the truth. Adopt it
+        # and tell the user where the key is really changed.
+        kept = []
+        changed = False
+        for action, trigger in triggers.items():
+            if action not in self.hotkeys or not trigger:
+                continue
+            # KDE lists alternative triggers as "F9, Alt+S"; the first one is
+            # the primary key and the only one the hotkeys file can hold.
+            actual = normalize_keyboard_combo(trigger.split(',')[0])
+            requested = self._portal_requested.get(action, '')
+            if requested and actual != requested:
+                kept.append(f'{_ACTION_DESCRIPTIONS.get(action, action)}: {trigger}')
+            if actual != self.hotkeys.get(action, ''):
+                self.hotkeys[action] = actual
+                changed = True
+        if changed:
+            self._save_hotkeys()
+        self.desktop_bindings_changed.emit(self.desktop_triggers)
+        if kept:
+            self.error_occurred.emit(
+                'DESKTOP KEPT ITS SHORTCUT',
+                'Your desktop manages these keys and kept '
+                + ', '.join(kept)
+                + '. Change them in your desktop shortcut settings.',
+                'warning',
+            )
+
+    def _on_portal_failed(self, reason: str) -> None:
+        print(f'[Hotkey] Portal: {reason}')
+        if self._portal is not None and not self._portal.session_active:
+            # No session at all (typically a source run the portal cannot
+            # tie to a .desktop file): drop back to the socket instructions.
+            self._portal.stop()
+            self._portal.deleteLater()
+            self._portal = None
+            self._keyboard_failed = True
+            self._warn_if_linux_hotkeys_dead()
+            return
+        self.error_occurred.emit('GLOBAL HOTKEYS', reason, 'warning')
 
     def _register_windows_hotkey(self, action: str, key: str) -> bool:
         """Register one chord against an always-alive hidden native window."""
@@ -793,6 +900,7 @@ class HotkeyManager(QObject):
             self._windows_failed_actions.clear()
         for action in _HOTKEY_ACTIONS:
             self._register_action(action)
+        self._bind_portal_shortcuts()
         if sys.platform == 'win32' and self._input_capture_depth == 0:
             self._windows_hotkey_watchdog_timer.start()
             expected = sum(bool(self.hotkeys.get(action))
@@ -1228,6 +1336,8 @@ class HotkeyManager(QObject):
         """
         if sys.platform == 'win32' or not getattr(self, '_keyboard_failed', False):
             return
+        if self._portal is not None:
+            return   # the desktop portal delivers activations
         comp = None
         try:
             from core.compositor import detect_compositor
@@ -1256,7 +1366,8 @@ class HotkeyManager(QObject):
 
         self.error_occurred.emit(
             'GLOBAL HOTKEYS NEED MANUAL SETUP',
-            'Direct key capture needs root on Linux and is disabled by design. '
+            'This desktop has no GlobalShortcuts portal, and FTHR Clips never '
+            'reads input devices directly. '
             f'Bind a key in {where} to this command:    '
             f'{self.socket_command("save_clip")}',
             'warning',
@@ -1569,13 +1680,8 @@ class HotkeyManager(QObject):
         if sys.platform == 'win32':
             self._unregister_windows_hotkey(action)
             return
-        registered = getattr(self, '_registered_hotkeys', [])
-        if key and key in registered:
-            try:
-                keyboard.remove_hotkey(key)
-                registered.remove(key)
-            except Exception as exc:
-                print(f'[Hotkey] Fallback unregister failed key={key}: {exc}')
+        # Linux: the desktop owns the binding; set_hotkey() re-announces the
+        # whole set and the portal replaces it.
 
     def _unregister_keyboard_hotkeys(self):
         """Remove only process-wide keyboard registrations, retaining sockets."""
@@ -1586,12 +1692,8 @@ class HotkeyManager(QObject):
             self._raw_keyboard_modifiers = 0
             self._raw_keyboard_down.clear()
             return
-        for key in getattr(self, '_registered_hotkeys', []):
-            try:
-                keyboard.remove_hotkey(key)
-            except Exception as exc:
-                print(f'[Hotkey] Fallback unregister failed key={key}: {exc}')
-        self._registered_hotkeys.clear()
+        # Linux: portal bindings persist across register_all(); dispatch is
+        # paused through _input_capture_depth instead.
 
     def unregister_all(self):
         """Unregister keyboard and controller hotkeys."""
@@ -1602,6 +1704,9 @@ class HotkeyManager(QObject):
     def cleanup(self):
         """Clean up hotkeys on exit"""
         self.unregister_all()
+        if self._portal is not None:
+            self._portal.stop()
+            self._portal = None
         self._socket_running = False
         if self._socket_thread:
             self._socket_thread.join(timeout=2.0)

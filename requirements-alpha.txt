@@ -7,7 +7,7 @@ PySide6==6.11.1
 opencv-python-headless==4.13.0.92
 numpy==2.4.4
 sounddevice==0.5.5
-keyboard==0.13.5
+jeepney==0.9.0; sys_platform != "win32"
 
 # Transitive dependencies — pinned so a silent upstream release cannot change
 # what an alpha build contains.

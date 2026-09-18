@@ -68,7 +68,7 @@ pkg-config --exists libavcodec libpulse-simple wayland-client || {
 # which no amount of pip installing will fix. Verified on Ubuntu 24.04.
 _missing_py=()
 _missing_sys=()
-for _m in PySide6 keyboard cv2 numpy sounddevice; do
+for _m in PySide6 jeepney cv2 numpy sounddevice; do
     _err="$("$PYTHON_BIN" -c "import $_m" 2>&1)" && continue
     case "$_err" in
         *PortAudio*)          _missing_sys+=("$_m: PortAudio runtime library") ;;
@@ -283,6 +283,19 @@ elif [ -n "${DISPLAY:-}" ]; then
     export QT_QPA_PLATFORM="xcb"
 fi
 
+# The XDG GlobalShortcuts portal identifies us by the systemd scope we run
+# in (app-fthr\x2dclips-<pid>.scope, matching fthr-clips.desktop). Desktop
+# launchers create that scope; a start from a terminal would inherit the
+# terminal's identity instead, so move into our own scope when we can.
+if [ -z "${FTHR_SCOPED:-}" ] && command -v systemd-run >/dev/null 2>&1 \
+        && ! grep -q 'app-fthr\\x2dclips' /proc/self/cgroup 2>/dev/null \
+        && systemd-run --user --scope --quiet true 2>/dev/null; then
+    FTHR_SCOPED=1
+    export FTHR_SCOPED
+    exec systemd-run --user --scope --quiet \
+        --unit="app-fthr\\x2dclips-$$" "$0" "$@"
+fi
+
 export PYTHONUNBUFFERED=1
 exec "$HERE/FTHRClips" "$@"
 APPRUN_EOF
@@ -397,6 +410,6 @@ printf "║  Size:   %-52s║\n" "$SIZE"
 echo "╠══════════════════════════════════════════════════════════════╣"
 echo "║  Linux-only — contains the Linux capture engine only.       ║"
 echo "║                                                              ║"
-echo "║  For global hotkeys (one-time):                             ║"
-echo "║    sudo usermod -aG input \$USER  (then re-login)            ║"
+echo "║  Global hotkeys use the desktop's GlobalShortcuts portal;   ║"
+echo "║  no input group or root is needed.                          ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
