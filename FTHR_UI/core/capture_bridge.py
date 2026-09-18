@@ -199,9 +199,12 @@ class CaptureBridge:
 
         if not self._layout.is_initialized:
             print('Linux engine not initialized yet')
+            # Drop the from_buffer view first: closing the mmap while a ctypes
+            # structure still exports its buffer raises BufferError and killed
+            # the connect thread on every early poll.
+            self._layout = None
             self._linux_mmap.close()
             self._linux_mmap = None
-            self._layout = None
             return False
 
         self._initialized = True
