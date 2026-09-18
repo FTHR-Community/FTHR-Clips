@@ -92,7 +92,7 @@ __pycache__/
 *.egg-info/
 .eggs/
 .venv/
-/.venv-linux/
+/.venv-linux
 venv/
 env/
 .pytest_cache/

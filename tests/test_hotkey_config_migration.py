@@ -28,15 +28,16 @@ def test_recording_has_separate_start_and_stop_hotkey_dispatch():
 
 
 def test_unset_recording_hotkey_is_not_registered(monkeypatch):
-    registrations = []
+    probes = []
     monkeypatch.setattr(
-        'FTHR_UI.core.hotkey_manager.keyboard.add_hotkey',
-        lambda *args: registrations.append(args))
+        'FTHR_UI.core.hotkey_manager.portal_shortcuts.is_available',
+        lambda: probes.append('portal') or True)
     manager = HotkeyManager.__new__(HotkeyManager)
 
-    manager._register_keyboard_hotkey('', object())
+    assert manager._register_keyboard_hotkey('', object()) is True
 
-    assert registrations == []
+    # An unset key never reaches the desktop portal or the native registrar.
+    assert probes == []
 
 
 def test_lua_hyprland_bindings_are_written_to_custom_keybinds(tmp_path):

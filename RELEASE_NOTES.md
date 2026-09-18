@@ -59,6 +59,21 @@ automatic hotkeys outside Hyprland (#16), and window/game-specific capture
   CAPTURE FAILED message now carries the engine's reason instead of a generic
   text, and a declined picker is not retried.
 
+## Changes since 1.0.0-alpha (Linux hotkeys)
+
+- Global hotkeys now go through the XDG Desktop Portal
+  (`org.freedesktop.portal.GlobalShortcuts`) on KDE Plasma 6, GNOME 48+ and
+  other desktops with a portal backend. The desktop owns the key grab and lists
+  FTHR's actions in its own shortcut settings.
+- The `keyboard` library and its `/dev/input` access are gone. Membership in the
+  `input` group is no longer required and the app can no longer observe
+  keystrokes it did not register.
+- The AppImage installs `fthr-clips.desktop` on first run so the portal can
+  identify it. Hyprland keeps the Unix-socket path with generated binds;
+  other desktops without a portal backend keep the socket fallback.
+- Once the desktop knows a shortcut it keeps that key; changing it happens in the
+  desktop's shortcut settings (Settings → Hotkeys → Edit in desktop settings).
+
 ## Current status
 
 This build is ready for public testing.
