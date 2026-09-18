@@ -3,6 +3,7 @@
 # FTHR Clips
 
 **Instant Replay, Recordings and Screenshots with easy sharing and editing tools built in, right on your Windows or Linux PC—local first.**
+**FOR LINUX VERSION PULL REQUESTS PLEASE USE THE LINUX BRANCH**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20experimental-lightgrey)](KNOWN_ISSUES.md)
