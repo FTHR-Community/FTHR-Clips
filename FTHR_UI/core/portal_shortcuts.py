@@ -17,6 +17,7 @@ import queue
 import secrets
 import sys
 import threading
+import time
 from typing import Any
 
 from PySide6.QtCore import QObject, Signal
@@ -30,6 +31,10 @@ SESSION_IFACE = 'org.freedesktop.portal.Session'
 # Response codes from org.freedesktop.portal.Request.Response.
 RESPONSE_OK = 0
 RESPONSE_CANCELLED = 1
+
+# CreateSession is retried with these pauses before the portal is given up on.
+SESSION_ATTEMPTS = 3
+SESSION_RETRY_SECONDS = (1, 3)
 
 # FTHR combo names -> xkb keysym names the shortcuts spec expects.
 _MODIFIER_TOKENS = {'Ctrl': 'CTRL', 'Alt': 'ALT', 'Shift': 'SHIFT', 'Win': 'LOGO'}
@@ -142,6 +147,7 @@ class PortalShortcuts(QObject):
     activated = Signal(str)          # shortcut id
     deactivated = Signal(str)        # shortcut id
     bound = Signal(dict)             # id -> trigger description from the compositor
+    session_ready = Signal()         # CreateSession succeeded; binds go through now
     failed = Signal(str)             # human-readable reason
 
     def __init__(self, parent: QObject | None = None):
@@ -153,6 +159,12 @@ class PortalShortcuts(QObject):
         self._pending_bind: list[tuple[str, dict]] | None = None
         self._requests: dict[str, str] = {}      # request path -> kind
         self._parent_window = ''
+        self._expected_session = ''
+        self._session_attempts = 0
+        self._reported_malformed = False
+        # Bound inside _run(); tests may install stand-ins.
+        self._call = None
+        self._create_session = None
 
     # Public API (main thread)
 
@@ -239,11 +251,17 @@ class PortalShortcuts(QObject):
                                 f'{method} failed: {reply.body[0] if reply.body else reply.header.fields.get(HeaderFields.error_name)}')
                         return path
 
-                    session_token = 'fthrsess' + secrets.token_hex(6)
-                    expected_session = session_path(me, session_token)
-                    call('CreateSession', 'a{sv}',
-                         ({'session_handle_token': ('s', session_token)},),
-                         'create_session')
+                    def create_session() -> None:
+                        self._session_attempts += 1
+                        token = 'fthrsess' + secrets.token_hex(6)
+                        self._expected_session = session_path(me, token)
+                        call('CreateSession', 'a{sv}',
+                             ({'session_handle_token': ('s', token)},),
+                             'create_session')
+
+                    self._call = call
+                    self._create_session = create_session
+                    self._request_session()
 
                     while self._running:
                         item = self._jobs.get()
@@ -258,6 +276,8 @@ class PortalShortcuts(QObject):
                                 call('BindShortcuts', 'oa(sa{sv})sa{sv}',
                                      (self._session, payload, self._parent_window, {}),
                                      'bind')
+                            elif kind == 'retry_session':
+                                self._request_session()
                             elif kind == 'configure' and self._session is not None:
                                 msg = new_method_call(
                                     portal, 'ConfigureShortcuts', 'osa{sv}',
@@ -269,18 +289,10 @@ class PortalShortcuts(QObject):
                             continue
 
                         fields = item.header.fields
-                        member = fields.get(HeaderFields.member)
-                        path = fields.get(HeaderFields.path, '')
-                        if member == 'Response':
-                            self._handle_response(
-                                self._requests.pop(path, None), item.body,
-                                expected_session, call)
-                        elif member == 'Activated':
-                            self.activated.emit(str(item.body[1]))
-                        elif member == 'Deactivated':
-                            self.deactivated.emit(str(item.body[1]))
-                        elif member == 'ShortcutsChanged':
-                            self.bound.emit(parse_bound_shortcuts(item.body[1]))
+                        self._handle_signal(
+                            str(fields.get(HeaderFields.member, '')),
+                            str(fields.get(HeaderFields.path, '')),
+                            item.body)
 
                     if self._session is not None:
                         try:
@@ -298,19 +310,86 @@ class PortalShortcuts(QObject):
             self._session = None
             self._running = False
 
-    def _handle_response(self, kind, body, expected_session, call) -> None:
-        code = int(body[0]) if body else RESPONSE_CANCELLED + 1
+    # Session setup with a bounded retry (worker thread)
+
+    def _request_session(self) -> None:
+        """Ask for a session; retry a few times before giving up.
+
+        Right after login the portal backend may not be up yet, and a
+        one-shot failure would leave hotkeys dead until the next start.
+        """
+        try:
+            self._create_session()
+        except Exception as exc:
+            self._session_setup_failed(str(exc))
+
+    def _session_setup_failed(self, reason: str) -> None:
+        if self._session_attempts < SESSION_ATTEMPTS:
+            delay = SESSION_RETRY_SECONDS[self._session_attempts - 1]
+            print(f'[Portal] {reason}; retrying session in {delay}s '
+                  f'({self._session_attempts}/{SESSION_ATTEMPTS})')
+            time.sleep(delay)
+            self._jobs.put(('retry_session', None))
+            return
+        self.failed.emit(f'Desktop portal error: {reason}')
+
+    # Message handling (worker thread; pure enough to unit-test)
+
+    def _handle_signal(self, member: str, path: str, body: Any) -> None:
+        """Dispatch one portal signal after checking it is ours and well-formed.
+
+        Nothing here may raise: an exception would end the worker and with
+        it every portal hotkey, so malformed input is reported and dropped.
+        """
+        if not isinstance(body, (list, tuple)):
+            self._malformed(member, body)
+            return
+        if member == 'Response':
+            kind = self._requests.pop(path, None)
+            if kind is None:
+                return   # not one of our requests
+            if not body or not isinstance(body[0], int):
+                self._malformed(member, body)
+                return
+            self._handle_response(kind, body)
+        elif member in ('Activated', 'Deactivated'):
+            if len(body) < 2 or not isinstance(body[0], str) or not isinstance(body[1], str):
+                self._malformed(member, body)
+                return
+            if body[0] != self._session:
+                return   # another session on this connection or a stray signal
+            (self.activated if member == 'Activated' else self.deactivated).emit(body[1])
+        elif member == 'ShortcutsChanged':
+            if len(body) < 2 or not isinstance(body[0], str):
+                self._malformed(member, body)
+                return
+            if body[0] != self._session:
+                return
+            self.bound.emit(parse_bound_shortcuts(body[1]))
+
+    def _malformed(self, member: str, body: Any) -> None:
+        print(f'[Portal] Ignoring malformed {member or "signal"}: {body!r}')
+        if not self._reported_malformed:
+            self._reported_malformed = True
+            self.failed.emit(
+                'The desktop portal sent an unexpected GlobalShortcuts message; '
+                'it was ignored.')
+
+    def _handle_response(self, kind: str, body: Any) -> None:
+        code = int(body[0])
         results = unwrap_vardict(body[1]) if len(body) > 1 else {}
         if kind == 'create_session':
             if code != RESPONSE_OK:
-                self.failed.emit('The desktop portal refused a global shortcuts session.')
+                self._session_setup_failed(
+                    'the desktop portal refused a global shortcuts session')
                 return
-            self._session = str(results.get('session_handle') or expected_session)
+            self._session = str(results.get('session_handle') or self._expected_session)
             print(f'[Portal] GlobalShortcuts session {self._session}')
+            self.session_ready.emit()
             if self._pending_bind is not None:
                 payload, self._pending_bind = self._pending_bind, None
-                call('BindShortcuts', 'oa(sa{sv})sa{sv}',
-                     (self._session, payload, self._parent_window, {}), 'bind')
+                self._call('BindShortcuts', 'oa(sa{sv})sa{sv}',
+                           (self._session, payload, self._parent_window, {}), 'bind')
         elif kind == 'bind':
             if code == RESPONSE_OK:
                 self.bound.emit(parse_bound_shortcuts(results.get('shortcuts')))

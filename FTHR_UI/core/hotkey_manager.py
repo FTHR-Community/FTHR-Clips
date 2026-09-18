@@ -678,7 +678,13 @@ class HotkeyManager(QObject):
 
     @property
     def portal_active(self) -> bool:
+        """A portal client exists; the session itself comes up asynchronously."""
         return self._portal is not None
+
+    @property
+    def portal_ready(self) -> bool:
+        """CreateSession succeeded: binds and activations flow now."""
+        return self._portal is not None and self._portal.session_active
 
     def _ensure_portal(self) -> bool:
         if sys.platform == 'win32':
@@ -693,6 +699,8 @@ class HotkeyManager(QObject):
         portal = portal_shortcuts.PortalShortcuts(self)
         portal.activated.connect(self._on_portal_activated)
         portal.bound.connect(self._on_portal_bound)
+        portal.session_ready.connect(
+            lambda: print('[Hotkey] Desktop portal session ready'))
         portal.failed.connect(self._on_portal_failed)
         if not portal.start():
             portal.deleteLater()
