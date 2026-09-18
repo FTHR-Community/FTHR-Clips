@@ -151,7 +151,12 @@ fi
 echo "    Engine links only the pinned LGPL FFmpeg."
 cd "$SCRIPT_DIR"
 
-# 3. Bundle with PyInstaller
+# 3. Build the optional Linux uploader bundle before the main AppImage.
+echo ""
+echo ">>> Building optional Linux upload extension..."
+"$PYTHON_BIN" "$SCRIPT_DIR/tools/build_linux_uploader.py" --python "$PYTHON_BIN"
+
+# 4. Bundle with PyInstaller
 echo ""
 echo ">>> Bundling Python app with PyInstaller..."
 "$PYTHON_BIN" -m PyInstaller FTHR_linux.spec --clean --noconfirm

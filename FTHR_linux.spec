@@ -7,6 +7,11 @@ import sys as _sys
 ROOT       = Path(SPECPATH)
 UI_DIR     = ROOT / 'FTHR_UI'
 ASSETS_DIR = UI_DIR / 'assets'
+PLUGIN_BUNDLE = ROOT / 'plugin-packages' / 'FTHR-Uploader-linux.fthrplugin'
+if not PLUGIN_BUNDLE.is_file():
+    raise SystemExit(
+        f'FTHR_linux.spec: missing {PLUGIN_BUNDLE}. '
+        'Run tools/build_linux_uploader.py first.')
 ENGINE_BIN = ROOT / 'FTHRcapture_linux' / 'build' / 'FTHRclips'
 PLAYBACK_MIXER = ROOT / 'FTHRcapture_linux' / 'build' / 'libFTHRPlaybackMixer.so'
 
@@ -137,6 +142,7 @@ a = Analysis(
         (str(ASSETS_DIR / 'fthr_logo.png'),  'assets'),
         (str(ASSETS_DIR / 'preview_desktop.png'), 'assets'),
         (str(ASSETS_DIR / 'gary.png'), 'assets'),
+        (str(PLUGIN_BUNDLE), 'plugin-packages'),
         # Licence paperwork must travel INSIDE the bundle (AUDIT-005), so a
         # portable copy is as complete as an installed one.
         (str(ROOT / 'LICENSE'), '.'),
