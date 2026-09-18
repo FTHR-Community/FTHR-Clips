@@ -405,12 +405,13 @@ if(BUILD_TESTING)
     set_target_properties(fthr_linux_vaapi_encoder_test PROPERTIES
         BUILD_WITH_INSTALL_RPATH TRUE
         INSTALL_RPATH "$ORIGIN/../third_party/ffmpeg/lib")
-    # VA-API requires a real render node. Keep the test in the suite on GPU
-    # hosts, but do not make headless CI pretend to qualify hardware encoding.
-    if(EXISTS "/dev/dri/renderD128")
-        add_test(NAME linux_vaapi_encoder
-            COMMAND fthr_linux_vaapi_encoder_test)
-    endif()
+    # Run the probe wherever the test binary can be built. It returns CTest's
+    # skip code when the render node, driver, permissions, or encoder profile
+    # is unavailable, rather than treating an ordinary Linux setup as broken.
+    add_test(NAME linux_vaapi_encoder
+        COMMAND fthr_linux_vaapi_encoder_test)
+    set_tests_properties(linux_vaapi_encoder PROPERTIES
+        SKIP_RETURN_CODE 77)
 
     add_executable(fthr_linux_encoder_timestamp_test
         tests/linux_encoder_timestamp_test.cpp

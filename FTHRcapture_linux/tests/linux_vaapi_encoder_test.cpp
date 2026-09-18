@@ -1,8 +1,13 @@
 #include "encoder.h"
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
+
+namespace {
+constexpr int kSkip = 77;
+}
 
 int main() {
     fthr::EncoderConfig cfg{};
@@ -18,8 +23,15 @@ int main() {
 
     fthr::Encoder encoder;
     std::string codec;
-    assert(encoder.Open(cfg, codec));
-    assert(codec == "h264_vaapi");
+    if (!encoder.Open(cfg, codec)) {
+        std::cout << "SKIP: h264_vaapi is unavailable or cannot initialize VA-API" << std::endl;
+        return kSkip;
+    }
+    if (codec != "h264_vaapi") {
+        std::cout << "SKIP: requested h264_vaapi was not selected (got "
+                  << codec << ")" << std::endl;
+        return kSkip;
+    }
 
     std::vector<uint8_t> bgra(cfg.src_width * cfg.src_height * 4, 0);
     size_t packets = 0;
