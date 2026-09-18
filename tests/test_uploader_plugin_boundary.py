@@ -74,6 +74,47 @@ def test_linux_uploader_spec_uses_linux_bundle_and_entrypoint(monkeypatch):
     assert spec.entrypoint == 'FTHR-Uploader'
 
 
+def test_platform_data_root_uses_xdg_data_home_on_linux(monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    monkeypatch.setenv('XDG_DATA_HOME', '/tmp/fthr-xdg-data')
+    monkeypatch.delenv('LOCALAPPDATA', raising=False)
+    assert core_uploader._platform_data_root() == Path('/tmp/fthr-xdg-data')
+
+
+def test_linux_activation_restores_uploader_executable_bit(tmp_path, monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    uploader_bundle = _bundle(
+        tmp_path,
+        filename='FTHR-Uploader-linux.fthrplugin',
+        plugin_id=core_uploader.UPLOADER_PLUGIN_ID,
+        plugin_version=core_uploader.UPLOADER_PLUGIN_VERSION,
+        entrypoint='FTHR-Uploader',
+        legal_versions={
+            'terms_version': core_uploader.UPLOADER_TERMS_VERSION,
+            'privacy_version': core_uploader.UPLOADER_PRIVACY_VERSION,
+        },
+    )
+    uploader_root = tmp_path / 'installed-uploader'
+    manager = core_uploader.UploadManager(_CoreSettings())
+    with (
+            patch.object(manager, 'bundle_path', return_value=uploader_bundle),
+            patch.object(
+                core_uploader, 'EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256',
+                _sha256(uploader_bundle)),
+            patch.object(core_uploader, '_UPLOADER_ROOT', uploader_root),
+            patch.object(
+                core_uploader, '_UPLOADER_ACTIVATION_FILE',
+                uploader_root / 'activation.json'),
+            patch.object(core_uploader, '_SETTINGS_FILE', tmp_path / 'settings.json')):
+        ok, message = manager.activate_plugin(
+            core_uploader.UPLOADER_TERMS_VERSION,
+            core_uploader.UPLOADER_PRIVACY_VERSION,
+        )
+    assert ok, message
+    executable = uploader_root / core_uploader.UPLOADER_PLUGIN_VERSION / 'FTHR-Uploader'
+    assert executable.stat().st_mode & 0o111
+
+
 def test_linux_uploader_manifest_binds_a_platform_specific_hash():
     assert core_uploader.EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256
     assert core_uploader.EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 != (

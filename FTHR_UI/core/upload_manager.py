@@ -51,8 +51,18 @@ from core.uploader_bundle_manifest import (
 )
 
 
-_LOCAL_APP_DATA = Path(os.environ.get(
-    'LOCALAPPDATA', str(Path.home() / 'AppData' / 'Local')))
+def _platform_data_root() -> Path:
+    """Return the per-user data root appropriate for the current platform."""
+    if sys.platform == 'win32':
+        return Path(os.environ.get(
+            'LOCALAPPDATA', str(Path.home() / 'AppData' / 'Local')))
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Application Support'
+    return Path(os.environ.get(
+        'XDG_DATA_HOME', str(Path.home() / '.local' / 'share')))
+
+
+_LOCAL_APP_DATA = _platform_data_root()
 _PLUGIN_DATA_ROOT = _LOCAL_APP_DATA / 'FTHR Clips' / 'plugins'
 _UPLOADER_ROOT = _PLUGIN_DATA_ROOT / 'uploader'
 _HARDWARE_ROOT = _PLUGIN_DATA_ROOT / 'hardware-identity'
@@ -402,6 +412,8 @@ class UploadManager(QObject):
                         target.parent.mkdir(parents=True, exist_ok=True)
                         with archive.open(item, 'r') as source, target.open('wb') as output:
                             shutil.copyfileobj(source, output)
+                        if sys.platform != 'win32' and name == f'payload/{spec.entrypoint}':
+                            target.chmod(target.stat().st_mode | 0o111)
 
                 for entry in entries:
                     target = temporary / str(entry['path'])
