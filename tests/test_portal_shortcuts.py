@@ -74,6 +74,104 @@ def test_bind_payload_omits_empty_preferred_trigger(monkeypatch):
     ]
 
 
+# Signal validation: nothing the portal sends may take the worker down
+
+class _Recorder:
+    def __init__(self, client):
+        self.activated, self.deactivated, self.bound, self.failed, self.ready = [], [], [], [], []
+        client.activated.connect(self.activated.append)
+        client.deactivated.connect(self.deactivated.append)
+        client.bound.connect(self.bound.append)
+        client.failed.connect(self.failed.append)
+        client.session_ready.connect(lambda: self.ready.append(True))
+
+
+def _client_with_session():
+    client = portal.PortalShortcuts()
+    client._session = '/org/freedesktop/portal/desktop/session/1_7/ours'
+    return client, _Recorder(client)
+
+
+def test_activated_requires_our_session_handle():
+    client, seen = _client_with_session()
+    client._handle_signal('Activated', portal.PORTAL_PATH,
+                          ['/org/freedesktop/portal/desktop/session/1_7/other', 'save_clip', 1, {}])
+    client._handle_signal('Activated', portal.PORTAL_PATH,
+                          [client._session, 'save_clip', 2, {}])
+    client._handle_signal('Deactivated', portal.PORTAL_PATH,
+                          [client._session, 'save_clip', 3, {}])
+    assert seen.activated == ['save_clip']
+    assert seen.deactivated == ['save_clip']
+    assert seen.failed == []
+
+
+@pytest.mark.parametrize('body', [
+    None, 'Activated', [], [42], ['/session/only'], [None, 'save_clip'],
+    ['/org/freedesktop/portal/desktop/session/1_7/ours', 7],
+])
+def test_malformed_signals_are_dropped_and_reported_once(body):
+    client, seen = _client_with_session()
+    client._handle_signal('Activated', portal.PORTAL_PATH, body)
+    client._handle_signal('Activated', portal.PORTAL_PATH, body)
+    assert seen.activated == []
+    assert len(seen.failed) == 1, 'one warning, not one per message'
+
+
+def test_shortcuts_changed_checks_session_and_parses():
+    client, seen = _client_with_session()
+    client._handle_signal('ShortcutsChanged', portal.PORTAL_PATH,
+                          ['/other', [('save_clip', {'trigger_description': ('s', 'F1')})]])
+    client._handle_signal('ShortcutsChanged', portal.PORTAL_PATH,
+                          [client._session, [('save_clip', {'trigger_description': ('s', 'F9')})]])
+    client._handle_signal('ShortcutsChanged', portal.PORTAL_PATH, [client._session])
+    assert seen.bound == [{'save_clip': 'F9'}]
+    assert len(seen.failed) == 1
+
+
+def test_response_is_only_handled_for_our_own_requests():
+    client = portal.PortalShortcuts()
+    seen = _Recorder(client)
+    calls = []
+    client._call = lambda *args: calls.append(args)
+    client._expected_session = '/org/freedesktop/portal/desktop/session/1_7/expected'
+    client._pending_bind = [('save_clip', {'description': ('s', 'Save clip')})]
+    req = portal.request_path(':1.7', 'tok')
+
+    client._handle_signal('Response', '/not/ours', [0, {}])
+    assert client.session_active is False
+
+    client._requests[req] = 'create_session'
+    client._handle_signal('Response', req, ['bogus'])
+    assert client.session_active is False and len(seen.failed) == 1
+
+    client._requests[req] = 'create_session'
+    client._handle_signal('Response', req, [0, {'session_handle': ('s', client._expected_session)}])
+    assert client.session_active is True
+    assert seen.ready == [True]
+    assert calls and calls[0][0] == 'BindShortcuts', 'the queued bind goes out once the session exists'
+
+
+def test_session_creation_retries_then_reports(monkeypatch):
+    client = portal.PortalShortcuts()
+    seen = _Recorder(client)
+    attempts = []
+    monkeypatch.setattr(portal.time, 'sleep', lambda s: attempts.append(('sleep', s)))
+
+    def failing():
+        client._session_attempts += 1
+        raise RuntimeError('CreateSession failed: An app id is required')
+    client._create_session = failing
+
+    for _ in range(portal.SESSION_ATTEMPTS):
+        client._request_session()
+        if not client._jobs.empty():
+            assert client._jobs.get_nowait() == ('retry_session', None)
+
+    assert client._session_attempts == portal.SESSION_ATTEMPTS
+    assert [s for kind, s in attempts] == list(portal.SESSION_RETRY_SECONDS)
+    assert len(seen.failed) == 1 and 'app id' in seen.failed[0]
+
+
 # The keyboard library is gone for good
 
 def test_hotkey_manager_never_imports_input_device_hooks():
