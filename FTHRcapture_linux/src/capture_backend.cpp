@@ -20,7 +20,7 @@ std::unique_ptr<ICaptureBackend> CreateBestBackend(
     bool has_wayland = (std::getenv("WAYLAND_DISPLAY") != nullptr);
 
     if (has_wayland) {
-        // 1. wlr-screencopy (Hyprland, Sway, wlroots compositors)
+        // 1. wlr-screencopy (a protocol commonly provided by wlroots compositors)
         auto wlr = std::make_unique<WlrBackend>(running);
         if (wlr->Initialize(cfg)) {
             std::cerr << "[Backend] Using wlr-screencopy" << std::endl;
@@ -28,7 +28,7 @@ std::unique_ptr<ICaptureBackend> CreateBestBackend(
         }
         if (cancelled()) return nullptr;
 
-        // 2. ext-image-copy-capture-v1 (KDE Plasma 6+, GNOME 46+)
+        // 2. ext-image-copy-capture-v1 (when the compositor advertises it)
         auto ext = std::make_unique<ExtBackend>(running);
         if (ext->Initialize(cfg)) {
             std::cerr << "[Backend] Using ext-image-copy-capture-v1" << std::endl;
@@ -36,8 +36,11 @@ std::unique_ptr<ICaptureBackend> CreateBestBackend(
         }
         if (cancelled()) return nullptr;
 
-        std::cerr << "[Backend] No Wayland capture backend available; "
-                     "refusing XWayland/x11grab fallback" << std::endl;
+        std::cerr << "[Backend] No Wayland capture backend available. "
+                     "This compositor does not advertise wlr-screencopy or "
+                     "ext-image-copy-capture; on KDE/GNOME, screen capture "
+                     "may require a ScreenCast portal/PipeWire backend. "
+                     "XWayland/x11grab fallback is intentionally disabled." << std::endl;
         return nullptr;
     }
 

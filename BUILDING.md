@@ -293,10 +293,13 @@ FTHRcapture_linux/build/FTHRclips 30 10 1280 720 6000 0 0 0 0 "" 0 4 0 1
 ```
 
 The alpha build tries `wlr-screencopy` and then
-`ext-image-copy-capture`. FFmpeg `x11grab` is compiled out by default because
-AUDIT-044 has no proven bounded-cancellation path. Unsupported sessions fail
-clearly after bounded recovery instead of falling back to X11. Developers can
-compile the known-unbounded backend only with
+`ext-image-copy-capture`, using only protocols the compositor advertises.
+KDE Plasma/KWin sessions that expose capture only through the ScreenCast
+portal/PipeWire are not supported by the current alpha engine and require a
+future portal/PipeWire video backend. FFmpeg `x11grab` is compiled out by
+default because AUDIT-044 has no proven bounded-cancellation path. Unsupported
+sessions fail clearly after bounded recovery instead of falling back to X11.
+Developers can compile the known-unbounded backend only with
 `-DFTHR_EXPERIMENTAL_X11GRAB=ON`; such a build is not an alpha release build.
 
 ### 4. Audio
