@@ -67,7 +67,15 @@ def _bundle(
     return path
 
 
-def test_uploader_and_hardware_identity_install_only_after_separate_consents(tmp_path):
+def test_linux_uploader_spec_uses_linux_bundle_and_entrypoint(monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    spec = core_uploader._uploader_spec()
+    assert spec.filename == 'FTHR-Uploader-linux.fthrplugin'
+    assert spec.entrypoint == 'FTHR-Uploader'
+
+
+def test_uploader_and_hardware_identity_install_only_after_separate_consents(tmp_path, monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'win32')
     uploader_bundle = _bundle(
         tmp_path,
         filename='FTHR-Uploader.fthrplugin',

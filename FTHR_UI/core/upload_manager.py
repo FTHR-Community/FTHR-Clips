@@ -40,6 +40,7 @@ from core.export_profiles import (
 from core.uploader_bundle_manifest import (
     EXPECTED_HARDWARE_BUNDLE_SHA256,
     EXPECTED_UPLOADER_BUNDLE_SHA256,
+    EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256,
     HARDWARE_PLUGIN_ID,
     HARDWARE_PLUGIN_VERSION,
     HARDWARE_POLICY_VERSION,
@@ -114,13 +115,21 @@ class _BundleSpec:
 
 
 def _uploader_spec() -> _BundleSpec:
+    if sys.platform == 'win32':
+        filename = 'FTHR-Uploader.fthrplugin'
+        entrypoint = 'FTHR Uploader.exe'
+    else:
+        filename = 'FTHR-Uploader-linux.fthrplugin'
+        entrypoint = 'FTHR-Uploader'
     return _BundleSpec(
         label='FTHR Upload Extension',
-        filename='FTHR-Uploader.fthrplugin',
+        filename=filename,
         plugin_id=UPLOADER_PLUGIN_ID,
         plugin_version=UPLOADER_PLUGIN_VERSION,
-        expected_sha256=EXPECTED_UPLOADER_BUNDLE_SHA256,
-        entrypoint='FTHR Uploader.exe',
+        expected_sha256=(
+            EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256
+            if sys.platform != 'win32' else EXPECTED_UPLOADER_BUNDLE_SHA256),
+        entrypoint=entrypoint,
         install_root=_UPLOADER_ROOT,
         receipt_path=_UPLOADER_ACTIVATION_FILE,
     )
