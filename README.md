@@ -49,7 +49,7 @@ FTHRClips runs silently in the background capturing your game and when you press
 
 ## Download
 
-you can download a ready installer or AppImage right on our downloads page 
+You can download a ready installer or AppImage right on our downloads page
 [downloads.fthrclips.com](https://downloads.fthrclips.com)
 or compile the code yourself with this repo.
 
