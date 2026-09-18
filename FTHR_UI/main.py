@@ -4857,8 +4857,9 @@ class MainWindow(QMainWindow):
             else:
                 bitrate = BITRATE_PRESETS[resolution].get(
                     quality, BITRATE_PRESETS[resolution]['high'])
-        monitor = self.settings_manager.get('capture_monitor', '')
-        if sys.platform == 'win32':
+        monitor = str(self.settings_manager.get('capture_monitor', '') or '')
+        if (sys.platform == 'win32'
+                or monitor.casefold().startswith(r'\\?\display#')):
             current_choices = enumerate_windows_monitors()
             if current_choices and not is_valid_monitor_device_path(monitor, current_choices):
                 monitor = default_windows_monitor_path(current_choices)
@@ -4877,8 +4878,7 @@ class MainWindow(QMainWindow):
                 active_game,
                 self.settings_manager.get('game_detection_custom_games', []),
             )
-        crop_enabled = bool(
-            sys.platform == 'win32' and crop and crop.get('enabled', True))
+        crop_enabled = bool(crop and crop.get('enabled', True))
         return CaptureConfig(
             fps=fps,
             buffer_seconds=compute_buffer_seconds(

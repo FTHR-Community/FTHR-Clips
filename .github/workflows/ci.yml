@@ -149,7 +149,7 @@ jobs:
           sudo apt-get install -q -y \
             cmake g++ pkg-config \
             libpulse-dev libx11-dev libxext-dev libxfixes-dev \
-            libwayland-dev wayland-protocols
+            libwayland-dev wayland-protocols libwayland-bin
 
       - name: Fetch pinned Linux FFmpeg
         run: python tools/fetch_third_party.py --ffmpeg-linux
