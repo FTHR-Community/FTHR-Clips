@@ -25,7 +25,9 @@ _FTHR_HYPR_CONF    = Path.home() / '.config' / 'hypr' / 'fthr-hotkeys.conf'
 _HYPR_CONF         = Path.home() / '.config' / 'hypr' / 'hyprland.conf'
 _HYPR_LUA_CONF     = Path.home() / '.config' / 'hypr' / 'hyprland.lua'
 _HYPR_CUSTOM_LUA   = Path.home() / '.config' / 'hypr' / 'custom' / 'keybinds.lua'
-_FTHR_LUA_MARKER   = '-- FTHR Clips hotkeys (managed)'
+_FTHR_LUA_BEGIN    = '-- FTHR Clips hotkeys begin (managed)'
+_FTHR_LUA_END      = '-- FTHR Clips hotkeys end (managed)'
+_FTHR_LUA_MARKER   = _FTHR_LUA_BEGIN
 
 # Older builds stored each binding as ``{'keyboard': 'F9', 'controller': ...}``
 # and used the longer game-detection action names.  Keep the user's keyboard
@@ -1346,9 +1348,14 @@ class HotkeyManager(QObject):
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             existing = path.read_text() if path.exists() else ''
-            if _FTHR_LUA_MARKER in existing:
-                existing = existing[:existing.index(_FTHR_LUA_MARKER)].rstrip() + '\n'
-            lines = [existing.rstrip(), '', _FTHR_LUA_MARKER]
+            begin = existing.find(_FTHR_LUA_BEGIN)
+            if begin >= 0:
+                end = existing.find(_FTHR_LUA_END, begin)
+                if end < 0:
+                    raise ValueError('incomplete FTHR Lua hotkey block; refusing to edit user config')
+                end += len(_FTHR_LUA_END)
+                existing = existing[:begin].rstrip() + existing[end:]
+            lines = [existing.rstrip(), '', _FTHR_LUA_BEGIN]
             for action in ('save_clip', 'save_screenshot'):
                 key = self.hotkeys.get(action, '')
                 if not key:
@@ -1358,9 +1365,10 @@ class HotkeyManager(QObject):
                 lines.append(
                     f'hl.bind("{combo}", hl.dsp.exec_cmd("{command}"), '
                     f'{{ description = "FTHR Clips: {action}" }})')
+            lines.append(_FTHR_LUA_END)
             path.write_text('\n'.join(lines).rstrip() + '\n')
             print(f'[Hotkey] Written Lua bindings to {path}')
-        except OSError as e:
+        except (OSError, ValueError) as e:
             print(f'[Hotkey] Failed to write Lua bindings: {e}')
 
     def _ensure_hyprland_source(self) -> None:

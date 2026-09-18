@@ -61,11 +61,27 @@ def test_lua_hyprland_bindings_are_idempotent(tmp_path):
     path.write_text('local existing = true\n')
 
     manager._write_hyprland_lua_config(path)
+    path.write_text(path.read_text() + 'hl.bind("USER", user_action)\n')
     manager._write_hyprland_lua_config(path)
 
     content = path.read_text()
-    assert content.count('FTHR Clips hotkeys') == 1
+    assert content.count('FTHR Clips hotkeys begin') == 1
+    assert content.count('FTHR Clips hotkeys end') == 1
     assert content.count('hl.bind("F9"') == 1
+    assert 'hl.bind("USER", user_action)' in content
+
+
+def test_lua_hyprland_incomplete_block_is_left_untouched(tmp_path):
+    manager = HotkeyManager.__new__(HotkeyManager)
+    manager.hotkeys = {'save_clip': 'F9', 'save_screenshot': ''}
+    manager.socket_command = lambda action: f'echo -n {action} | nc -U /tmp/{action}'
+    path = tmp_path / 'keybinds.lua'
+    original = '-- FTHR Clips hotkeys begin (managed)\\nhl.bind("USER", user_action)\\n'
+    path.write_text(original)
+
+    manager._write_hyprland_lua_config(path)
+
+    assert path.read_text() == original
 
 
 def test_load_hotkeys_migrates_legacy_nested_schema_without_losing_controller_bindings(tmp_path):
