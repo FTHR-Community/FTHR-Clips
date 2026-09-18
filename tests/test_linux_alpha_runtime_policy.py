@@ -44,7 +44,7 @@ def test_native_x11_is_enabled_but_never_used_as_xwayland_fallback():
     assert ' ON)' in option[:160]
     assert '#if FTHR_X11_CAPTURE' in BACKEND_CPP
     wayland_failure = BACKEND_CPP.index(
-        'refusing XWayland/x11grab fallback')
+        'XWayland/x11grab fallback is intentionally disabled.')
     assert BACKEND_CPP.index('return nullptr;', wayland_failure) < \
         BACKEND_CPP.index('auto x11', wayland_failure)
 
