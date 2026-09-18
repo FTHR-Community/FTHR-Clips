@@ -49,9 +49,13 @@ def bind_linux_bundle_hash(existing: str, bundle_hash: str) -> str:
             existing,
             count=1,
             flags=re.MULTILINE)
-    marker = f'EXPECTED_UPLOADER_BUNDLE_SHA256 = {bundle_hash!r}'
-    if marker not in existing:
+    marker_match = re.search(
+        r"^EXPECTED_UPLOADER_BUNDLE_SHA256 = .*?$",
+        existing,
+        flags=re.MULTILINE)
+    if not marker_match:
         raise ValueError('uploader manifest is missing the Windows bundle hash')
+    marker = marker_match.group(0)
     return existing.replace(marker, marker + '\n' + linux_hash_line, 1)
 
 
