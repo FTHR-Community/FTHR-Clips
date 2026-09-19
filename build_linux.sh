@@ -277,10 +277,14 @@ cat > "$APPDIR/AppRun" <<'APPRUN_EOF'
 #!/bin/sh
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
-if [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    export QT_QPA_PLATFORM="wayland"
-elif [ -n "${DISPLAY:-}" ]; then
-    export QT_QPA_PLATFORM="xcb"
+# Default to the native platform, but let a user override it (for example
+# QT_QPA_PLATFORM=xcb to run under XWayland when the Wayland plugin misbehaves).
+if [ -z "${QT_QPA_PLATFORM:-}" ]; then
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        export QT_QPA_PLATFORM="wayland"
+    elif [ -n "${DISPLAY:-}" ]; then
+        export QT_QPA_PLATFORM="xcb"
+    fi
 fi
 
 export PYTHONUNBUFFERED=1
