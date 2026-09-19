@@ -208,17 +208,24 @@ sudo apt install build-essential cmake pkg-config \
   libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev libavdevice-dev \
   libswscale-dev libswresample-dev \
   libwayland-dev wayland-protocols libwayland-bin \
+  libpipewire-0.3-dev libdbus-1-dev \
   libpulse-dev libportaudio2 \
   libegl1 libxcb-cursor0 libxkbcommon-x11-0
 
 # Arch
 sudo pacman -S base-devel cmake pkgconf ffmpeg wayland wayland-protocols \
-  libpulse portaudio
+  pipewire dbus libpulse portaudio
 
 # Fedora
 sudo dnf install gcc-c++ cmake pkgconf ffmpeg-devel wayland-devel \
-  wayland-protocols-devel pulseaudio-libs-devel portaudio
+  wayland-protocols-devel pipewire-devel dbus-devel pulseaudio-libs-devel portaudio
 ```
+
+The PipeWire and D-Bus packages only supply headers: the engine loads
+`libpipewire-0.3.so.0` and `libdbus-1.so.3` with `dlopen` when the ScreenCast
+portal backend is needed, so neither is linked or bundled and a system without
+them still runs the other backends. `-DFTHR_PORTAL_BACKEND=OFF` compiles the
+engine without that backend.
 
 `libportaudio2` is easy to miss: `sounddevice` imports fine without it and then
 fails at runtime with `OSError: PortAudio library not found`. `pip install
@@ -292,8 +299,17 @@ FTHRclips <fps> <buffer_s> <w> <h> <bitrate_kbps> <_> <_> <_> <scaling>
 FTHRcapture_linux/build/FTHRclips 30 10 1280 720 6000 0 0 0 0 "" 0 4 0 1
 ```
 
-The alpha build tries `wlr-screencopy` and then
-`ext-image-copy-capture`. FFmpeg `x11grab` is compiled out by default because
+The alpha build tries `wlr-screencopy`, then `ext-image-copy-capture`, then
+the `org.freedesktop.portal.ScreenCast` portal with PipeWire (KDE Plasma/KWin
+sessions advertise neither protocol). The portal shows the desktop's screen
+picker on the first run of a standalone engine and stores the restore token in
+`~/.fthr/portal_screencast_token`; a declined picker ends the engine with
+`CAPTURE_HEALTH_BACKEND_FAILED` and the reason in `engine_string` instead of
+retrying. The portal binds restore tokens to the caller's app id, which
+xdg-desktop-portal derives from the systemd scope: a token granted to an
+engine started from a terminal belongs to that terminal's identity, so the
+packaged app (scope `app-fthr\x2dclips-<pid>`) is asked once more on its
+first start. FFmpeg `x11grab` is compiled out by default because
 AUDIT-044 has no proven bounded-cancellation path. Unsupported sessions fail
 clearly after bounded recovery instead of falling back to X11. Developers can
 compile the known-unbounded backend only with

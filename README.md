@@ -91,7 +91,9 @@ available on Linux.
 
 - x86_64 Linux with a native graphical session
 - Wayland compositor exposing `wlr-screencopy` or
-  `ext-image-copy-capture`
+  `ext-image-copy-capture`, or an `org.freedesktop.portal.ScreenCast`
+  backend (`xdg-desktop-portal-kde` on KDE Plasma/KWin) together with
+  PipeWire and D-Bus
 - PipeWire with PulseAudio compatibility, or PulseAudio
 - `grim` for screenshots and `nc`/netcat for compositor hotkey commands
 - A working FFmpeg runtime supplied by the AppImage
@@ -111,7 +113,15 @@ PipeWire/PulseAudio, `grim`, netcat, and Mesa VA-API packages.
 ### Wayland capture and audio
 
 On Wayland, FTHR first tries `wlr-screencopy` and then
-`ext-image-copy-capture`. It captures the selected desktop output rather than
+`ext-image-copy-capture`, using only protocols the compositor advertises. When
+neither is offered (KWin exports capture only through the desktop portal), it
+falls back to the `org.freedesktop.portal.ScreenCast` portal and reads the
+frames from PipeWire. The desktop shows its own screen picker the first time;
+FTHR stores the portal's restore token in `~/.fthr/portal_screencast_token`
+so later starts are silent, and the picker rather than the app's monitor
+setting decides which screen is captured. Declining the picker stops the
+engine with that reason in the app instead of re-opening the dialog. It
+captures the selected desktop output rather than
 promising arbitrary per-window capture. PipeWire's PulseAudio compatibility
 layer supplies the default output sink's monitor source for desktop audio.
 If the audio service cannot be opened, video capture can continue without audio.
@@ -195,7 +205,9 @@ hyprctl binds | grep -i fthr
   the file is executable.
 - **No video:** confirm `WAYLAND_DISPLAY`, the compositor capture protocol,
   and the selected output. Do not run the graphical test from a headless SSH
-  shell.
+  shell. On KDE the log should show `[Backend] Using ScreenCast portal`; if
+  it reports the portal as unavailable, check that `xdg-desktop-portal` and
+  `xdg-desktop-portal-kde` are installed and PipeWire is running.
 - **No desktop audio:** confirm PipeWire/PulseAudio is running and inspect
   `pactl info`; FTHR uses the output sink monitor, not the microphone source.
 - **VA-API unavailable:** run `vainfo`, check the Mesa driver and render-node

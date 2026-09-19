@@ -195,6 +195,16 @@ conflict.
 | **Used for** | Linux compositor capture and related Wayland protocol integration |
 | **Licence notices** | [`licenses/Wayland-Protocols-NOTICES.txt`](licenses/Wayland-Protocols-NOTICES.txt) |
 
+### PipeWire and D-Bus headers (Linux engine)
+
+| | |
+|---|---|
+| **Files** | System headers `pipewire-0.3/`, `spa-0.2/` and `dbus-1.0/` read at build time only; nothing from either project is copied into this repository or the AppImage |
+| **Copyright** | PipeWire: Wim Taymans and contributors. D-Bus: Red Hat, Inc. and contributors |
+| **Licence** | PipeWire headers: MIT. libdbus: dual AFL-2.1 / GPL-2.0-or-later, used under the AFL-2.1 option |
+| **Linkage** | **None at build time.** The engine resolves `libpipewire-0.3.so.0` and `libdbus-1.so.3` with `dlopen()`/`dlsym()` on the user's system when the ScreenCast portal capture backend is needed, and reports that backend as unavailable otherwise. The libraries are **not** redistributed. |
+| **Used for** | `org.freedesktop.portal.ScreenCast` session setup over the session bus and PipeWire video stream capture on compositors without a capture protocol |
+
 ### Microsoft Visual C++ Redistributable
 
 | | |
@@ -257,6 +267,9 @@ Listed so future audits do not have to re-derive it:
   to `ffmpeg` on `PATH`. That copy belongs to the user's distribution and is not
   redistributed by this project.
 - **Development tooling** — pytest, ruff, PyInstaller, Inno Setup, MSVC.
+- **PipeWire and libdbus runtime libraries** — loaded from the user's system
+  with `dlopen()` by the Linux engine when the ScreenCast portal backend runs;
+  never bundled. See the headers entry above.
 
 ---
 
