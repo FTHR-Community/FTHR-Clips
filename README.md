@@ -91,7 +91,8 @@ available on Linux.
 
 - x86_64 Linux with a native graphical session
 - Wayland compositor exposing `wlr-screencopy` or
-  `ext-image-copy-capture`
+  `ext-image-copy-capture`; KDE Plasma/KWin and other compositors that only
+  expose the ScreenCast portal are not supported by the current alpha engine
 - PipeWire with PulseAudio compatibility, or PulseAudio
 - `grim` for screenshots and `nc`/netcat for compositor hotkey commands
 - A working FFmpeg runtime supplied by the AppImage
@@ -111,10 +112,14 @@ PipeWire/PulseAudio, `grim`, netcat, and Mesa VA-API packages.
 ### Wayland capture and audio
 
 On Wayland, FTHR first tries `wlr-screencopy` and then
-`ext-image-copy-capture`. It captures the selected desktop output rather than
-promising arbitrary per-window capture. PipeWire's PulseAudio compatibility
-layer supplies the default output sink's monitor source for desktop audio.
-If the audio service cannot be opened, video capture can continue without audio.
+`ext-image-copy-capture`, using only protocols the compositor advertises. It
+captures the selected desktop output rather than promising arbitrary per-window
+capture. KDE Plasma/KWin configurations that expose screen capture only through
+the ScreenCast portal/PipeWire are not supported by the current alpha engine;
+they need a future portal/PipeWire video backend. PipeWire's PulseAudio
+compatibility layer supplies the default output sink's monitor source for desktop
+audio. If the audio service cannot be opened, video capture can continue without
+audio.
 
 ### AMD hardware encoding
 
