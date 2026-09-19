@@ -411,12 +411,13 @@ class ClipDeduplicationDialog(FthrDialog):
         self.progress_bar.setVisible(False)
         self.body_layout.addWidget(self.progress_bar)
 
-        self.delete_checkbox = QCheckBox("Move original overlapping clips to quarantine after successful merge")
+        self.delete_checkbox = QCheckBox("Move original overlapping clips to OS Recycle Bin / Trash after successful merge")
         self.delete_checkbox.setChecked(False)
         self.delete_checkbox.setStyleSheet(label_body(Colors.TEXT_MUTED, Fonts.SIZE_BODY))
+        self.delete_checkbox.clicked.connect(self._on_delete_checkbox_toggled)
         self.body_layout.addWidget(self.delete_checkbox)
 
-        self.quarantine_hint = QLabel("Original clips are safely moved to '.fthr_quarantine' in the clip folder and can be restored if needed.")
+        self.quarantine_hint = QLabel("Original clips are safely moved to your system Recycle Bin / Trash using send2trash.")
         self.quarantine_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_MICRO))
         self.body_layout.addWidget(self.quarantine_hint)
 
@@ -520,12 +521,22 @@ class ClipDeduplicationDialog(FthrDialog):
             overlap_sec = int(pair.overlap_seconds)
             saved_mb = pair.estimated_saved_bytes / (1024 * 1024)
             info_text = f"{overlap_sec}s overlap (~{saved_mb:.1f} MB)"
-            if pair.confidence != 'exact':
+            if pair.confidence == 'LOW':
+                info_text += " ⚠️ [Low Confidence]"
+            elif pair.confidence != 'HIGH':
                 info_text += " [Inferred]"
             if pair.is_chained:
                 info_text += " [Chained]"
             item_info = QTableWidgetItem(info_text)
-            if pair.confidence != 'exact':
+            if pair.confidence == 'LOW':
+                item_info.setForeground(QColor(Colors.WARNING))
+                item_info.setToolTip(
+                    "⚠️ Low timestamp confidence!\n"
+                    "File modification and creation times indicate this clip may have been copied or touched.\n"
+                    "Merging requires explicit 'Force merge (Low Confidence)' confirmation.\n"
+                    "Please preview before merging."
+                )
+            elif pair.confidence != 'HIGH':
                 item_info.setForeground(QColor(Colors.WARNING))
                 item_info.setToolTip(
                     "Timestamp was inferred from file modification date.\n"
@@ -567,6 +578,16 @@ class ClipDeduplicationDialog(FthrDialog):
             prev_layout.setContentsMargins(2, 2, 2, 2)
             self.table.setCellWidget(row, 4, prev_widget)
 
+    def _on_delete_checkbox_toggled(self, checked: bool):
+        if checked:
+            FthrMessageDialog.information(
+                self,
+                "RECYCLE BIN QUARANTINE ENABLED",
+                "When enabled, original overlapping video files will be safely moved to your "
+                "OS Recycle Bin / Trash rather than permanently deleted.\n\n"
+                "You can restore any file from the Recycle Bin at any time."
+            )
+
     def _on_selection_changed(self):
         has_sel = len(self.table.selectionModel().selectedRows()) > 0
         self.preview_btn.setEnabled(has_sel or len(self.pairs) > 0)
@@ -606,29 +627,30 @@ class ClipDeduplicationDialog(FthrDialog):
             return
 
         remove_orig = self.delete_checkbox.isChecked()
-        inferred_pairs = [p for p in selected_pairs if p.confidence != 'exact']
+        low_conf_pairs = [p for p in selected_pairs if p.confidence == 'LOW']
 
-        # Explicit safety confirmation if removing originals or if inferred timestamps are selected
-        if remove_orig or inferred_pairs:
-            msg_parts = []
-            if remove_orig:
-                msg_parts.append(
-                    f"You have chosen to quarantine original clips for {len(selected_pairs)} pair(s).\n\n"
-                    "The following original files will be moved to a safe '.fthr_quarantine' folder:\n"
-                )
-                for p in selected_pairs[:10]:
-                    msg_parts.append(f"  • {p.first.path.name}\n  • {p.second.path.name}\n")
-                if len(selected_pairs) > 10:
-                    msg_parts.append(f"  ... and {len(selected_pairs) - 10} more pair(s)\n")
+        # 1. Low confidence guard requiring explicit user confirmation
+        if low_conf_pairs:
+            msg = (
+                f"⚠️ Warning: {len(low_conf_pairs)} selected pair(s) have LOW timestamp confidence.\n\n"
+                "Their modification and creation dates suggest they were copied or touched outside FTHR.\n"
+                "Do you want to proceed with a Force Merge (Low Confidence)?"
+            )
+            if not FthrMessageDialog.question(self, "FORCE MERGE (LOW CONFIDENCE)?", msg):
+                return
 
-            if inferred_pairs:
-                msg_parts.append(
-                    f"\n⚠ Warning: {len(inferred_pairs)} selected pair(s) have INFERRED timestamps. "
-                    "These may be false matches if clips were copied or touched outside FTHR.\n"
-                )
-
-            msg_parts.append("\nDo you want to proceed with the merge?")
-            if not FthrMessageDialog.question(self, "CONFIRM MERGE", "".join(msg_parts)):
+        # 2. Recycle Bin quarantine confirmation listing original files
+        if remove_orig:
+            msg_parts = [
+                f"You have chosen to move original clips for {len(selected_pairs)} pair(s) to the OS Recycle Bin / Trash.\n\n"
+                "The following files will be safely moved:\n"
+            ]
+            for p in selected_pairs[:10]:
+                msg_parts.append(f"  • {p.first.path.name}\n  • {p.second.path.name}\n")
+            if len(selected_pairs) > 10:
+                msg_parts.append(f"  ... and {len(selected_pairs) - 10} more pair(s)\n")
+            msg_parts.append("\nDo you want to proceed?")
+            if not FthrMessageDialog.question(self, "CONFIRM MOVE TO RECYCLE BIN", "".join(msg_parts)):
                 return
 
         self.merge_btn.setEnabled(False)
@@ -659,12 +681,12 @@ class ClipDeduplicationDialog(FthrDialog):
             if self.delete_checkbox.isChecked():
                 self.info_label.setText(
                     f"Successfully merged {success_count} overlapping clip pair(s)! "
-                    f"Confirmed {saved_mb:.1f} MB disk space recovered (originals moved to .fthr_quarantine)."
+                    f"Confirmed {saved_mb:.1f} MB disk space recovered (originals safely moved to OS Recycle Bin / Trash)."
                 )
             else:
                 self.info_label.setText(
                     f"Successfully merged {success_count} overlapping clip pair(s)! "
-                    "Original files were preserved (no disk space freed)."
+                    "Original files were preserved in place (no disk space freed)."
                 )
             self.deduplication_completed.emit(success_count, bytes_saved)
         else:

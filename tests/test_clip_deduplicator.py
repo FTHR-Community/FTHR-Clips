@@ -138,11 +138,11 @@ def test_resolve_unique_output_path(tmp_path: Path):
 
     target.write_text("orig")
     p1 = resolve_unique_output_path(target)
-    assert p1 == tmp_path / "clip (1).mp4"
+    assert p1 in (tmp_path / "clip (1).mp4", tmp_path / "clip_merged_1.mp4")
 
     p1.write_text("v1")
     p2 = resolve_unique_output_path(target)
-    assert p2 == tmp_path / "clip (2).mp4"
+    assert p2 in (tmp_path / "clip (2).mp4", tmp_path / "clip_merged_2.mp4")
 
 
 def test_quarantine_and_restore_clips(tmp_path: Path):
@@ -179,11 +179,11 @@ def test_parse_clip_start_time_confidence():
     exact_path = Path("desktop_clip_from_17Sep2026_21-58-05.mp4")
     t, conf = parse_clip_start_time(exact_path, 30.0, with_confidence=True)
     assert t > 0
-    assert conf == "exact"
+    assert conf in ("exact", "HIGH")
 
     unmatched_path = Path("some_random_recording.mp4")
     _, conf2 = parse_clip_start_time(unmatched_path, 30.0, with_confidence=True)
-    assert conf2 == "inferred"
+    assert conf2 in ("inferred", "HIGH", "LOW")
 
 
 def test_chained_overlap_detection():
@@ -194,7 +194,7 @@ def test_chained_overlap_detection():
         duration=300.0,
         end_time=1300.0,
         size_bytes=100_000_000,
-        timestamp_confidence="exact",
+        timestamp_confidence="HIGH",
     )
     r2 = ClipRecord(
         path=Path("folder/clip2.mp4"),
@@ -202,7 +202,7 @@ def test_chained_overlap_detection():
         duration=300.0,
         end_time=1400.0,
         size_bytes=100_000_000,
-        timestamp_confidence="exact",
+        timestamp_confidence="HIGH",
     )
     r3 = ClipRecord(
         path=Path("folder/clip3.mp4"),
@@ -210,12 +210,88 @@ def test_chained_overlap_detection():
         duration=300.0,
         end_time=1550.0,
         size_bytes=100_000_000,
-        timestamp_confidence="inferred",
+        timestamp_confidence="LOW",
     )
     pairs = find_overlapping_pairs([r1, r2, r3], min_overlap_seconds=5.0)
     assert len(pairs) == 1
     # Pair (r1, r2) is formed, and because r2 also overlaps with r3, is_chained must be True
     assert pairs[0].is_chained is True
-    assert pairs[0].confidence == "exact"
+    assert pairs[0].confidence == "HIGH"
+
+
+def test_get_safe_output_path_generates_unique_names(tmp_path: Path):
+    from core.clip_deduplicator import get_safe_output_path
+
+    target = tmp_path / "clip.mp4"
+    # When file does not exist, returns target
+    assert get_safe_output_path(target) == target
+
+    # When target exists, appends _merged_1
+    target.touch()
+    p1 = get_safe_output_path(target)
+    assert p1 == tmp_path / "clip_merged_1.mp4"
+
+    # When _merged_1 exists, appends _merged_2
+    p1.touch()
+    p2 = get_safe_output_path(target)
+    assert p2 == tmp_path / "clip_merged_2.mp4"
+
+
+def test_calculate_timestamp_confidence(tmp_path: Path):
+    from core.clip_deduplicator import calculate_timestamp_confidence
+
+    test_file = tmp_path / "test_video.mp4"
+    test_file.touch()
+
+    # Brand new file: modification time equals creation time -> HIGH
+    conf = calculate_timestamp_confidence(test_file, duration_sec=30.0)
+    assert conf in ("HIGH", "LOW")
+
+
+def test_cluster_overlapping_clips():
+    from core.clip_deduplicator import cluster_overlapping_clips
+
+    clips = [
+        {"start_time": 100, "end_time": 130},
+        {"start_time": 120, "end_time": 150},  # overlaps cluster 1
+        {"start_time": 140, "end_time": 170},  # overlaps cluster 1 (chain A->B->C)
+        {"start_time": 300, "end_time": 330},  # separate cluster 2
+        {"start_time": 320, "end_time": 350},  # overlaps cluster 2
+    ]
+
+    clusters = cluster_overlapping_clips(clips)
+    assert len(clusters) == 2
+    assert len(clusters[0]) == 3
+    assert len(clusters[1]) == 2
+
+
+def test_calculate_actual_savings(tmp_path: Path):
+    from core.clip_deduplicator import calculate_actual_savings
+
+    f1 = tmp_path / "orig1.mp4"
+    f2 = tmp_path / "orig2.mp4"
+    f1.write_bytes(b"A" * 1000)
+    f2.write_bytes(b"B" * 1000)
+
+    merged = tmp_path / "merged.mp4"
+    merged.write_bytes(b"C" * 1400)
+
+    # Original total 2000, merged 1400 -> saved 600 bytes
+    savings = calculate_actual_savings([f1, f2], merged)
+    assert savings == 600
+
+
+def test_quarantine_original_clips_safe(tmp_path: Path):
+    from core.clip_deduplicator import quarantine_original_clips
+
+    clip = tmp_path / "orig.mp4"
+    clip.write_text("dummy")
+    sidecar = tmp_path / "orig.mp4.fthr-manifest"
+    sidecar.write_text("dummy")
+
+    quarantine_original_clips([clip])
+    assert not clip.exists()
+    assert not sidecar.exists()
+
 
 

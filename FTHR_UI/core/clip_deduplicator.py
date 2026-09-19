@@ -30,6 +30,53 @@ from core.clip_files import is_completed_video_path, iter_safe_tree
 from core.ffmpeg_tools import get_ffmpeg_exe
 from core.media_metadata import probe_video_metadata
 
+try:
+    from send2trash import send2trash
+except ImportError:
+    # Native fallback for moving files to OS trash / recycle bin without external dependencies
+    if sys.platform == 'win32':
+        import ctypes
+        from ctypes import wintypes
+
+        class _SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [
+                ('hwnd', wintypes.HWND),
+                ('wFunc', wintypes.UINT),
+                ('pFrom', wintypes.LPCWSTR),
+                ('pTo', wintypes.LPCWSTR),
+                ('fFlags', wintypes.WORD),
+                ('fAnyOperationsAborted', wintypes.BOOL),
+                ('hNameMappings', ctypes.c_void_p),
+                ('lpszProgressTitle', wintypes.LPCWSTR),
+            ]
+
+        def send2trash(path: str | Path) -> None:
+            """Move a file to the Windows Recycle Bin using SHFileOperationW."""
+            p = Path(path).resolve()
+            if not p.exists():
+                return
+            # Windows API requires double-null terminated LPCWSTR string
+            path_str = str(p) + '\0\0'
+            op = _SHFILEOPSTRUCTW()
+            op.wFunc = 0x0003  # FO_DELETE
+            op.pFrom = path_str
+            op.fFlags = 0x0040 | 0x0010 | 0x0004  # FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
+            res = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+            if res != 0 or op.fAnyOperationsAborted:
+                # Fallback to local hidden quarantine directory if recycle bin is unavailable
+                q_dir = p.parent / '.fthr_quarantine'
+                q_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(p), str(q_dir / p.name))
+    else:
+        def send2trash(path: str | Path) -> None:
+            """Move a file to trash directory on POSIX systems or local quarantine fallback."""
+            p = Path(path).resolve()
+            if not p.exists():
+                return
+            q_dir = p.parent / '.fthr_quarantine'
+            q_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(p), str(q_dir / p.name))
+
 _DATE_PATTERNS = [
     # FTHR default format: e.g. 17Sep2026_21-58-05
     (re.compile(r'(\d{1,2}[A-Za-z]{3}\d{4}_\d{2}-\d{2}-\d{2})'), '%d%b%Y_%H-%M-%S'),
@@ -51,7 +98,7 @@ class ClipRecord:
     width: int = 0
     height: int = 0
     fps: float = 0.0
-    timestamp_confidence: str = 'exact'  # 'exact' or 'inferred'
+    timestamp_confidence: str = 'HIGH'  # 'HIGH' or 'LOW'
 
     @property
     def formatted_start(self) -> str:
@@ -64,7 +111,7 @@ class OverlapPair:
     second: ClipRecord
     overlap_seconds: float
     estimated_saved_bytes: int
-    confidence: str = 'exact'      # 'exact' if both exact, else 'inferred'
+    confidence: str = 'HIGH'       # 'HIGH' if both HIGH, else 'LOW'
     is_chained: bool = False       # True if part of an A->B->C chain
     actual_saved_bytes: int = 0    # Populated after merge
 
@@ -73,7 +120,7 @@ class OverlapPair:
         overlap_m = int(self.overlap_seconds // 60)
         overlap_s = int(self.overlap_seconds % 60)
         saved_mb = self.estimated_saved_bytes / (1024 * 1024)
-        conf_str = " [Inferred timestamp]" if self.confidence != "exact" else ""
+        conf_str = " [Low confidence timestamp]" if self.confidence != "HIGH" else ""
         chain_str = " [Chained overlap]" if self.is_chained else ""
         return (
             f"Overlap: {overlap_m}m {overlap_s}s ({self.overlap_seconds:.1f}s){conf_str}{chain_str} — "
@@ -83,21 +130,54 @@ class OverlapPair:
         )
 
 
-def resolve_unique_output_path(target_path: Path) -> Path:
-    """Generate a unique path if target_path already exists (e.g. name (1).mp4)."""
+def get_safe_output_path(target_path: Path) -> Path:
+    """
+    Generate a unique file path to prevent silent overwrites.
+
+    Appends a counter to the filename if the target path already exists.
+
+    Args:
+        target_path (Path): The intended output file path.
+
+    Returns:
+        Path: A guaranteed unique file path.
+    """
     if not target_path.exists():
         return target_path
 
-    directory = target_path.parent
-    stem = target_path.stem
-    suffix = target_path.suffix
-
     counter = 1
     while True:
-        candidate = directory / f"{stem} ({counter}){suffix}"
-        if not candidate.exists():
-            return candidate
+        new_path = target_path.with_name(f"{target_path.stem}_merged_{counter}{target_path.suffix}")
+        if not new_path.exists():
+            return new_path
         counter += 1
+
+
+# Backwards compatibility alias for existing code
+resolve_unique_output_path = get_safe_output_path
+
+
+def quarantine_original_clips(file_paths: list[Path]) -> None:
+    """
+    Move original clips to the OS trash/recycle bin instead of permanent deletion.
+
+    Args:
+        file_paths (list[Path]): A list of paths to the original video clips.
+    """
+    for file_path in file_paths:
+        if file_path.exists():
+            # Safely move the video file and its metadata sidecar to the recycle bin/trash
+            try:
+                send2trash(file_path)
+            except Exception as e:
+                print(f"[Deduplication] Failed to send {file_path.name} to trash: {e}")
+            sidecar = file_path.with_name(file_path.name + ".fthr-manifest")
+            if sidecar.exists():
+                try:
+                    send2trash(sidecar)
+                except Exception:
+                    # Non-fatal: sidecar cleanup is best-effort and does not impact clip deduplication
+                    pass
 
 
 def quarantine_clips(
@@ -116,7 +196,7 @@ def quarantine_clips(
             q_dir.mkdir(parents=True, exist_ok=True)
             dest = q_dir / p.name
             if dest.exists():
-                dest = resolve_unique_output_path(dest)
+                dest = get_safe_output_path(dest)
             shutil.move(str(p), str(dest))
             quarantined.append(dest)
 
@@ -128,6 +208,85 @@ def quarantine_clips(
             print(f"[Deduplication] Failed to quarantine {p.name}: {e}")
 
     return quarantined
+
+
+def calculate_timestamp_confidence(file_path: Path, duration_sec: float) -> str:
+    """
+    Determine the confidence level of a clip's derived start time.
+
+    Args:
+        file_path (Path): Path to the video file.
+        duration_sec (float): The duration of the video in seconds.
+
+    Returns:
+        str: 'HIGH' if the timestamp is reliable, 'LOW' otherwise.
+    """
+    try:
+        stat = file_path.stat()
+    except OSError:
+        return "LOW"
+
+    # Calculate the theoretical start time based on modification time
+    derived_start_time = stat.st_mtime - duration_sec
+
+    # If the file creation time (ctime on Windows) is significantly newer
+    # than the derived start time, the file was likely copied or modified.
+    if hasattr(stat, 'st_ctime') and stat.st_ctime > (derived_start_time + duration_sec + 60):
+        return "LOW"
+
+    return "HIGH"
+
+
+def calculate_actual_savings(original_paths: list[Path], merged_path: Path) -> int:
+    """
+    Calculate the exact disk space saved after a successful merge operation.
+
+    Args:
+        original_paths (list[Path]): Paths of the original overlapping clips.
+        merged_path (Path): Path of the new merged clip.
+
+    Returns:
+        int: The number of bytes saved (can be negative if the new file is larger).
+    """
+    original_size = sum(p.stat().st_size for p in original_paths if p.exists())
+    merged_size = merged_path.stat().st_size if merged_path.exists() else 0
+
+    return original_size - merged_size
+
+
+def cluster_overlapping_clips(clips: list[dict]) -> list[list[dict]]:
+    """
+    Group all overlapping clips into distinct clusters for batch processing.
+
+    Assumes clips are sorted by start time.
+
+    Args:
+        clips (list[dict]): Sorted list of clip dictionaries containing
+                            'start_time' and 'end_time'.
+
+    Returns:
+        list[list[dict]]: A list of clusters, where each cluster is a list of clips.
+    """
+    if not clips:
+        return []
+
+    clusters: list[list[dict]] = []
+    current_cluster = [clips[0]]
+    current_end = clips[0]['end_time']
+
+    for clip in clips[1:]:
+        # If the current clip starts before the current cluster ends, they overlap
+        if clip['start_time'] <= current_end:
+            current_cluster.append(clip)
+            current_end = max(current_end, clip['end_time'])
+        else:
+            # No overlap, save the current cluster and start a new one
+            clusters.append(current_cluster)
+            current_cluster = [clip]
+            current_end = clip['end_time']
+
+    clusters.append(current_cluster)
+    return clusters
 
 
 def restore_quarantined_clips(
@@ -165,18 +324,19 @@ def parse_clip_start_time(
             try:
                 dt = datetime.datetime.strptime(match.group(1), fmt)
                 t = dt.timestamp()
-                return (t, 'exact') if with_confidence else t
+                return (t, 'HIGH') if with_confidence else t
             except ValueError:
                 # Pattern match was not a valid calendar date; try next pattern
                 pass
 
-    # Fallback to filesystem mtime minus duration
+    # Fallback to filesystem mtime minus duration with timestamp confidence calculation
     try:
         mtime = path.stat().st_mtime
         t = max(0.0, mtime - duration)
-        return (t, 'inferred') if with_confidence else t
+        conf = calculate_timestamp_confidence(path, duration)
+        return (t, conf) if with_confidence else t
     except OSError:
-        return (0.0, 'inferred') if with_confidence else 0.0
+        return (0.0, 'LOW') if with_confidence else 0.0
 
 
 def scan_clip_records(
@@ -292,7 +452,7 @@ def find_overlapping_pairs(
                 # Estimate duplicate byte savings
                 ratio = overlap / r2.duration if r2.duration > 0 else 0.0
                 saved_bytes = int(r2.size_bytes * min(1.0, ratio))
-                confidence = 'exact' if (r1.timestamp_confidence == 'exact' and r2.timestamp_confidence == 'exact') else 'inferred'
+                confidence = 'HIGH' if (r1.timestamp_confidence == 'HIGH' and r2.timestamp_confidence == 'HIGH') else 'LOW'
                 is_chained = len(overlaps_per_clip[r1.path]) > 1 or len(overlaps_per_clip[r2.path]) > 1
 
                 pairs.append(
@@ -334,9 +494,9 @@ def merge_overlapping_pair(
     if output_path is None:
         stem = f"{pair.first.path.stem}_merged_{pair.second.path.stem[-8:]}"
         candidate = out_dir / f"{stem}.mp4"
-        output_path = candidate if allow_overwrite else resolve_unique_output_path(candidate)
+        output_path = candidate if allow_overwrite else get_safe_output_path(candidate)
     elif not allow_overwrite and output_path.exists():
-        output_path = resolve_unique_output_path(output_path)
+        output_path = get_safe_output_path(output_path)
 
     cut_offset = max(0.0, pair.overlap_seconds)
 
@@ -363,7 +523,7 @@ def merge_overlapping_pair(
                 if cancel_event and cancel_event.is_set():
                     process.kill()
                     raise InterruptedError("Deduplication cancelled")
-                time.sleep(0.05)
+                    time.sleep(0.05)
             if process.returncode != 0:
                 _, stderr = process.communicate()
                 raise RuntimeError(f"FFmpeg copy failed: {stderr}")
@@ -426,10 +586,12 @@ def merge_overlapping_pair(
             output_path.unlink()
         shutil.move(str(temp_out), str(output_path))
 
-    initial_bytes = pair.first.size_bytes + pair.second.size_bytes
     if remove_originals:
+        pair.actual_saved_bytes = max(
+            0, calculate_actual_savings([pair.first.path, pair.second.path], output_path)
+        )
         if quarantine:
-            quarantine_clips([pair.first.path, pair.second.path])
+            quarantine_original_clips([pair.first.path, pair.second.path])
         else:
             for p in (pair.first.path, pair.second.path):
                 try:
@@ -440,9 +602,134 @@ def merge_overlapping_pair(
                 except OSError:
                     # Non-fatal: original files could not be unlinked (e.g. file lock); merged file remains safe
                     pass
-        merged_size = output_path.stat().st_size if output_path.exists() else 0
-        pair.actual_saved_bytes = max(0, initial_bytes - merged_size)
     else:
         pair.actual_saved_bytes = 0
 
     return output_path
+
+
+def merge_clip_cluster(
+    cluster: Sequence[ClipRecord],
+    output_path: Path | None = None,
+    remove_originals: bool = False,
+    allow_overwrite: bool = False,
+    cancel_event: threading.Event | None = None,
+) -> Path:
+    """
+    Merge a cluster of overlapping clips (>= 2 clips) into one continuous clip in a single FFmpeg pass.
+
+    Assumes cluster clips are sorted chronologically by start time.
+
+    Args:
+        cluster: List of ClipRecords in the cluster.
+        output_path: Destination path or None to auto-generate.
+        remove_originals: Whether to move original clips to OS trash/quarantine.
+        allow_overwrite: Whether existing destination can be replaced.
+        cancel_event: Cancellation signal.
+
+    Returns:
+        Path to the merged output video clip.
+    """
+    if not cluster:
+        raise ValueError("Cannot merge an empty cluster")
+    if len(cluster) == 1:
+        return cluster[0].path
+
+    if cancel_event and cancel_event.is_set():
+        raise InterruptedError("Deduplication cancelled")
+
+    ffmpeg = get_ffmpeg_exe()
+    out_dir = cluster[0].path.parent
+    if output_path is None:
+        first_stem = cluster[0].path.stem
+        last_suffix = cluster[-1].path.stem[-8:]
+        candidate = out_dir / f"{first_stem}_cluster_{last_suffix}.mp4"
+        output_path = candidate if allow_overwrite else get_safe_output_path(candidate)
+    elif not allow_overwrite and output_path.exists():
+        output_path = get_safe_output_path(output_path)
+
+    try:
+        td_dir = out_dir if out_dir.is_dir() else None
+    except Exception:
+        td_dir = None
+
+    with tempfile.TemporaryDirectory(prefix="fthr_cluster_", dir=td_dir) as td:
+        segments_to_concat: list[Path] = [cluster[0].path]
+        timeline_end = cluster[0].end_time
+
+        for idx, clip in enumerate(cluster[1:], start=1):
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Deduplication cancelled")
+
+            # If this clip ends before or at current timeline end, it is completely redundant
+            if clip.end_time <= timeline_end + 0.1:
+                continue
+
+            if clip.start_time < timeline_end:
+                cut_offset = timeline_end - clip.start_time
+                trimmed_seg = Path(td) / f"trimmed_seg_{idx}.mp4"
+                trim_cmd = [
+                    ffmpeg, "-y", "-v", "error", "-nostdin",
+                    "-ss", f"{cut_offset:.3f}",
+                    "-i", str(clip.path),
+                    "-map", "0",
+                    "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
+                    str(trimmed_seg),
+                ]
+                proc = subprocess.Popen(trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **_NO_WINDOW)
+                while proc.poll() is None:
+                    if cancel_event and cancel_event.is_set():
+                        proc.kill()
+                        raise InterruptedError("Deduplication cancelled")
+                    time.sleep(0.05)
+                if proc.returncode != 0:
+                    _, err = proc.communicate()
+                    raise RuntimeError(f"FFmpeg cluster trim failed for {clip.path.name}: {err}")
+                segments_to_concat.append(trimmed_seg)
+                timeline_end = clip.end_time
+            else:
+                # No overlap with previous clip, take entirely
+                segments_to_concat.append(clip.path)
+                timeline_end = clip.end_time
+
+        temp_out = Path(td) / "cluster_merged_out.mp4"
+        if len(segments_to_concat) == 1:
+            shutil.copyfile(str(segments_to_concat[0]), str(temp_out))
+        else:
+            concat_list = Path(td) / "concat_list.txt"
+            lines = []
+            for p in segments_to_concat:
+                escaped = p.resolve().as_posix().replace("'", "'\\''")
+                lines.append(f"file '{escaped}'")
+            concat_list.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            concat_cmd = [
+                ffmpeg, "-y", "-v", "error", "-nostdin",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list),
+                "-map", "0",
+                "-c", "copy",
+                str(temp_out),
+            ]
+            proc = subprocess.Popen(concat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **_NO_WINDOW)
+            while proc.poll() is None:
+                if cancel_event and cancel_event.is_set():
+                    proc.kill()
+                    raise InterruptedError("Deduplication cancelled")
+                time.sleep(0.05)
+            if proc.returncode != 0:
+                _, err = proc.communicate()
+                raise RuntimeError(f"FFmpeg cluster concat failed: {err}")
+
+        # Atomically place output
+        if output_path.exists() and allow_overwrite:
+            output_path.unlink()
+        shutil.move(str(temp_out), str(output_path))
+
+    if remove_originals:
+        orig_paths = [c.path for c in cluster]
+        quarantine_original_clips(orig_paths)
+
+    return output_path
+
