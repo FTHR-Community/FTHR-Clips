@@ -87,6 +87,7 @@ def parse_clip_start_time(path: Path, duration: float = 0.0) -> float:
                 dt = datetime.datetime.strptime(match.group(1), fmt)
                 return dt.timestamp()
             except ValueError:
+                # Pattern match was not a valid calendar date; try next pattern
                 pass
 
     # Fallback to filesystem mtime minus duration (since mtime is usually when file finished writing)
@@ -325,6 +326,7 @@ def merge_overlapping_pair(
                 if sidecar.is_file():
                     sidecar.unlink(missing_ok=True)
             except OSError:
+                # Non-fatal: original files could not be unlinked (e.g. file lock); merged file remains safe
                 pass
 
     return output_path
