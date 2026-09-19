@@ -71,15 +71,21 @@ void CaptureEngine::CaptureLoop() {
         if (recovery.Attempts() > 0)
             capture_health_flags_.store(CAPTURE_HEALTH_RECOVERING);
 
-        if (RunCaptureGeneration()) break;
+        const GenerationEnd end = RunCaptureGeneration();
+        if (end == GenerationEnd::Stopped) break;
         if (!running_.load()) break;
 
         if (ring_) ring_->Clear();
         content_suspicious_streak_.store(0);
         const auto decision = recovery.OnGenerationFailed(
             frame_count_.load() - frames_before);
-        if (decision.exhausted) {
-            std::cerr << "[Capture] Recovery exhausted after 3 attempts" << std::endl;
+        if (decision.exhausted || end == GenerationEnd::FailedForGood) {
+            if (decision.exhausted)
+                std::cerr << "[Capture] Recovery exhausted after 3 attempts" << std::endl;
+            else
+                std::cerr << "[Capture] Not retrying: " << GetCaptureFailureReason()
+                          << std::endl;
+            // The reason is already stored; the flag is what the UI acts on.
             capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
             // AUDIT-023: capture-thread state must become false on terminal
             // backend failure.  The command loop stays alive to publish the
@@ -106,11 +112,21 @@ void CaptureEngine::CaptureLoop() {
         capture_health_flags_.store(CAPTURE_HEALTH_NONE);
 }
 
-bool CaptureEngine::RunCaptureGeneration() {
-    backend_ = CreateBestBackend(cfg_, &running_);
+void CaptureEngine::SetCaptureFailureReason(const std::string& reason) {
+    std::lock_guard<std::mutex> lk(codec_mutex_);
+    capture_failure_reason_ = reason;
+}
+
+CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration() {
+    BackendFailure failure;
+    backend_ = CreateBestBackend(cfg_, &running_, &failure);
     if (!backend_) {
+        if (!running_.load()) return GenerationEnd::Stopped;
         std::cerr << "[Capture] No capture backend available — exiting" << std::endl;
-        return false;
+        SetCaptureFailureReason(failure.reason.empty()
+            ? "No capture backend is available" : failure.reason);
+        return failure.retry_pointless ? GenerationEnd::FailedForGood
+                                       : GenerationEnd::Failed;
     }
 
     uint32_t native_w = backend_->NativeWidth();
@@ -146,9 +162,12 @@ bool CaptureEngine::RunCaptureGeneration() {
     std::string codec_used;
     if (!encoder_.Open(enc_cfg, codec_used)) {
         std::cerr << "[Capture] Encoder open failed" << std::endl;
+        SetCaptureFailureReason("No video encoder could be opened");
         backend_->Shutdown();
-        return false;
+        backend_.reset();
+        return GenerationEnd::Failed;
     }
+    SetCaptureFailureReason("");
     nvenc_active_.store(codec_used.find("nvenc") != std::string::npos);
     { std::lock_guard<std::mutex> lk(codec_mutex_); active_codec_ = codec_used; }
     capture_generation_.fetch_add(1);
@@ -176,8 +195,10 @@ bool CaptureEngine::RunCaptureGeneration() {
 
         RawFrame raw;
         if (!backend_->CaptureFrame(raw)) {
-            if (running_.load())
+            if (running_.load()) {
                 std::cerr << "[Capture] CaptureFrame failed — exiting loop" << std::endl;
+                SetCaptureFailureReason("The capture backend stopped delivering frames");
+            }
             break;
         }
 
@@ -199,7 +220,7 @@ bool CaptureEngine::RunCaptureGeneration() {
     encoder_.Close();
     nvenc_active_.store(false);
     std::cout << "[Capture] Loop exited. Frames: " << frame_count_.load() << std::endl;
-    return !running_.load();
+    return running_.load() ? GenerationEnd::Failed : GenerationEnd::Stopped;
 }
 
 void CaptureEngine::SampleContent(const RawFrame& frame, uint64_t produced_frame) {

@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 BINARY = Path(__file__).parent.parent / 'FTHRcapture_linux/build/FTHRclips'
-KNOWN_BACKENDS = ['wlr-screencopy', 'ext-image-copy-capture-v1']
+KNOWN_BACKENDS = ['wlr-screencopy', 'ext-image-copy-capture-v1', 'ScreenCast portal']
 
 
 def test_binary_exists():

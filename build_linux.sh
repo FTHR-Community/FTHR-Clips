@@ -62,6 +62,15 @@ pkg-config --exists libavcodec libpulse-simple wayland-client || {
     exit 1
 }
 
+# Headers only: the engine dlopen()s these at runtime for the ScreenCast
+# portal backend, so the release build must compile it in.
+pkg-config --exists libpipewire-0.3 dbus-1 || {
+    echo "ERROR: Missing PipeWire / D-Bus headers for the ScreenCast portal backend."
+    echo "  Arch:          sudo pacman -S pipewire dbus"
+    echo "  Debian/Ubuntu: sudo apt install libpipewire-0.3-dev libdbus-1-dev"
+    exit 1
+}
+
 # Import each module separately. A combined import reports only the first
 # failure, and the advice it printed ("pip install …") was actively misleading
 # for sounddevice: that one fails on a missing *system* library (PortAudio),
