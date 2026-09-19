@@ -3112,6 +3112,9 @@ class MainWindow(QMainWindow):
         self._shutdown_timer_started = None
         self._tray_icon = None
         self._background_ui_paused = False
+        # Set by the first paintEvent; see _apply_background_ui_paused.
+        self._first_frame_painted = False
+        self._background_ui_pause_deferred = False
         self._pending_status_display: tuple[str, str] | None = None
         self._capture_settings_applying = False
         self._screenshot_inflight = False
@@ -3900,6 +3903,18 @@ class MainWindow(QMainWindow):
             self.showMaximized()
 
     # Native Windows resize + Aero snap --
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        self._note_first_frame_painted()
+
+    def _note_first_frame_painted(self) -> None:
+        if self._first_frame_painted:
+            return
+        self._first_frame_painted = True
+        if self._background_ui_pause_deferred:
+            self._background_ui_pause_deferred = False
+            QTimer.singleShot(0, self._refresh_background_ui_pause_state)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -7962,6 +7977,14 @@ class MainWindow(QMainWindow):
             self, paused: bool, *, force: bool = False) -> None:
         """Pause presentation work; capture, cards, sounds and saves stay live."""
         paused = bool(paused)
+        if paused and not self._first_frame_painted:
+            # Never pause a window that has not painted yet. On Wayland the
+            # compositor maps a surface only after its first buffer and only
+            # grants focus (ApplicationActive) to mapped windows, so pausing
+            # here would leave the app invisible for good. paintEvent re-runs
+            # the check once the first frame is out.
+            self._background_ui_pause_deferred = True
+            return
         if paused == self._background_ui_paused and not force:
             return
         self._background_ui_paused = paused
