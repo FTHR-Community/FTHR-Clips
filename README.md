@@ -83,19 +83,8 @@ hardware-unverified; hybrid or cross-adapter capture is not supported.
 
 ### Linux
 
-Dependencies: `cmake`, `gcc`, `ffmpeg`, `libpulse`, `wayland-protocols`, `python3 >= 3.11`, `PySide6`
-
-> FTHR uses the FFmpeg bundled next to the capture engine, falling back to
-> `ffmpeg` on your `PATH`. It no longer uses `imageio-ffmpeg`, whose bundled
-> binary is a GPL build.
-
-```bash
-git clone https://github.com/FTHR-Community/FTHR-Clips.git
-cd FTHR-Clips
-bash build_linux.sh
-```
-
-The AppImage lands in `build_output/`.
+See the [linux branch](https://github.com/FTHR-Community/FTHR-Clips/tree/linux)
+for build dependencies and instructions.
 
 ### Windows
 
