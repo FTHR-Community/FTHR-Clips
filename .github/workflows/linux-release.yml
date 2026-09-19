@@ -57,6 +57,7 @@ jobs:
             libportaudio2 libavcodec-dev libavfilter-dev libavformat-dev \
             libavutil-dev libavdevice-dev libswscale-dev libswresample-dev \
             libpulse-dev libwayland-dev wayland-protocols libwayland-bin \
+            libpipewire-0.3-dev libdbus-1-dev \
             libx11-dev libgl1 libegl1 libxcb-cursor0 libxcb-icccm4 \
             libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
             libxcb-xinerama0 libxkbcommon-x11-0 libxext-dev libxfixes-dev

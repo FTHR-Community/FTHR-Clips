@@ -47,7 +47,7 @@ jobs:
             cmake g++ pkg-config libpulse0 libpulse-dev libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
             libxcb-xinerama0 libxkbcommon-x11-0 libx11-dev libxext-dev libxfixes-dev \
-            libwayland-dev wayland-protocols
+            libwayland-dev wayland-protocols libpipewire-0.3-dev libdbus-1-dev
 
       - name: Install pinned dependencies
         # The alpha lock is the ONLY install path. If it does not resolve on a
@@ -82,7 +82,7 @@ jobs:
       - name: Prepare Linux test artifacts
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -q -y cmake g++ pkg-config libpulse-dev libx11-dev libxext-dev libxfixes-dev libwayland-dev wayland-protocols
+          sudo apt-get install -q -y cmake g++ pkg-config libpulse-dev libx11-dev libxext-dev libxfixes-dev libwayland-dev wayland-protocols libpipewire-0.3-dev libdbus-1-dev
           python tools/fetch_third_party.py --ffmpeg-linux
           echo "LD_LIBRARY_PATH=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
           echo "PATH=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg/bin:${PATH}" >> "$GITHUB_ENV"
@@ -149,7 +149,8 @@ jobs:
           sudo apt-get install -q -y \
             cmake g++ pkg-config \
             libpulse-dev libx11-dev libxext-dev libxfixes-dev \
-            libwayland-dev wayland-protocols libwayland-bin
+            libwayland-dev wayland-protocols libwayland-bin \
+            libpipewire-0.3-dev libdbus-1-dev
 
       - name: Fetch pinned Linux FFmpeg
         run: python tools/fetch_third_party.py --ffmpeg-linux
@@ -392,7 +393,8 @@ jobs:
             libgl1 libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
             libxcb-xinerama0 libxkbcommon-x11-0 \
-            libxext-dev libxfixes-dev libwayland-dev wayland-protocols
+            libxext-dev libxfixes-dev libwayland-dev wayland-protocols \
+            libpipewire-0.3-dev libdbus-1-dev
           python -m pip install --upgrade pip
           python -m pip install -r requirements-alpha.txt pyinstaller
 

@@ -11,6 +11,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(FTHR_X11_CAPTURE
     "Enable process-isolated native X11 capture backend" ON)
 
+# ScreenCast portal + PipeWire capture for compositors without a capture
+# protocol (KWin). Only the headers are needed at build time: the engine
+# dlopen()s libpipewire-0.3 and libdbus-1 and reports the backend as
+# unavailable when a system lacks them, so nothing new is linked or bundled.
+option(FTHR_PORTAL_BACKEND
+    "Compile the XDG ScreenCast portal / PipeWire capture backend" ON)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(fthr_replay_interval_test
@@ -186,6 +193,18 @@ pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET
 pkg_check_modules(PULSE REQUIRED IMPORTED_TARGET
     libpulse-simple libpulse)
 
+if(FTHR_PORTAL_BACKEND)
+    # Header-only use: the include dirs are taken, the libraries are not.
+    pkg_check_modules(PORTAL_HEADERS libpipewire-0.3 dbus-1)
+    if(NOT PORTAL_HEADERS_FOUND)
+        message(FATAL_ERROR
+            "FTHR_PORTAL_BACKEND=ON needs the PipeWire and D-Bus headers "
+            "(Debian: libpipewire-0.3-dev libdbus-1-dev; Arch: pipewire dbus; "
+            "Fedora: pipewire-devel dbus-devel). Pass -DFTHR_PORTAL_BACKEND=OFF "
+            "to build an engine without ScreenCast portal capture.")
+    endif()
+endif()
+
 if(BUILD_TESTING)
     add_executable(fthr_wayland_dispatch_test
         tests/wayland_dispatch_test.cpp
@@ -295,6 +314,13 @@ if(FTHR_X11_CAPTURE)
         src/x11_frame_converter.cpp)
 endif()
 
+if(FTHR_PORTAL_BACKEND)
+    list(APPEND FTHR_ENGINE_SOURCES
+        src/backend_portal.cpp
+        src/portal_screencast.cpp
+        src/pipewire_frame.cpp)
+endif()
+
 add_executable(FTHRclips ${FTHR_ENGINE_SOURCES})
 
 # The editor loads this small bridge into the Python process.  It uses the same
@@ -321,7 +347,14 @@ target_link_libraries(FTHRclips PRIVATE
 
 target_compile_options(FTHRclips PRIVATE -Wall -Wextra)
 target_compile_definitions(FTHRclips PRIVATE
-    FTHR_X11_CAPTURE=$<BOOL:${FTHR_X11_CAPTURE}>)
+    FTHR_X11_CAPTURE=$<BOOL:${FTHR_X11_CAPTURE}>
+    FTHR_PORTAL_BACKEND=$<BOOL:${FTHR_PORTAL_BACKEND}>)
+if(FTHR_PORTAL_BACKEND)
+    target_include_directories(FTHRclips SYSTEM PRIVATE ${PORTAL_HEADERS_INCLUDE_DIRS})
+    target_compile_definitions(FTHRclips PRIVATE _REENTRANT)
+    # dlopen() lives in libdl on older glibc; nothing from PipeWire or D-Bus.
+    target_link_libraries(FTHRclips PRIVATE ${CMAKE_DL_LIBS})
+endif()
 
 target_include_directories(FTHRPlaybackMixer PRIVATE
     ${CMAKE_SOURCE_DIR}/../FTHRcapture_common)
@@ -386,6 +419,25 @@ if(BUILD_TESTING)
             INSTALL_RPATH "$ORIGIN/../third_party/ffmpeg/lib")
         add_test(NAME x11_frame_conversion
             COMMAND fthr_x11_frame_converter_test)
+    endif()
+
+    if(FTHR_PORTAL_BACKEND)
+        # Exercises the pure portal helpers and the Response parser against
+        # messages built in-process, so it links libdbus-1 directly; the
+        # engine itself never does.
+        add_executable(fthr_portal_screencast_test
+            tests/portal_screencast_test.cpp
+            src/portal_screencast.cpp
+            src/pipewire_frame.cpp)
+        target_include_directories(fthr_portal_screencast_test PRIVATE src)
+        target_include_directories(fthr_portal_screencast_test SYSTEM PRIVATE
+            ${PORTAL_HEADERS_INCLUDE_DIRS} ${FFMPEG_INCLUDE_DIRS})
+        target_compile_definitions(fthr_portal_screencast_test PRIVATE _REENTRANT)
+        target_compile_options(fthr_portal_screencast_test PRIVATE
+            -Wall -Wextra -Wpedantic -UNDEBUG)
+        target_link_libraries(fthr_portal_screencast_test PRIVATE
+            ${PORTAL_HEADERS_LINK_LIBRARIES} ${CMAKE_DL_LIBS})
+        add_test(NAME portal_screencast_helpers COMMAND fthr_portal_screencast_test)
     endif()
 
     add_executable(fthr_linux_vaapi_encoder_test

@@ -1,6 +1,7 @@
 #include "capture_engine.h"
 #include "shared_memory.h"
 #include <algorithm>
+#include <chrono>
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
@@ -100,6 +101,13 @@ int main(int argc, char* argv[]) {
     // Signal handlers for clean exit
     signal(SIGINT,  on_signal);
     signal(SIGTERM, on_signal);
+
+    // After a terminal capture failure the process lingers briefly so the
+    // UI's 500 ms status poll can observe BACKEND_FAILED and its reason
+    // before the exit path reports a stopped engine instead.
+    constexpr auto kFailurePublishGrace = std::chrono::milliseconds(2000);
+    std::chrono::steady_clock::time_point capture_stopped_at{};
+    bool failure_reason_published = false;
 
     // Command poll loop — same 20ms cadence as Windows version
     while (!g_quit) {
@@ -208,16 +216,42 @@ int main(int argc, char* argv[]) {
 
         layout->frames_captured = engine.GetFrameCount();
         layout->nvenc_active    = engine.IsNvencActive();
-        layout->capture_health_flags = engine.GetCaptureHealthFlags();
+        uint32_t health_flags = engine.GetCaptureHealthFlags();
+        if ((health_flags & fthr::CAPTURE_HEALTH_BACKEND_FAILED) &&
+                !failure_reason_published) {
+            // Payload first: the UI reads engine_string as soon as it sees
+            // the BACKEND_FAILED flag. engine_string is shared with save and
+            // recording results, so wait until the UI has consumed any
+            // pending response and hold the flag back until then; no
+            // engine_response is published for the capture failure itself.
+            if (layout->engine_response ==
+                    static_cast<uint32_t>(fthr::ResponseType::NONE)) {
+                fthr::set_engine_string(layout, engine.GetCaptureFailureReason());
+                failure_reason_published = true;
+            } else {
+                health_flags &= ~fthr::CAPTURE_HEALTH_BACKEND_FAILED;
+            }
+        } else if (!(health_flags & fthr::CAPTURE_HEALTH_BACKEND_FAILED)) {
+            // A RECONFIGURE_ENCODER restart may fail again later.
+            failure_reason_published = false;
+        }
+        layout->capture_health_flags = health_flags;
         layout->capture_generation = engine.GetCaptureGeneration();
         layout->content_sample_sequence = engine.GetContentSampleSequence();
         layout->content_suspicious_streak = engine.GetContentSuspiciousStreak();
         layout->content_luma_mean = engine.GetContentLumaMean();
         layout->content_luma_variance = engine.GetContentLumaVariance();
         if (!engine.IsCapturing()) {
-            std::cerr << "[FTHR] Capture backend stopped; exiting engine"
-                      << std::endl;
-            break;
+            const auto now = std::chrono::steady_clock::now();
+            if (capture_stopped_at == std::chrono::steady_clock::time_point{})
+                capture_stopped_at = now;
+            if (now - capture_stopped_at >= kFailurePublishGrace) {
+                std::cerr << "[FTHR] Capture backend stopped; exiting engine"
+                          << std::endl;
+                break;
+            }
+        } else {
+            capture_stopped_at = {};
         }
         // Keep active_codec in shared memory up to date
         const std::string& ac = engine.GetActiveCodec();
