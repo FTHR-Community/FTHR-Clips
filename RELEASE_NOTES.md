@@ -13,6 +13,21 @@ This is the first patched alpha release.
 - Overlay previews, webcam and click burn-ins
 - Installer and Linux AppImage build definitions with release checks in place
 
+## Changes since 1.0.0-alpha (Linux hotkeys)
+
+- Global hotkeys now go through the XDG Desktop Portal
+  (`org.freedesktop.portal.GlobalShortcuts`) on KDE Plasma 6, GNOME 48+ and
+  other desktops with a portal backend. The desktop owns the key grab and lists
+  FTHR's actions in its own shortcut settings.
+- The `keyboard` library and its `/dev/input` access are gone. Membership in the
+  `input` group is no longer required and the app can no longer observe
+  keystrokes it did not register.
+- The AppImage installs `fthr-clips.desktop` on first run and starts inside its
+  own systemd scope so the portal can identify it. Desktops without a portal
+  backend keep the Unix-socket fallback (Hyprland binds are still generated).
+- Once the desktop knows a shortcut it keeps that key; changing it happens in the
+  desktop's shortcut settings (Settings → Hotkeys → Edit in desktop settings).
+
 ## Current status
 
 This build is ready for public testing.

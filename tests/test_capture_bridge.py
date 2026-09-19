@@ -1,5 +1,8 @@
 ﻿import ctypes
 import sys
+import os
+
+import pytest
 
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'FTHR_UI'))
 
@@ -279,3 +282,26 @@ def _a_path() -> str:
 def _encode_engine_string(text: str):
     """engine_string is wchar on Windows and raw bytes on Linux."""
     return text if sys.platform == 'win32' else text.encode('utf-8')
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Linux shared-memory path')
+def test_uninitialized_engine_mapping_closes_without_buffer_error(tmp_path, monkeypatch):
+    """The early poll before the engine flips is_initialized must return False
+    cleanly. Closing the mmap while the from_buffer view was still alive raised
+    BufferError and killed the connect thread on every Linux start."""
+    import ctypes
+    from core.capture_bridge import CaptureBridge, SharedMemoryLayout
+
+    shm = tmp_path / 'fthr_shm'
+    shm.write_bytes(b'\0' * ctypes.sizeof(SharedMemoryLayout))
+    # CaptureBridge is a process-wide singleton; keep this real instance from
+    # being handed to the fake-bridge subclasses other test modules build.
+    monkeypatch.setattr(CaptureBridge, '_instance', None)
+    bridge = CaptureBridge()
+    monkeypatch.setattr(os, 'open', lambda path, flags, _real=os.open: _real(str(shm), flags))
+
+    assert bridge._initialize_linux() is False
+    assert bridge._linux_mmap is None and bridge._layout is None
+
+    # A second attempt must work as well: nothing leaked from the first one.
+    assert bridge._initialize_linux() is False

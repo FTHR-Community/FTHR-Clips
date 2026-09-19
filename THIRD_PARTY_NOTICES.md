@@ -158,13 +158,13 @@ conflict.
 | **Licence text** | [`licenses/sounddevice-LICENSE.txt`](licenses/sounddevice-LICENSE.txt) |
 | **Note** | Wraps **PortAudio** (MIT). On Linux `libportaudio.so.2` is bundled explicitly by `FTHR_linux.spec`. |
 
-### keyboard
+### jeepney
 
 | | |
 |---|---|
-| **Version** | 0.13.5 · **Licence** MIT |
-| **Used for** | Global hotkeys (the only hotkey path on Windows) |
-| **Licence text** | [`licenses/keyboard-LICENSE.txt`](licenses/keyboard-LICENSE.txt) |
+| **Version** | 0.9.0 · **Licence** MIT |
+| **Used for** | Linux only: D-Bus client for the XDG GlobalShortcuts portal (`core/portal_shortcuts.py`). Pure Python, no native code. |
+| **Licence text** | [`licenses/jeepney-LICENSE.txt`](licenses/jeepney-LICENSE.txt) |
 
 ### cffi and pycparser
 

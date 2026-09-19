@@ -19,6 +19,9 @@ def _method_source(name: str, next_name: str) -> str:
 
 def test_retired_hotkey_path_and_update_surface_are_absent():
     assert '/tmp/fthr_hotkey.sock' not in MAIN_SOURCE
+    # The evdev-based hotkey path and its input-group nag are gone for good.
+    assert 'usermod -aG input' not in MAIN_SOURCE
+    assert '_check_linux_input_group' not in MAIN_SOURCE
     assert 'You are on the latest version.' not in MAIN_SOURCE
     assert 'Automatic update checks are not available yet.' not in MAIN_SOURCE
     assert 'Version & Updates' not in MAIN_SOURCE
@@ -377,7 +380,7 @@ def test_engine_launch_hard_disables_multiband_and_forwards_encoder_selection():
 
 
 def test_startup_limitations_never_open_modal_dialogs():
-    hotkey_warning = _method_source('_warn_input_group', '_warn_no_engine')
+    hotkey_warning = _method_source('_warn_no_engine', '_setup_hotkeys')
     compositor_warning = _method_source(
         '_show_compositor_warning', '_on_game_appeared')
 

@@ -226,8 +226,9 @@ sounddevice` does not fix it — the missing piece is the system library.
 
 Optional helpers, each enabling one feature: `hyprctl` (Hyprland binds),
 `xdotool` + `xprop` (X11 window and game detection), `grim` (Wayland
-screenshots), `openbsd-netcat` (hotkey socket client), `xdg-utils` (open clips
-folder). Check what you have:
+screenshots), `openbsd-netcat` (hotkey socket client on desktops without a
+GlobalShortcuts portal backend), `xdg-utils` (open clips folder). Check what
+you have:
 
 ```bash
 bash tools/linux_system_report.sh
@@ -280,8 +281,23 @@ Notes on the build:
 python FTHR_UI/main.py
 ```
 
-The UI spawns the engine itself. To run the engine standalone for diagnostics
-(positional argv):
+The UI spawns the engine itself.
+
+Global hotkeys on Linux come from the XDG GlobalShortcuts portal, which only
+grants a session to a process it can tie to a `.desktop` file. Packaged builds
+handle that themselves (AppRun starts inside `app-fthr\x2dclips-<pid>.scope`
+and the app installs `fthr-clips.desktop` on first run). A source run has
+neither, so the portal answers "An app id is required" and the app falls back
+to the socket instructions. To test the portal path from source, install a
+desktop entry once and start inside a matching scope:
+
+```bash
+printf '[Desktop Entry]\nType=Application\nName=FTHR Clips\nExec=/bin/true\nNoDisplay=true\n' \
+    > ~/.local/share/applications/fthr-clips.desktop
+systemd-run --user --scope --quiet --unit="app-fthr\\x2dclips-$$" python FTHR_UI/main.py
+```
+
+To run the engine standalone for diagnostics (positional argv):
 
 ```
 FTHRclips <fps> <buffer_s> <w> <h> <bitrate_kbps> <_> <_> <_> <scaling>
