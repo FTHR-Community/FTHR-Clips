@@ -1,6 +1,10 @@
-# FTHR Clips 1.1.0-alpha
+# FTHR Clips 1.1.1-alpha
 
 This is the first patched alpha release.
+
+This release includes a Linux audio/video synchronization fix. Desktop audio
+capture now compensates for measured PulseAudio delivery latency and uses a
+bounded recording buffer before extracting replay audio.
 
 ## What is in here
 
