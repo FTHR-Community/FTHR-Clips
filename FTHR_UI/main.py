@@ -9183,6 +9183,8 @@ class _SettingsPage(QWidget):
             self.imported_folders_changed.emit()
             self._update_dedup_stats_display()
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f'[Deduplication] Failed to open deduplication dialog: {e}')
 
     def _on_recording_folder_browse(self):

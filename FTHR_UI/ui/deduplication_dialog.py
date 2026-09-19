@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QSlider,
     QTableWidget,
     QTableWidgetItem,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -311,7 +310,7 @@ class _MergeWorker(QThread):
         for idx, pair in enumerate(self.pairs):
             if self.cancel_event.is_set():
                 break
-            self.progress.emit(idx, total, f"Merging {pair.first.path.name}...")
+            self.progress.emit(idx, total, f"Merging clip {idx + 1} of {total}: {pair.first.path.name}...")
             try:
                 merge_overlapping_pair(
                     pair,
@@ -417,7 +416,10 @@ class ClipDeduplicationDialog(FthrDialog):
         self.delete_checkbox.setStyleSheet(label_body(Colors.TEXT_MUTED, Fonts.SIZE_BODY))
         self.body_layout.addWidget(self.delete_checkbox)
 
-        self.disclaimer_label = QLabel("Note: Clips are merged losslessly without re-encoding, so a 1-2 second jump may appear at the stitch boundary.")
+        self.disclaimer_label = QLabel(
+            "Note: Clips are merged losslessly without re-encoding, taking only a few seconds per clip. "
+            "A 1-2 second jump may appear at the stitch boundary."
+        )
         self.disclaimer_label.setStyleSheet(label_body(Colors.TEXT_MUTED, Fonts.SIZE_MICRO))
         self.disclaimer_label.setWordWrap(True)
         self.body_layout.addWidget(self.disclaimer_label)
@@ -578,8 +580,11 @@ class ClipDeduplicationDialog(FthrDialog):
         self.preview_btn.setEnabled(False)
         self.scan_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, len(selected_pairs))
-        self.progress_bar.setValue(0)
+        if len(selected_pairs) == 1:
+            self.progress_bar.setRange(0, 0)
+        else:
+            self.progress_bar.setRange(0, len(selected_pairs))
+            self.progress_bar.setValue(0)
 
         remove_orig = self.delete_checkbox.isChecked()
         self._merge_worker = _MergeWorker(selected_pairs, remove_orig)
@@ -588,7 +593,8 @@ class ClipDeduplicationDialog(FthrDialog):
         self._merge_worker.start()
 
     def _on_merge_progress(self, cur: int, total: int, status: str):
-        self.progress_bar.setValue(cur)
+        if total > 1:
+            self.progress_bar.setValue(cur)
         self.info_label.setText(status)
 
     def _on_merge_finished(self, success_count: int, bytes_saved: int):

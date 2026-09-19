@@ -107,3 +107,26 @@ def test_each_clip_paired_at_most_once():
     assert pairs[0].first.path.name == "clip1.mp4"
     assert pairs[0].second.path.name == "clip2.mp4"
 
+
+def test_subsumed_clip_overlap():
+    # Clip 2 is completely inside Clip 1
+    r1 = ClipRecord(
+        path=Path("folder/clip1.mp4"),
+        start_time=1000.0,
+        duration=600.0,
+        end_time=1600.0,
+        size_bytes=200_000_000,
+    )
+    r2 = ClipRecord(
+        path=Path("folder/clip2.mp4"),
+        start_time=1200.0,
+        duration=200.0,
+        end_time=1400.0,
+        size_bytes=60_000_000,
+    )
+    pairs = find_overlapping_pairs([r1, r2], min_overlap_seconds=5.0)
+    assert len(pairs) == 1
+    assert pairs[0].overlap_seconds == 200.0
+    assert pairs[0].estimated_saved_bytes == 60_000_000
+
+
