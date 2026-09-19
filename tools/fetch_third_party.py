@@ -148,6 +148,32 @@ def _verify_vcredist(path: Path) -> dict[str, str]:
     return details
 
 
+def _ensure_linux_ffmpeg_tool_rpaths(bin_dir: Path) -> None:
+    """Make bundled FFmpeg CLI tools find libraries beside the archive.
+
+    BtbN's Linux archive currently embeds the linker flag ``-Wl:../lib`` as
+    DT_RPATH. That is a literal, invalid loader path rather than a path
+    relative to the executable. Patch only the two CLI entry points; library
+    bytes remain covered by the manifest hashes.
+    """
+    patchelf = shutil.which('patchelf')
+    if patchelf is None:
+        raise RuntimeError(
+            'patchelf is required to repair the bundled Linux FFmpeg CLI RPATH; '
+            'install it before fetching FFmpeg')
+
+    for name in ('ffmpeg', 'ffprobe'):
+        tool = bin_dir / name
+        if not tool.is_file():
+            raise RuntimeError(f'Linux FFmpeg archive is missing bin/{name}')
+        subprocess.run(
+            [patchelf, '--force-rpath', '--set-rpath', '$ORIGIN/../lib', str(tool)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
 def _ensure_linux_ffmpeg_aliases(
     lib_dir: Path, soname_map: dict[str, str]
 ) -> None:
@@ -278,6 +304,7 @@ def fetch_ffmpeg_linux(force: bool) -> int:
         if set(expected) <= set(have):
             bad = [n for n, d in expected.items() if _sha256(have[n]) != d]
             if not bad:
+                _ensure_linux_ffmpeg_tool_rpaths(FFMPEG_LINUX_DIR / 'bin')
                 _ensure_linux_ffmpeg_aliases(lib_dir, manifest['soname_map'])
                 print(f'LGPL FFmpeg {manifest["version"]} already present and verified.')
                 return 0
@@ -340,6 +367,7 @@ def fetch_ffmpeg_linux(force: bool) -> int:
                 shutil.copy2(staged / lic, FFMPEG_LINUX_DIR / 'LICENSE.txt')
                 break
 
+        _ensure_linux_ffmpeg_tool_rpaths(FFMPEG_LINUX_DIR / 'bin')
         _ensure_linux_ffmpeg_aliases(lib_dir, manifest['soname_map'])
 
     print(f'LGPL FFmpeg installed into {FFMPEG_LINUX_DIR.relative_to(ROOT)}')

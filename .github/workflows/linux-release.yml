@@ -53,7 +53,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -q -y \
-            cmake g++ pkg-config curl file binutils squashfs-tools libfuse2 \
+            cmake g++ pkg-config curl file binutils patchelf squashfs-tools libfuse2 \
             libportaudio2 libavcodec-dev libavfilter-dev libavformat-dev \
             libavutil-dev libavdevice-dev libswscale-dev libswresample-dev \
             libpulse-dev libwayland-dev wayland-protocols libwayland-bin \
