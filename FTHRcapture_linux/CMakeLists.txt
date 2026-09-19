@@ -305,6 +305,7 @@ set(FTHR_ENGINE_SOURCES
     src/capture_backend.cpp
     src/audio_capture.cpp
     src/audio_multi_capture.cpp
+    src/audio_timing.cpp
     src/encoder.cpp
     src/save_clip.cpp
     src/ring_buffer.cpp
