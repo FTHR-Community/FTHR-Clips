@@ -95,7 +95,8 @@ available on Linux.
   backend (`xdg-desktop-portal-kde` on KDE Plasma/KWin) together with
   PipeWire and D-Bus
 - PipeWire with PulseAudio compatibility, or PulseAudio
-- `grim` for screenshots and `nc`/netcat for compositor hotkey commands
+- `grim` for screenshots (the ScreenCast portal path covers video only) and
+  `nc`/netcat for compositor hotkey commands
 - A working FFmpeg runtime supplied by the AppImage
 - AMD VA-API users should install the Mesa VA-API driver and ensure the user
   can access `/dev/dri/renderD*`; software encoding remains the fallback
@@ -120,7 +121,9 @@ frames from PipeWire. The desktop shows its own screen picker the first time;
 FTHR stores the portal's restore token in `~/.fthr/portal_screencast_token`
 so later starts are silent, and the picker rather than the app's monitor
 setting decides which screen is captured. Declining the picker stops the
-engine with that reason in the app instead of re-opening the dialog. It
+engine with that reason in the app instead of re-opening the dialog. That
+path needs `xdg-desktop-portal` with a ScreenCast backend, PipeWire and
+D-Bus installed; none is bundled. It
 captures the selected desktop output rather than
 promising arbitrary per-window capture. PipeWire's PulseAudio compatibility
 layer supplies the default output sink's monitor source for desktop audio.

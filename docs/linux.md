@@ -78,7 +78,18 @@ the engine and the app shows that reason. Delete the token file to be asked
 again. Linux capture is desktop-output based. Arbitrary per-window capture is
 not part of the qualified Wayland scope.
 
-The selected output and scaling settings are controlled from the application.
+The portal path needs, at runtime, `xdg-desktop-portal` with a ScreenCast
+backend for the desktop (`xdg-desktop-portal-kde` on Plasma), PipeWire
+(`libpipewire-0.3.so.0`) and D-Bus (`libdbus-1.so.3`). None of them is
+bundled: the engine loads the two libraries only when it takes that path and
+otherwise reports why it could not. Its limits: the picker appears once per
+app identity (a source build started from a terminal is not the packaged
+app), the app's monitor selection is advisory because the portal picks the
+screen, and screenshots are a separate path (`grim`) that the portal backend
+does not provide.
+
+On `wlr-screencopy` and `ext-image-copy-capture` compositors the selected
+output and scaling settings are controlled from the application.
 For a compositor or output that is not detected correctly, run the diagnostic
 commands below and include their redacted output in a support report.
 
