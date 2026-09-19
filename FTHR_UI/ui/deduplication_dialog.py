@@ -27,7 +27,8 @@ from PySide6.QtWidgets import (
 
 from core.clip_deduplicator import (
     OverlapPair,
-    find_overlapping_pairs,
+    find_overlapping_clusters,
+    merge_clip_cluster,
     merge_overlapping_pair,
     scan_clip_records,
 )
@@ -81,24 +82,18 @@ class ClipPreviewDialog(FthrDialog):
         switch_row = QHBoxLayout()
         switch_row.setSpacing(10)
 
-        p1_name = self.pair.first.path.name
-        p2_name = self.pair.second.path.name
-        if len(p1_name) > 34:
-            p1_name = p1_name[:32] + "…"
-        if len(p2_name) > 34:
-            p2_name = p2_name[:32] + "…"
-
-        self.clip1_btn = QPushButton(f"CLIP 1: {p1_name}")
-        self.clip1_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.clip1_btn.setToolTip(str(self.pair.first.path))
-        self.clip1_btn.clicked.connect(lambda: self.switch_clip(1))
-        switch_row.addWidget(self.clip1_btn, 1)
-
-        self.clip2_btn = QPushButton(f"CLIP 2: {p2_name}")
-        self.clip2_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.clip2_btn.setToolTip(str(self.pair.second.path))
-        self.clip2_btn.clicked.connect(lambda: self.switch_clip(2))
-        switch_row.addWidget(self.clip2_btn, 1)
+        self.clip_buttons: list[QPushButton] = []
+        clips = self.pair.clips or [self.pair.first, self.pair.second]
+        for idx, clip in enumerate(clips, start=1):
+            name = clip.path.name
+            if len(name) > 30:
+                name = name[:28] + "…"
+            btn = QPushButton(f"CLIP {idx}: {name}")
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(str(clip.path))
+            btn.clicked.connect(lambda _, i=idx: self.switch_clip(i))
+            switch_row.addWidget(btn, 1)
+            self.clip_buttons.append(btn)
 
         overlap_sec = int(self.pair.overlap_seconds)
         saved_mb = self.pair.estimated_saved_bytes / (1024 * 1024)
@@ -149,7 +144,7 @@ class ClipPreviewDialog(FthrDialog):
         self.ext_btn = QPushButton("OPEN EXTERNAL")
         self.ext_btn.setStyleSheet(button_outline_qss())
         self.ext_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.ext_btn.setToolTip("Open in default Windows media player")
+        self.ext_btn.setToolTip("Open in default media player")
         self.ext_btn.clicked.connect(self._open_external)
         ctrl_bar.addWidget(self.ext_btn)
 
@@ -163,17 +158,19 @@ class ClipPreviewDialog(FthrDialog):
         self.seek_slider.sliderReleased.connect(self._on_seek_released)
 
     def switch_clip(self, clip_idx: int):
+        clips = self.pair.clips or [self.pair.first, self.pair.second]
+        if not (1 <= clip_idx <= len(clips)):
+            return
         self.active_clip_idx = clip_idx
-        path = self.pair.first.path if clip_idx == 1 else self.pair.second.path
+        path = clips[clip_idx - 1].path
         if not path.exists():
             return
 
-        if clip_idx == 1:
-            self.clip1_btn.setStyleSheet(button_primary_qss())
-            self.clip2_btn.setStyleSheet(button_outline_qss())
-        else:
-            self.clip1_btn.setStyleSheet(button_outline_qss())
-            self.clip2_btn.setStyleSheet(button_primary_qss())
+        for idx, btn in enumerate(self.clip_buttons, start=1):
+            if idx == clip_idx:
+                btn.setStyleSheet(button_primary_qss())
+            else:
+                btn.setStyleSheet(button_outline_qss())
 
         self.player.stop()
         self.player.setSource(QUrl.fromLocalFile(str(path)))
@@ -213,9 +210,11 @@ class ClipPreviewDialog(FthrDialog):
         self._is_seeking = False
 
     def _open_external(self):
-        path = self.pair.first.path if self.active_clip_idx == 1 else self.pair.second.path
-        if path.exists():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        clips = self.pair.clips or [self.pair.first, self.pair.second]
+        if 1 <= self.active_clip_idx <= len(clips):
+            path = clips[self.active_clip_idx - 1].path
+            if path.exists():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def keyPressEvent(self, event):  # noqa: N802
         if event.key() == Qt.Key.Key_Space:
@@ -284,7 +283,7 @@ class _ScanWorker(QThread):
             progress_cb=lambda cur, tot, name: self.progress.emit(cur, tot, name),
         )
         if not self.cancel_event.is_set():
-            pairs = find_overlapping_pairs(records)
+            pairs = find_overlapping_clusters(records)
             self.finished.emit(pairs)
         else:
             self.finished.emit([])
@@ -307,20 +306,30 @@ class _MergeWorker(QThread):
         success = 0
         bytes_saved = 0
         total = len(self.pairs)
-        for idx, pair in enumerate(self.pairs):
+        for idx, item in enumerate(self.pairs):
             if self.cancel_event.is_set():
                 break
-            self.progress.emit(idx, total, f"Merging clip {idx + 1} of {total}: {pair.first.path.name}...")
+            name = item.first.path.name if item.first else f"Item {idx + 1}"
+            clips = item.clips or [item.first, item.second]
+            self.progress.emit(idx, total, f"Merging {idx + 1} of {total}: {name}...")
             try:
-                merge_overlapping_pair(
-                    pair,
-                    remove_originals=self.remove_originals,
-                    cancel_event=self.cancel_event,
-                )
+                if len(clips) > 2:
+                    _, saved = merge_clip_cluster(
+                        clips,
+                        remove_originals=self.remove_originals,
+                        cancel_event=self.cancel_event,
+                    )
+                    item.actual_saved_bytes = saved
+                else:
+                    merge_overlapping_pair(
+                        item,
+                        remove_originals=self.remove_originals,
+                        cancel_event=self.cancel_event,
+                    )
                 success += 1
-                bytes_saved += pair.actual_saved_bytes if self.remove_originals else 0
+                bytes_saved += item.actual_saved_bytes if self.remove_originals else 0
             except Exception as e:
-                print(f"[Deduplication] Failed to merge {pair.first.path.name} and {pair.second.path.name}: {e}")
+                print(f"[Deduplication] Failed to merge {name}: {e}")
                 continue
 
         self.finished.emit(success, bytes_saved, self.remove_originals)
@@ -491,8 +500,9 @@ class ClipDeduplicationDialog(FthrDialog):
         note_str = f" ({'; '.join(notes)})" if notes else ""
 
         total_saved_mb = sum(p.estimated_saved_bytes for p in pairs) / (1024 * 1024)
+        item_word = "group(s)" if any(len(p.clips or []) > 2 for p in pairs) else "pair(s)"
         self.info_label.setText(
-            f"Found {len(pairs)} overlapping clip pairs. "
+            f"Found {len(pairs)} overlapping clip {item_word}. "
             f"Estimated potential disk savings: {total_saved_mb:.1f} MB.{note_str} "
             "Double-click any clip to preview."
         )
@@ -502,7 +512,8 @@ class ClipDeduplicationDialog(FthrDialog):
         self.table.setRowCount(len(pairs))
         for row, pair in enumerate(pairs):
             chk = QCheckBox()
-            chk.setChecked(True)
+            # LOW confidence items are unchecked by default to require explicit user selection
+            chk.setChecked(pair.confidence != 'LOW')
             chk_widget = QWidget()
             chk_layout = QHBoxLayout(chk_widget)
             chk_layout.addWidget(chk)
@@ -510,12 +521,21 @@ class ClipDeduplicationDialog(FthrDialog):
             chk_layout.setContentsMargins(0, 0, 0, 0)
             self.table.setCellWidget(row, 0, chk_widget)
 
+            clips = pair.clips or [pair.first, pair.second]
+
             item1 = QTableWidgetItem(pair.first.path.name)
             item1.setToolTip(f"Clip 1: {pair.first.path}\nConfidence: {pair.first.timestamp_confidence}\nDouble-click to preview")
             self.table.setItem(row, 1, item1)
 
-            item2 = QTableWidgetItem(pair.second.path.name)
-            item2.setToolTip(f"Clip 2: {pair.second.path}\nConfidence: {pair.second.timestamp_confidence}\nDouble-click to preview")
+            if len(clips) > 2:
+                col2_text = f"{pair.second.path.name} (+{len(clips) - 2} more)"
+                col2_tip = "\n".join(f"Clip {i}: {c.path.name}" for i, c in enumerate(clips[1:], start=2)) + "\nDouble-click to preview"
+            else:
+                col2_text = pair.second.path.name
+                col2_tip = f"Clip 2: {pair.second.path}\nConfidence: {pair.second.timestamp_confidence}\nDouble-click to preview"
+
+            item2 = QTableWidgetItem(col2_text)
+            item2.setToolTip(col2_tip)
             self.table.setItem(row, 2, item2)
 
             overlap_sec = int(pair.overlap_seconds)
@@ -526,7 +546,10 @@ class ClipDeduplicationDialog(FthrDialog):
             elif pair.confidence != 'HIGH':
                 info_text += " [Inferred]"
             if pair.is_chained:
-                info_text += " [Chained]"
+                if len(clips) > 2:
+                    info_text += f" [Chain: {len(clips)} clips]"
+                else:
+                    info_text += " [Chained]"
             item_info = QTableWidgetItem(info_text)
             if pair.confidence == 'LOW':
                 item_info.setForeground(QColor(Colors.WARNING))
@@ -544,10 +567,16 @@ class ClipDeduplicationDialog(FthrDialog):
                     "Please preview before merging."
                 )
             elif pair.is_chained:
-                item_info.setToolTip(
-                    "Part of an overlap chain (e.g. A->B->C).\n"
-                    "Re-scan after merge to resolve remaining overlaps."
-                )
+                if len(clips) > 2:
+                    item_info.setToolTip(
+                        f"Overlap chain of {len(clips)} clips (e.g. A->B->C).\n"
+                        "Merged seamlessly in a single FFmpeg pass."
+                    )
+                else:
+                    item_info.setToolTip(
+                        "Part of an overlap chain.\n"
+                        "Merged seamlessly in a single FFmpeg pass."
+                    )
             self.table.setItem(row, 3, item_info)
 
             # Preview button in row
@@ -632,7 +661,7 @@ class ClipDeduplicationDialog(FthrDialog):
         # 1. Low confidence guard requiring explicit user confirmation
         if low_conf_pairs:
             msg = (
-                f"⚠️ Warning: {len(low_conf_pairs)} selected pair(s) have LOW timestamp confidence.\n\n"
+                f"⚠️ Warning: {len(low_conf_pairs)} selected item(s) have LOW timestamp confidence.\n\n"
                 "Their modification and creation dates suggest they were copied or touched outside FTHR.\n"
                 "Do you want to proceed with a Force Merge (Low Confidence)?"
             )
@@ -642,13 +671,18 @@ class ClipDeduplicationDialog(FthrDialog):
         # 2. Recycle Bin quarantine confirmation listing original files
         if remove_orig:
             msg_parts = [
-                f"You have chosen to move original clips for {len(selected_pairs)} pair(s) to the OS Recycle Bin / Trash.\n\n"
+                f"You have chosen to move original clips for {len(selected_pairs)} item(s) to the OS Recycle Bin / Trash.\n\n"
                 "The following files will be safely moved:\n"
             ]
-            for p in selected_pairs[:10]:
-                msg_parts.append(f"  • {p.first.path.name}\n  • {p.second.path.name}\n")
-            if len(selected_pairs) > 10:
-                msg_parts.append(f"  ... and {len(selected_pairs) - 10} more pair(s)\n")
+            all_files: list[Path] = []
+            for item in selected_pairs:
+                for c in (item.clips or [item.first, item.second]):
+                    all_files.append(c.path)
+
+            for p in all_files[:12]:
+                msg_parts.append(f"  • {p.name}\n")
+            if len(all_files) > 12:
+                msg_parts.append(f"  ... and {len(all_files) - 12} more file(s)\n")
             msg_parts.append("\nDo you want to proceed?")
             if not FthrMessageDialog.question(self, "CONFIRM MOVE TO RECYCLE BIN", "".join(msg_parts)):
                 return
@@ -680,12 +714,12 @@ class ClipDeduplicationDialog(FthrDialog):
         if success_count > 0:
             if removed:
                 self.info_label.setText(
-                    f"Successfully merged {success_count} overlapping clip pair(s)! "
+                    f"Successfully merged {success_count} overlapping clip item(s)! "
                     f"Confirmed {saved_mb:.1f} MB disk space recovered (originals safely moved to OS Recycle Bin / Trash)."
                 )
             else:
                 self.info_label.setText(
-                    f"Successfully merged {success_count} overlapping clip pair(s)! "
+                    f"Successfully merged {success_count} overlapping clip item(s)! "
                     "Original files were preserved in place (no disk space freed)."
                 )
             self.deduplication_completed.emit(success_count, bytes_saved)
@@ -701,12 +735,12 @@ class ClipDeduplicationDialog(FthrDialog):
         if getattr(self, '_workers_torn_down', False):
             return
         self._workers_torn_down = True
-        if self._scan_worker and self._scan_worker.isRunning():
-            self._scan_worker.cancel()
-            self._scan_worker.wait(1000)
-        if self._merge_worker and self._merge_worker.isRunning():
-            self._merge_worker.cancel()
-            self._merge_worker.wait(1000)
+        for worker in (self._scan_worker, self._merge_worker):
+            if worker and worker.isRunning():
+                worker.cancel()
+                if not worker.wait(2000):
+                    worker.terminate()
+                    worker.wait(1000)
 
     def reject(self):
         self._teardown_workers()

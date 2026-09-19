@@ -183,7 +183,7 @@ def test_parse_clip_start_time_confidence():
 
     unmatched_path = Path("some_random_recording.mp4")
     _, conf2 = parse_clip_start_time(unmatched_path, 30.0, with_confidence=True)
-    assert conf2 in ("inferred", "HIGH", "LOW")
+    assert conf2 in ("HIGH", "LOW")
 
 
 def test_chained_overlap_detection():
@@ -237,6 +237,41 @@ def test_get_safe_output_path_generates_unique_names(tmp_path: Path):
     assert p2 == tmp_path / "clip_merged_2.mp4"
 
 
+def test_get_safe_output_path_does_not_accumulate_suffixes(tmp_path: Path):
+    from core.clip_deduplicator import get_safe_output_path
+
+    # If target already has _merged_1 in stem, it should not produce _merged_1_merged_1
+    target = tmp_path / "clip_merged_1.mp4"
+    target.touch()
+
+    p2 = get_safe_output_path(target)
+    assert p2 == tmp_path / "clip_merged_2.mp4"
+
+
+def test_finalize_output_atomic_and_overwrite(tmp_path: Path):
+    from core.clip_deduplicator import finalize_output
+
+    temp_out = tmp_path / "temp.mp4"
+    temp_out.write_text("rendered_data")
+
+    desired = tmp_path / "desired.mp4"
+    desired.write_text("existing_data")
+
+    # 1. Without allow_overwrite, should move to a non-colliding path
+    final_path = finalize_output(temp_out, desired, allow_overwrite=False)
+    assert final_path != desired
+    assert final_path.exists()
+    assert final_path.read_text() == "rendered_data"
+    assert desired.read_text() == "existing_data"
+
+    # 2. With allow_overwrite, should replace target
+    temp_out2 = tmp_path / "temp2.mp4"
+    temp_out2.write_text("new_data")
+    final_path2 = finalize_output(temp_out2, desired, allow_overwrite=True)
+    assert final_path2 == desired
+    assert desired.read_text() == "new_data"
+
+
 def test_calculate_timestamp_confidence_new_file_is_high(tmp_path: Path):
     from core.clip_deduplicator import calculate_timestamp_confidence
 
@@ -280,6 +315,61 @@ def test_cluster_overlapping_clips():
     assert len(clusters[1]) == 2
 
 
+def test_cluster_overlapping_clips_with_clip_records(tmp_path: Path):
+    from core.clip_deduplicator import ClipRecord, cluster_overlapping_clips
+
+    dir_a = tmp_path / "game_a"
+    dir_b = tmp_path / "game_b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+
+    r1 = ClipRecord(path=dir_a / "c1.mp4", start_time=100.0, duration=30.0, end_time=130.0, size_bytes=1000)
+    r2 = ClipRecord(path=dir_a / "c2.mp4", start_time=120.0, duration=30.0, end_time=150.0, size_bytes=1000)
+    # r3 overlaps chronologically with r1/r2, but is in a different directory -> must NOT be in cluster A
+    r3 = ClipRecord(path=dir_b / "c3.mp4", start_time=110.0, duration=30.0, end_time=140.0, size_bytes=1000)
+
+    clusters = cluster_overlapping_clips([r1, r2, r3])
+    assert len(clusters) == 1
+    assert len(clusters[0]) == 2
+    assert clusters[0][0].path == dir_a / "c1.mp4"
+    assert clusters[0][1].path == dir_a / "c2.mp4"
+
+
+def test_stream_copy_compatibility(tmp_path: Path):
+    from core.clip_deduplicator import ClipRecord, are_clips_stream_copy_compatible
+
+    p1 = tmp_path / "clip1.mp4"
+    p2 = tmp_path / "clip2.mp4"
+
+    # Matching resolution
+    r1 = ClipRecord(path=p1, start_time=0, duration=10, end_time=10, size_bytes=100, width=1920, height=1080)
+    r2 = ClipRecord(path=p2, start_time=5, duration=10, end_time=15, size_bytes=100, width=1920, height=1080)
+    assert are_clips_stream_copy_compatible(r1, r2) is True
+
+    # Differing resolution -> incompatible for -c copy concat
+    r3 = ClipRecord(path=p2, start_time=5, duration=10, end_time=15, size_bytes=100, width=2560, height=1440)
+    assert are_clips_stream_copy_compatible(r1, r3) is False
+
+
+def test_find_overlapping_clusters_chain(tmp_path: Path):
+    from core.clip_deduplicator import ClipRecord, find_overlapping_clusters
+
+    p1 = tmp_path / "clip1.mp4"
+    p2 = tmp_path / "clip2.mp4"
+    p3 = tmp_path / "clip3.mp4"
+
+    r1 = ClipRecord(path=p1, start_time=100.0, duration=30.0, end_time=130.0, size_bytes=30_000_000)
+    r2 = ClipRecord(path=p2, start_time=120.0, duration=30.0, end_time=150.0, size_bytes=30_000_000)
+    r3 = ClipRecord(path=p3, start_time=140.0, duration=30.0, end_time=170.0, size_bytes=30_000_000)
+
+    clusters = find_overlapping_clusters([r1, r2, r3], min_overlap_seconds=5.0)
+    assert len(clusters) == 1
+    assert clusters[0].is_chained is True
+    assert len(clusters[0].clips) == 3
+    assert clusters[0].first.path == p1
+    assert clusters[0].second.path == p2
+
+
 def test_calculate_actual_savings(tmp_path: Path):
     from core.clip_deduplicator import calculate_actual_savings
 
@@ -298,15 +388,60 @@ def test_calculate_actual_savings(tmp_path: Path):
 
 def test_quarantine_original_clips_safe(tmp_path: Path):
     from core.clip_deduplicator import quarantine_original_clips
+    from core.audio_manifest import MANIFEST_SUFFIX
 
     clip = tmp_path / "orig.mp4"
     clip.write_text("dummy")
-    sidecar = tmp_path / "orig.mp4.fthr-manifest"
-    sidecar.write_text("dummy")
+    sidecar_audio = tmp_path / f"orig.mp4{MANIFEST_SUFFIX}"
+    sidecar_audio.write_text("audio_manifest")
+    sidecar_legacy = tmp_path / "orig.mp4.fthr-manifest"
+    sidecar_legacy.write_text("legacy_manifest")
 
-    quarantine_original_clips([clip])
+    quarantined = quarantine_original_clips([clip])
+    assert len(quarantined) == 1
+    assert quarantined[0] == clip
     assert not clip.exists()
-    assert not sidecar.exists()
+    assert not sidecar_audio.exists()
+    assert not sidecar_legacy.exists()
+
+
+def test_is_file_locked_handles_readonly_and_locked(tmp_path: Path, monkeypatch):
+    import stat
+    from core.clip_deduplicator import _is_file_locked, quarantine_original_clips
+
+    # 1. Read-only file: should NOT be considered locked
+    ro_file = tmp_path / "readonly_clip.mp4"
+    ro_file.write_text("content")
+    # Make read-only
+    ro_file.chmod(stat.S_IREAD)
+    try:
+        assert _is_file_locked(ro_file) is False
+        quarantined = quarantine_original_clips([ro_file])
+        assert len(quarantined) == 1
+        assert not ro_file.exists()
+    finally:
+        if ro_file.exists():
+            ro_file.chmod(stat.S_IWRITE | stat.S_IREAD)
+            ro_file.unlink()
+
+    # 2. Simulated locked file: open() raises PermissionError on writable file
+    locked_file = tmp_path / "locked_clip.mp4"
+    locked_file.write_text("locked_content")
+
+    orig_open = Path.open
+    def mock_open(self, *args, **kwargs):
+        if self == locked_file:
+            raise PermissionError("Simulated OS file lock")
+        return orig_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", mock_open)
+    assert _is_file_locked(locked_file) is True
+
+    # Quarantining a locked file should skip it safely
+    quarantined = quarantine_original_clips([locked_file])
+    assert len(quarantined) == 0
+    assert locked_file.exists()
+
 
 
 

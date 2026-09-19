@@ -125,3 +125,44 @@ def test_merge_clip_cluster_integration(ffmpeg_exe, tmp_path: Path):
     assert not clip2.exists(), "clip2 should have been quarantined"
     assert not clip3.exists(), "clip3 should have been quarantined"
     assert saved2 > 0, "should report positive bytes saved after quarantine"
+
+
+def test_merge_clip_cluster_with_audio_manifest_sidecars(ffmpeg_exe, tmp_path: Path):
+    """Verify cluster merge also quarantines audio manifest sidecars and calculates savings."""
+    from core.clip_deduplicator import ClipRecord, find_overlapping_clusters, merge_clip_cluster
+    from core.audio_manifest import MANIFEST_SUFFIX
+
+    clip1 = tmp_path / "desktop_clip_from_20Sep2026_09-00-00.mp4"
+    clip2 = tmp_path / "desktop_clip_from_20Sep2026_09-00-06.mp4"
+    clip3 = tmp_path / "desktop_clip_from_20Sep2026_09-00-12.mp4"
+
+    _generate_synthetic_clip(ffmpeg_exe, clip1, 10.0, "A")
+    _generate_synthetic_clip(ffmpeg_exe, clip2, 10.0, "B")
+    _generate_synthetic_clip(ffmpeg_exe, clip3, 10.0, "C")
+
+    # Create audio manifest sidecars
+    sidecar1 = clip1.with_name(clip1.name + MANIFEST_SUFFIX)
+    sidecar2 = clip2.with_name(clip2.name + MANIFEST_SUFFIX)
+    sidecar3 = clip3.with_name(clip3.name + MANIFEST_SUFFIX)
+    sidecar1.write_text('{"sources": []}')
+    sidecar2.write_text('{"sources": []}')
+    sidecar3.write_text('{"sources": []}')
+
+    records = [
+        ClipRecord(path=clip1, start_time=0.0,  duration=10.0, end_time=10.0, size_bytes=clip1.stat().st_size),
+        ClipRecord(path=clip2, start_time=6.0,  duration=10.0, end_time=16.0, size_bytes=clip2.stat().st_size),
+        ClipRecord(path=clip3, start_time=12.0, duration=10.0, end_time=22.0, size_bytes=clip3.stat().st_size),
+    ]
+
+    clusters = find_overlapping_clusters(records, min_overlap_seconds=3.0)
+    assert len(clusters) == 1
+    assert len(clusters[0].clips) == 3
+
+    out, saved = merge_clip_cluster(clusters[0].clips, remove_originals=True)
+    assert out.exists()
+    assert saved > 0
+
+    # Verify both MP4s and sidecars were moved to trash/quarantine
+    for p in (clip1, clip2, clip3, sidecar1, sidecar2, sidecar3):
+        assert not p.exists(), f"{p.name} should have been quarantined"
+
