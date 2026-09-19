@@ -295,7 +295,7 @@ class _ScanWorker(QThread):
 
 class _MergeWorker(QThread):
     progress = Signal(int, int, str)
-    finished = Signal(int, int)  # success_count, total_bytes_saved
+    finished = Signal(int, int, bool)  # success_count, total_bytes_saved, remove_originals
 
     def __init__(self, pairs: list[OverlapPair], remove_originals: bool):
         super().__init__()
@@ -323,7 +323,7 @@ class _MergeWorker(QThread):
                 print(f"[Deduplication] Failed to merge {pair.first.path.name} and {pair.second.path.name}: {e}")
                 continue
 
-        self.finished.emit(success, bytes_saved)
+        self.finished.emit(success, bytes_saved, self.remove_originals)
 
     def cancel(self):
         self.cancel_event.set()
@@ -482,7 +482,7 @@ class ClipDeduplicationDialog(FthrDialog):
             return
 
         has_chained = any(p.is_chained for p in pairs)
-        has_inferred = any(p.confidence != 'exact' for p in pairs)
+        has_inferred = any(p.confidence == 'LOW' for p in pairs)
         notes = []
         if has_chained:
             notes.append("chained overlaps detected")
@@ -673,12 +673,12 @@ class ClipDeduplicationDialog(FthrDialog):
             self.progress_bar.setValue(cur)
         self.info_label.setText(status)
 
-    def _on_merge_finished(self, success_count: int, bytes_saved: int):
+    def _on_merge_finished(self, success_count: int, bytes_saved: int, removed: bool):
         self.progress_bar.setVisible(False)
         self.scan_btn.setEnabled(True)
         saved_mb = bytes_saved / (1024 * 1024)
         if success_count > 0:
-            if self.delete_checkbox.isChecked():
+            if removed:
                 self.info_label.setText(
                     f"Successfully merged {success_count} overlapping clip pair(s)! "
                     f"Confirmed {saved_mb:.1f} MB disk space recovered (originals safely moved to OS Recycle Bin / Trash)."

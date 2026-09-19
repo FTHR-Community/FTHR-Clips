@@ -42,7 +42,7 @@ except ImportError:
             _fields_ = [
                 ('hwnd', wintypes.HWND),
                 ('wFunc', wintypes.UINT),
-                ('pFrom', wintypes.LPCWSTR),
+                ('pFrom', ctypes.c_void_p),  # c_void_p prevents c_wchar_p null-truncation
                 ('pTo', wintypes.LPCWSTR),
                 ('fFlags', wintypes.WORD),
                 ('fAnyOperationsAborted', wintypes.BOOL),
@@ -55,11 +55,13 @@ except ImportError:
             p = Path(path).resolve()
             if not p.exists():
                 return
-            # Windows API requires double-null terminated LPCWSTR string
-            path_str = str(p) + '\0\0'
+            # SHFileOperationW requires a double-null terminated path string.
+            # Use create_unicode_buffer so the buffer stays alive, and c_void_p
+            # (not LPCWSTR / c_wchar_p) so Python does not truncate at the first \0.
+            buf = ctypes.create_unicode_buffer(str(p) + '\0')  # create_unicode_buffer appends \0 → double-null
             op = _SHFILEOPSTRUCTW()
             op.wFunc = 0x0003  # FO_DELETE
-            op.pFrom = path_str
+            op.pFrom = ctypes.addressof(buf)
             op.fFlags = 0x0040 | 0x0010 | 0x0004  # FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
             res = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
             if res != 0 or op.fAnyOperationsAborted:
@@ -76,6 +78,16 @@ except ImportError:
             q_dir = p.parent / '.fthr_quarantine'
             q_dir.mkdir(parents=True, exist_ok=True)
             shutil.move(str(p), str(q_dir / p.name))
+
+
+def _is_file_locked(path: Path) -> bool:
+    """Return True if the file cannot be opened for writing (likely held open by another process)."""
+    try:
+        with path.open("r+b"):
+            return False
+    except OSError:
+        return True
+
 
 _DATE_PATTERNS = [
     # FTHR default format: e.g. 17Sep2026_21-58-05
@@ -130,7 +142,7 @@ class OverlapPair:
         )
 
 
-def get_safe_output_path(target_path: Path) -> Path:
+def get_safe_output_path(target_path: Path, max_attempts: int = 9999) -> Path:
     """
     Generate a unique file path to prevent silent overwrites.
 
@@ -138,19 +150,24 @@ def get_safe_output_path(target_path: Path) -> Path:
 
     Args:
         target_path (Path): The intended output file path.
+        max_attempts (int): Maximum number of suffixes to try before raising.
 
     Returns:
         Path: A guaranteed unique file path.
+
+    Raises:
+        RuntimeError: If no unique path could be found within max_attempts.
     """
     if not target_path.exists():
         return target_path
 
-    counter = 1
-    while True:
+    for counter in range(1, max_attempts + 1):
         new_path = target_path.with_name(f"{target_path.stem}_merged_{counter}{target_path.suffix}")
         if not new_path.exists():
             return new_path
-        counter += 1
+    raise RuntimeError(
+        f"Could not find a unique output path after {max_attempts} attempts: {target_path}"
+    )
 
 
 # Backwards compatibility alias for existing code
@@ -165,19 +182,25 @@ def quarantine_original_clips(file_paths: list[Path]) -> None:
         file_paths (list[Path]): A list of paths to the original video clips.
     """
     for file_path in file_paths:
-        if file_path.exists():
-            # Safely move the video file and its metadata sidecar to the recycle bin/trash
+        if not file_path.exists():
+            continue
+        if _is_file_locked(file_path):
+            # File is still held open by the capture engine or another process.
+            # Skip rather than risk moving a partially-written clip to the recycle bin.
+            print(f"[Deduplication] Skipping locked file (still open by another process): {file_path.name}")
+            continue
+        # Safely move the video file and its metadata sidecar to the recycle bin/trash
+        try:
+            send2trash(file_path)
+        except Exception as e:
+            print(f"[Deduplication] Failed to send {file_path.name} to trash: {e}")
+        sidecar = file_path.with_name(file_path.name + ".fthr-manifest")
+        if sidecar.exists():
             try:
-                send2trash(file_path)
-            except Exception as e:
-                print(f"[Deduplication] Failed to send {file_path.name} to trash: {e}")
-            sidecar = file_path.with_name(file_path.name + ".fthr-manifest")
-            if sidecar.exists():
-                try:
-                    send2trash(sidecar)
-                except Exception:
-                    # Non-fatal: sidecar cleanup is best-effort and does not impact clip deduplication
-                    pass
+                send2trash(sidecar)
+            except Exception:
+                # Non-fatal: sidecar cleanup is best-effort and does not impact clip deduplication
+                pass
 
 
 def quarantine_clips(
@@ -226,12 +249,15 @@ def calculate_timestamp_confidence(file_path: Path, duration_sec: float) -> str:
     except OSError:
         return "LOW"
 
-    # Calculate the theoretical start time based on modification time
-    derived_start_time = stat.st_mtime - duration_sec
-
-    # If the file creation time (ctime on Windows) is significantly newer
-    # than the derived start time, the file was likely copied or modified.
-    if hasattr(stat, 'st_ctime') and stat.st_ctime > (derived_start_time + duration_sec + 60):
+    # ctime semantics differ by platform:
+    #   Windows: ctime = file creation time  (unchanged by mv, updated by cp/copy)
+    #   Linux:   ctime = inode change time   (updated by both mv AND cp)
+    #
+    # On both platforms, if ctime is significantly newer than mtime it signals that the file
+    # was *copied* (or touched) rather than recorded in-place — flag as LOW confidence.
+    # A plain `mv` on the same filesystem updates ctime on Linux but also updates mtime to
+    # the same value, so the 60-second gap still only triggers on genuine copies.
+    if hasattr(stat, 'st_ctime') and stat.st_ctime > stat.st_mtime + 60:
         return "LOW"
 
     return "HIGH"
@@ -269,6 +295,9 @@ def cluster_overlapping_clips(clips: list[dict]) -> list[list[dict]]:
     """
     if not clips:
         return []
+
+    # Defensively sort to guarantee correct cluster formation regardless of caller ordering.
+    clips = sorted(clips, key=lambda c: c['start_time'])
 
     clusters: list[list[dict]] = []
     current_cluster = [clips[0]]
@@ -523,7 +552,6 @@ def merge_overlapping_pair(
                 if cancel_event and cancel_event.is_set():
                     process.kill()
                     raise InterruptedError("Deduplication cancelled")
-                    time.sleep(0.05)
             if process.returncode != 0:
                 _, stderr = process.communicate()
                 raise RuntimeError(f"FFmpeg copy failed: {stderr}")
@@ -614,7 +642,7 @@ def merge_clip_cluster(
     remove_originals: bool = False,
     allow_overwrite: bool = False,
     cancel_event: threading.Event | None = None,
-) -> Path:
+) -> tuple[Path, int]:
     """
     Merge a cluster of overlapping clips (>= 2 clips) into one continuous clip in a single FFmpeg pass.
 
@@ -628,12 +656,13 @@ def merge_clip_cluster(
         cancel_event: Cancellation signal.
 
     Returns:
-        Path to the merged output video clip.
+        Tuple of (path to merged output clip, bytes_saved: int).
+        bytes_saved is 0 when remove_originals is False.
     """
     if not cluster:
         raise ValueError("Cannot merge an empty cluster")
     if len(cluster) == 1:
-        return cluster[0].path
+        return cluster[0].path, 0
 
     if cancel_event and cancel_event.is_set():
         raise InterruptedError("Deduplication cancelled")
@@ -729,7 +758,10 @@ def merge_clip_cluster(
 
     if remove_originals:
         orig_paths = [c.path for c in cluster]
+        # Calculate actual savings BEFORE files are removed from disk so their sizes are still readable.
+        actual_saved = max(0, calculate_actual_savings(orig_paths, output_path))
         quarantine_original_clips(orig_paths)
+        return output_path, actual_saved
 
-    return output_path
+    return output_path, 0
 

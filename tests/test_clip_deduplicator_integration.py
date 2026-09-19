@@ -89,3 +89,39 @@ def test_merge_overlapping_pair_integration(ffmpeg_exe, tmp_path: Path):
     p3 = resolve_unique_output_path(out2)
     assert p3 != out2
     assert "_merged_1" in p3.name or "(1)" in p3.name
+
+
+def test_merge_clip_cluster_integration(ffmpeg_exe, tmp_path: Path):
+    """Verify cluster merge of 3 overlapping clips (A->B->C) in a single FFmpeg pass."""
+    from core.clip_deduplicator import ClipRecord, merge_clip_cluster
+
+    clip1 = tmp_path / "desktop_clip_from_20Sep2026_08-00-00.mp4"
+    clip2 = tmp_path / "desktop_clip_from_20Sep2026_08-00-07.mp4"
+    clip3 = tmp_path / "desktop_clip_from_20Sep2026_08-00-14.mp4"
+
+    _generate_synthetic_clip(ffmpeg_exe, clip1, 10.0, "A")
+    _generate_synthetic_clip(ffmpeg_exe, clip2, 10.0, "B")
+    _generate_synthetic_clip(ffmpeg_exe, clip3, 10.0, "C")
+
+    cluster = [
+        ClipRecord(path=clip1, start_time=0.0,  duration=10.0, end_time=10.0, size_bytes=clip1.stat().st_size),
+        ClipRecord(path=clip2, start_time=7.0,  duration=10.0, end_time=17.0, size_bytes=clip2.stat().st_size),
+        ClipRecord(path=clip3, start_time=14.0, duration=10.0, end_time=24.0, size_bytes=clip3.stat().st_size),
+    ]
+
+    # 1. Merge WITHOUT removing originals
+    out, saved = merge_clip_cluster(cluster, remove_originals=False)
+    assert out.exists()
+    assert out.stat().st_size > 0
+    assert saved == 0
+    assert clip1.exists(), "original should be preserved"
+    assert clip2.exists(), "original should be preserved"
+    assert clip3.exists(), "original should be preserved"
+
+    # 2. Merge WITH quarantine — originals should disappear
+    out2, saved2 = merge_clip_cluster(cluster, remove_originals=True)
+    assert out2.exists()
+    assert not clip1.exists(), "clip1 should have been quarantined"
+    assert not clip2.exists(), "clip2 should have been quarantined"
+    assert not clip3.exists(), "clip3 should have been quarantined"
+    assert saved2 > 0, "should report positive bytes saved after quarantine"

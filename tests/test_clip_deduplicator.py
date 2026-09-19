@@ -237,15 +237,30 @@ def test_get_safe_output_path_generates_unique_names(tmp_path: Path):
     assert p2 == tmp_path / "clip_merged_2.mp4"
 
 
-def test_calculate_timestamp_confidence(tmp_path: Path):
+def test_calculate_timestamp_confidence_new_file_is_high(tmp_path: Path):
     from core.clip_deduplicator import calculate_timestamp_confidence
 
     test_file = tmp_path / "test_video.mp4"
     test_file.touch()
-
-    # Brand new file: modification time equals creation time -> HIGH
+    # A brand-new file has ctime ≈ mtime — should always be HIGH
     conf = calculate_timestamp_confidence(test_file, duration_sec=30.0)
-    assert conf in ("HIGH", "LOW")
+    assert conf == "HIGH"
+
+
+def test_calculate_timestamp_confidence_detects_copied_file(tmp_path: Path):
+    import os
+    import time as _time
+    from core.clip_deduplicator import calculate_timestamp_confidence
+
+    test_file = tmp_path / "test_video.mp4"
+    test_file.touch()
+    # Backdate mtime to 1 hour ago — simulates a file whose mtime is old but ctime is now
+    # (i.e. a copy: ctime was reset to now, mtime was preserved from source)
+    old_mtime = _time.time() - 3600
+    os.utime(test_file, (old_mtime, old_mtime))
+    # ctime (≈ now) >> mtime (1 h ago) → copied/touched file → LOW
+    conf = calculate_timestamp_confidence(test_file, duration_sec=30.0)
+    assert conf == "LOW"
 
 
 def test_cluster_overlapping_clips():
