@@ -17,7 +17,7 @@ class AudioCapture {
 public:
     static constexpr int kSampleRate  = 48000;
     static constexpr int kChannels    = 2;
-    static constexpr int kMaxSeconds  = 300;
+    static constexpr int kMaxSeconds  = 1800;
 
     AudioCapture() = default;
     ~AudioCapture() { Stop(); }

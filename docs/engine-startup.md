@@ -11,7 +11,7 @@ is the executable. Defaults apply when an argument is omitted.
 | Position | Value | Default / meaning |
 |---|---|---|
 | 1 | Capture FPS | 60; supported range 1–360 |
-| 2 | Replay duration | 30 seconds; supported range 1–300 |
+| 2 | Replay duration | 30 seconds; supported range 1–1800 |
 | 3–4 | Output width, height | 0, 0 for native size |
 | 5 | Video bitrate | 16,000 kbps; supported range 500–60,000 |
 | 6 | Legacy raw-buffer budget | Windows: 2,048 MB; unused for compressed replay. Linux ignores it. |

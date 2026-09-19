@@ -50,7 +50,7 @@ int main(int argc, char* argv[]) {
     if (cfg.fps            < 1)     cfg.fps            = 1;
     if (cfg.fps            > 360)   cfg.fps            = 360;
     if (cfg.buffer_seconds < 1)     cfg.buffer_seconds = 1;
-    if (cfg.buffer_seconds > 300)   cfg.buffer_seconds = 300;
+    if (cfg.buffer_seconds > 1800)  cfg.buffer_seconds = 1800;
     if (cfg.bitrate_kbps   < 500)   cfg.bitrate_kbps   = 500;
     if (cfg.bitrate_kbps   > 60000) cfg.bitrate_kbps   = 60000;
 
