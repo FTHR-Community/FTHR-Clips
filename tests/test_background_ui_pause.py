@@ -163,6 +163,7 @@ def test_background_pause_leaves_core_timer_card_and_sound_state_alone(qtbot):
     hotkey_state = {'registered': True}
     host = SimpleNamespace(
         _background_ui_paused=False,
+        _first_frame_painted=True,
         _ui_ready=True,
         _pending_status_display=None,
         clip_grid=grid,
@@ -511,3 +512,52 @@ def test_repeated_pause_resume_does_not_strand_thumbnail_ownership(
             assert len(grid._thumbnail_jobs_inflight) == 1
 
     assert len(_FakeThumbnailWorker.workers) == 40
+
+
+def test_background_pause_waits_for_the_first_painted_frame(qtbot, monkeypatch):
+    """A never-painted window must not have updates disabled: on Wayland the
+    compositor maps a surface only after its first buffer and grants focus
+    only to mapped windows, so pausing first left the app invisible."""
+    import main as main_module
+    from main import MainWindow
+
+    calls: list[str] = []
+    host = SimpleNamespace(
+        _first_frame_painted=False,
+        _background_ui_pause_deferred=False,
+        _background_ui_paused=False,
+        _ui_ready=True,
+        _pending_status_display=None,
+        setUpdatesEnabled=lambda enabled: calls.append(f'updates={enabled}'),
+        clip_grid=SimpleNamespace(set_background_paused=lambda p: calls.append(f'grid={p}')),
+        _settings_page_widget=SimpleNamespace(
+            set_background_ui_paused=lambda p: calls.append(f'settings={p}')),
+        update=lambda: calls.append('update'),
+        _refresh_background_ui_pause_state=lambda: calls.append('refresh'),
+    )
+    scheduled: list = []
+    monkeypatch.setattr(main_module.QTimer, 'singleShot',
+                        staticmethod(lambda _ms, fn: scheduled.append(fn)))
+
+    MainWindow._apply_background_ui_paused(host, True)
+    assert calls == []
+    assert host._background_ui_pause_deferred is True
+    assert host._background_ui_paused is False
+
+    # Unpausing before the first frame is harmless and applies normally.
+    MainWindow._apply_background_ui_paused(host, False, force=True)
+    assert 'updates=True' in calls
+    calls.clear()
+
+    MainWindow._note_first_frame_painted(host)
+    assert host._first_frame_painted is True
+    assert host._background_ui_pause_deferred is False
+    assert len(scheduled) == 1
+    scheduled[0]()
+    assert calls == ['refresh']
+
+    # Once painted, the pause applies as before.
+    MainWindow._apply_background_ui_paused(host, True)
+    assert calls[-3:] == ['updates=False', 'grid=True', 'settings=True']
+    MainWindow._note_first_frame_painted(host)
+    assert len(scheduled) == 1

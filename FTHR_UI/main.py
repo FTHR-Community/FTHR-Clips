@@ -255,6 +255,7 @@ from core.media_metadata import (
 )
 from ui.capture_card_client import CaptureCardClient
 from ui.error_bar import ErrorBar
+from ui.frameless_window_linux import install_resize_filter, start_system_move
 from ui.clip_grid import ClipGrid, _show_in_file_manager
 from ui.customize_page import CustomizePage
 from ui.gary_overlay import GaryOverlay
@@ -3111,6 +3112,9 @@ class MainWindow(QMainWindow):
         self._shutdown_timer_started = None
         self._tray_icon = None
         self._background_ui_paused = False
+        # Set by the first paintEvent; see _apply_background_ui_paused.
+        self._first_frame_painted = False
+        self._background_ui_pause_deferred = False
         self._pending_status_display: tuple[str, str] | None = None
         self._capture_settings_applying = False
         self._screenshot_inflight = False
@@ -3875,6 +3879,11 @@ class MainWindow(QMainWindow):
 
     def _bar_mouse_press(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            # Let the compositor drag the window on Linux so its own snapping
+            # and tiling apply; a plain move() would bypass them.
+            if sys.platform != 'win32' and start_system_move(self.windowHandle()):
+                self._drag_pos = None
+                return
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def _bar_mouse_move(self, event):
@@ -3895,15 +3904,32 @@ class MainWindow(QMainWindow):
 
     # Native Windows resize + Aero snap --
 
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        self._note_first_frame_painted()
+
+    def _note_first_frame_painted(self) -> None:
+        if self._first_frame_painted:
+            return
+        self._first_frame_painted = True
+        if self._background_ui_pause_deferred:
+            self._background_ui_pause_deferred = False
+            QTimer.singleShot(0, self._refresh_background_ui_pause_state)
+
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self._refresh_background_ui_pause_state)
+        if sys.platform != 'win32':
+            # Idempotent: reuses the filter on repeated shows and catches a
+            # first show where the native window did not exist yet.
+            install_resize_filter(self.windowHandle())
         if not getattr(self, '_native_style_applied', False):
             self._native_style_applied = True
             # Defer SetWindowPos(SWP_FRAMECHANGED) to after the event loop starts.
             # Calling it synchronously inside showEvent sends WM_NCCALCSIZE back
             # into nativeEvent while Qt is mid-show, causing a crash.
-            QTimer.singleShot(0, self._apply_native_style)
+            if sys.platform == 'win32':
+                QTimer.singleShot(0, self._apply_native_style)
             # Pre-realize the settings page so the first time the user clicks
             # the gear button it doesn't pay for layout, font resolution, and
             # stylesheet compilation. The page is already constructed; we just
@@ -3931,7 +3957,11 @@ class MainWindow(QMainWindow):
             print(f'[Prerealize] settings page warm-up failed: {e}')
 
     def _apply_native_style(self):
-        """Apply WS_THICKFRAME so native resize/Aero-snap work on the frameless window."""
+        """Apply WS_THICKFRAME so native resize/Aero-snap work on the frameless window.
+
+        Linux uses ui.frameless_window_linux instead: the compositor performs
+        the move/resize, which is also what makes its snapping work.
+        """
         try:
             import ctypes
             hwnd = int(self.winId())
@@ -7947,6 +7977,14 @@ class MainWindow(QMainWindow):
             self, paused: bool, *, force: bool = False) -> None:
         """Pause presentation work; capture, cards, sounds and saves stay live."""
         paused = bool(paused)
+        if paused and not self._first_frame_painted:
+            # Never pause a window that has not painted yet. On Wayland the
+            # compositor maps a surface only after its first buffer and only
+            # grants focus (ApplicationActive) to mapped windows, so pausing
+            # here would leave the app invisible for good. paintEvent re-runs
+            # the check once the first frame is out.
+            self._background_ui_pause_deferred = True
+            return
         if paused == self._background_ui_paused and not force:
             return
         self._background_ui_paused = paused
