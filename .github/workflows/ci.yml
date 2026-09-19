@@ -2,10 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, experimental, 'feat/**', 'fix/**']
     tags: ['v*']
   pull_request:
-    branches: [main, master]
+    branches: [main, master, experimental]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Keep CI read-only and free of secrets; release verification scans untrusted changes.
 permissions:
@@ -44,7 +45,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -q -y \
-            libpulse0 libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libpulse0 libegl1 libgl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
             libxcb-xinerama0 libxkbcommon-x11-0
 

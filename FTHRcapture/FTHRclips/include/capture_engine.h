@@ -1,4 +1,4 @@
-﻿// Windows capture, compressed replay storage, and asynchronous clip saves.
+// Windows capture, compressed replay storage, and asynchronous clip saves.
 // Prefer borderless WGC; use DXGI when WGC cannot suppress its border. Capture
 // and hardware encoding stay on the selected monitor adapter. Public-alpha
 // startup requires NVENC, AMF, or QSV; raw replay is legacy-only. CaptureThread
@@ -35,6 +35,7 @@
 #include "windows_microphone_audio_provider.h"
 #include "windows_process_loopback_audio_provider.h"
 #include "continuous_recording_writer.h"
+#include "replay_disk_spooler.h"
 #include "audio_ring_buffer.h"   // AudioRingBuffer (raw float32 PCM)
 #include "shared_memory.h"       // typed v4 capture-health flags
 #include "windows_capture_border_policy.h"
@@ -349,6 +350,10 @@ namespace fthr {
         mutable std::mutex record_writer_mutex_;
         std::shared_ptr<ContinuousRecordingWriter> record_writer_;
         std::string last_recording_error_;
+
+        // Disk-backed replay buffer spooler (for long retention e.g. 10m-30m+)
+        mutable std::mutex replay_disk_spooler_mutex_;
+        std::unique_ptr<ReplayDiskSpooler> replay_disk_spooler_;
 
         // Stats
         std::atomic<uint64_t> frames_captured_;

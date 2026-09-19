@@ -625,6 +625,30 @@ namespace fthr {
         std::cout << "  Codec      : " << VideoCodecName(config.video_codec)
                   << std::endl;
 
+        bool use_disk_spool = false;
+        std::wstring spool_dir;
+        wchar_t env_spool_buf[MAX_PATH] = {0};
+        if (GetEnvironmentVariableW(L"FTHR_REPLAY_TEMP_DIR", env_spool_buf, MAX_PATH) > 0) {
+            spool_dir = env_spool_buf;
+        }
+        wchar_t env_flag_buf[16] = {0};
+        if (GetEnvironmentVariableW(L"FTHR_REPLAY_DISK_SPOOL", env_flag_buf, 16) > 0) {
+            if (env_flag_buf[0] == L'1' || env_flag_buf[0] == L't' || env_flag_buf[0] == L'T') {
+                use_disk_spool = true;
+            }
+        }
+        if (!spool_dir.empty() && buffer_seconds_ >= 600) {
+            use_disk_spool = true;
+        }
+
+        if (use_disk_spool && !spool_dir.empty()) {
+            std::wcout << L"[CaptureEngine] Enabling disk-backed replay spooler at "
+                       << spool_dir << L" (retention: " << buffer_seconds_ << L"s)" << std::endl;
+            std::lock_guard<std::mutex> lock(replay_disk_spooler_mutex_);
+            replay_disk_spooler_ = std::make_unique<ReplayDiskSpooler>(
+                std::filesystem::path(spool_dir), 600, buffer_seconds_);
+        }
+
         // Prefer borderless WGC, falling back to DXGI if its border remains required.
         // Regular windows try CreateForWindow first, then monitor capture. Known
         // protected games use monitor capture with a foreground gate to avoid
@@ -812,6 +836,27 @@ namespace fthr {
             if (writer && !writer->PushVideo(data, size, pts, is_keyframe)) {
                 is_recording_.store(false, std::memory_order_release);
             }
+
+            {
+                std::lock_guard<std::mutex> lock(replay_disk_spooler_mutex_);
+                if (replay_disk_spooler_) {
+                    if (!replay_disk_spooler_->IsActive()) {
+                        ContinuousRecordingAudioConfig audio_config;
+                        if (audio_active_ && default_mix_audio_encoder_.IsInitialized()) {
+                            audio_config.sample_rate = default_mix_audio_encoder_.GetSampleRate();
+                            audio_config.channels = default_mix_audio_encoder_.GetChannels();
+                            audio_config.codec_extradata = default_mix_audio_encoder_.GetExtradata();
+                        }
+                        const auto video_config = replay_encoder_->GetVideoConfig();
+                        if (replay_encoder_->IsVideoConfigReady() && !video_config.codec_extradata.empty()) {
+                            replay_disk_spooler_->Start(video_config, audio_config);
+                        }
+                    }
+                    if (replay_disk_spooler_->IsActive()) {
+                        replay_disk_spooler_->PushVideo(data, size, pts, is_keyframe);
+                    }
+                }
+            }
         };
 
         ID3D11Device* encoder_device = device_;
@@ -890,10 +935,12 @@ namespace fthr {
         {
             // Retain requested history plus the encoder's maximum four-second
             // GOP pre-roll and one second for asynchronous publication jitter.
-            // Unlike the former 2x policy, memory no longer scales with a
-            // second complete copy of long (up to 300-second) replay history.
+            // If disk spooling is active, clamp in-memory ring to 60 seconds to save RAM.
+            const uint32_t ring_seconds = (replay_disk_spooler_)
+                ? std::min<uint32_t>(buffer_seconds_, 60)
+                : buffer_seconds_;
             const size_t capacity = CalculateEncodedReplaySlotCapacity(
-                buffer_seconds_, fps_);
+                ring_seconds, fps_);
 
             LARGE_INTEGER qpc_freq;
             QueryPerformanceFrequency(&qpc_freq);
@@ -915,13 +962,17 @@ namespace fthr {
 
             // max_frames_ used for stats - set to time-based count.
             // ring_head_ / ring_count_ not used on NVENC path.
-            max_frames_ = static_cast<size_t>(buffer_seconds_) * fps_;
+            max_frames_ = static_cast<size_t>(ring_seconds) * fps_;
 
             const auto active = replay_encoder_->GetActiveEncoderInfo();
             std::cout << "[CaptureEngine] " << active.name
                 << " active. Encoded ring: " << capacity
-                << " slots. Raw FramePool: skipped." << std::endl;
+                << " slots (" << ring_seconds << "s). Raw FramePool: skipped." << std::endl;
         }
+
+        const uint32_t audio_ring_seconds = (replay_disk_spooler_)
+            ? std::min<uint32_t>(buffer_seconds_, 60)
+            : buffer_seconds_;
 
         // Initialize WASAPI -> AAC encoders -> bounded packet rings before video.
         // Compressed audio keeps long replay windows bounded; saves snapshot packets.
@@ -967,7 +1018,7 @@ namespace fthr {
                 capture_generation_.load(std::memory_order_relaxed) + 1,
                 AudioSourceFormat{audio_capture_.GetSampleRate(),
                                   audio_capture_.GetChannels(), "fltp"},
-                buffer_seconds_);
+                audio_ring_seconds);
             if (!default_mix_audio_encoder_.Initialize(
                     audio_capture_.GetSampleRate(), audio_capture_.GetChannels(),
                     audio_cfg.bitrate_kbps,
@@ -984,6 +1035,13 @@ namespace fthr {
                         }
                         if (writer && !writer->PushAudio(data, size, pts, 1024)) {
                             is_recording_.store(false, std::memory_order_release);
+                        }
+
+                        {
+                            std::lock_guard<std::mutex> lock(replay_disk_spooler_mutex_);
+                            if (replay_disk_spooler_ && replay_disk_spooler_->IsActive()) {
+                                replay_disk_spooler_->PushAudio(data, size, pts, 1024);
+                            }
                         }
                     })) {
                 std::cerr << "[CaptureEngine] Persistent AAC encoder init failed - "
@@ -1035,7 +1093,7 @@ namespace fthr {
                     std::memory_order_relaxed) + 1;
                 microphone_config.endpoint_id = config.microphone_endpoint_id;
                 microphone_config.use_default_endpoint = config.microphone_endpoint_id.empty();
-                microphone_config.retention_seconds = buffer_seconds_;
+                microphone_config.retention_seconds = audio_ring_seconds;
                 microphone_config.bitrate_kbps = 96;
                 microphone_config.input_gain = std::clamp(
                     static_cast<float>(config.microphone_gain_percent) / 100.0f,
@@ -1070,7 +1128,7 @@ namespace fthr {
                 application_audio_source_manager_ =
                     std::make_unique<WindowsApplicationAudioSourceManager>(
                         capture_generation_.load(std::memory_order_relaxed) + 1,
-                        buffer_seconds_);
+                        audio_ring_seconds);
                 if (!application_audio_source_manager_->Start()) {
                     const auto capability = application_audio_source_manager_->capability();
                     const std::string detail = application_audio_source_manager_->last_error();
@@ -1222,7 +1280,8 @@ namespace fthr {
             || save_clip_thread_
             || device_ || context_ || wgc_state_
             || replay_encoder_ || audio_active_ || nvenc_device_
-            || nvenc_context_ || record_writer_ || application_audio_source_manager_;
+            || nvenc_context_ || record_writer_ || application_audio_source_manager_
+            || replay_disk_spooler_;
         if (!has_resources) return;
 
         std::cout << "[CaptureEngine] Shutting down..." << std::endl;
@@ -1257,6 +1316,15 @@ namespace fthr {
             save_clip_thread_->join();
             delete save_clip_thread_;
             save_clip_thread_ = nullptr;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(replay_disk_spooler_mutex_);
+            if (replay_disk_spooler_) {
+                replay_disk_spooler_->Stop();
+                replay_disk_spooler_->Cleanup();
+                replay_disk_spooler_.reset();
+            }
         }
 
         // Finalize NVENC encoder after CaptureThread has exited
@@ -1774,6 +1842,28 @@ namespace fthr {
                 / static_cast<double>(save_qpc_frequency.QuadPart)
             : 0.0;
 
+        // Disk-spooled replay path: used when the requested duration exceeds the in-memory ring buffer (> 60s)
+        {
+            std::lock_guard<std::mutex> lock(replay_disk_spooler_mutex_);
+            if (duration_seconds > 60 && replay_disk_spooler_ && replay_disk_spooler_->IsActive()) {
+                SaveClipTask task;
+                task.output_path = path;
+                task.duration_seconds = duration_seconds;
+                task.use_spooler = true;
+                task.shared_memory = shared_memory;
+                task.task_id = next_task_id_.fetch_add(1);
+
+                if (!save_clip_queue_.Push(std::move(task))) {
+                    SetEngineError(shared_memory,
+                        L"The clip save queue is full or shutting down. Wait for "
+                        L"the current save to finish, then try again.");
+                    return false;
+                }
+                std::wcout << L"[SaveClip] Disk-spooled task queued: " << path << std::endl;
+                return true;
+            }
+        }
+
         // NVENC path - mux only, no encoding
         if (nvenc_active_) {
             const auto publish_timeout = std::chrono::milliseconds(
@@ -2131,6 +2221,39 @@ namespace fthr {
     // ProcessSaveClipTask - transactional wrapper around both media writers
 
     bool CaptureEngine::ProcessSaveClipTask(const SaveClipTask& task) {
+        if (task.use_spooler) {
+            std::wcout << L"[ProcessSaveClipTask] Merging disk-spooled replay segments to: "
+                       << task.output_path << std::endl;
+            const auto result = transactional_save::Run(
+                task.output_path,
+                [this, &task](const std::filesystem::path& temporary_path,
+                              std::string& writer_error) {
+                    bool ok = false;
+                    ReplayDiskSpooler* spooler = nullptr;
+                    {
+                        std::lock_guard<std::mutex> lock(replay_disk_spooler_mutex_);
+                        spooler = replay_disk_spooler_.get();
+                    }
+                    if (spooler) {
+                        ok = spooler->SaveClip(
+                            temporary_path.wstring(), task.duration_seconds);
+                    }
+                    if (!ok) {
+                        writer_error = "The disk-spooled replay segments could not be merged.";
+                        return false;
+                    }
+                    return true;
+                });
+            if (!result.success) {
+                const std::string detail = transactional_save::DescribeFailure(result);
+                std::cerr << "[ProcessSaveClipTask] Spooler save failed: " << detail << std::endl;
+                SetEngineError(task.shared_memory, L"Failed to merge replay segments.");
+                return false;
+            }
+            std::wcout << L"[ProcessSaveClipTask] Disk-spooled replay clip successfully saved." << std::endl;
+            return true;
+        }
+
         if (task.use_encoded_path && !task.encoded_audio_tracks.empty()) {
             std::string transaction_id;
             std::string transaction_error;

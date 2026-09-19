@@ -340,6 +340,7 @@ bool ContinuousRecordingWriter::WritePacket(const QueuedPacket& packet) {
         output->dts = output->pts;
         output->duration = packet.duration;
         output->stream_index = audio_stream_->index;
+        output->flags = AV_PKT_FLAG_KEY;
     }
 
     const int write_error = av_interleaved_write_frame(format_context_, output);

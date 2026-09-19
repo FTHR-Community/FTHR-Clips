@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\continuous_recording_writer.h" />
+    <ClInclude Include="include\replay_disk_spooler.h" />
     <ClInclude Include="include\audio_packet_ring.h" />
     <ClInclude Include="include\audio_source_model.h" />
     <ClInclude Include="include\clip_audio_manifest.h" />
@@ -54,6 +55,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\continuous_recording_writer.cpp" />
+    <ClCompile Include="src\replay_disk_spooler.cpp" />
     <ClCompile Include="src\audio_packet_ring.cpp" />
     <ClCompile Include="src\audio_source_model.cpp" />
     <ClCompile Include="src\clip_audio_manifest.cpp" />

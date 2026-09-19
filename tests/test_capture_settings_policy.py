@@ -107,3 +107,28 @@ def test_engine_exit_clears_the_active_process_snapshot():
     assert tracker.active is None
     assert tracker.requested == old
     assert tracker.error == 'engine exited'
+
+
+def test_thirty_minute_replay_buffer_configuration_stress_and_bounds():
+    config = _config(
+        fps=60,
+        buffer_seconds=compute_buffer_seconds(1800),
+        bitrate_kbps=50_000,
+    )
+    assert config.buffer_seconds == 1800
+    assert config.fps == 60
+
+    # Ensure 30-minute frame count calculation fits 32-bit limits safely
+    total_frames = config.fps * config.buffer_seconds
+    assert total_frames == 108_000
+    assert total_frames < 2**31 - 1
+
+    # Transition tracking through 30-minute config
+    tracker = CaptureConfigTracker(active=_config())
+    tracker.request(config)
+    assert tracker.status is ApplyStatus.REQUESTED
+    tracker.begin_apply()
+    assert tracker.status is ApplyStatus.APPLYING
+    tracker.succeed()
+    assert tracker.status is ApplyStatus.ACTIVE
+    assert tracker.active.buffer_seconds == 1800

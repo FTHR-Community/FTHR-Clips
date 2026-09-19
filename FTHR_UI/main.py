@@ -3283,6 +3283,20 @@ class MainWindow(QMainWindow):
         for _folder in ('Desktop', 'Recordings', 'Exported', 'Shared', 'Screenshots'):
             (clips_root / _folder).mkdir(parents=True, exist_ok=True)
 
+        # Temporary disk-spooled replay segments directory
+        temp_replay_dir = clips_root / '.fthr-temp-replay'
+        temp_replay_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            for _item in temp_replay_dir.glob('*.mp4*'):
+                try:
+                    _item.unlink(missing_ok=True)
+                except OSError:
+                    # Stale replay segments might be locked by another process; ignore.
+                    pass
+        except OSError:
+            # Replay temp directory enumeration failure is non-fatal on startup.
+            pass
+
         # A hard kill can leave the engine's same-directory transaction file.
         # Only old, FTHR-named partials are removed; fresh files may belong to a
         # still-running save and unrelated *.mp4.partial files are user-owned.
@@ -5107,6 +5121,13 @@ class MainWindow(QMainWindow):
             self._engine_startup_output = EngineLogCapture(
                 engine_log_path, self._diagnostics)
             engine_environment = os.environ.copy()
+            _clips_root = clips_directory_from(self.settings_manager)
+            _temp_replay_dir = _clips_root / '.fthr-temp-replay'
+            _temp_replay_dir.mkdir(parents=True, exist_ok=True)
+            engine_environment['FTHR_REPLAY_TEMP_DIR'] = str(_temp_replay_dir.resolve())
+            if launch_config.buffer_seconds >= 600:
+                engine_environment['FTHR_REPLAY_DISK_SPOOL'] = '1'
+                engine_environment['FTHR_REPLAY_RETENTION_SECONDS'] = str(launch_config.buffer_seconds)
             if self._diagnostics is not None:
                 engine_environment['FTHR_DIAGNOSTIC_SESSION_ID'] = (
                     self._diagnostics.session_id)
@@ -8379,6 +8400,19 @@ class MainWindow(QMainWindow):
         if self._manual_record_path is not None:
             self._finalize_manual_recording_file(publish_ui=False)
         self._shutdown_mark('EngineStopped')
+        try:
+            _clips_root = clips_directory_from(self.settings_manager)
+            _temp_replay_dir = _clips_root / '.fthr-temp-replay'
+            if _temp_replay_dir.exists():
+                for _item in _temp_replay_dir.glob('*.mp4*'):
+                    try:
+                        _item.unlink(missing_ok=True)
+                    except OSError:
+                        # Stale segment may still be locked during immediate exit; ignore.
+                        pass
+        except OSError:
+            # Temporary replay directory cleanup on shutdown is best-effort.
+            pass
 
         if self._tray_icon is not None:
             self._tray_icon.hide()

@@ -9,7 +9,7 @@ from pathlib import Path
 import threading
 
 from PySide6.QtCore import QUrl, Qt, QThread, Signal
-from PySide6.QtGui import QCursor, QDesktopServices
+from PySide6.QtGui import QColor, QCursor, QDesktopServices
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -31,7 +31,7 @@ from core.clip_deduplicator import (
     merge_overlapping_pair,
     scan_clip_records,
 )
-from ui.dialogs import FthrDialog
+from ui.dialogs import FthrDialog, FthrMessageDialog
 from ui.style import (
     Colors,
     Fonts,
@@ -318,7 +318,7 @@ class _MergeWorker(QThread):
                     cancel_event=self.cancel_event,
                 )
                 success += 1
-                bytes_saved += pair.estimated_saved_bytes
+                bytes_saved += pair.actual_saved_bytes if self.remove_originals else 0
             except Exception as e:
                 print(f"[Deduplication] Failed to merge {pair.first.path.name} and {pair.second.path.name}: {e}")
                 continue
@@ -411,10 +411,14 @@ class ClipDeduplicationDialog(FthrDialog):
         self.progress_bar.setVisible(False)
         self.body_layout.addWidget(self.progress_bar)
 
-        self.delete_checkbox = QCheckBox("Delete original overlapping clips after successful merge")
-        self.delete_checkbox.setChecked(True)
+        self.delete_checkbox = QCheckBox("Move original overlapping clips to quarantine after successful merge")
+        self.delete_checkbox.setChecked(False)
         self.delete_checkbox.setStyleSheet(label_body(Colors.TEXT_MUTED, Fonts.SIZE_BODY))
         self.body_layout.addWidget(self.delete_checkbox)
+
+        self.quarantine_hint = QLabel("Original clips are safely moved to '.fthr_quarantine' in the clip folder and can be restored if needed.")
+        self.quarantine_hint.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_MICRO))
+        self.body_layout.addWidget(self.quarantine_hint)
 
         self.disclaimer_label = QLabel(
             "Note: Clips are merged losslessly without re-encoding, taking only a few seconds per clip. "
@@ -476,10 +480,19 @@ class ClipDeduplicationDialog(FthrDialog):
             self.info_label.setText("No overlapping clips found in the library. All files are unique!")
             return
 
+        has_chained = any(p.is_chained for p in pairs)
+        has_inferred = any(p.confidence != 'exact' for p in pairs)
+        notes = []
+        if has_chained:
+            notes.append("chained overlaps detected")
+        if has_inferred:
+            notes.append("some timestamps are inferred")
+        note_str = f" ({'; '.join(notes)})" if notes else ""
+
         total_saved_mb = sum(p.estimated_saved_bytes for p in pairs) / (1024 * 1024)
         self.info_label.setText(
             f"Found {len(pairs)} overlapping clip pairs. "
-            f"Potential disk savings: {total_saved_mb:.1f} MB. "
+            f"Estimated potential disk savings: {total_saved_mb:.1f} MB.{note_str} "
             "Double-click any clip to preview."
         )
         self.merge_btn.setEnabled(True)
@@ -497,17 +510,33 @@ class ClipDeduplicationDialog(FthrDialog):
             self.table.setCellWidget(row, 0, chk_widget)
 
             item1 = QTableWidgetItem(pair.first.path.name)
-            item1.setToolTip(f"Clip 1: {pair.first.path}\nDouble-click to preview")
+            item1.setToolTip(f"Clip 1: {pair.first.path}\nConfidence: {pair.first.timestamp_confidence}\nDouble-click to preview")
             self.table.setItem(row, 1, item1)
 
             item2 = QTableWidgetItem(pair.second.path.name)
-            item2.setToolTip(f"Clip 2: {pair.second.path}\nDouble-click to preview")
+            item2.setToolTip(f"Clip 2: {pair.second.path}\nConfidence: {pair.second.timestamp_confidence}\nDouble-click to preview")
             self.table.setItem(row, 2, item2)
 
             overlap_sec = int(pair.overlap_seconds)
             saved_mb = pair.estimated_saved_bytes / (1024 * 1024)
             info_text = f"{overlap_sec}s overlap (~{saved_mb:.1f} MB)"
+            if pair.confidence != 'exact':
+                info_text += " [Inferred]"
+            if pair.is_chained:
+                info_text += " [Chained]"
             item_info = QTableWidgetItem(info_text)
+            if pair.confidence != 'exact':
+                item_info.setForeground(QColor(Colors.WARNING))
+                item_info.setToolTip(
+                    "Timestamp was inferred from file modification date.\n"
+                    "May be inaccurate if files were copied or touched.\n"
+                    "Please preview before merging."
+                )
+            elif pair.is_chained:
+                item_info.setToolTip(
+                    "Part of an overlap chain (e.g. A->B->C).\n"
+                    "Re-scan after merge to resolve remaining overlaps."
+                )
             self.table.setItem(row, 3, item_info)
 
             # Preview button in row
@@ -576,6 +605,32 @@ class ClipDeduplicationDialog(FthrDialog):
         if not selected_pairs:
             return
 
+        remove_orig = self.delete_checkbox.isChecked()
+        inferred_pairs = [p for p in selected_pairs if p.confidence != 'exact']
+
+        # Explicit safety confirmation if removing originals or if inferred timestamps are selected
+        if remove_orig or inferred_pairs:
+            msg_parts = []
+            if remove_orig:
+                msg_parts.append(
+                    f"You have chosen to quarantine original clips for {len(selected_pairs)} pair(s).\n\n"
+                    "The following original files will be moved to a safe '.fthr_quarantine' folder:\n"
+                )
+                for p in selected_pairs[:10]:
+                    msg_parts.append(f"  • {p.first.path.name}\n  • {p.second.path.name}\n")
+                if len(selected_pairs) > 10:
+                    msg_parts.append(f"  ... and {len(selected_pairs) - 10} more pair(s)\n")
+
+            if inferred_pairs:
+                msg_parts.append(
+                    f"\n⚠ Warning: {len(inferred_pairs)} selected pair(s) have INFERRED timestamps. "
+                    "These may be false matches if clips were copied or touched outside FTHR.\n"
+                )
+
+            msg_parts.append("\nDo you want to proceed with the merge?")
+            if not FthrMessageDialog.question(self, "CONFIRM MERGE", "".join(msg_parts)):
+                return
+
         self.merge_btn.setEnabled(False)
         self.preview_btn.setEnabled(False)
         self.scan_btn.setEnabled(False)
@@ -586,7 +641,6 @@ class ClipDeduplicationDialog(FthrDialog):
             self.progress_bar.setRange(0, len(selected_pairs))
             self.progress_bar.setValue(0)
 
-        remove_orig = self.delete_checkbox.isChecked()
         self._merge_worker = _MergeWorker(selected_pairs, remove_orig)
         self._merge_worker.progress.connect(self._on_merge_progress)
         self._merge_worker.finished.connect(self._on_merge_finished)
@@ -602,10 +656,16 @@ class ClipDeduplicationDialog(FthrDialog):
         self.scan_btn.setEnabled(True)
         saved_mb = bytes_saved / (1024 * 1024)
         if success_count > 0:
-            self.info_label.setText(
-                f"Successfully merged {success_count} overlapping clip pair(s)! "
-                f"Recovered {saved_mb:.1f} MB disk space."
-            )
+            if self.delete_checkbox.isChecked():
+                self.info_label.setText(
+                    f"Successfully merged {success_count} overlapping clip pair(s)! "
+                    f"Confirmed {saved_mb:.1f} MB disk space recovered (originals moved to .fthr_quarantine)."
+                )
+            else:
+                self.info_label.setText(
+                    f"Successfully merged {success_count} overlapping clip pair(s)! "
+                    "Original files were preserved (no disk space freed)."
+                )
             self.deduplication_completed.emit(success_count, bytes_saved)
         else:
             self.info_label.setText(
