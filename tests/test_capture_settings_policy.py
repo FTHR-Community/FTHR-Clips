@@ -32,17 +32,17 @@ def _config(**overrides) -> CaptureConfig:
 
 
 def test_product_limits_have_one_authoritative_policy():
-    assert max(NORMAL_CLIP_VALUES) == 300
+    assert max(NORMAL_CLIP_VALUES) == 1800
     assert max(FPS_VALUES) == 240
 
-    assert validate_normal_clip_length(300) == 300
+    assert validate_normal_clip_length(1800) == 1800
     assert validate_fps(240) == 240
 
 
 def test_every_exposed_duration_fits_the_native_ring():
     for normal in NORMAL_CLIP_VALUES:
         ring = compute_buffer_seconds(normal)
-        assert normal <= ring <= 300
+        assert normal <= ring <= 1800
 
 
 def test_python_microphone_history_matches_maximum_replay():
@@ -54,7 +54,7 @@ def test_python_microphone_history_matches_maximum_replay():
 @pytest.mark.parametrize(
     ('validator', 'invalid'),
     [
-        (validate_normal_clip_length, 301),
+        (validate_normal_clip_length, 1801),
         (validate_fps, 241),
     ],
 )

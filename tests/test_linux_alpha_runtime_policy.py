@@ -30,7 +30,7 @@ def test_audio_open_failure_is_synchronous_and_video_only_diagnostic_exists():
 
 
 def test_audio_history_matches_maximum_replay_duration():
-    assert 'kMaxSeconds  = 300' in AUDIO_H
+    assert 'kMaxSeconds  = 1800' in AUDIO_H
 
 
 def test_multiband_request_is_ignored_at_native_boundary():
