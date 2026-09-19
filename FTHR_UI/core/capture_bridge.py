@@ -9,6 +9,8 @@ from ctypes import Structure, c_uint32, c_bool, c_float, c_uint64
 from enum import IntEnum
 import os
 
+from core.capture_health import CaptureHealthFlag
+
 if sys.platform == 'win32':
     from ctypes import c_wchar
 
@@ -478,6 +480,13 @@ class CaptureBridge:
                 'content_suspicious_streak': int(self._layout.content_suspicious_streak),
                 'content_luma_mean': float(self._layout.content_luma_mean),
                 'content_luma_variance': float(self._layout.content_luma_variance),
+                # The engine writes the reason into engine_string before it
+                # publishes BACKEND_FAILED; no engine_response accompanies it
+                # because that channel carries save and recording results.
+                'capture_failure_detail': (
+                    self._read_engine_string()
+                    if int(self._layout.capture_health_flags) & CaptureHealthFlag.BACKEND_FAILED
+                    else ''),
             }
         except Exception as e:
             self._log_read_error_once('get_status', e)

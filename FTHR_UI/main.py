@@ -7843,9 +7843,12 @@ class MainWindow(QMainWindow):
                     luma_mean=status.get('content_luma_mean', 0.0),
                     luma_variance=status.get('content_luma_variance', 0.0))
                 if snapshot.state is CaptureHealthState.FAILED:
+                    # The engine explains terminal failures (no capture
+                    # protocol, declined portal dialog) in engine_string.
                     self.push_error(
                         'CAPTURE FAILED',
-                        snapshot.reason or 'The capture backend failed.',
+                        status.get('capture_failure_detail')
+                        or snapshot.reason or 'The capture backend failed.',
                         level='error',
                         actions=[('RESTART ENGINE', self._restart_capture_engine)],
                     )
