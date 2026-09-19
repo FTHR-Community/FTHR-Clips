@@ -93,6 +93,14 @@ if(BUILD_TESTING)
     target_compile_options(fthr_transactional_save_test PRIVATE
         -Wall -Wextra -Wpedantic -UNDEBUG)
     add_test(NAME transactional_save_contract COMMAND fthr_transactional_save_test)
+
+    add_executable(fthr_audio_timing_test
+        tests/audio_timing_test.cpp
+        src/audio_timing.cpp)
+    target_include_directories(fthr_audio_timing_test PRIVATE src)
+    target_compile_options(fthr_audio_timing_test PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME audio_timing_contract COMMAND fthr_audio_timing_test)
 endif()
 
 find_package(PkgConfig REQUIRED)
