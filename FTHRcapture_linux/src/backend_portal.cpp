@@ -240,6 +240,10 @@ void PortalBackend::OnStreamParamChanged(uint32_t id, const spa_pod* param) {
             // restarts the generation through the normal recovery path.
             stream_error_ = "screen size changed";
             failed_ = true;
+        } else if (have_format_) {
+            // Same size, different pixel format: only the copy changes.
+            // front_ may be in the encoder's hands right now, so leave it.
+            layout_ = layout;
         } else {
             native_w_ = info.size.width;
             native_h_ = info.size.height;
@@ -282,7 +286,13 @@ void PortalBackend::OnStreamParamChanged(uint32_t id, const spa_pod* param) {
 }
 
 void PortalBackend::OnStreamProcess() {
-    pw_buffer* pwb = pw_->stream_dequeue_buffer(stream_);
+    // Several buffers can be queued before one wakeup; keep only the newest
+    // and hand the rest straight back so delivery never lags the queue depth.
+    pw_buffer* pwb = nullptr;
+    while (pw_buffer* next = pw_->stream_dequeue_buffer(stream_)) {
+        if (pwb) pw_->stream_queue_buffer(stream_, pwb);
+        pwb = next;
+    }
     if (!pwb) return;
     spa_buffer* buf = pwb->buffer;
     const spa_data& d = buf->datas[0];
@@ -471,7 +481,7 @@ bool PortalBackend::Initialize(const CaptureConfig& cfg) {
     if (!OpenPortalSession(cfg)) { Shutdown(); return false; }
 
     std::string detail;
-    const int fd = session_->OpenPipeWireRemote(&detail);
+    const int fd = session_->OpenPipeWireRemote([this] { return KeepRunning(); }, &detail);
     if (fd < 0) {
         std::cerr << "[PortalBackend] " << detail << std::endl;
         failure_reason_ = "the ScreenCast portal did not hand out a PipeWire connection: " + detail;

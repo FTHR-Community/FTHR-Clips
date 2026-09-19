@@ -480,12 +480,15 @@ class CaptureBridge:
                 'content_suspicious_streak': int(self._layout.content_suspicious_streak),
                 'content_luma_mean': float(self._layout.content_luma_mean),
                 'content_luma_variance': float(self._layout.content_luma_variance),
-                # The engine writes the reason into engine_string before it
-                # publishes BACKEND_FAILED; no engine_response accompanies it
-                # because that channel carries save and recording results.
+                # The Linux engine writes the reason into engine_string before
+                # it publishes BACKEND_FAILED; no engine_response accompanies
+                # it because that channel carries save and recording results.
+                # The Windows engine does not write it, and there the string
+                # would still hold the last save error.
                 'capture_failure_detail': (
                     self._read_engine_string()
-                    if int(self._layout.capture_health_flags) & CaptureHealthFlag.BACKEND_FAILED
+                    if sys.platform != 'win32' and
+                    int(self._layout.capture_health_flags) & CaptureHealthFlag.BACKEND_FAILED
                     else ''),
             }
         except Exception as e:

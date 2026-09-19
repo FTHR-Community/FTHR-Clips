@@ -198,7 +198,6 @@ bool LoadDBusApi(DBusApi& api, std::string* error) {
     ok &= resolve(api.connection_set_exit_on_disconnect, "dbus_connection_set_exit_on_disconnect");
     ok &= resolve(api.connection_close, "dbus_connection_close");
     ok &= resolve(api.connection_unref, "dbus_connection_unref");
-    ok &= resolve(api.connection_send_with_reply_and_block, "dbus_connection_send_with_reply_and_block");
     ok &= resolve(api.connection_send, "dbus_connection_send");
     ok &= resolve(api.connection_flush, "dbus_connection_flush");
     ok &= resolve(api.connection_read_write, "dbus_connection_read_write");
@@ -207,6 +206,9 @@ bool LoadDBusApi(DBusApi& api, std::string* error) {
     ok &= resolve(api.message_unref, "dbus_message_unref");
     ok &= resolve(api.message_is_signal, "dbus_message_is_signal");
     ok &= resolve(api.message_get_path, "dbus_message_get_path");
+    ok &= resolve(api.message_get_type, "dbus_message_get_type");
+    ok &= resolve(api.message_get_reply_serial, "dbus_message_get_reply_serial");
+    ok &= resolve(api.message_get_error_name, "dbus_message_get_error_name");
     ok &= resolve(api.message_iter_init, "dbus_message_iter_init");
     ok &= resolve(api.message_iter_init_append, "dbus_message_iter_init_append");
     ok &= resolve(api.message_iter_open_container, "dbus_message_iter_open_container");
@@ -389,6 +391,66 @@ void PortalScreenCastSession::HandleSignal(DBusMessage* message) {
     }
 }
 
+DBusMessage* PortalScreenCastSession::SendAndWait(DBusMessage* message,
+                                                  std::chrono::milliseconds timeout,
+                                                  const KeepRunning& keep_running,
+                                                  PortalOutcome* outcome,
+                                                  std::string* error) {
+    dbus_uint32_t serial = 0;
+    const bool sent = api_.connection_send(connection_, message, &serial);
+    api_.message_unref(message);
+    if (!sent) {
+        if (error) *error = "session bus: send failed";
+        *outcome = PortalOutcome::Failed;
+        return nullptr;
+    }
+    api_.connection_flush(connection_);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        // Drain what is queued before deciding to wait again: the reply may
+        // already be there, and Response signals must not be lost.
+        while (DBusMessage* incoming = api_.connection_pop_message(connection_)) {
+            const int type = api_.message_get_type(incoming);
+            if ((type == DBUS_MESSAGE_TYPE_METHOD_RETURN || type == DBUS_MESSAGE_TYPE_ERROR) &&
+                    api_.message_get_reply_serial(incoming) == serial) {
+                if (type == DBUS_MESSAGE_TYPE_METHOD_RETURN) return incoming;
+                const char* name = api_.message_get_error_name(incoming);
+                const std::string error_name = name ? name : "";
+                DBusMessageIter it{};
+                std::string text;
+                if (api_.message_iter_init(incoming, &it)) text = ReadString(api_, &it);
+                api_.message_unref(incoming);
+                if (error) *error = error_name + " " + text;
+                const bool missing = error_name == DBUS_ERROR_SERVICE_UNKNOWN ||
+                    error_name == DBUS_ERROR_UNKNOWN_METHOD ||
+                    error_name == DBUS_ERROR_UNKNOWN_INTERFACE ||
+                    error_name == DBUS_ERROR_UNKNOWN_OBJECT ||
+                    error_name == DBUS_ERROR_NAME_HAS_NO_OWNER ||
+                    error_name == DBUS_ERROR_UNKNOWN_PROPERTY;
+                *outcome = missing ? PortalOutcome::Unavailable : PortalOutcome::Failed;
+                return nullptr;
+            }
+            HandleSignal(incoming);
+            api_.message_unref(incoming);
+        }
+        if (!keep_running()) {
+            if (error) *error = "capture stopped while waiting for the reply";
+            *outcome = PortalOutcome::Interrupted;
+            return nullptr;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            if (error) *error = "no reply within " + std::to_string(timeout.count()) + " ms";
+            *outcome = PortalOutcome::TimedOut;
+            return nullptr;
+        }
+        if (!api_.connection_read_write(connection_, kPollSliceMs)) {
+            if (error) *error = "session bus disconnected";
+            *outcome = PortalOutcome::Failed;
+            return nullptr;
+        }
+    }
+}
+
 void PortalScreenCastSession::CloseRequest() {
     if (pending_request_path_.empty()) return;
     // Best effort: tells the portal to drop the dialog it may still show.
@@ -427,20 +489,15 @@ PortalOutcome PortalScreenCastSession::Call(
         if (error) *error = std::string(method) + ": could not build arguments";
         return PortalOutcome::Failed;
     }
-    DBusError err;
-    api_.error_init(&err);
-    DBusMessage* reply = api_.connection_send_with_reply_and_block(
-        connection_, msg, kMethodReplyTimeoutMs, &err);
-    api_.message_unref(msg);
+    PortalOutcome send_outcome = PortalOutcome::Ok;
+    std::string send_error;
+    DBusMessage* reply = SendAndWait(msg, std::chrono::milliseconds(kMethodReplyTimeoutMs),
+                                     keep_running, &send_outcome, &send_error);
     if (!reply) {
-        const std::string name = err.name ? err.name : "";
-        if (error) *error = std::string(method) + ": " + name + " " + (err.message ? err.message : "");
-        api_.error_free(&err);
+        if (error) *error = std::string(method) + ": " + send_error;
         pending_request_path_.clear();
-        const bool missing = name == DBUS_ERROR_SERVICE_UNKNOWN ||
-            name == DBUS_ERROR_UNKNOWN_METHOD || name == DBUS_ERROR_UNKNOWN_INTERFACE ||
-            name == DBUS_ERROR_UNKNOWN_OBJECT || name == DBUS_ERROR_NAME_HAS_NO_OWNER;
-        return missing ? PortalOutcome::Unavailable : PortalOutcome::Failed;
+        // A method-reply timeout is a portal problem, not an unanswered dialog.
+        return send_outcome == PortalOutcome::TimedOut ? PortalOutcome::Failed : send_outcome;
     }
     // Portals older than the handle_token convention return a path they
     // chose themselves; honour it so the Response is still recognised.
@@ -503,16 +560,14 @@ PortalOutcome PortalScreenCastSession::Open(const PortalScreenCastOptions& optio
         const char* prop = "version";
         api_.message_iter_append_basic(&it, DBUS_TYPE_STRING, &iface);
         api_.message_iter_append_basic(&it, DBUS_TYPE_STRING, &prop);
-        DBusError err;
-        api_.error_init(&err);
-        DBusMessage* reply = api_.connection_send_with_reply_and_block(
-            connection_, probe, static_cast<int>(options.request_timeout.count()), &err);
-        api_.message_unref(probe);
+        PortalOutcome probe_outcome = PortalOutcome::Ok;
+        std::string probe_error;
+        DBusMessage* reply = SendAndWait(probe, options.request_timeout, keep_running,
+                                         &probe_outcome, &probe_error);
         if (!reply) {
-            if (error) *error = std::string("ScreenCast portal not available: ") +
-                (err.name ? err.name : "") + " " + (err.message ? err.message : "");
-            api_.error_free(&err);
-            return PortalOutcome::Unavailable;
+            if (error) *error = "ScreenCast portal not available: " + probe_error;
+            return probe_outcome == PortalOutcome::Interrupted
+                ? PortalOutcome::Interrupted : PortalOutcome::Unavailable;
         }
         DBusMessageIter reply_it{}, variant{};
         dbus_uint32_t version = 0;
@@ -596,7 +651,8 @@ PortalOutcome PortalScreenCastSession::Open(const PortalScreenCastOptions& optio
     return PortalOutcome::Ok;
 }
 
-int PortalScreenCastSession::OpenPipeWireRemote(std::string* error) {
+int PortalScreenCastSession::OpenPipeWireRemote(const KeepRunning& keep_running,
+                                                std::string* error) {
     if (!connection_ || session_handle_.empty()) {
         if (error) *error = "no session";
         return -1;
@@ -610,13 +666,12 @@ int PortalScreenCastSession::OpenPipeWireRemote(std::string* error) {
     api_.message_iter_append_basic(&it, DBUS_TYPE_OBJECT_PATH, &session);
     DictWriter dict(api_, &it);
     dict.Close();
-    DBusError err;
-    api_.error_init(&err);
-    DBusMessage* reply = api_.connection_send_with_reply_and_block(connection_, msg, 10000, &err);
-    api_.message_unref(msg);
+    PortalOutcome outcome = PortalOutcome::Ok;
+    std::string detail;
+    DBusMessage* reply = SendAndWait(msg, std::chrono::milliseconds(10000), keep_running,
+                                     &outcome, &detail);
     if (!reply) {
-        if (error) *error = std::string("OpenPipeWireRemote: ") + (err.message ? err.message : "");
-        api_.error_free(&err);
+        if (error) *error = "OpenPipeWireRemote: " + detail;
         return -1;
     }
     int fd = -1;

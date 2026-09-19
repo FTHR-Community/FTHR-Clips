@@ -31,7 +31,6 @@ struct DBusApi {
     decltype(&dbus_connection_set_exit_on_disconnect) connection_set_exit_on_disconnect = nullptr;
     decltype(&dbus_connection_close) connection_close = nullptr;
     decltype(&dbus_connection_unref) connection_unref = nullptr;
-    decltype(&dbus_connection_send_with_reply_and_block) connection_send_with_reply_and_block = nullptr;
     decltype(&dbus_connection_send) connection_send = nullptr;
     decltype(&dbus_connection_flush) connection_flush = nullptr;
     decltype(&dbus_connection_read_write) connection_read_write = nullptr;
@@ -40,6 +39,9 @@ struct DBusApi {
     decltype(&dbus_message_unref) message_unref = nullptr;
     decltype(&dbus_message_is_signal) message_is_signal = nullptr;
     decltype(&dbus_message_get_path) message_get_path = nullptr;
+    decltype(&dbus_message_get_type) message_get_type = nullptr;
+    decltype(&dbus_message_get_reply_serial) message_get_reply_serial = nullptr;
+    decltype(&dbus_message_get_error_name) message_get_error_name = nullptr;
     decltype(&dbus_message_iter_init) message_iter_init = nullptr;
     decltype(&dbus_message_iter_init_append) message_iter_init_append = nullptr;
     decltype(&dbus_message_iter_open_container) message_iter_open_container = nullptr;
@@ -134,7 +136,7 @@ public:
                        std::string* error);
 
     // OpenPipeWireRemote(); the caller owns the returned descriptor. -1 on error.
-    int OpenPipeWireRemote(std::string* error);
+    int OpenPipeWireRemote(const KeepRunning& keep_running, std::string* error);
 
     // Non-blocking. True once the portal emitted Session.Closed, e.g. because
     // the user stopped sharing from the desktop's indicator.
@@ -146,6 +148,15 @@ public:
 
 private:
     bool Connect(std::string* error);
+    // Sends `message` (consumed) and waits for its reply in kPollSliceMs
+    // slices so keep_running() can abort; signals seen meanwhile go through
+    // HandleSignal. Returns the reply, or nullptr with *outcome set to
+    // Interrupted / TimedOut / Failed / Unavailable and *error explained.
+    DBusMessage* SendAndWait(DBusMessage* message,
+                             std::chrono::milliseconds timeout,
+                             const KeepRunning& keep_running,
+                             PortalOutcome* outcome,
+                             std::string* error);
     PortalOutcome Call(const char* method,
                        const std::function<bool(DBusMessageIter&)>& append_args,
                        std::chrono::milliseconds response_timeout,
