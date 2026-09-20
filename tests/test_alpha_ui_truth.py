@@ -195,6 +195,22 @@ def test_encoder_apply_uses_process_restart_not_stub_reconfigure():
     assert 'set_encoder_config' not in body
 
 
+def test_kde_source_button_routes_to_portal_picker():
+    pytest.importorskip('PySide6.QtCore')
+    from main import MainWindow
+
+    calls = []
+    fake = SimpleNamespace(
+        source_popup=SimpleNamespace(isVisible=lambda: True),
+        _uses_kde_portal_source_picker=lambda: True,
+        _open_kde_portal_source_picker=lambda: calls.append('portal'),
+    )
+
+    MainWindow._toggle_source(fake)
+
+    assert calls == ['portal']
+
+
 def test_audio_toggle_requests_capture_restart():
     body = _method_source('_on_audio_capture_changed', '_requested_capture_config')
     assert 'self._restart_capture_engine()' in body

@@ -66,7 +66,8 @@ std::string PortalSessionPath(const std::string& unique_name, const std::string&
 
 // The restore token lets a persistent session skip the source-selection dialog
 // on later runs. It is stored beside settings.json with owner-only permissions
-// because it grants screen access to whoever presents it.
+// because it grants screen access to whoever presents it. On KDE, the UI removes
+// it on source selection to let screenportal handle the source selection
 std::string PortalRestoreTokenPath(const char* home);
 std::string LoadPortalRestoreToken(const std::string& path);
 // An empty token removes the file. Writes go through a temporary file so a

@@ -478,24 +478,32 @@ bool PortalBackend::Initialize(const CaptureConfig& cfg) {
         return false;
     }
 
-    if (!OpenPortalSession(cfg)) { Shutdown(); return false; }
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!OpenPortalSession(cfg)) { Shutdown(); return false; }
 
-    std::string detail;
-    const int fd = session_->OpenPipeWireRemote([this] { return KeepRunning(); }, &detail);
-    if (fd < 0) {
-        std::cerr << "[PortalBackend] " << detail << std::endl;
-        failure_reason_ = "the ScreenCast portal did not hand out a PipeWire connection: " + detail;
-        Shutdown();
-        return false;
-    }
-    if (!ConnectStream(fd, session_->Streams().front().node_id, cfg.fps)) {
+        std::string detail;
+        const int fd = session_->OpenPipeWireRemote([this] { return KeepRunning(); }, &detail);
+        if (fd >= 0 && ConnectStream(fd, session_->Streams().front().node_id, cfg.fps)) {
+            std::cerr << "[PortalBackend] Ready: " << native_w_ << "x" << native_h_ << std::endl;
+            return true;
+        }
+        if (fd < 0) {
+            std::cerr << "[PortalBackend] " << detail << std::endl;
+            failure_reason_ = "the ScreenCast portal did not hand out a PipeWire connection: " + detail;
+        }
+        const bool has_restore_token = !restore_token_path_.empty() && !LoadPortalRestoreToken(restore_token_path_).empty();
+        if (attempt == 0 && has_restore_token) {
+            std::cerr << "[PortalBackend] Restored session did not negotiate; retrying without its restore token" << std::endl;
+            SavePortalRestoreToken(restore_token_path_, "");
+            Shutdown();
+            continue;
+        }
         if (!failure_reason_.empty())
             std::cerr << "[PortalBackend] " << failure_reason_ << std::endl;
         Shutdown();
         return false;
     }
-    std::cerr << "[PortalBackend] Ready: " << native_w_ << "x" << native_h_ << std::endl;
-    return true;
+    return false;
 }
 
 bool PortalBackend::CaptureFrame(RawFrame& out) {
