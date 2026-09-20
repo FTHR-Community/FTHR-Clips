@@ -20,7 +20,7 @@
 
 ## What it does
 
-FTHRClips run silently in the background capturing your game and when you press a hotkey it saves the clip. But unlike other applications FTHRClips is built to protect your privacy and doesn't depend on a network connection.
+FTHRClips runs silently in the background capturing your game and when you press a hotkey it saves the clip. But unlike other applications FTHRClips is built to protect your privacy and doesn't depend on a network connection.
 
 ---
 
@@ -49,7 +49,7 @@ FTHRClips run silently in the background capturing your game and when you press 
 
 ## Download
 
-you can download a ready installer or app image right on our downloads page 
+You can download a ready installer or AppImage right on our downloads page
 [downloads.fthrclips.com](https://downloads.fthrclips.com)
 or compile the code yourself with this repo.
 
@@ -117,7 +117,7 @@ audio. Platform hotkey activation is
 forwarded by the UI through the same shared-memory command contract; Linux also
 uses an owner-only Unix socket for compositor key bindings.
 
-the uploader is separate from the main app and doesn't work unless deliberately installed. 
+The uploader is separate from the main app and doesn't work unless deliberately installed. 
 Even after it installing it only connects when you allow it to.
 please note that all clips uploaded to third party services fall under their terms and privacy policy:
 `THIRD_PARTY_NOTICES.md`.
