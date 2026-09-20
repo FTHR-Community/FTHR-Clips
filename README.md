@@ -19,7 +19,7 @@
 
 ## What it does
 
-FTHRClips run silently in the background capturing your game and when you press a hotkey it saves the clip. But unlike other applications FTHRClips is built to protect your privacy and doesn't depend on a network connection.
+FTHRClips runs silently in the background, capturing your game; when you press a hotkey, it saves the clip. Unlike many other applications, FTHRClips is designed to protect your privacy and does not depend on a network connection.
 
 ---
 
@@ -34,7 +34,7 @@ FTHRClips run silently in the background capturing your game and when you press 
 | **Capture** | Monitor selection and scaling modes |
 | **Hotkeys** | Global hotkeys via Hyprland binds (Linux) or system hooks (Windows); Windows supports controller chords |
 | **Hotkeys** | Save clip · Start/stop · Dismiss notification |
-| **Audio** | System-output and microphone tracks; Windows 11 per-app stems are code-ready but still require hardware qualification (aka we fucked up and it didn't work)|
+| **Audio** | System-output and microphone tracks; Windows 11 per-app stems are code-ready but still require hardware qualification.|
 | **Post-processing** | Watermark overlay |
 | **Post-processing** | Webcam overlay (picture-in-picture) |
 | **Post-processing** | Windows third-party keyboard window overlay with live chroma-key color picking and intensity control |
@@ -48,9 +48,9 @@ FTHRClips run silently in the background capturing your game and when you press 
 
 ## Download
 
-you can download a ready installer or app image right on our downloads page 
-downloads.fthrclips.com
-or compile the code yourself with this repo.
+You can download a ready-made installer or AppImage from our downloads page at
+[downloads.fthrclips.com](https://downloads.fthrclips.com), or compile the code
+from this repository.
 
 
 ## Linux Setup
@@ -122,10 +122,9 @@ frames from PipeWire. The desktop shows its own screen picker the first time;
 FTHR stores the portal's restore token in `~/.fthr/portal_screencast_token`
 so later starts are silent, and the picker rather than the app's monitor
 setting decides which screen is captured. Declining the picker stops the
-engine with that reason in the app instead of re-opening the dialog. That
-path needs `xdg-desktop-portal` with a ScreenCast backend, PipeWire and
-D-Bus installed; none is bundled. It
-captures the selected desktop output rather than
+engine with that reason in the app instead of re-opening the dialog. That path
+needs `xdg-desktop-portal` with a ScreenCast backend, PipeWire, and D-Bus
+installed; none is bundled. It captures the selected desktop output rather than
 promising arbitrary per-window capture. PipeWire's PulseAudio compatibility
 layer supplies the default output sink's monitor source for desktop audio.
 If the audio service cannot be opened, video capture can continue without audio.
