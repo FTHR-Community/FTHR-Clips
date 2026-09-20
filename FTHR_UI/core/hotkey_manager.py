@@ -1240,7 +1240,7 @@ class HotkeyManager(QObject):
         # A vague warning here is why "hotkeys don't work" was the most common
         # Linux report with no actionable follow-up.
         where = {
-            'kwin':  'KDE: System Settings -> Shortcuts -> Add Command',
+            'kwin':  'KDE: System Settings -> Keyboard -> Shortcuts -> Add New -> Command or Script',
             'gnome': 'GNOME: Settings -> Keyboard -> Custom Shortcuts',
             'x11':   "your window manager's keybinding config",
         }.get(comp or '', "your desktop's custom-shortcut settings")
@@ -1305,7 +1305,7 @@ class HotkeyManager(QObject):
             for action in ('save_clip', 'save_screenshot')
         }
         if compositor == 'kwin':
-            heading = 'KDE: System Settings → Shortcuts → Custom Shortcuts'
+            heading = 'KDE: System Settings -> Keyboard -> Shortcuts -> Add New -> Command or Script'
             rendered = commands.values()
         elif compositor == 'gnome':
             heading = 'GNOME: Settings → Keyboard → Custom Shortcuts'
