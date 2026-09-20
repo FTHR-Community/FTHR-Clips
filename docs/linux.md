@@ -8,28 +8,35 @@ and how to diagnose the common setup problems.
 
 The currently qualified path is:
 
-- x86_64 Linux
+- x86_64 Linux AppImage
 - native Wayland desktop
 - Hyprland, tested with `wlr-screencopy`
+- KDE Plasma/KWin, tested through the ScreenCast portal and PipeWire
 - PipeWire with PulseAudio compatibility, or PulseAudio
 - AMD Radeon hardware using VA-API when the Mesa driver exposes the encoder
 
-Other compositors, distributions, GPUs, X11 sessions, and ARM systems may work,
-but are not covered by this qualification. Do not treat a headless, WSL, or ARM
-build as proof that graphical capture works on a native x86_64 desktop.
+This is a narrow qualification, not a promise of universal Linux support:
+
+- GNOME, X11 sessions, NVIDIA and Intel hardware encoding, ARM, and other
+  distributions remain unqualified unless separately tested.
+- KDE/KWin video capture requires an available ScreenCast portal backend,
+  PipeWire, and D-Bus; the portal chooses the desktop output.
+- A headless, WSL, or ARM build does not qualify graphical capture on native
+  x86_64 hardware.
 
 ## Install the AppImage
 
-Download the latest Linux pre-release from the [GitHub release page](https://github.com/FTHR-Community/FTHR-Clips/releases/tag/v1.1.0-alpha):
+Download the current Linux pre-release from the [GitHub release page](https://github.com/FTHR-Community/FTHR-Clips/releases/tag/v1.1.1-alpha):
 
-- [FTHRClips-1.1.0-alpha-x86_64.AppImage](https://github.com/FTHR-Community/FTHR-Clips/releases/download/v1.1.0-alpha/FTHRClips-1.1.0-alpha-x86_64.AppImage)
-- [SHA-256 checksum](https://github.com/FTHR-Community/FTHR-Clips/releases/download/v1.1.0-alpha/FTHRClips-1.1.0-alpha-x86_64.AppImage.sha256)
+- [FTHRClips-1.1.1-alpha-x86_64.AppImage](https://github.com/FTHR-Community/FTHR-Clips/releases/download/v1.1.1-alpha/FTHRClips-1.1.1-alpha-x86_64.AppImage)
+- [SHA-256 checksum](https://github.com/FTHR-Community/FTHR-Clips/releases/download/v1.1.1-alpha/FTHRClips-1.1.1-alpha-x86_64.AppImage.sha256)
 
-Then run:
+Then verify and run:
 
 ```bash
-chmod +x FTHRClips-1.1.0-alpha-x86_64.AppImage
-./FTHRClips-1.1.0-alpha-x86_64.AppImage
+sha256sum -c FTHRClips-1.1.1-alpha-x86_64.AppImage.sha256
+chmod +x FTHRClips-1.1.1-alpha-x86_64.AppImage
+./FTHRClips-1.1.1-alpha-x86_64.AppImage
 ```
 
 If FUSE is unavailable:
