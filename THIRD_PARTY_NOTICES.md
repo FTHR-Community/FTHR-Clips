@@ -213,6 +213,29 @@ conflict.
 | **Licence** | Microsoft Visual Studio redistributable terms |
 | **Note** | Redistributed unmodified as permitted for VC++ runtime redistribution. |
 
+### AppImage type-2 runtime
+
+| | |
+|---|---|
+| **Version** | `20251108`, upstream commit `dd6cebedcbddde9c82f89b011e8e1d40b6e43868` |
+| **Source** | [AppImage/type2-runtime](https://github.com/AppImage/type2-runtime/releases/tag/20251108), asset `runtime-x86_64` |
+| **SHA-256** | `2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d` |
+| **Usage** | Embedded by the pinned Linux AppImage build as its type-2 runtime; it is not loaded by the FTHR application process. |
+| **Licence** | MIT for the runtime project, with statically linked musl, libfuse, squashfuse, libzstd, and zlib components listed in the upstream notice. |
+| **Licence text** | [`licenses/AppImage-type2-runtime-LICENSE.txt`](licenses/AppImage-type2-runtime-LICENSE.txt) |
+
+The runtime is fetched by the manifest-pinned build step and supplied to
+`appimagetool` explicitly with `--runtime-file`. Its URL, release tag, commit,
+size, and hash are recorded in
+[`tools/appimage_tool_manifest.json`](tools/appimage_tool_manifest.json).
+
+### AppImage packaging tool (build-only)
+
+`appimagetool` itself is a build-time dependency and is not part of the
+distributed AppImage. The build uses AppImage/appimagetool `1.9.1`, commit
+`8c8c91f762b412a19f4e8d2c4b35afb98f2d7c81`, and verifies its size and SHA-256
+from the same manifest before executing it.
+
 ---
 
 ## Project assets
