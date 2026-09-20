@@ -730,7 +730,7 @@ def merge_overlapping_pair(
     except Exception:
         td_dir = None
 
-    with tempfile.TemporaryDirectory(prefix="fthr_dedup_", dir=td_dir) as td:
+    with tempfile.TemporaryDirectory(prefix="fthr_dedup_", dir=td_dir, ignore_cleanup_errors=True) as td:
         temp_out = Path(td) / "merged_out.mp4"
 
         # Edge case: If clip 2 is completely subsumed within clip 1
@@ -858,7 +858,7 @@ def merge_clip_cluster(
     except Exception:
         td_dir = None
 
-    with tempfile.TemporaryDirectory(prefix="fthr_cluster_", dir=td_dir) as td:
+    with tempfile.TemporaryDirectory(prefix="fthr_cluster_", dir=td_dir, ignore_cleanup_errors=True) as td:
         segments_to_concat: list[Path] = [cluster[0].path]
         timeline_end = cluster[0].end_time
 

@@ -294,7 +294,7 @@ class _ScanWorker(QThread):
 
 class _MergeWorker(QThread):
     progress = Signal(int, int, str)
-    finished = Signal(int, int, bool)  # success_count, total_bytes_saved, remove_originals
+    finished = Signal(int, 'qint64', bool)  # success_count, total_bytes_saved, remove_originals
 
     def __init__(self, pairs: list[OverlapPair], remove_originals: bool):
         super().__init__()
@@ -341,7 +341,7 @@ class _MergeWorker(QThread):
 class ClipDeduplicationDialog(FthrDialog):
     """Scan and losslessly merge overlapping clips to recover disk space."""
 
-    deduplication_completed = Signal(int, int)  # success_count, bytes_saved
+    deduplication_completed = Signal(int, 'qint64')  # success_count, bytes_saved
 
     def __init__(self, clips_directory: Path, parent: QWidget | None = None):
         super().__init__("CLIP DEDUPLICATION & OVERLAP MANAGER", parent, width=860)
@@ -613,7 +613,7 @@ class ClipDeduplicationDialog(FthrDialog):
                 self,
                 "RECYCLE BIN QUARANTINE ENABLED",
                 "When enabled, original overlapping video files will be safely moved to your "
-                "OS Recycle Bin / Trash rather than permanently deleted.\n\n"
+                "OS Recycle Bin .\n\n"
                 "You can restore any file from the Recycle Bin at any time."
             )
 

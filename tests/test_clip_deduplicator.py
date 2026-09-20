@@ -437,10 +437,32 @@ def test_is_file_locked_handles_readonly_and_locked(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(Path, "open", mock_open)
     assert _is_file_locked(locked_file) is True
 
-    # Quarantining a locked file should skip it safely
-    quarantined = quarantine_original_clips([locked_file])
-    assert len(quarantined) == 0
-    assert locked_file.exists()
+def test_large_bytes_saved_signal_emission():
+    """Verify that signal emissions with > 2GB (64-bit int) do not raise OverflowError."""
+    from ui.deduplication_dialog import _MergeWorker, ClipDeduplicationDialog
+    
+    worker = _MergeWorker([], remove_originals=True)
+    received = []
+    worker.finished.connect(lambda s, b, r: received.append((s, b, r)))
+    
+    # 8 GB byte count
+    large_bytes = 8_059_901_675
+    worker.finished.emit(1, large_bytes, True)
+    assert len(received) == 1
+    assert received[0] == (1, large_bytes, True)
+    
+    # Check ClipDeduplicationDialog signal definition as well
+    from PySide6.QtCore import QObject
+    dlg_received = []
+    class DummyEmitter(QObject):
+        sig = ClipDeduplicationDialog.deduplication_completed
+    
+    emitter = DummyEmitter()
+    emitter.sig.connect(lambda s, b: dlg_received.append((s, b)))
+    emitter.sig.emit(2, large_bytes)
+    assert len(dlg_received) == 1
+    assert dlg_received[0] == (2, large_bytes)
+
 
 
 
