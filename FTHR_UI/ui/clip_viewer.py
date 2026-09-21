@@ -3467,7 +3467,8 @@ class ClipViewer(QDialog):
         self._renderer_resume_playing = False
         self._player_lifecycle_state = PlayerLifecycleState.PREPARING
         self._player_failure_detail = ''
-        self._play_when_ready = False
+        self._play_when_ready = bool(
+            self.sm.get('clip_viewer_autoplay', True)) if self.sm else True
         self._audio_prepare_timed_out = False
         self._last_stable_position_ms = 0
         self._resume_anchor_ms: int | None = None

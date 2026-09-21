@@ -17,6 +17,7 @@ def test_new_defaults_present(tmp_path, monkeypatch):
     assert sm.get('recording_bitrate_level') == 'medium'
     assert sm.get('error_notifications_enabled') is True
     assert sm.get('audio_capture_mode') == 'combined'
+    assert sm.get('clip_viewer_autoplay') is True
     assert sm.get('clips_directory') == str(tmp_path / 'FTHR_Clips')
 
 
@@ -72,6 +73,18 @@ def test_codec_preference_persists_across_restart(tmp_path, monkeypatch, codec):
 
     restarted = SettingsManager()
     assert restarted.get('codec_pref') == codec
+
+
+def test_clip_viewer_autoplay_preference_persists_across_restart(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
+
+    first_run = SettingsManager()
+    first_run.set('clip_viewer_autoplay', False)
+    assert first_run.save_settings() is True
+
+    restarted = SettingsManager()
+    assert restarted.get('clip_viewer_autoplay') is False
 
 
 def test_extended_clips_are_not_in_defaults(tmp_path, monkeypatch):
