@@ -336,9 +336,8 @@ void PortalBackend::OnCoreError(uint32_t id, int seq, int res, const char* messa
 
 bool PortalBackend::OpenPortalSession(const CaptureConfig& cfg) {
     session_ = std::make_unique<PortalScreenCastSession>(dbus_);
-    PortalScreenCastOptions options;
     restore_token_path_ = PortalRestoreTokenPath(std::getenv("HOME"));
-    options.restore_token = LoadPortalRestoreToken(restore_token_path_);
+    PortalScreenCastOptions options = LoadPortalScreenCastOptions(restore_token_path_);
     if (!options.restore_token.empty())
         std::cerr << "[PortalBackend] Presenting saved restore token" << std::endl;
     if (!cfg.target_output.empty()) {
@@ -478,24 +477,39 @@ bool PortalBackend::Initialize(const CaptureConfig& cfg) {
         return false;
     }
 
-    if (!OpenPortalSession(cfg)) { Shutdown(); return false; }
-
     std::string detail;
-    const int fd = session_->OpenPipeWireRemote([this] { return KeepRunning(); }, &detail);
-    if (fd < 0) {
-        std::cerr << "[PortalBackend] " << detail << std::endl;
-        failure_reason_ = "the ScreenCast portal did not hand out a PipeWire connection: " + detail;
-        Shutdown();
-        return false;
+    const bool started = RunPortalStartupWithRetry({
+        [this, &cfg] { return OpenPortalSession(cfg); },
+        [this, &detail] {
+            detail.clear();
+            PortalOutcome outcome = PortalOutcome::Failed;
+            const int fd = session_->OpenPipeWireRemote([this] { return KeepRunning(); }, &detail, &outcome);
+            if (fd < 0 && outcome != PortalOutcome::Interrupted) {
+                std::cerr << "[PortalBackend] " << detail << std::endl;
+                failure_reason_ = "the ScreenCast portal did not hand out a PipeWire connection: " + detail;
+            }
+            return PortalPipeWireResult{fd, outcome};
+        },
+        [this, &cfg](int fd) {
+            return ConnectStream(fd, session_->Streams().front().node_id, cfg.fps);
+        },
+        [this] {
+            return !restore_token_path_.empty() &&
+                !LoadPortalRestoreToken(restore_token_path_).empty();
+        },
+        [this] {
+            std::cerr << "[PortalBackend] Restored session did not negotiate; retrying without its restore token" << std::endl;
+            SavePortalRestoreToken(restore_token_path_, "");
+        },
+        [this] { Shutdown(); },
+    });
+    if (started) {
+        std::cerr << "[PortalBackend] Ready: " << native_w_ << "x" << native_h_ << std::endl;
+        return true;
     }
-    if (!ConnectStream(fd, session_->Streams().front().node_id, cfg.fps)) {
-        if (!failure_reason_.empty())
-            std::cerr << "[PortalBackend] " << failure_reason_ << std::endl;
-        Shutdown();
-        return false;
-    }
-    std::cerr << "[PortalBackend] Ready: " << native_w_ << "x" << native_h_ << std::endl;
-    return true;
+    if (!failure_reason_.empty())
+        std::cerr << "[PortalBackend] " << failure_reason_ << std::endl;
+    return false;
 }
 
 bool PortalBackend::CaptureFrame(RawFrame& out) {

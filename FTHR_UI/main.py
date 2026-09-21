@@ -12,6 +12,7 @@ import threading
 from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime
+from core.compositor import detect_compositor
 _NO_WINDOW = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
 _BACKGROUND_NO_WINDOW = {
     'creationflags': (
@@ -4066,6 +4067,9 @@ class MainWindow(QMainWindow):
         self._sync_topbar_dropdown_arrows()
 
     def _toggle_source(self):
+        if self._uses_kde_portal_source_picker():
+            self._open_kde_portal_source_picker()
+            return
         if self.source_popup.isVisible():
             self.source_popup.hide()
         else:
@@ -4074,6 +4078,25 @@ class MainWindow(QMainWindow):
             self.game_detection_popup.hide()
             self.source_popup.show_below(self.source_btn)
         self._sync_topbar_dropdown_arrows()
+
+    @staticmethod
+    def _uses_kde_portal_source_picker() -> bool:
+        if sys.platform == 'win32' or not os.environ.get('WAYLAND_DISPLAY'):
+            return False
+        return detect_compositor() == 'kwin'
+
+    def _open_kde_portal_source_picker(self) -> None:
+        token_path = Path.home() / '.fthr' / 'portal_screencast_token'
+        try:
+            token_path.unlink(missing_ok=True)
+        except OSError as error:
+            self.push_error(
+                'SOURCE PICKER UNAVAILABLE',
+                f'Could not reset the KDE screen-sharing selection: {error}',
+                level='warning',
+            )
+            return
+        self._restart_capture_engine()
 
     def _toggle_game_detection(self):
         if self.game_detection_popup.isVisible():

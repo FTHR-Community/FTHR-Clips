@@ -79,11 +79,11 @@ On Wayland, FTHR tries `wlr-screencopy` first and
 captured through the `org.freedesktop.portal.ScreenCast` portal: the desktop
 shows its screen picker once, FTHR keeps the returned restore token in
 `~/.fthr/portal_screencast_token` (owner-only) so later starts need no dialog,
-and the frames arrive over PipeWire as memfd buffers. The picker, not the
-app's monitor setting, decides which screen is captured; declining it stops
-the engine and the app shows that reason. Delete the token file to be asked
-again. Linux capture is desktop-output based. Arbitrary per-window capture is
-not part of the qualified Wayland scope.
+and the frames arrive over PipeWire as memfd buffers. On KDE Plasma, pressing
+`SOURCE` removes that token and restarts the engine so the KDE monitor picker
+opens again; the selected monitor becomes the capture source. The picker, not
+the app's monitor setting, decides the source. Declining it stops the engine
+and the app shows that reason. Linux portal capture is desktop-output only.
 
 The portal path needs, at runtime, `xdg-desktop-portal` with a ScreenCast
 backend for the desktop (`xdg-desktop-portal-kde` on Plasma), PipeWire
@@ -96,7 +96,8 @@ screen, and screenshots are a separate path (`grim`) that the portal backend
 does not provide.
 
 On `wlr-screencopy` and `ext-image-copy-capture` compositors the selected
-output and scaling settings are controlled from the application.
+output and scaling settings are controlled from the application. The KDE
+portal path uses the desktop's source chooser instead.
 For a compositor or output that is not detected correctly, run the diagnostic
 commands below and include their redacted output in a support report.
 

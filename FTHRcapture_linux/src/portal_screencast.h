@@ -66,7 +66,8 @@ std::string PortalSessionPath(const std::string& unique_name, const std::string&
 
 // The restore token lets a persistent session skip the source-selection dialog
 // on later runs. It is stored beside settings.json with owner-only permissions
-// because it grants screen access to whoever presents it.
+// because it grants screen access to whoever presents it. On KDE, the UI removes
+// it on source selection to let screenportal handle the source selection
 std::string PortalRestoreTokenPath(const char* home);
 std::string LoadPortalRestoreToken(const std::string& path);
 // An empty token removes the file. Writes go through a temporary file so a
@@ -117,6 +118,30 @@ struct PortalScreenCastOptions {
     std::chrono::milliseconds dialog_timeout{120000};
 };
 
+// Builds startup options from the persisted restore-token file. An absent or
+// invalid file produces options without a restore token.
+PortalScreenCastOptions LoadPortalScreenCastOptions(const std::string& path);
+
+// A failed restored session may retry once without its token. Fresh sessions
+// must not trigger that retry because it would only repeat the same failure.
+bool ShouldRetryPortalStartup(int attempt, bool has_restore_token) noexcept;
+
+struct PortalPipeWireResult {
+    int fd = -1;
+    PortalOutcome outcome = PortalOutcome::Failed;
+};
+
+struct PortalStartupCallbacks {
+    std::function<bool()> open_session;
+    std::function<PortalPipeWireResult()> open_pipewire_remote;
+    std::function<bool(int)> connect_stream;
+    std::function<bool()> has_restore_token;
+    std::function<void()> clear_restore_token;
+    std::function<void()> shutdown;
+};
+
+bool RunPortalStartupWithRetry(const PortalStartupCallbacks& callbacks);
+
 // Owns one private session-bus connection and one ScreenCast session. All
 // methods run on the caller's thread and poll the bus in short slices so
 // keep_running() can abort a wait within ~50 ms.
@@ -136,7 +161,7 @@ public:
                        std::string* error);
 
     // OpenPipeWireRemote(); the caller owns the returned descriptor. -1 on error.
-    int OpenPipeWireRemote(const KeepRunning& keep_running, std::string* error);
+    int OpenPipeWireRemote(const KeepRunning& keep_running, std::string* error, PortalOutcome* outcome = nullptr);
 
     // Non-blocking. True once the portal emitted Session.Closed, e.g. because
     // the user stopped sharing from the desktop's indicator.

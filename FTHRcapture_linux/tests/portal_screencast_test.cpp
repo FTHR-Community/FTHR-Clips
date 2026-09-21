@@ -23,11 +23,41 @@ extern "C" {
 
 namespace {
 
+DBusConnection* FakeConnection() {
+    static int connection;
+    return reinterpret_cast<DBusConnection*>(&connection);
+}
+
+DBusConnection* FakeBusGetPrivate(DBusBusType, DBusError*) {
+    return FakeConnection();
+}
+
+const char* FakeUniqueName(DBusConnection*) {
+    return ":1.7";
+}
+
+void FakeSetExitOnDisconnect(DBusConnection*, dbus_bool_t) {}
+
+void FakeAddMatch(DBusConnection*, const char*, DBusError*) {}
+
+void FakeClose(DBusConnection*) {}
+void FakeUnref(DBusConnection*) {}
+
+dbus_bool_t FakeSend(DBusConnection*, DBusMessage*, dbus_uint32_t* serial) {
+    if (serial) *serial = 1;
+    return TRUE;
+}
+
+void FakeFlush(DBusConnection*) {}
+dbus_bool_t FakeReadWrite(DBusConnection*, int) { return TRUE; }
+DBusMessage* FakePop(DBusConnection*) { return nullptr; }
+
 fthr::DBusApi DirectApi() {
     fthr::DBusApi api;
     api.error_init = dbus_error_init;
     api.error_free = dbus_error_free;
     api.error_is_set = dbus_error_is_set;
+    api.message_new_method_call = dbus_message_new_method_call;
     api.message_unref = dbus_message_unref;
     api.message_iter_init = dbus_message_iter_init;
     api.message_iter_init_append = dbus_message_iter_init_append;
@@ -164,8 +194,118 @@ void TestRestoreTokenPersistence() {
     assert(!fthr::SavePortalRestoreToken("", "token"));
     assert(fthr::LoadPortalRestoreToken("").empty());
 
+    const std::string parent_file = std::string(dir) + "/parent-file";
+    FILE* parent = fopen(parent_file.c_str(), "wb");
+    assert(parent);
+    fclose(parent);
+    assert(!fthr::SavePortalRestoreToken(parent_file + "/token", "token"));
+
     std::string cleanup = "rm -rf " + std::string(dir);
     assert(system(cleanup.c_str()) == 0);
+}
+
+void TestStartupRestoreToken() {
+    char dir[] = "/tmp/fthr-portal-startup-XXXXXX";
+    assert(mkdtemp(dir) != nullptr);
+    const std::string path = std::string(dir) + "/portal_screencast_token";
+
+    assert(fthr::SavePortalRestoreToken(path, "restored-session"));
+    const fthr::PortalScreenCastOptions options = fthr::LoadPortalScreenCastOptions(path);
+    assert(options.restore_token == "restored-session");
+
+    assert(fthr::SavePortalRestoreToken(path, "damaged token"));
+    assert(fthr::LoadPortalScreenCastOptions(path).restore_token.empty());
+
+    std::string cleanup = "rm -rf " + std::string(dir);
+    assert(system(cleanup.c_str()) == 0);
+}
+
+void TestInvalidRestoreTokenRetryPolicy() {
+    assert(fthr::ShouldRetryPortalStartup(0, true));
+    assert(!fthr::ShouldRetryPortalStartup(1, true));
+    assert(!fthr::ShouldRetryPortalStartup(0, false));
+}
+
+void TestRestoredSessionRetriesWithoutToken() {
+    std::vector<std::string> calls;
+    int connect_attempt = 0;
+    const bool started = fthr::RunPortalStartupWithRetry({
+        [&] {
+            calls.push_back("open-session");
+            return true;
+        },
+        [&] {
+            calls.push_back("open-pipewire");
+            return fthr::PortalPipeWireResult{7, fthr::PortalOutcome::Failed};
+        },
+        [&](int fd) {
+            assert(fd == 7);
+            calls.push_back("connect-stream");
+            return ++connect_attempt == 2;
+        },
+        [&] {
+            calls.push_back("has-token");
+            return true;
+        },
+        [&] { calls.push_back("clear-token"); },
+        [&] { calls.push_back("shutdown"); },
+    });
+
+    assert(started);
+    assert(calls == std::vector<std::string>({
+        "open-session", "open-pipewire", "connect-stream", "has-token",
+        "clear-token", "shutdown", "open-session", "open-pipewire",
+        "connect-stream"}));
+}
+
+void TestPipeWireCancellationDoesNotRetry() {
+    std::vector<std::string> calls;
+    const bool started = fthr::RunPortalStartupWithRetry({
+        [&] {
+            calls.push_back("open-session");
+            return true;
+        },
+        [&] {
+            calls.push_back("open-pipewire");
+            return fthr::PortalPipeWireResult{
+                -1, fthr::PortalOutcome::Interrupted};
+        },
+        [&](int) {
+            calls.push_back("connect-stream");
+            return false;
+        },
+        [&] {
+            calls.push_back("has-token");
+            return true;
+        },
+        [&] { calls.push_back("clear-token"); },
+        [&] { calls.push_back("shutdown"); },
+    });
+
+    assert(!started);
+    assert(calls == std::vector<std::string>({
+        "open-session", "open-pipewire", "shutdown"}));
+}
+
+void TestPortalStartupCancellation() {
+    fthr::DBusApi api = DirectApi();
+    api.bus_get_private = FakeBusGetPrivate;
+    api.bus_get_unique_name = FakeUniqueName;
+    api.bus_add_match = FakeAddMatch;
+    api.connection_set_exit_on_disconnect = FakeSetExitOnDisconnect;
+    api.connection_close = FakeClose;
+    api.connection_unref = FakeUnref;
+    api.connection_send = FakeSend;
+    api.connection_flush = FakeFlush;
+    api.connection_read_write = FakeReadWrite;
+    api.connection_pop_message = FakePop;
+
+    fthr::PortalScreenCastSession session(api);
+    std::string error;
+    const fthr::PortalOutcome outcome = session.Open(
+        fthr::PortalScreenCastOptions{}, [] { return false; }, &error);
+    assert(outcome == fthr::PortalOutcome::Interrupted);
+    assert(error.find("capture stopped while waiting") != std::string::npos);
 }
 
 void TestResponseParsing() {
@@ -265,6 +405,11 @@ void TestPixelFormats() {
 int main() {
     TestPaths();
     TestRestoreTokenPersistence();
+    TestStartupRestoreToken();
+    TestInvalidRestoreTokenRetryPolicy();
+    TestRestoredSessionRetriesWithoutToken();
+    TestPipeWireCancellationDoesNotRetry();
+    TestPortalStartupCancellation();
     TestResponseParsing();
     TestPixelFormats();
     std::puts("portal screencast helpers: ok");
