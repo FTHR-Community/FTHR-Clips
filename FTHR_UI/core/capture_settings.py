@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 
-NORMAL_CLIP_VALUES = (5, 10, 15, 30, 45, 60, 90, 120, 180, 240, 300)
+NORMAL_CLIP_VALUES = (5, 10, 15, 30, 45, 60, 90, 120, 180, 240, 300, 600, 900, 1200, 1800)
 FPS_VALUES = (30, 60, 90, 120, 144, 165, 180, 240)
 AUDIO_CAPTURE_MODE_COMBINED = 'combined'
 AUDIO_CAPTURE_MODE_SEPARATED = 'separated'
@@ -36,7 +36,7 @@ def _validate_int(value: int, *, name: str, minimum: int, maximum: int) -> int:
 
 
 def validate_normal_clip_length(value: int) -> int:
-    return _validate_int(value, name='normal clip length', minimum=5, maximum=300)
+    return _validate_int(value, name='normal clip length', minimum=5, maximum=1800)
 
 
 
@@ -75,7 +75,16 @@ class CaptureConfig:
 def compute_buffer_seconds(normal_seconds: int) -> int:
     """Return a native-safe ring size while retaining the usual safety margin."""
     normal = validate_normal_clip_length(normal_seconds)
-    return min(300, normal + 2)
+    return min(1800, normal + 2)
+
+
+LINUX_MAX_REPLAY_BUFFER_MB = 2048
+
+
+def estimate_replay_buffer_mb(buffer_seconds: int, bitrate_kbps: int) -> int:
+    """Return estimated in-memory buffer footprint in megabytes."""
+    bytes_total = int(buffer_seconds) * (int(bitrate_kbps) * 1000 // 8)
+    return max(1, bytes_total // (1024 * 1024))
 
 
 class ApplyStatus(Enum):
