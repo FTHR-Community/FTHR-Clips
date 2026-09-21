@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tools.fetch_third_party import _ensure_linux_ffmpeg_aliases
+from tools.fetch_third_party import (
+    _ensure_linux_ffmpeg_aliases,
+    _ensure_linux_ffmpeg_tool_rpaths,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +33,31 @@ def test_linux_ffmpeg_aliases_are_created_and_repaired(tmp_path: Path) -> None:
         tmp_path, {versioned.name: soname.name}
     )
     assert linker.read_bytes() == versioned.read_bytes()
+
+
+def test_linux_ffmpeg_cli_rpaths_are_repaired(tmp_path: Path, monkeypatch) -> None:
+    if __import__('shutil').which('patchelf') is None:
+        import pytest
+        pytest.skip('patchelf is not installed on this test host')
+
+    import subprocess
+
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    fixture = Path('/bin/true')
+    for name in ('ffmpeg', 'ffprobe'):
+        target = bin_dir / name
+        target.write_bytes(fixture.read_bytes())
+        target.chmod(0o755)
+
+    _ensure_linux_ffmpeg_tool_rpaths(bin_dir)
+
+    for name in ('ffmpeg', 'ffprobe'):
+        result = subprocess.run(
+            ['readelf', '-d', str(bin_dir / name)],
+            check=True, capture_output=True, text=True,
+        )
+        assert 'Library rpath: [$ORIGIN/../lib]' in result.stdout
 
 
 def test_linux_release_link_is_confined_to_pinned_ffmpeg_tree() -> None:

@@ -88,6 +88,11 @@ class ScanStats:
     duplicate_files: int = 0
     skipped_reparse_points: int = 0
     inaccessible_entries: int = 0
+
+    @property
+    def skipped_reparse_point_count(self) -> int:
+        """Compatibility name used by diagnostics and older callers."""
+        return self.skipped_reparse_points
     vanished_entries: int = 0
     watched_directories: int = 0
     cancelled: bool = False

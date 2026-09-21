@@ -1,10 +1,11 @@
-"""Generated release bindings for dormant optional uploader packages."""
+"""Generated release bindings for optional uploader packages."""
 
 UPLOADER_PLUGIN_ID = 'com.fthrclips.uploader'
 UPLOADER_PLUGIN_VERSION = '1.1.0'
 UPLOADER_TERMS_VERSION = '2026-08-24-v1'
 UPLOADER_PRIVACY_VERSION = '2026-08-24-v1'
-EXPECTED_UPLOADER_BUNDLE_SHA256 = 'd8b1c494d01a89ae86aee9893807bced3411bd3d4eefdc6078936315d520a4ec'
+EXPECTED_UPLOADER_BUNDLE_SHA256 = '374d83dd1f1403d20412dfee1045835ccd5c8a2c8028eb0490cee6b76f6db9c3'
+EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = 'ce68917afb8798649bc0d360cbf61aaf4968f4d0d24d5e5855c65c029793565c'
 
 HARDWARE_PLUGIN_ID = 'com.fthrclips.hardware-identity'
 HARDWARE_PLUGIN_VERSION = '1.0.0'

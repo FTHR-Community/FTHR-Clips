@@ -1,4 +1,5 @@
 #include "audio_capture.h"
+#include "audio_timing.h"
 #include <pulse/simple.h>
 #include <pulse/error.h>
 #include <pulse/pulseaudio.h>
@@ -125,10 +126,14 @@ bool AudioCapture::Start(const std::string& device_name) {
     ss.format   = PA_SAMPLE_FLOAT32LE;
     ss.rate     = static_cast<uint32_t>(kSampleRate);
     ss.channels = static_cast<uint8_t>(kChannels);
+    pa_buffer_attr buffer_attr{};
+    buffer_attr.maxlength = static_cast<uint32_t>(kFramesPerChunk * kChannels * sizeof(float) * 20);
+    buffer_attr.fragsize = static_cast<uint32_t>(kFramesPerChunk * kChannels * sizeof(float));
+    buffer_attr.prebuf = buffer_attr.minreq = buffer_attr.tlength = static_cast<uint32_t>(-1);
     int pa_err = 0;
     stream_ = pa_simple_new(
         nullptr, "FTHRclips", PA_STREAM_RECORD, source_name.c_str(),
-        "desktop-output-loopback", &ss, nullptr, nullptr, &pa_err);
+        "desktop-output-loopback", &ss, nullptr, &buffer_attr, &pa_err);
     if (!stream_) {
         std::cerr << "[Audio] Could not open output monitor '" << source_name
                   << "': " << pa_strerror(pa_err) << std::endl;
@@ -168,18 +173,22 @@ void AudioCapture::CaptureLoop() {
     std::vector<float> buf(static_cast<size_t>(kSamplesPerChunk));
 
     while (running_.load()) {
-        int64_t chunk_start_ns = mono_ns();
-
         if (pa_simple_read(stream_, buf.data(),
                            buf.size() * sizeof(float), &pa_err) < 0) {
             std::cerr << "[Audio] pa_simple_read error: "
                       << pa_strerror(pa_err) << std::endl;
             break;
         }
+        int64_t delivery_end_ns = mono_ns();
+        pa_usec_t latency_us = pa_simple_get_latency(stream_, &pa_err);
+        if (latency_us == static_cast<pa_usec_t>(-1))
+            latency_us = 0;
 
         TimedChunk chunk;
         chunk.samples   = buf;
-        chunk.start_ns  = chunk_start_ns;
+        chunk.start_ns  = AudioChunkStartNs(
+            delivery_end_ns, static_cast<int64_t>(latency_us),
+            buf.size() / kChannels, kSampleRate);
 
         {
             std::lock_guard<std::mutex> lk(mutex_);

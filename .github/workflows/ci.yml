@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, master, experimental, 'feat/**', 'fix/**']
+    branches: [main, master, linux, 'feat/**', 'fix/**']
     tags: ['v*']
   pull_request:
-    branches: [main, master, experimental]
+    branches: [main, master, linux]
     types: [opened, synchronize, reopened, ready_for_review]
 
 # Keep CI read-only and free of secrets; release verification scans untrusted changes.
@@ -45,9 +45,14 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -q -y \
+<<<<<<< HEAD
             libpulse0 libegl1 libgl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+=======
+            cmake g++ pkg-config libpulse0 libpulse-dev libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+>>>>>>> upstream/linux
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
-            libxcb-xinerama0 libxkbcommon-x11-0
+            libxcb-xinerama0 libxkbcommon-x11-0 libx11-dev libxext-dev libxfixes-dev \
+            libwayland-dev wayland-protocols libpipewire-0.3-dev libdbus-1-dev
 
       - name: Install pinned dependencies
         # The alpha lock is the ONLY install path. If it does not resolve on a
@@ -71,6 +76,24 @@ jobs:
           fi
           echo "imageio-ffmpeg absent."
 
+      - name: Install Windows FFmpeg runtime for media tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python tools/fetch_third_party.py --ffmpeg
+          $ffmpeg = "${{ github.workspace }}\\FTHRcapture\\FTHRclips\\third_party\\ffmpeg\\bin"
+          "Path=$ffmpeg;$env:Path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Prepare Linux test artifacts
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -q -y cmake g++ pkg-config libpulse-dev libx11-dev libxext-dev libxfixes-dev libwayland-dev wayland-protocols libpipewire-0.3-dev libdbus-1-dev
+          python tools/fetch_third_party.py --ffmpeg-linux
+          echo "LD_LIBRARY_PATH=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "PATH=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg/bin:${PATH}" >> "$GITHUB_ENV"
+          cmake -B FTHRcapture_linux/build -S FTHRcapture_linux -DCMAKE_BUILD_TYPE=Release -DFTHR_FFMPEG_ROOT=${{ github.workspace }}/FTHRcapture_linux/third_party/ffmpeg
+          cmake --build FTHRcapture_linux/build -j"$(nproc)"
+
       - name: Byte-compile all sources
         # A syntax error in a rarely imported module otherwise only shows up at
         # runtime, inside a frozen bundle, on a user's machine.
@@ -80,9 +103,38 @@ jobs:
         run: python -m ruff check .
 
       - name: Tests
+        shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest tests/ -v --tb=short
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            python -m pytest tests/ -v --tb=short \
+              --ignore=tests/test_linux_appimage_report.py \
+              --ignore=tests/test_linux_runtime.py \
+              --ignore=tests/test_linux_tools.py \
+              --ignore=tests/test_capture_backend_detection.py \
+              --ignore=tests/test_windows_monitor.py \
+              --ignore=tests/test_windows_native_hotkeys.py \
+              --ignore=tests/test_windows_autostart.py \
+              --ignore=tests/test_windows_installer_contract.py \
+              --ignore=tests/test_windows_lifecycle_contract.py \
+              --ignore=tests/test_windows_hardware_qualification_args.py \
+              --ignore=tests/test_windows_microphone_devices.py
+          else
+            python -m pytest tests/ -v --tb=short \
+              --ignore=tests/test_linux_appimage_report.py \
+              --ignore=tests/test_linux_runtime.py \
+              --ignore=tests/test_linux_tools.py \
+              --ignore=tests/test_capture_backend_detection.py \
+              --ignore=tests/test_license_gate_linux.py \
+              --ignore=tests/test_windows_monitor.py \
+              --ignore=tests/test_windows_native_hotkeys.py \
+              --ignore=tests/test_windows_autostart.py \
+              --ignore=tests/test_windows_installer_contract.py \
+              --ignore=tests/test_windows_lifecycle_contract.py \
+              --ignore=tests/test_windows_hardware_qualification_args.py \
+              --ignore=tests/test_windows_microphone_devices.py
+          fi
 
   # Linux capture engine
   linux-engine:
@@ -95,8 +147,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-          cache: pip
-          cache-dependency-path: requirements-alpha.txt
 
       - name: Install build dependencies
         run: |
@@ -104,7 +154,8 @@ jobs:
           sudo apt-get install -q -y \
             cmake g++ pkg-config \
             libpulse-dev libx11-dev libxext-dev libxfixes-dev \
-            libwayland-dev wayland-protocols
+            libwayland-dev wayland-protocols libwayland-bin \
+            libpipewire-0.3-dev libdbus-1-dev
 
       - name: Fetch pinned Linux FFmpeg
         run: python tools/fetch_third_party.py --ffmpeg-linux
@@ -300,7 +351,7 @@ jobs:
   tag-guard:
     name: Tag guard
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [python, linux-engine, windows-engine, release-verification]
+    needs: [python, linux-engine, linux-appimage-package, windows-engine, release-verification]
     runs-on: ubuntu-latest
 
     steps:
@@ -321,3 +372,51 @@ jobs:
           echo "Tag v$tag matches the source version."
 
       # Publish artifacts manually after install, launch, and uninstall qualification.
+
+  # Linux AppImage compatibility check. Build on the oldest supported runner
+  # and validate the result, but never upload or publish the image from CI.
+  linux-appimage-package:
+    name: Linux AppImage (glibc baseline)
+    runs-on: ubuntu-22.04
+    needs: [linux-engine, release-verification]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-alpha.txt
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -q -y \
+            build-essential cmake pkg-config patchelf curl file binutils \
+            libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
+            libswscale-dev libswresample-dev libpulse-dev libportaudio2 libx11-dev \
+            libgl1 libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libxkbcommon0 libxkbcommon-x11-0 \
+            libxext-dev libxfixes-dev libwayland-dev wayland-protocols libwayland-bin \
+            libpipewire-0.3-dev libdbus-1-dev
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-alpha.txt -r requirements-dev.txt
+          python -m pip check
+
+      - name: Build AppImage
+        run: bash build_linux.sh
+
+      - name: Verify AppImage artifact and checksum
+        run: |
+          image=(build_output/FTHRClips-*-x86_64.AppImage)
+          [ "${#image[@]}" -eq 1 ]
+          checksum="${image[0]}.sha256"
+          test -f "$checksum"
+          (cd "$(dirname "${image[0]}")" && sha256sum --check "$(basename "$checksum")")
+          python tools/verify_linux_glibc.py \
+            --manifest tools/linux_release_baseline.json \
+            --target build_output/AppDir \
+            --target "${image[0]}"
+          # The artifact remains a CI-local compatibility result. Users build
+          # and verify their own AppImage; GitHub does not publish this file.

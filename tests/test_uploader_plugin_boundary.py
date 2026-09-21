@@ -67,7 +67,111 @@ def _bundle(
     return path
 
 
-def test_uploader_and_hardware_identity_install_only_after_separate_consents(tmp_path):
+def test_linux_uploader_spec_uses_linux_bundle_and_entrypoint(monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    spec = core_uploader._uploader_spec()
+    assert spec.filename == 'FTHR-Uploader-linux.fthrplugin'
+    assert spec.entrypoint == 'FTHR-Uploader'
+
+
+def test_platform_data_root_uses_xdg_data_home_on_linux(monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    monkeypatch.setenv('XDG_DATA_HOME', '/tmp/fthr-xdg-data')
+    monkeypatch.delenv('LOCALAPPDATA', raising=False)
+    assert core_uploader._platform_data_root() == Path('/tmp/fthr-xdg-data')
+
+
+def test_linux_activation_restores_uploader_executable_bit(tmp_path, monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    uploader_bundle = _bundle(
+        tmp_path,
+        filename='FTHR-Uploader-linux.fthrplugin',
+        plugin_id=core_uploader.UPLOADER_PLUGIN_ID,
+        plugin_version=core_uploader.UPLOADER_PLUGIN_VERSION,
+        entrypoint='FTHR-Uploader',
+        legal_versions={
+            'terms_version': core_uploader.UPLOADER_TERMS_VERSION,
+            'privacy_version': core_uploader.UPLOADER_PRIVACY_VERSION,
+        },
+    )
+    uploader_root = tmp_path / 'installed-uploader'
+    manager = core_uploader.UploadManager(_CoreSettings())
+    chmod_calls = []
+
+    def record_chmod(path, mode):
+        chmod_calls.append((path, mode))
+
+    monkeypatch.setattr(core_uploader.Path, 'chmod', record_chmod)
+    with (
+            patch.object(manager, 'bundle_path', return_value=uploader_bundle),
+            patch.object(
+                core_uploader, 'EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256',
+                _sha256(uploader_bundle)),
+            patch.object(core_uploader, '_UPLOADER_ROOT', uploader_root),
+            patch.object(
+                core_uploader, '_UPLOADER_ACTIVATION_FILE',
+                uploader_root / 'activation.json'),
+            patch.object(core_uploader, '_SETTINGS_FILE', tmp_path / 'settings.json')):
+        ok, message = manager.activate_plugin(
+            core_uploader.UPLOADER_TERMS_VERSION,
+            core_uploader.UPLOADER_PRIVACY_VERSION,
+        )
+    assert ok, message
+    executable = uploader_root / core_uploader.UPLOADER_PLUGIN_VERSION / 'FTHR-Uploader'
+    assert len(chmod_calls) == 1
+    chmod_path, chmod_mode = chmod_calls[0]
+    assert chmod_path.name == executable.name
+    assert chmod_path.parent.name == 'payload'
+    assert chmod_mode & 0o111 == 0o111
+
+
+def test_linux_uploader_manifest_binds_a_platform_specific_hash():
+    assert core_uploader.EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256
+    assert core_uploader.EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 != (
+        core_uploader.EXPECTED_UPLOADER_BUNDLE_SHA256)
+
+
+def test_linux_builder_preserves_other_manifest_bindings():
+    import runpy
+
+    builder = runpy.run_path(str(ROOT / 'tools' / 'build_linux_uploader.py'))
+    source = '''EXPECTED_UPLOADER_BUNDLE_SHA256 = 'windows'
+EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = 'old-linux'
+EXPECTED_HARDWARE_BUNDLE_SHA256 = 'hardware'
+'''
+    result = builder['bind_linux_bundle_hash'](source, 'new-linux')
+    assert "EXPECTED_UPLOADER_BUNDLE_SHA256 = 'windows'" in result
+    assert "EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = 'new-linux'" in result
+    assert "EXPECTED_HARDWARE_BUNDLE_SHA256 = 'hardware'" in result
+
+
+def test_windows_builder_preserves_linux_manifest_binding():
+    import runpy
+
+    builder = runpy.run_path(str(ROOT / 'tools' / 'build_optional_uploaders.py'))
+    source = '''"""Generated release bindings."""
+
+EXPECTED_UPLOADER_BUNDLE_SHA256 = 'old-windows'
+EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = 'existing-linux'
+
+EXPECTED_HARDWARE_BUNDLE_SHA256 = 'old-hardware'
+'''
+    result = builder['bind_windows_bundle_hashes'](source, {
+        'uploader': 'new-windows',
+        'hardware-identity': 'new-hardware',
+    })
+
+    assert result == '''"""Generated release bindings."""
+
+EXPECTED_UPLOADER_BUNDLE_SHA256 = 'new-windows'
+EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = 'existing-linux'
+
+EXPECTED_HARDWARE_BUNDLE_SHA256 = 'new-hardware'
+'''
+
+
+def test_uploader_and_hardware_identity_install_only_after_separate_consents(tmp_path, monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'win32')
     uploader_bundle = _bundle(
         tmp_path,
         filename='FTHR-Uploader.fthrplugin',

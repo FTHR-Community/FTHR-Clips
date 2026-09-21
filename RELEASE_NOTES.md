@@ -1,6 +1,10 @@
-# FTHR Clips 1.1.0-alpha
+# FTHR Clips 1.1.1-alpha
 
 This is the first patched alpha release.
+
+This release includes a Linux audio/video synchronization fix. Desktop audio
+capture now compensates for measured PulseAudio delivery latency and uses a
+bounded recording buffer before extracting replay audio.
 
 ## What is in here
 
@@ -13,6 +17,19 @@ This is the first patched alpha release.
 - Persistent autostart and settings
 - Overlay previews, webcam and click burn-ins
 - Installer and Linux AppImage build definitions with release checks in place
+
+## Changes since 1.0.0-alpha (Linux ScreenCast portal capture)
+
+- Compositors that advertise neither `wlr-screencopy` nor
+  `ext-image-copy-capture` — KDE Plasma/KWin in particular — are now captured
+  through the `org.freedesktop.portal.ScreenCast` portal and PipeWire. The
+  desktop's screen picker appears once; the restore token is kept in
+  `~/.fthr/portal_screencast_token` so later starts are silent.
+- `libpipewire-0.3` and `libdbus-1` are loaded at runtime only when that path
+  is used. Systems without them keep the existing backends.
+- When no capture path works, or the screen picker is declined, the app's
+  CAPTURE FAILED message now carries the engine's reason instead of a generic
+  text, and a declined picker is not retried.
 
 ## Current status
 

@@ -279,3 +279,24 @@ def _a_path() -> str:
 def _encode_engine_string(text: str):
     """engine_string is wchar on Windows and raw bytes on Linux."""
     return text if sys.platform == 'win32' else text.encode('utf-8')
+
+
+def test_get_status_exposes_failure_detail_only_with_backend_failed():
+    from core.capture_health import CaptureHealthFlag
+
+    layout, buf = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+    layout.engine_string = _encode_engine_string(
+        "Screen sharing was declined in the desktop's dialog.")
+
+    # engine_string also carries save results; it is only a capture failure
+    # detail while the engine publishes BACKEND_FAILED alongside it.
+    layout.capture_health_flags = CaptureHealthFlag.ACTIVE
+    assert bridge.get_status()['capture_failure_detail'] == ''
+
+    layout.capture_health_flags = CaptureHealthFlag.BACKEND_FAILED
+    # Only the Linux engine writes the reason there; on Windows the string
+    # still holds the last save error, so the bridge reports nothing.
+    expected = ('' if sys.platform == 'win32'
+                else "Screen sharing was declined in the desktop's dialog.")
+    assert bridge.get_status()['capture_failure_detail'] == expected

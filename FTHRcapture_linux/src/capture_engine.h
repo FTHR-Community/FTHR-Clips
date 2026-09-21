@@ -65,11 +65,24 @@ public:
         std::lock_guard<std::mutex> lk(codec_mutex_);
         return active_codec_;
     }
+    // Why capture stopped for good, for the UI. Set before the health flags
+    // publish CAPTURE_HEALTH_BACKEND_FAILED; empty while capture is alive.
+    std::string GetCaptureFailureReason() const {
+        std::lock_guard<std::mutex> lk(codec_mutex_);
+        return capture_failure_reason_;
+    }
     std::string GetAudioMappingsJson() const;
 
 private:
+    enum class GenerationEnd {
+        Stopped,          // running_ went false: normal shutdown
+        Failed,           // backend or encoder failure worth a bounded retry
+        FailedForGood,    // only user action can help (declined portal dialog)
+    };
+
     void CaptureLoop();
-    bool RunCaptureGeneration();
+    GenerationEnd RunCaptureGeneration();
+    void SetCaptureFailureReason(const std::string& reason);
     void SampleContent(const RawFrame& frame, uint64_t produced_frame);
 
     CaptureConfig                      cfg_{};
@@ -89,6 +102,7 @@ private:
     std::atomic<float>      content_luma_mean_{0.0f};
     std::atomic<float>      content_luma_variance_{0.0f};
     std::string active_codec_;
+    std::string capture_failure_reason_;   // guarded by codec_mutex_
     mutable std::mutex codec_mutex_;
     AudioMultiCapture   multi_audio_;
 };

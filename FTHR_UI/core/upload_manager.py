@@ -40,6 +40,7 @@ from core.export_profiles import (
 from core.uploader_bundle_manifest import (
     EXPECTED_HARDWARE_BUNDLE_SHA256,
     EXPECTED_UPLOADER_BUNDLE_SHA256,
+    EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256,
     HARDWARE_PLUGIN_ID,
     HARDWARE_PLUGIN_VERSION,
     HARDWARE_POLICY_VERSION,
@@ -50,8 +51,18 @@ from core.uploader_bundle_manifest import (
 )
 
 
-_LOCAL_APP_DATA = Path(os.environ.get(
-    'LOCALAPPDATA', str(Path.home() / 'AppData' / 'Local')))
+def _platform_data_root() -> Path:
+    """Return the per-user data root appropriate for the current platform."""
+    if sys.platform == 'win32':
+        return Path(os.environ.get(
+            'LOCALAPPDATA', str(Path.home() / 'AppData' / 'Local')))
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Application Support'
+    return Path(os.environ.get(
+        'XDG_DATA_HOME', str(Path.home() / '.local' / 'share')))
+
+
+_LOCAL_APP_DATA = _platform_data_root()
 _PLUGIN_DATA_ROOT = _LOCAL_APP_DATA / 'FTHR Clips' / 'plugins'
 _UPLOADER_ROOT = _PLUGIN_DATA_ROOT / 'uploader'
 _HARDWARE_ROOT = _PLUGIN_DATA_ROOT / 'hardware-identity'
@@ -114,13 +125,21 @@ class _BundleSpec:
 
 
 def _uploader_spec() -> _BundleSpec:
+    if sys.platform == 'win32':
+        filename = 'FTHR-Uploader.fthrplugin'
+        entrypoint = 'FTHR Uploader.exe'
+    else:
+        filename = 'FTHR-Uploader-linux.fthrplugin'
+        entrypoint = 'FTHR-Uploader'
     return _BundleSpec(
         label='FTHR Upload Extension',
-        filename='FTHR-Uploader.fthrplugin',
+        filename=filename,
         plugin_id=UPLOADER_PLUGIN_ID,
         plugin_version=UPLOADER_PLUGIN_VERSION,
-        expected_sha256=EXPECTED_UPLOADER_BUNDLE_SHA256,
-        entrypoint='FTHR Uploader.exe',
+        expected_sha256=(
+            EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256
+            if sys.platform != 'win32' else EXPECTED_UPLOADER_BUNDLE_SHA256),
+        entrypoint=entrypoint,
         install_root=_UPLOADER_ROOT,
         receipt_path=_UPLOADER_ACTIVATION_FILE,
     )
@@ -393,6 +412,8 @@ class UploadManager(QObject):
                         target.parent.mkdir(parents=True, exist_ok=True)
                         with archive.open(item, 'r') as source, target.open('wb') as output:
                             shutil.copyfileobj(source, output)
+                        if sys.platform != 'win32' and name == f'payload/{spec.entrypoint}':
+                            target.chmod(target.stat().st_mode | 0o111)
 
                 for entry in entries:
                     target = temporary / str(entry['path'])

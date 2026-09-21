@@ -195,6 +195,16 @@ conflict.
 | **Used for** | Linux compositor capture and related Wayland protocol integration |
 | **Licence notices** | [`licenses/Wayland-Protocols-NOTICES.txt`](licenses/Wayland-Protocols-NOTICES.txt) |
 
+### PipeWire and D-Bus headers (Linux engine)
+
+| | |
+|---|---|
+| **Files** | System headers `pipewire-0.3/`, `spa-0.2/` and `dbus-1.0/` read at build time only; nothing from either project is copied into this repository or the AppImage |
+| **Copyright** | PipeWire: Wim Taymans and contributors. D-Bus: Red Hat, Inc. and contributors |
+| **Licence** | PipeWire headers: MIT. libdbus: dual AFL-2.1 / GPL-2.0-or-later, used under the AFL-2.1 option |
+| **Linkage** | **None at build time.** The engine resolves `libpipewire-0.3.so.0` and `libdbus-1.so.3` with `dlopen()`/`dlsym()` on the user's system when the ScreenCast portal capture backend is needed, and reports that backend as unavailable otherwise. The libraries are **not** redistributed. |
+| **Used for** | `org.freedesktop.portal.ScreenCast` session setup over the session bus and PipeWire video stream capture on compositors without a capture protocol |
+
 ### Microsoft Visual C++ Redistributable
 
 | | |
@@ -202,6 +212,29 @@ conflict.
 | **File** | `redist/vc_redist.x64.exe`, executed by the Windows installer |
 | **Licence** | Microsoft Visual Studio redistributable terms |
 | **Note** | Redistributed unmodified as permitted for VC++ runtime redistribution. |
+
+### AppImage type-2 runtime
+
+| | |
+|---|---|
+| **Version** | `20251108`, upstream commit `dd6cebedcbddde9c82f89b011e8e1d40b6e43868` |
+| **Source** | [AppImage/type2-runtime](https://github.com/AppImage/type2-runtime/releases/tag/20251108), asset `runtime-x86_64` |
+| **SHA-256** | `2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d` |
+| **Usage** | Embedded by the pinned Linux AppImage build as its type-2 runtime; it is not loaded by the FTHR application process. |
+| **Licence** | MIT for the runtime project, with statically linked musl, libfuse, squashfuse, libzstd, and zlib components listed in the upstream notice. |
+| **Licence text** | [`licenses/AppImage-type2-runtime-LICENSE.txt`](licenses/AppImage-type2-runtime-LICENSE.txt) |
+
+The runtime is fetched by the manifest-pinned build step and supplied to
+`appimagetool` explicitly with `--runtime-file`. Its URL, release tag, commit,
+size, and hash are recorded in
+[`tools/appimage_tool_manifest.json`](tools/appimage_tool_manifest.json).
+
+### AppImage packaging tool (build-only)
+
+`appimagetool` itself is a build-time dependency and is not part of the
+distributed AppImage. The build uses AppImage/appimagetool `1.9.1`, commit
+`8c8c91f762b412a19f4e8d2c4b35afb98f2d7c81`, and verifies its size and SHA-256
+from the same manifest before executing it.
 
 ---
 
@@ -257,6 +290,9 @@ Listed so future audits do not have to re-derive it:
   to `ffmpeg` on `PATH`. That copy belongs to the user's distribution and is not
   redistributed by this project.
 - **Development tooling** — pytest, ruff, PyInstaller, Inno Setup, MSVC.
+- **PipeWire and libdbus runtime libraries** — loaded from the user's system
+  with `dlopen()` by the Linux engine when the ScreenCast portal backend runs;
+  never bundled. See the headers entry above.
 
 ---
 
