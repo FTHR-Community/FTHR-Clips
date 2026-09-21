@@ -369,7 +369,7 @@ jobs:
       # Publish artifacts manually after install, launch, and uninstall qualification.
 
   # Linux AppImage compatibility check. Build on the oldest supported runner
-  # and validate the result, but never upload or publish the image from CI.
+  # and validate the result. The verified image is retained as a CI artifact.
   linux-appimage-package:
     name: Linux AppImage (glibc baseline)
     runs-on: ubuntu-22.04
