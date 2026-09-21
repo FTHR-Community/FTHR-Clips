@@ -101,6 +101,10 @@ if(BUILD_TESTING)
     target_compile_options(fthr_audio_timing_test PRIVATE
         -Wall -Wextra -Wpedantic -UNDEBUG)
     add_test(NAME audio_timing_contract COMMAND fthr_audio_timing_test)
+
+    add_executable(fthr_vaapi_symbol_compat_test tests/vaapi_symbol_compat_test.cpp)
+    target_link_libraries(fthr_vaapi_symbol_compat_test PRIVATE ${CMAKE_DL_LIBS})
+    add_test(NAME vaapi_symbol_compat COMMAND fthr_vaapi_symbol_compat_test)
 endif()
 
 find_package(PkgConfig REQUIRED)
@@ -331,6 +335,15 @@ if(FTHR_PORTAL_BACKEND)
 endif()
 
 add_executable(FTHRclips ${FTHR_ENGINE_SOURCES})
+
+add_library(libva_compat SHARED src/libva_compat.c)
+set_target_properties(libva_compat PROPERTIES
+    OUTPUT_NAME "va"
+    SOVERSION "2"
+    VERSION "2.14.0"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+target_link_libraries(libva_compat PRIVATE ${CMAKE_DL_LIBS})
+add_dependencies(FTHRclips libva_compat)
 
 # The editor loads this small bridge into the Python process.  It uses the same
 # pinned LGPL FFmpeg ABI as the capture engine but has no capture/IPC symbols
