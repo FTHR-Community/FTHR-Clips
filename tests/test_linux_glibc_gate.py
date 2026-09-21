@@ -115,14 +115,16 @@ def test_symlinked_elf_is_scanned_once(tmp_path: Path) -> None:
     assert len(calls) == 1
 
 
-def test_ci_uses_ubuntu_2204_glibc_gate_without_artifact_upload() -> None:
+def test_ci_uses_ubuntu_2204_glibc_gate_and_uploads_verified_artifact() -> None:
     workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     start = workflow.index("  linux-appimage-package:")
-    end = workflow.index("  #", start + len("  linux-appimage-package:"))
+    end = workflow.find("\n  #", start + len("  linux-appimage-package:"))
+    if end == -1:
+        end = len(workflow)
     job = workflow[start:end]
     assert "runs-on: ubuntu-22.04" in job
     assert "bash build_linux.sh" in job
     assert "python tools/verify_linux_glibc.py" in job
-    assert "actions/upload-artifact@v4" not in workflow
+    assert "actions/upload-artifact@v4" in job
     assert "gh release create" not in workflow
     assert not (WORKFLOWS / "linux-release.yml").exists()
