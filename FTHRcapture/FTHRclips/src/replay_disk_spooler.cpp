@@ -88,9 +88,12 @@ void ReplayDiskSpooler::PushVideo(
     }
 
     if (old_writer) {
-        std::thread([w = std::move(old_writer)]() mutable {
+        if (finishing_thread_.joinable()) {
+            finishing_thread_.join();
+        }
+        finishing_thread_ = std::thread([w = std::move(old_writer)]() mutable {
             w->Stop();
-        }).detach();
+        });
     }
 }
 
@@ -201,9 +204,12 @@ bool ReplayDiskSpooler::SaveClip(
         writer_to_finish = RotateSegmentLocked();
     } // MUTEX RELEASED: audio and video threads can continue writing into new segment
 
-    // Stop active writer outside the mutex so capture and audio threads are never blocked
+    // Stop active writer and join any in-flight finishing writer outside the mutex so capture and audio threads are never blocked
     if (writer_to_finish) {
         writer_to_finish->Stop();
+    }
+    if (finishing_thread_.joinable()) {
+        finishing_thread_.join();
     }
 
     {
@@ -236,7 +242,15 @@ bool ReplayDiskSpooler::SaveClip(
             std::ofstream list_out(concat_list);
             for (const auto& seg : to_merge) {
                 std::string p = seg.path.generic_u8string();
-                list_out << "file '" << p << "'\n";
+                std::string escaped_p;
+                for (char c : p) {
+                    if (c == '\'') {
+                        escaped_p += "'\\''";
+                    } else {
+                        escaped_p += c;
+                    }
+                }
+                list_out << "file '" << escaped_p << "'\n";
             }
         }
 
@@ -316,17 +330,25 @@ bool ReplayDiskSpooler::SaveClip(
 }
 
 void ReplayDiskSpooler::Stop() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!active_) return;
-    active_ = false;
-    if (current_writer_) {
-        current_writer_->Stop();
-        current_writer_.reset();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!active_) return;
+        active_ = false;
+        if (current_writer_) {
+            current_writer_->Stop();
+            current_writer_.reset();
+        }
+    }
+    if (finishing_thread_.joinable()) {
+        finishing_thread_.join();
     }
     std::cout << "[ReplayDiskSpooler] Stopped." << std::endl;
 }
 
 void ReplayDiskSpooler::Cleanup() {
+    if (finishing_thread_.joinable()) {
+        finishing_thread_.join();
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     std::error_code ec;
     for (const auto& seg : completed_segments_) {

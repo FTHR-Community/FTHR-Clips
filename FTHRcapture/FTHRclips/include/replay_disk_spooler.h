@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "continuous_recording_writer.h"
@@ -82,6 +83,7 @@ private:
     uint64_t segment_counter_ = 0;
 
     std::deque<ReplaySegment> completed_segments_;
+    std::thread finishing_thread_;
 };
 
 } // namespace fthr

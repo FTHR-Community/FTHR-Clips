@@ -637,8 +637,12 @@ namespace fthr {
                 use_disk_spool = true;
             }
         }
-        if (!spool_dir.empty() && buffer_seconds_ >= 600) {
+        if (buffer_seconds_ >= 600) {
             use_disk_spool = true;
+        }
+        if (use_disk_spool && spool_dir.empty()) {
+            std::error_code ec;
+            spool_dir = (std::filesystem::temp_directory_path(ec) / L"fthr_replay_spool").wstring();
         }
 
         if (use_disk_spool && !spool_dir.empty()) {
