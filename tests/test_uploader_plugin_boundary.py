@@ -96,6 +96,12 @@ def test_linux_activation_restores_uploader_executable_bit(tmp_path, monkeypatch
     )
     uploader_root = tmp_path / 'installed-uploader'
     manager = core_uploader.UploadManager(_CoreSettings())
+    chmod_calls = []
+
+    def record_chmod(path, mode):
+        chmod_calls.append((path, mode))
+
+    monkeypatch.setattr(core_uploader.Path, 'chmod', record_chmod)
     with (
             patch.object(manager, 'bundle_path', return_value=uploader_bundle),
             patch.object(
@@ -112,7 +118,11 @@ def test_linux_activation_restores_uploader_executable_bit(tmp_path, monkeypatch
         )
     assert ok, message
     executable = uploader_root / core_uploader.UPLOADER_PLUGIN_VERSION / 'FTHR-Uploader'
-    assert executable.stat().st_mode & 0o111
+    assert len(chmod_calls) == 1
+    chmod_path, chmod_mode = chmod_calls[0]
+    assert chmod_path.name == executable.name
+    assert chmod_path.parent.name == 'payload'
+    assert chmod_mode & 0o111 == 0o111
 
 
 def test_linux_uploader_manifest_binds_a_platform_specific_hash():
@@ -133,6 +143,31 @@ EXPECTED_HARDWARE_BUNDLE_SHA256 = 'hardware'
     assert "EXPECTED_UPLOADER_BUNDLE_SHA256 = 'windows'" in result
     assert "EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = 'new-linux'" in result
     assert "EXPECTED_HARDWARE_BUNDLE_SHA256 = 'hardware'" in result
+
+
+def test_windows_builder_preserves_linux_manifest_binding():
+    import runpy
+
+    builder = runpy.run_path(str(ROOT / 'tools' / 'build_optional_uploaders.py'))
+    source = '''"""Generated release bindings."""
+
+EXPECTED_UPLOADER_BUNDLE_SHA256 = 'old-windows'
+EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = 'existing-linux'
+
+EXPECTED_HARDWARE_BUNDLE_SHA256 = 'old-hardware'
+'''
+    result = builder['bind_windows_bundle_hashes'](source, {
+        'uploader': 'new-windows',
+        'hardware-identity': 'new-hardware',
+    })
+
+    assert result == '''"""Generated release bindings."""
+
+EXPECTED_UPLOADER_BUNDLE_SHA256 = 'new-windows'
+EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256 = 'existing-linux'
+
+EXPECTED_HARDWARE_BUNDLE_SHA256 = 'new-hardware'
+'''
 
 
 def test_uploader_and_hardware_identity_install_only_after_separate_consents(tmp_path, monkeypatch):

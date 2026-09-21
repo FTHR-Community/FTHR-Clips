@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -174,21 +175,32 @@ def _seal(package: Package, executable: Path) -> Path:
     return destination
 
 
+def bind_windows_bundle_hashes(existing: str, hashes: dict[str, str]) -> str:
+    """Update only Windows bundle hashes while preserving other bindings."""
+    result = existing
+    for name, key in (
+            ('EXPECTED_UPLOADER_BUNDLE_SHA256', 'uploader'),
+            ('EXPECTED_HARDWARE_BUNDLE_SHA256', 'hardware-identity')):
+        replacement = f'{name} = {hashes[key]!r}'
+        updated, count = re.subn(
+            rf'^{re.escape(name)} = [^\r\n]*',
+            replacement,
+            result,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if count != 1:
+            raise ValueError(f'uploader manifest is missing {name}')
+        result = updated
+    return result
+
+
 def _write_core_manifest(hashes: dict[str, str]) -> None:
-    text = f'''"""Generated release bindings for dormant optional uploader packages."""
-
-UPLOADER_PLUGIN_ID = {UPLOADER_PLUGIN_ID!r}
-UPLOADER_PLUGIN_VERSION = {UPLOADER_PLUGIN_VERSION!r}
-UPLOADER_TERMS_VERSION = {UPLOADER_TERMS_VERSION!r}
-UPLOADER_PRIVACY_VERSION = {UPLOADER_PRIVACY_VERSION!r}
-EXPECTED_UPLOADER_BUNDLE_SHA256 = {hashes['uploader']!r}
-
-HARDWARE_PLUGIN_ID = {HARDWARE_PLUGIN_ID!r}
-HARDWARE_PLUGIN_VERSION = {HARDWARE_PLUGIN_VERSION!r}
-HARDWARE_POLICY_VERSION = {HARDWARE_POLICY_VERSION!r}
-EXPECTED_HARDWARE_BUNDLE_SHA256 = {hashes['hardware-identity']!r}
-'''
-    CORE_MANIFEST.write_text(text, encoding='utf-8')
+    existing = CORE_MANIFEST.read_text(encoding='utf-8')
+    CORE_MANIFEST.write_text(
+        bind_windows_bundle_hashes(existing, hashes),
+        encoding='utf-8',
+    )
 
 
 def main() -> int:

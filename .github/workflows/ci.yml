@@ -346,7 +346,7 @@ jobs:
   tag-guard:
     name: Tag guard
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [python, linux-engine, windows-engine, release-verification]
+    needs: [python, linux-engine, linux-appimage-package, windows-engine, release-verification]
     runs-on: ubuntu-latest
 
     steps:
@@ -368,11 +368,11 @@ jobs:
 
       # Publish artifacts manually after install, launch, and uninstall qualification.
 
-  # Packaging smoke test — exercises the AppImage builder's artifact and
-  # checksum contract without publishing anything from pull requests.
+  # Linux AppImage compatibility check. Build on the oldest supported runner
+  # and validate the result, but never upload or publish the image from CI.
   linux-appimage-package:
-    name: Linux AppImage package smoke test
-    runs-on: ubuntu-latest
+    name: Linux AppImage (glibc baseline)
+    runs-on: ubuntu-22.04
     needs: [linux-engine, release-verification]
     steps:
       - uses: actions/checkout@v4
@@ -387,27 +387,31 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -q -y \
-            cmake g++ pkg-config curl file binutils libportaudio2 \
+            build-essential cmake pkg-config patchelf curl file binutils \
             libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
-            libswscale-dev libswresample-dev libpulse-dev libx11-dev \
+            libswscale-dev libswresample-dev libpulse-dev libportaudio2 libx11-dev \
             libgl1 libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
-            libxcb-xinerama0 libxkbcommon-x11-0 \
-            libxext-dev libxfixes-dev libwayland-dev wayland-protocols \
+            libxcb-shape0 libxcb-xinerama0 libxkbcommon0 libxkbcommon-x11-0 \
+            libxext-dev libxfixes-dev libwayland-dev wayland-protocols libwayland-bin \
             libpipewire-0.3-dev libdbus-1-dev
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-alpha.txt pyinstaller
+          python -m pip install -r requirements-alpha.txt -r requirements-dev.txt
+          python -m pip check
 
       - name: Build AppImage
         run: bash build_linux.sh
 
       - name: Verify AppImage artifact and checksum
         run: |
-          image="build_output/FTHRClips-$(python -c "import sys; sys.path.insert(0,'FTHR_UI'); import version; print(version.__version__)")-x86_64.AppImage"
-          test -x "$image"
-          test -s "$image.sha256"
-          (cd "$(dirname "$image")" && sha256sum -c "$(basename "$image.sha256")")
-          file "$image" | grep -qi appimage
-          APPIMAGE_EXTRACT_AND_RUN=1 "$image" --appimage-extract >/dev/null
-          test -x squashfs-root/AppRun
-          test -x squashfs-root/FTHRClips
+          image=(build_output/FTHRClips-*-x86_64.AppImage)
+          [ "${#image[@]}" -eq 1 ]
+          checksum="${image[0]}.sha256"
+          test -f "$checksum"
+          (cd "$(dirname "${image[0]}")" && sha256sum --check "$(basename "$checksum")")
+          python tools/verify_linux_glibc.py \
+            --manifest tools/linux_release_baseline.json \
+            --target build_output/AppDir \
+            --target "${image[0]}"
+          # The artifact remains a CI-local compatibility result. Users build
+          # and verify their own AppImage; GitHub does not publish this file.

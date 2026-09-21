@@ -13,11 +13,14 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import stat
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -32,6 +35,8 @@ REDIST_DIR = ROOT / 'redist'
 # against and shipped with instead.
 MANIFEST_LINUX = ROOT / 'tools' / 'ffmpeg_manifest_linux.json'
 FFMPEG_LINUX_DIR = ROOT / 'FTHRcapture_linux' / 'third_party' / 'ffmpeg'
+APPIMAGE_MANIFEST = ROOT / 'tools' / 'appimage_tool_manifest.json'
+APPIMAGE_OUTPUT_DIR = ROOT / 'build_output'
 
 VCREDIST_URL = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
 VCREDIST_METADATA = REDIST_DIR / 'vc_redist.x64.json'
@@ -59,6 +64,95 @@ def _download(url: str, dest: Path) -> None:
                 print(f'\r  {pct:3d}%  {done / 1e6:.1f} / {total / 1e6:.1f} MB',
                       end='', flush=True)
         print()
+
+
+def _verify_download(path: Path, asset: dict[str, object]) -> None:
+    """Verify a downloaded asset's exact byte count and SHA-256."""
+    expected_size = int(asset['size_bytes'])
+    expected_hash = str(asset['sha256']).lower()
+    if not path.is_file():
+        raise RuntimeError(f'downloaded asset is missing: {path}')
+    actual_size = path.stat().st_size
+    if actual_size != expected_size:
+        raise RuntimeError(
+            f'{path.name} size mismatch: expected {expected_size}, got {actual_size}')
+    actual_hash = _sha256(path)
+    if actual_hash != expected_hash:
+        raise RuntimeError(
+            f'{path.name} sha256 mismatch: expected {expected_hash}, got {actual_hash}')
+
+
+def _verified_appimage_asset(
+    asset: dict[str, object], target: Path, *, force: bool = False
+) -> None:
+    """Install one manifest-pinned AppImage asset with atomic replacement."""
+    if target.is_file():
+        try:
+            _verify_download(target, asset)
+        except RuntimeError as exc:
+            print(f'  cached {target.name} is invalid: {exc}')
+        else:
+            print(f'  cached {target.name} passed size and sha256 verification.')
+            if not force:
+                return
+
+    url = str(asset['url'])
+    if not url.startswith('https://'):
+        raise RuntimeError(f'refusing non-HTTPS AppImage asset URL: {url}')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f'.{target.name}.', suffix='.download', dir=target.parent)
+    os.close(fd)
+    temp = Path(temp_name)
+    try:
+        _download(url, temp)
+        _verify_download(temp, asset)
+        temp.chmod(temp.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        os.replace(temp, target)
+    except (OSError, RuntimeError, urllib.error.URLError) as exc:
+        temp.unlink(missing_ok=True)
+        raise RuntimeError(f'could not install verified {target.name}: {exc}') from exc
+
+
+def fetch_appimage_tools(force: bool) -> int:
+    """Fetch and verify the pinned appimagetool and type-2 runtime."""
+    try:
+        manifest = json.loads(APPIMAGE_MANIFEST.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f'could not read AppImage tool manifest: {exc}') from exc
+    if not isinstance(manifest, dict):
+        raise RuntimeError('AppImage tool manifest must contain a JSON object')
+    if manifest.get('platform') != 'linux' or manifest.get('arch') != 'x86_64':
+        raise RuntimeError('AppImage tool manifest is not for Linux x86_64')
+    assets: dict[str, dict[str, object]] = {}
+    for key in ('appimagetool', 'runtime'):
+        asset = manifest.get(key)
+        if not isinstance(asset, dict):
+            raise RuntimeError(f'AppImage tool manifest is missing {key}')
+        filename = asset.get('filename')
+        url = asset.get('url')
+        size_bytes = asset.get('size_bytes')
+        sha256 = asset.get('sha256')
+        if not isinstance(filename, str) or not filename:
+            raise RuntimeError(f'AppImage tool manifest has invalid {key} filename')
+        if Path(filename).name != filename:
+            raise RuntimeError(f'invalid AppImage asset filename: {filename!r}')
+        if not isinstance(url, str) or not url.startswith('https://'):
+            raise RuntimeError(f'AppImage tool manifest has invalid {key} URL')
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
+            raise RuntimeError(f'AppImage tool manifest has invalid {key} size_bytes')
+        if not isinstance(sha256, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', sha256):
+            raise RuntimeError(f'AppImage tool manifest has invalid {key} sha256')
+        assets[key] = asset
+
+    # Validate both records before touching the network. A malformed runtime
+    # entry must not allow the first asset to be fetched successfully.
+    for key, asset in assets.items():
+        filename = str(asset['filename'])
+        target = APPIMAGE_OUTPUT_DIR / filename
+        print(f'Fetching verified {key} {asset.get("version", "unknown")}')
+        _verified_appimage_asset(asset, target, force=force)
+    return 0
 
 
 def _windows_powershell() -> str:
@@ -413,6 +507,8 @@ def main() -> int:
                     help='Windows LGPL FFmpeg runtime')
     ap.add_argument('--ffmpeg-linux', action='store_true',
                     help='Linux LGPL FFmpeg (headers + libs) — AUDIT-014')
+    ap.add_argument('--appimagetool-linux', action='store_true',
+                    help='pinned Linux AppImage tool and type-2 runtime')
     ap.add_argument('--vcredist', action='store_true')
     ap.add_argument('--all', action='store_true',
                     help='everything for the current platform')
@@ -420,7 +516,8 @@ def main() -> int:
                     help='re-download even if the files are already present')
     args = ap.parse_args()
 
-    if not (args.ffmpeg or args.ffmpeg_linux or args.vcredist or args.all):
+    if not (args.ffmpeg or args.ffmpeg_linux or args.appimagetool_linux
+            or args.vcredist or args.all):
         ap.print_help()
         return 2
 
@@ -432,6 +529,13 @@ def main() -> int:
         rc |= fetch_ffmpeg(args.force)
     if args.ffmpeg_linux or (args.all and not on_windows):
         rc |= fetch_ffmpeg_linux(args.force)
+    if args.appimagetool_linux or (args.all and not on_windows):
+        try:
+            rc |= fetch_appimage_tools(args.force)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            print(f'ERROR: AppImage tool preparation failed: {exc}',
+                  file=sys.stderr)
+            rc |= 1
     if args.vcredist or (args.all and on_windows):
         rc |= fetch_vcredist(args.force)
     return rc

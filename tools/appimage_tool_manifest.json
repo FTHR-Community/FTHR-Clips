@@ -1,0 +1,33 @@
+{
+  "component": "AppImage packaging tools",
+  "platform": "linux",
+  "arch": "x86_64",
+  "retrieved": "2026-09-20",
+  "appimagetool": {
+    "project": "AppImage/appimagetool",
+    "release_tag": "1.9.1",
+    "commit": "8c8c91f762b412a19f4e8d2c4b35afb98f2d7c81",
+    "version": "1.9.1",
+    "url": "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage",
+    "filename": "appimagetool-x86_64.AppImage",
+    "size_bytes": 15092216,
+    "sha256": "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0",
+    "license": "MIT",
+    "license_source_url": "https://raw.githubusercontent.com/AppImage/appimagetool/8c8c91f762b412a19f4e8d2c4b35afb98f2d7c81/LICENSE",
+    "build_only": true
+  },
+  "runtime": {
+    "project": "AppImage/type2-runtime",
+    "release_tag": "20251108",
+    "commit": "dd6cebedcbddde9c82f89b011e8e1d40b6e43868",
+    "version": "20251108",
+    "url": "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64",
+    "filename": "runtime-x86_64",
+    "size_bytes": 944632,
+    "sha256": "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d",
+    "license": "MIT (with statically linked third-party components listed in the license)",
+    "copyright": "Copyright (c) 2004-23 probonopd",
+    "license_file": "licenses/AppImage-type2-runtime-LICENSE.txt",
+    "embedded_in_release": true
+  }
+}
