@@ -86,6 +86,7 @@ void TestThirtyMinuteReplayBufferStress() {
     config.time_base = {1, 60};
     assert(ring.SetVideoConfig(config));
 
+    constexpr int64_t base_qpc = 1000;
     constexpr int64_t total_frames = 1800 * fps;
     for (int64_t frame = 0; frame <= total_frames; ++frame) {
         ring.Push(
@@ -93,9 +94,9 @@ void TestThirtyMinuteReplayBufferStress() {
             1,
             frame,
             frame % (fps * 2) == 0, // keyframe every 2 seconds
-            frame * 100);
+            base_qpc + frame * 100);
     }
-    const auto snapshot = ring.TakeSnapshotByTime(1800, total_frames * 100);
+    const auto snapshot = ring.TakeSnapshotByTime(1800, base_qpc + total_frames * 100);
     assert(snapshot.full_history);
     assert(!snapshot.packets.empty());
     assert(snapshot.packets.front().is_keyframe);
