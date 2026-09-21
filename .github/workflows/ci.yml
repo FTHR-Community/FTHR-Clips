@@ -413,5 +413,12 @@ jobs:
             --manifest tools/linux_release_baseline.json \
             --target build_output/AppDir \
             --target "${image[0]}"
-          # The artifact remains a CI-local compatibility result. Users build
-          # and verify their own AppImage; GitHub does not publish this file.
+      - name: Upload verified Linux AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: fthr-linux-appimage-${{ github.sha }}
+          path: |
+            build_output/FTHRClips-*-x86_64.AppImage
+            build_output/FTHRClips-*-x86_64.AppImage.sha256
+          if-no-files-found: error
+          retention-days: 7

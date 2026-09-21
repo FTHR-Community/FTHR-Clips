@@ -1,4 +1,8 @@
-# FTHR Clips 1.1.1-alpha
+# FTHR Clips 1.1.2-alpha
+
+This is the Linux compatibility rebuild of the alpha release. Linux packaging is
+built on Ubuntu 22.04 and rejects bundled ELF objects requiring GLIBC newer than
+2.35, preventing the GLIBC_2.44 launch failure in the previous AppImage.
 
 This is the first patched alpha release.
 

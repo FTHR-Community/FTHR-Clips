@@ -4,7 +4,7 @@
 ; Prerequisite: redist\vc_redist.x64.exe — https://aka.ms/vs/17/release/vc_redist.x64.exe
 
 #define MyAppName      "FTHR Clips"
-#define MyAppVersion   "1.1.1-alpha"
+#define MyAppVersion "1.1.2-alpha"
 #define MyAppPublisher "FTHR Community"
 #define MyAppExeName   "FTHRClips.exe"
 #define MyAppURL       "https://github.com/fthr/clips"

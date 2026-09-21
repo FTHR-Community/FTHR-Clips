@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 # PEP 440 / SemVer pre-release string. Keep the two in sync when releasing.
-__version__ = '1.1.1-alpha'
+__version__ = '1.1.2-alpha'
 
 # Numeric (major, minor, patch) triple. Windows VERSIONINFO resources cannot
 # express a pre-release suffix, so the packaging code uses this and records the
