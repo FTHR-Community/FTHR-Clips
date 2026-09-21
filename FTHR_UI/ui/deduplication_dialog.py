@@ -240,6 +240,7 @@ class ClipPreviewDialog(FthrDialog):
                 self.audio_output.setMuted(True)
                 self.audio_output.setVolume(0.0)
         except Exception:
+            # Audio output teardown failure is non-fatal when dialog is closing.
             pass
         try:
             if hasattr(self, 'player') and self.player is not None:
@@ -248,6 +249,7 @@ class ClipPreviewDialog(FthrDialog):
                 self.player.setVideoOutput(None)
                 self.player.setAudioOutput(None)
         except Exception:
+            # Media player release failure is non-fatal on dialog exit.
             pass
 
     def reject(self):
