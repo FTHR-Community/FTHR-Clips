@@ -211,6 +211,83 @@ def test_kde_source_button_routes_to_portal_picker():
     assert calls == ['portal']
 
 
+def test_kde_source_button_restarts_engine(tmp_path, monkeypatch):
+    pytest.importorskip('PySide6.QtCore')
+    import main
+    from main import MainWindow
+
+    calls = []
+    restarts = []
+    token_path = tmp_path / '.fthr' / 'portal_screencast_token'
+    token_path.parent.mkdir()
+    token_path.write_text('stale-token')
+    monkeypatch.setattr(main.Path, 'home', classmethod(lambda _cls: tmp_path))
+    fake = SimpleNamespace(
+        source_popup=SimpleNamespace(isVisible=lambda: True),
+        _uses_kde_portal_source_picker=lambda: True,
+        _restart_capture_engine=lambda: restarts.append('restart'),
+    )
+
+    def open_portal_picker():
+        calls.append('portal')
+        MainWindow._open_kde_portal_source_picker(fake)
+
+    fake._open_kde_portal_source_picker = open_portal_picker
+
+    MainWindow._toggle_source(fake)
+
+    assert calls == ['portal']
+    assert restarts == ['restart']
+
+
+def test_kde_source_picker_removes_saved_token_before_restart(tmp_path, monkeypatch):
+    pytest.importorskip('PySide6.QtCore')
+    import main
+    from main import MainWindow
+
+    token_path = tmp_path / '.fthr' / 'portal_screencast_token'
+    token_path.parent.mkdir()
+    token_path.write_text('stale-token')
+    restarts = []
+    errors = []
+    monkeypatch.setattr(main.Path, 'home', classmethod(lambda _cls: tmp_path))
+    fake = SimpleNamespace(
+        _restart_capture_engine=lambda: restarts.append(True),
+        push_error=lambda *args, **kwargs: errors.append((args, kwargs)),
+    )
+
+    MainWindow._open_kde_portal_source_picker(fake)
+
+    assert not token_path.exists()
+    assert restarts == [True]
+    assert errors == []
+
+
+def test_kde_source_picker_reports_token_reset_failure_without_restart(monkeypatch):
+    pytest.importorskip('PySide6.QtCore')
+    import main
+    from main import MainWindow
+
+    errors = []
+    monkeypatch.setattr(
+        main.Path,
+        'unlink',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('read-only')),
+    )
+    fake = SimpleNamespace(
+        _restart_capture_engine=lambda: pytest.fail('restart must not happen when the portal token cannot be reset'),
+        push_error=lambda *args, **kwargs: errors.append((args, kwargs)),
+    )
+
+    MainWindow._open_kde_portal_source_picker(fake)
+
+    assert errors == [(
+        ('SOURCE PICKER UNAVAILABLE',
+         'Could not reset the KDE screen-sharing selection: read-only'),
+        {'level': 'warning'},
+    )]
+
+
 def test_audio_toggle_requests_capture_restart():
     body = _method_source('_on_audio_capture_changed', '_requested_capture_config')
     assert 'self._restart_capture_engine()' in body

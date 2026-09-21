@@ -286,6 +286,39 @@ bool SavePortalRestoreToken(const std::string& path, const std::string& token) {
     return ok;
 }
 
+PortalScreenCastOptions LoadPortalScreenCastOptions(const std::string& path) {
+    PortalScreenCastOptions options;
+    options.restore_token = LoadPortalRestoreToken(path);
+    return options;
+}
+
+bool ShouldRetryPortalStartup(int attempt, bool has_restore_token) noexcept {
+    return attempt == 0 && has_restore_token;
+}
+
+bool RunPortalStartupWithRetry(const PortalStartupCallbacks& callbacks) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!callbacks.open_session()) {
+            callbacks.shutdown();
+            return false;
+        }
+        const PortalPipeWireResult pipewire = callbacks.open_pipewire_remote();
+        if (pipewire.outcome == PortalOutcome::Interrupted) {
+            callbacks.shutdown();
+            return false;
+        }
+        if (pipewire.fd >= 0 && callbacks.connect_stream(pipewire.fd)) return true;
+        if (ShouldRetryPortalStartup(attempt, callbacks.has_restore_token())) {
+            callbacks.clear_restore_token();
+            callbacks.shutdown();
+            continue;
+        }
+        callbacks.shutdown();
+        return false;
+    }
+    return false;
+}
+
 bool ParsePortalResponse(const DBusApi& api, DBusMessage* message, PortalResponse& out) {
     out = PortalResponse{};
     DBusMessageIter it{};
@@ -651,8 +684,8 @@ PortalOutcome PortalScreenCastSession::Open(const PortalScreenCastOptions& optio
     return PortalOutcome::Ok;
 }
 
-int PortalScreenCastSession::OpenPipeWireRemote(const KeepRunning& keep_running,
-                                                std::string* error) {
+int PortalScreenCastSession::OpenPipeWireRemote(const KeepRunning& keep_running, std::string* error, PortalOutcome* outcome) {
+    if (outcome) *outcome = PortalOutcome::Failed;
     if (!connection_ || session_handle_.empty()) {
         if (error) *error = "no session";
         return -1;
@@ -666,10 +699,10 @@ int PortalScreenCastSession::OpenPipeWireRemote(const KeepRunning& keep_running,
     api_.message_iter_append_basic(&it, DBUS_TYPE_OBJECT_PATH, &session);
     DictWriter dict(api_, &it);
     dict.Close();
-    PortalOutcome outcome = PortalOutcome::Ok;
+    PortalOutcome wait_outcome = PortalOutcome::Ok;
     std::string detail;
-    DBusMessage* reply = SendAndWait(msg, std::chrono::milliseconds(10000), keep_running,
-                                     &outcome, &detail);
+    DBusMessage* reply = SendAndWait(msg, std::chrono::milliseconds(10000), keep_running, &wait_outcome, &detail);
+    if (outcome) *outcome = wait_outcome;
     if (!reply) {
         if (error) *error = "OpenPipeWireRemote: " + detail;
         return -1;

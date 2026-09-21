@@ -118,6 +118,30 @@ struct PortalScreenCastOptions {
     std::chrono::milliseconds dialog_timeout{120000};
 };
 
+// Builds startup options from the persisted restore-token file. An absent or
+// invalid file produces options without a restore token.
+PortalScreenCastOptions LoadPortalScreenCastOptions(const std::string& path);
+
+// A failed restored session may retry once without its token. Fresh sessions
+// must not trigger that retry because it would only repeat the same failure.
+bool ShouldRetryPortalStartup(int attempt, bool has_restore_token) noexcept;
+
+struct PortalPipeWireResult {
+    int fd = -1;
+    PortalOutcome outcome = PortalOutcome::Failed;
+};
+
+struct PortalStartupCallbacks {
+    std::function<bool()> open_session;
+    std::function<PortalPipeWireResult()> open_pipewire_remote;
+    std::function<bool(int)> connect_stream;
+    std::function<bool()> has_restore_token;
+    std::function<void()> clear_restore_token;
+    std::function<void()> shutdown;
+};
+
+bool RunPortalStartupWithRetry(const PortalStartupCallbacks& callbacks);
+
 // Owns one private session-bus connection and one ScreenCast session. All
 // methods run on the caller's thread and poll the bus in short slices so
 // keep_running() can abort a wait within ~50 ms.
@@ -137,7 +161,7 @@ public:
                        std::string* error);
 
     // OpenPipeWireRemote(); the caller owns the returned descriptor. -1 on error.
-    int OpenPipeWireRemote(const KeepRunning& keep_running, std::string* error);
+    int OpenPipeWireRemote(const KeepRunning& keep_running, std::string* error, PortalOutcome* outcome = nullptr);
 
     // Non-blocking. True once the portal emitted Session.Closed, e.g. because
     // the user stopped sharing from the desktop's indicator.
