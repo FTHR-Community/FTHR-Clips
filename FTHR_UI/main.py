@@ -1234,7 +1234,7 @@ class CaptureSettingsPopup(_PopupPanel):
     summary_changed     = Signal(str)   # emitted whenever any value changes
 
     _CLIP_VALUES  = list(NORMAL_CLIP_VALUES)
-    _CLIP_LABELS  = ['5s','10s','15s','30s','45s','1m','1m 30s','2m','3m','4m','5m']
+    _CLIP_LABELS  = ['5s','10s','15s','30s','45s','1m','1m 30s','2m','3m','4m','5m','10m','15m','20m','30m']
     _FPS_VALUES   = list(FPS_VALUES)
     _RES_LABELS   = ['480p','720p','1080p','1440p','Source']
     _RES_KEYS     = ['480p','720p','1080p','1440p','source']
