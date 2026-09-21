@@ -78,6 +78,15 @@ def compute_buffer_seconds(normal_seconds: int) -> int:
     return min(1800, normal + 2)
 
 
+LINUX_MAX_REPLAY_BUFFER_MB = 2048
+
+
+def estimate_replay_buffer_mb(buffer_seconds: int, bitrate_kbps: int) -> int:
+    """Return estimated in-memory buffer footprint in megabytes."""
+    bytes_total = int(buffer_seconds) * (int(bitrate_kbps) * 1000 // 8)
+    return max(1, bytes_total // (1024 * 1024))
+
+
 class ApplyStatus(Enum):
     ACTIVE = auto()
     REQUESTED = auto()

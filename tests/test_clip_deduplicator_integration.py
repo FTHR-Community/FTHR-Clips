@@ -1,6 +1,7 @@
 """Integration test for clip deduplication using FFmpeg."""
 
 from pathlib import Path
+import os
 import subprocess
 import pytest
 
@@ -18,6 +19,8 @@ def ffmpeg_exe():
     try:
         return get_ffmpeg_exe()
     except FFmpegUnavailable:
+        if os.getenv("CI"):
+            pytest.fail("FFmpeg runtime must be available in CI to execute deduplication integration tests")
         pytest.skip("FFmpeg is unavailable on this test host")
 
 
@@ -165,4 +168,3 @@ def test_merge_clip_cluster_with_audio_manifest_sidecars(ffmpeg_exe, tmp_path: P
     # Verify both MP4s and sidecars were moved to trash/quarantine
     for p in (clip1, clip2, clip3, sidecar1, sidecar2, sidecar3):
         assert not p.exists(), f"{p.name} should have been quarantined"
-

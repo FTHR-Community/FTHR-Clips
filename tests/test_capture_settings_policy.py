@@ -132,3 +132,17 @@ def test_thirty_minute_replay_buffer_configuration_stress_and_bounds():
     tracker.succeed()
     assert tracker.status is ApplyStatus.ACTIVE
     assert tracker.active.buffer_seconds == 1800
+
+
+def test_replay_buffer_memory_estimation_and_linux_budget():
+    from core.capture_settings import LINUX_MAX_REPLAY_BUFFER_MB, estimate_replay_buffer_mb
+
+    assert LINUX_MAX_REPLAY_BUFFER_MB == 2048
+    # 30 seconds at 16,000 kbps is ~60 MB
+    assert 55 <= estimate_replay_buffer_mb(30, 16_000) <= 65
+    # 300 seconds (5 min) at 16,000 kbps is ~600 MB (fits within 2 GB)
+    assert estimate_replay_buffer_mb(300, 16_000) < LINUX_MAX_REPLAY_BUFFER_MB
+    # 1800 seconds (30 min) at 60,000 kbps is ~12.87 GB (exceeds Linux in-memory budget)
+    exceeded_mb = estimate_replay_buffer_mb(1800, 60_000)
+    assert exceeded_mb > 12_000
+    assert exceeded_mb > LINUX_MAX_REPLAY_BUFFER_MB

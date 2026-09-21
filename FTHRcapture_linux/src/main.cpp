@@ -32,7 +32,7 @@ int main(int argc, char* argv[]) {
     cfg.target_width   = (argc > 3) ? arg_u32(argv, 3, 0)      : 0;
     cfg.target_height  = (argc > 4) ? arg_u32(argv, 4, 0)      : 0;
     cfg.bitrate_kbps   = (argc > 5) ? arg_u32(argv, 5, 16000)  : 16000;
-    // argv[6] = max_buffer_mb — ignored
+    cfg.max_buffer_mb  = (argc > 6) ? arg_u32(argv, 6, 2048)   : 2048;
     // argv[7] = capture_mode  — ignored (always desktop)
     // argv[8] = target_hwnd   — ignored
     cfg.scaling_mode   = (argc > 9) ? arg_u32(argv, 9, 0)      : 0;
@@ -54,12 +54,15 @@ int main(int argc, char* argv[]) {
     if (cfg.buffer_seconds > 1800)  cfg.buffer_seconds = 1800;
     if (cfg.bitrate_kbps   < 500)   cfg.bitrate_kbps   = 500;
     if (cfg.bitrate_kbps   > 60000) cfg.bitrate_kbps   = 60000;
+    if (cfg.max_buffer_mb  < 64)    cfg.max_buffer_mb  = 64;
+    if (cfg.max_buffer_mb  > 4096)  cfg.max_buffer_mb  = 4096;
 
     std::cout << "[FTHR] Linux capture engine starting" << std::endl;
     std::cout << "[FTHR] fps=" << cfg.fps
               << " buffer=" << cfg.buffer_seconds << "s"
               << " enc=" << cfg.target_width << "x" << cfg.target_height
               << " bitrate=" << cfg.bitrate_kbps << "kbps"
+              << " memory_budget=" << cfg.max_buffer_mb << "MB"
               << " scaling=" << cfg.scaling_mode << std::endl;
 
     // Shared memory

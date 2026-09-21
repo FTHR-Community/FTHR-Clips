@@ -922,6 +922,4 @@ def merge_clip_cluster(
         freed = sum(orig_sizes.get(p, 0) for p in quarantined)
         actual_saved = max(0, freed - merged_size)
         return output_path, actual_saved
-
     return output_path, 0
-

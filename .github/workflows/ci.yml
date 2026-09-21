@@ -45,11 +45,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -q -y \
-<<<<<<< HEAD
-            libpulse0 libegl1 libgl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
-=======
             cmake g++ pkg-config libpulse0 libpulse-dev libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
->>>>>>> upstream/linux
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
             libxcb-xinerama0 libxkbcommon-x11-0 libx11-dev libxext-dev libxfixes-dev \
             libwayland-dev wayland-protocols libpipewire-0.3-dev libdbus-1-dev

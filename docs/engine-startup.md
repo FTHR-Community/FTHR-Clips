@@ -14,7 +14,7 @@ is the executable. Defaults apply when an argument is omitted.
 | 2 | Replay duration | 30 seconds; supported range 1–1800 |
 | 3–4 | Output width, height | 0, 0 for native size |
 | 5 | Video bitrate | 16,000 kbps; supported range 500–60,000 |
-| 6 | Legacy raw-buffer budget | Windows: 2,048 MB; unused for compressed replay. Linux ignores it. |
+| 6 | Memory budget | Windows: legacy raw-buffer budget 2,048 MB. Linux: in-memory replay buffer budget (default 2,048 MB, range 64–4,096 MB); configurations exceeding budget are rejected. |
 | 7 | Capture mode | Windows: 0 desktop, 1 window. Linux ignores it. |
 | 8 | Target window | Windows: decimal HWND, or 0. Linux ignores it. |
 | 9 | Scaling mode | 0 stretch, 1 fit with bars |

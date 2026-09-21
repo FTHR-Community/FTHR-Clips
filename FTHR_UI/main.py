@@ -1524,12 +1524,16 @@ class CaptureSettingsPopup(_PopupPanel):
             try:
                 from ui.dialogs import FthrMessageDialog
                 minutes = self.cur_clip // 60
+                msg = (
+                    f'Selecting a {minutes}-minute buffer requires substantial video history capacity.\n\n'
+                    'On Windows, FTHR-Clips utilizes temporary disk streaming to minimize memory pressure.\n'
+                    'On Linux, in-memory replay enforces a measured budget guard (max 2 GB) to protect system stability.\n'
+                    'Ensure your system has adequate memory and disk space for smooth operation.'
+                )
                 FthrMessageDialog.warning(
                     self,
                     'EXTENDED REPLAY BUFFER',
-                    f'Selecting a {minutes}-minute buffer requires up to 4–8 GB of video history memory.\n\n'
-                    'FTHR-Clips utilizes temporary disk streaming and interleaved muxing to minimize memory pressure.\n'
-                    'Ensure your system has adequate RAM and temp disk space for smooth gameplay.',
+                    msg,
                 )
             except Exception:
                 # Warning dialog failure is non-fatal in headless or mock test contexts
