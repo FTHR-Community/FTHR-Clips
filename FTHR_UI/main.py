@@ -1234,7 +1234,7 @@ class CaptureSettingsPopup(_PopupPanel):
     summary_changed     = Signal(str)   # emitted whenever any value changes
 
     _CLIP_VALUES  = list(NORMAL_CLIP_VALUES)
-    _CLIP_LABELS  = ['5s','10s','15s','30s','45s','1m','1m 30s','2m','3m','4m','5m','10m','15m','20m','30m']
+    _CLIP_LABELS  = ['5s','10s','15s','30s','45s','1m','1m 30s','2m','3m','4m','5m','10m','15m (High RAM)','20m (High RAM)','30m (High RAM)']
     _FPS_VALUES   = list(FPS_VALUES)
     _RES_LABELS   = ['480p','720p','1080p','1440p','Source']
     _RES_KEYS     = ['480p','720p','1080p','1440p','source']
@@ -1518,6 +1518,24 @@ class CaptureSettingsPopup(_PopupPanel):
 
     def _on_clip_changed(self, idx):
         self.cur_clip = self._CLIP_VALUES[idx]
+        if self.cur_clip >= 900:
+            try:
+                from ui.dialogs import FthrMessageDialog
+                minutes = self.cur_clip // 60
+                msg = (
+                    f'Selecting a {minutes}-minute buffer requires substantial video history capacity.\n\n'
+                    'On Windows, FTHR-Clips utilizes temporary disk streaming to minimize memory pressure.\n'
+                    'On Linux, in-memory replay enforces a measured budget guard (max 2 GB) to protect system stability.\n'
+                    'Ensure your system has adequate memory and disk space for smooth operation.'
+                )
+                FthrMessageDialog.warning(
+                    self,
+                    'EXTENDED REPLAY BUFFER',
+                    msg,
+                )
+            except Exception:
+                # Warning dialog failure is non-fatal in headless or mock test contexts
+                pass
         self.sm.set('clip_length', self.cur_clip)
         self.sm.save_settings()
         self._mark_restart()
