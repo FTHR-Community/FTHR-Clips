@@ -327,6 +327,7 @@ class UploadSettingsWidget(QWidget):
         self.provider_combo = WheelSafeComboBox()
         self.provider_combo.addItem('Catbox', 'catbox')
         self.provider_combo.addItem('Lustful', 'lustful')
+        self.provider_combo.addItem('Discord Webhook', 'discord_webhook')
         self.provider_combo.addItem('Your server', _CUSTOM_PROVIDER)
         set_theme_style(self.provider_combo, combo_qss)
         self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
@@ -346,6 +347,24 @@ class UploadSettingsWidget(QWidget):
         set_theme_style(self.catbox_userhash, lineedit_qss)
         catbox_row.addWidget(self.catbox_userhash, 1)
         body.addWidget(self.catbox_panel)
+
+        self.discord_panel = QFrame()
+        set_theme_style(self.discord_panel,
+            lambda: (f'background: {Colors.SURFACE_1}; border: 1px solid {Colors.BORDER}; '
+            f'border-left: 3px solid {Colors.ACCENT};'))
+        discord_body = QVBoxLayout(self.discord_panel)
+        discord_body.setContentsMargins(16, 14, 16, 14)
+        discord_body.setSpacing(8)
+
+        discord_url_row = QHBoxLayout()
+        discord_url_row.setSpacing(10)
+        discord_url_row.addWidget(_field_label('Webhook URL'))
+        self.discord_url_edit = QLineEdit()
+        self.discord_url_edit.setPlaceholderText('https://discord.com/api/webhooks/ID/TOKEN')
+        set_theme_style(self.discord_url_edit, lineedit_qss)
+        discord_url_row.addWidget(self.discord_url_edit, 1)
+        discord_body.addLayout(discord_url_row)
+        body.addWidget(self.discord_panel)
 
         self.custom_panel = QFrame()
         set_theme_style(self.custom_panel,
@@ -497,6 +516,7 @@ class UploadSettingsWidget(QWidget):
         self.catbox_userhash.setText(self._sm.get('catbox_userhash', ''))
         self.server_url_edit.setText(self._sm.get('upload_server_url', ''))
         self.server_auth_edit.setText(self._sm.get('upload_auth_header', ''))
+        self.discord_url_edit.setText(self._sm.get('discord_webhook_url', '') or self._sm.get('discord_active_webhook', ''))
         mode = self._sm.get('upload_mode', 'manual')
         self.mode_immediate.setChecked(mode == 'immediate')
         self.mode_interval.setChecked(mode == 'interval')
@@ -621,10 +641,12 @@ class UploadSettingsWidget(QWidget):
         catbox = provider == 'catbox'
         lustful = provider == 'lustful'
         custom = provider == _CUSTOM_PROVIDER
+        discord = provider == 'discord_webhook'
         self.catbox_panel.setVisible(catbox)
         self.lustful_panel.setVisible(lustful)
         self.custom_panel.setVisible(custom)
-        self.website_btn.setVisible(not custom)
+        self.discord_panel.setVisible(discord)
+        self.website_btn.setVisible(not custom and not discord)
         self.website_btn.setText('OPEN CATBOX' if catbox else 'OPEN LUSTFUL')
         self.catbox_donate_btn.setVisible(catbox)
         self.lustful_donate_btn.setVisible(lustful)
@@ -653,6 +675,9 @@ class UploadSettingsWidget(QWidget):
             self.server_url_edit.setText(server_url)
         self._sm.set('upload_server_url', server_url)
         self._sm.set('upload_auth_header', self.server_auth_edit.text().strip())
+        discord_url = self.discord_url_edit.text().strip()
+        self._sm.set('discord_webhook_url', discord_url)
+        self._sm.set('discord_active_webhook', discord_url)
         mode = {0: 'immediate', 1: 'interval', 2: 'manual'}.get(
             self._mode_group.checkedId(), 'manual')
         self._sm.set('upload_mode', mode)
@@ -680,6 +705,10 @@ class UploadSettingsWidget(QWidget):
             self._test_status.setText('Enter a server URL first')
             set_theme_style(self._test_status, lambda: (label_body(Colors.ERROR, Fonts.SIZE_BODY)))
             return
+        if provider == 'discord_webhook' and not self.discord_url_edit.text().strip():
+            self._test_status.setText('Enter a Discord Webhook URL first')
+            set_theme_style(self._test_status, lambda: (label_body(Colors.ERROR, Fonts.SIZE_BODY)))
+            return
         self.test_btn.setEnabled(False)
         self._test_status.setText('Testing…')
 
@@ -690,6 +719,8 @@ class UploadSettingsWidget(QWidget):
                     'catbox_userhash': self.catbox_userhash.text().strip(),
                     'upload_server_url': self.server_url_edit.text().strip(),
                     'upload_auth_header': self.server_auth_edit.text().strip(),
+                    'discord_webhook_url': self.discord_url_edit.text().strip(),
+                    'discord_active_webhook': self.discord_url_edit.text().strip(),
                 })
             except Exception as exc:
                 ok, message = False, str(exc)

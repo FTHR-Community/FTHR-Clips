@@ -83,6 +83,8 @@ def _provider(settings: dict[str, Any], request: dict[str, Any]) -> str:
         return 'lustful'
     if provider in {'own_server', 'your_server'}:
         return _CUSTOM_PROVIDER
+    if provider in {'discord', 'discord_webhook'}:
+        return 'discord_webhook'
     return provider
 
 
@@ -94,10 +96,10 @@ def _require_provider_consent(
         if settings.get('catbox_legal_accepted_version') != CATBOX_LEGAL_VERSION:
             raise PermissionError('Accept Catbox’s legal policies in FTHR Clips first.')
         return
-    if provider == _CUSTOM_PROVIDER:
+    if provider in {_CUSTOM_PROVIDER, 'discord_webhook'}:
         return
     if provider != 'lustful':
-        raise ValueError('Only Catbox, Lustful, and your server are supported.')
+        raise ValueError('Only Catbox, Lustful, Discord Webhook, and your server are supported.')
     if settings.get('lustful_legal_accepted_version') != LUSTFUL_LEGAL_VERSION:
         raise PermissionError('Accept Lustful’s Terms and Privacy Policy first.')
     if settings.get('lustful_hardware_policy_accepted_version') != HARDWARE_POLICY_VERSION:
