@@ -1,3 +1,4 @@
+#include "capture_engine.h"
 #include "ring_buffer.h"
 
 #include <cassert>
