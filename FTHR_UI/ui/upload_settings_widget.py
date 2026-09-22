@@ -510,6 +510,8 @@ class UploadSettingsWidget(QWidget):
             provider = 'lustful'
         if provider in {'own_server', 'your_server'}:
             provider = _CUSTOM_PROVIDER
+        if provider in {'discord', 'discord_webhook'}:
+            provider = 'discord_webhook'
         index = self.provider_combo.findData(provider)
         self.provider_combo.setCurrentIndex(index if index >= 0 else 0)
         self._selected_provider = provider
