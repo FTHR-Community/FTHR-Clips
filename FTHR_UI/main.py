@@ -5359,6 +5359,20 @@ class MainWindow(QMainWindow):
                     })
                 def _on_failed():
                     self.stop_engine()
+                    current_mon = str(self.settings_manager.get('capture_monitor', '') or '')
+                    if current_mon and (
+                        failure.code == 'CAPTURE_ADAPTER_UNSUPPORTED'
+                        or 'selected monitor has no matching output' in failure.detail.lower()
+                        or 'output_resolution_failed' in failure.detail.lower()
+                    ):
+                        print('[EngineRecovery] Saved capture_monitor path failed to resolve. Resetting to auto...')
+                        self.settings_manager.set('capture_monitor', '')
+                        self.settings_manager.save_settings()
+                        self._capture_config.fail(failure.detail)
+                        self._restart_pending = False
+                        self._set_capture_apply_state(False)
+                        self._restart_capture_engine()
+                        return
                     self._capture_config.fail(failure.detail)
                     self._restart_pending = False
                     self._set_capture_apply_state(False)
