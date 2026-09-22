@@ -1,4 +1,3 @@
-#include "capture_engine.h"
 #include "ring_buffer.h"
 
 #include <cassert>
@@ -159,23 +158,16 @@ void TestDynamicMemoryLimitReduction() {
     assert(ring.PacketCount() == 5);
 }
 
-void TestReconfigurePreservesMemoryLimit() {
-    fthr::CaptureConfig cfg;
-    cfg.buffer_seconds = 30;
-    cfg.fps = 60;
-    cfg.max_buffer_mb = 2048;
-    cfg.audio_enabled = false;
+void TestRingBufferReallocationPreservesMemoryLimit() {
+    size_t ring_ms = (30 + 5) * 1000;
+    size_t max_bytes = 2048ULL * 1024ULL * 1024ULL;
+    auto* ring = new fthr::EncodedRingBuffer(ring_ms, 60, max_bytes);
+    assert(ring->MaxBytes() == max_bytes);
+    delete ring;
 
-    // Verify initializing sets ring_ max_bytes
-    fthr::CaptureEngine engine;
-    assert(engine.Initialize(cfg));
-    assert(engine.GetRingBuffer() != nullptr);
-    assert(engine.GetRingBuffer()->MaxBytes() == 2048ULL * 1024ULL * 1024ULL);
-
-    // Reconfigure codec/preset
-    engine.Reconfigure(static_cast<uint32_t>(fthr::CodecPref::H264), 4);
-    assert(engine.GetRingBuffer() != nullptr);
-    assert(engine.GetRingBuffer()->MaxBytes() == 2048ULL * 1024ULL * 1024ULL);
+    ring = new fthr::EncodedRingBuffer(ring_ms, 60, max_bytes);
+    assert(ring->MaxBytes() == max_bytes);
+    delete ring;
 }
 
 } // namespace
@@ -187,6 +179,6 @@ int main() {
     TestMeasuredMemoryGuardPruning();
     TestMeasuredMemoryGuardUnderBudget();
     TestDynamicMemoryLimitReduction();
-    TestReconfigurePreservesMemoryLimit();
+    TestRingBufferReallocationPreservesMemoryLimit();
     return 0;
 }

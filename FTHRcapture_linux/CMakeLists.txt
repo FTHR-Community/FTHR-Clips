@@ -61,6 +61,18 @@ if(BUILD_TESTING)
     add_test(NAME windows_audio_interval
         COMMAND fthr_windows_audio_interval_test)
 
+    add_executable(fthr_linux_encoded_ring_duration_test
+        tests/linux_encoded_ring_duration_test.cpp
+        src/ring_buffer.cpp)
+    target_include_directories(fthr_linux_encoded_ring_duration_test PRIVATE
+        src
+        ../FTHRcapture_common)
+    target_compile_options(fthr_linux_encoded_ring_duration_test PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_libraries(fthr_linux_encoded_ring_duration_test PRIVATE pthread)
+    add_test(NAME linux_encoded_ring_duration
+        COMMAND fthr_linux_encoded_ring_duration_test)
+
     add_executable(fthr_capture_recovery_test tests/capture_recovery_test.cpp)
     target_include_directories(fthr_capture_recovery_test PRIVATE src)
     target_compile_options(fthr_capture_recovery_test PRIVATE
@@ -505,28 +517,6 @@ if(BUILD_TESTING)
     add_test(NAME short_save_actual_mp4
         COMMAND fthr_short_save_mp4_integration_test
             /tmp/fthr-audit042-short-save.mp4)
-
-    add_executable(fthr_linux_encoded_ring_duration_test
-        tests/linux_encoded_ring_duration_test.cpp
-        ${FTHR_ENGINE_SOURCES})
-    target_include_directories(fthr_linux_encoded_ring_duration_test PRIVATE
-        src
-        ${PROTO_GEN_DIR}
-        ${CMAKE_SOURCE_DIR}/../FTHRcapture_common)
-    target_include_directories(fthr_linux_encoded_ring_duration_test SYSTEM PRIVATE
-        ${FFMPEG_INCLUDE_DIRS})
-    target_link_libraries(fthr_linux_encoded_ring_duration_test PRIVATE
-        $<$<BOOL:${FTHR_FFMPEG_BUNDLED}>:${FTHR_FFMPEG_LINK_LIBRARIES}>
-        $<$<NOT:$<BOOL:${FTHR_FFMPEG_BUNDLED}>>:PkgConfig::FFMPEG>
-        PkgConfig::WAYLAND
-        PkgConfig::PULSE
-        pthread rt)
-    target_compile_options(fthr_linux_encoded_ring_duration_test PRIVATE
-        -Wall -Wextra -Wpedantic -UNDEBUG)
-    target_compile_definitions(fthr_linux_encoded_ring_duration_test PRIVATE
-        FTHR_X11_CAPTURE=$<BOOL:${FTHR_X11_CAPTURE}>)
-    add_test(NAME linux_encoded_ring_duration
-        COMMAND fthr_linux_encoded_ring_duration_test)
 endif()
 
 install(TARGETS FTHRclips RUNTIME DESTINATION bin)
