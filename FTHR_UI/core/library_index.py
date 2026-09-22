@@ -92,6 +92,10 @@ class ScanStats:
     watched_directories: int = 0
     cancelled: bool = False
 
+    @property
+    def skipped_reparse_point_count(self) -> int:
+        return self.skipped_reparse_points
+
     def as_dict(self) -> dict[str, int | bool]:
         return {
             "root_count": self.roots,
