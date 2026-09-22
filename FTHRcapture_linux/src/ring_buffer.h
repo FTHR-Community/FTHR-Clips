@@ -31,8 +31,9 @@ struct EncodedRingSnapshot {
 // and snapshots taken from the save-clip thread.
 class EncodedRingBuffer {
 public:
-    explicit EncodedRingBuffer(size_t max_duration_ms, uint32_t fps)
-        : max_duration_ms_(max_duration_ms), fps_(fps) {}
+    explicit EncodedRingBuffer(
+        size_t max_duration_ms, uint32_t fps, size_t max_bytes = 0)
+        : max_duration_ms_(max_duration_ms), fps_(fps), max_bytes_(max_bytes) {}
 
     void Push(EncodedPacket pkt);
 
@@ -44,6 +45,9 @@ public:
         int64_t target_end_ns, std::chrono::milliseconds timeout) const;
 
     size_t PacketCount() const;
+    size_t TotalBytes() const;
+    size_t MaxBytes() const;
+    void SetMaxBytes(size_t max_bytes);
     void Clear();
 
 private:
@@ -51,6 +55,8 @@ private:
     std::deque<EncodedPacket> packets_;
     size_t                    max_duration_ms_;
     uint32_t                  fps_;
+    size_t                    max_bytes_{0};
+    size_t                    total_bytes_{0};
     std::atomic<int64_t>      latest_wall_time_ns_{0};
     mutable std::condition_variable publication_cv_;
 };

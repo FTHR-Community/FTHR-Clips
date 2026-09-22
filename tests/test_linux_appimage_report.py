@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT = ROOT / 'tools/linux_appimage_report.sh'
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == 'win32',
+    reason='AppImage report shell script requires POSIX environment',
+)
 
 
 def run_report(*args: str) -> subprocess.CompletedProcess[str]:

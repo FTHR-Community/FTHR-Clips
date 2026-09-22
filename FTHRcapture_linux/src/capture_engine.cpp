@@ -23,9 +23,24 @@ CaptureEngine::~CaptureEngine() { Shutdown(); }
 bool CaptureEngine::Initialize(const CaptureConfig& cfg) {
     cfg_ = cfg;
 
-    // Allocate ring buffer (buffer_seconds + small margin)
+    // Check estimated memory budget for in-memory replay buffer
+    const uint64_t estimated_bytes =
+        static_cast<uint64_t>(cfg.buffer_seconds) * (static_cast<uint64_t>(cfg.bitrate_kbps) * 1000ULL / 8ULL);
+    const uint64_t budget_bytes =
+        static_cast<uint64_t>(cfg.max_buffer_mb) * 1024ULL * 1024ULL;
+
+    if (cfg.max_buffer_mb > 0 && estimated_bytes > budget_bytes) {
+        std::cerr << "[Capture] ERROR: Replay buffer configuration exceeds measured memory budget: "
+                  << (estimated_bytes / (1024 * 1024)) << " MB requested, "
+                  << cfg.max_buffer_mb << " MB limit. Rejecting configuration."
+                  << std::endl;
+        return false;
+    }
+
+    // Allocate ring buffer (buffer_seconds + small margin, with hard byte guard)
     size_t ring_ms = (static_cast<size_t>(cfg.buffer_seconds) + 5) * 1000;
-    ring_ = new EncodedRingBuffer(ring_ms, cfg.fps);
+    size_t max_bytes = static_cast<size_t>(cfg.max_buffer_mb) * 1024 * 1024;
+    ring_ = new EncodedRingBuffer(ring_ms, cfg.fps, max_bytes);
 
     // Start audio capture (loopback via PulseAudio monitor)
     if (cfg.audio_enabled) {
@@ -406,7 +421,8 @@ void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
     if (cfg_.preset > 7) cfg_.preset = 7;
     // Re-allocate ring (Shutdown() freed it)
     size_t ring_ms = (static_cast<size_t>(cfg_.buffer_seconds) + 5) * 1000;
-    ring_ = new EncodedRingBuffer(ring_ms, cfg_.fps);
+    size_t max_bytes = static_cast<size_t>(cfg_.max_buffer_mb) * 1024 * 1024;
+    ring_ = new EncodedRingBuffer(ring_ms, cfg_.fps, max_bytes);
     // Restart audio (Shutdown() stopped it)
     if (cfg_.audio_enabled) {
         if (cfg_.multiband_enabled && !cfg_.audio_categories.empty()) {
