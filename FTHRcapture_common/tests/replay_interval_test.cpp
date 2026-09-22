@@ -180,10 +180,22 @@ void TestInvalidInputsAndPresentationOffset() {
     assert(replay::PresentationStartPts(25, 30, 30, false, 7) == 7);
 }
 
+void TestThirtyMinuteReplayBufferStressAndSelection() {
+    constexpr int fps = 60;
+    constexpr int duration_seconds = 1800; // 30 minutes
+    const auto samples = ConstantRate(fps, duration_seconds + 5, fps * 2);
+    AssertFullWindow(
+        samples,
+        static_cast<int64_t>(duration_seconds) * kSecond,
+        static_cast<int64_t>(duration_seconds) * kSecond,
+        kSecond / fps);
+}
+
 } // namespace
 
 int main() {
     TestNormalDurationsAndFrameRates();
+    TestThirtyMinuteReplayBufferStressAndSelection();
     TestKeyframeBoundaries();
     TestInsufficientAndResetHistory();
     TestIrregularTimestampsAndNonZeroEpoch();

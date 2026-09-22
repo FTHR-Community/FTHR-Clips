@@ -1,4 +1,4 @@
-﻿// Native Windows startup and shared-memory command dispatch.
+// Native Windows startup and shared-memory command dispatch.
 // CaptureEngine owns capture, encoding, and save workers.
 // The positional startup contract is documented in docs/engine-startup.md.
 
@@ -281,7 +281,7 @@ int main(int argc, char* argv[]) {
         config.framerate = 60;
     }
 
-    if (config.buffer_seconds == 0 || config.buffer_seconds > 300) {
+    if (config.buffer_seconds == 0 || config.buffer_seconds > 1800) {
         std::cerr << "[Config] Invalid buffer_seconds " << config.buffer_seconds
             << " - clamping to 30" << std::endl;
         config.buffer_seconds = 30;

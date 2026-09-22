@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\continuous_recording_writer.h" />
+    <ClInclude Include="include\replay_disk_spooler.h" />
     <ClInclude Include="include\audio_packet_ring.h" />
     <ClInclude Include="include\audio_source_model.h" />
     <ClInclude Include="include\clip_audio_manifest.h" />
@@ -54,6 +55,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\continuous_recording_writer.cpp" />
+    <ClCompile Include="src\replay_disk_spooler.cpp" />
     <ClCompile Include="src\audio_packet_ring.cpp" />
     <ClCompile Include="src\audio_source_model.cpp" />
     <ClCompile Include="src\clip_audio_manifest.cpp" />
@@ -170,7 +172,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <AdditionalIncludeDirectories>$(ProjectDir)third_party\ffmpeg\include;$(ProjectDir)include;$(ProjectDir)include\nvenc\;$(ProjectDir)..\..\FTHRcapture_common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -193,7 +195,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <AdditionalIncludeDirectories>$(ProjectDir)third_party\ffmpeg\include;$(ProjectDir)include;$(ProjectDir)include\nvenc\;$(ProjectDir)..\..\FTHRcapture_common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>

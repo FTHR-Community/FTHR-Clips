@@ -288,7 +288,7 @@ public:
         auto* frames_context = reinterpret_cast<AVHWFramesContext*>(
             hw_frames_ctx_->data);
         frames_context->format = AV_PIX_FMT_D3D11;
-        frames_context->sw_format = AV_PIX_FMT_BGRA;
+        frames_context->sw_format = AV_PIX_FMT_NV12;
         frames_context->width = static_cast<int>(output_width_);
         frames_context->height = static_cast<int>(output_height_);
         // This pinned D3D11 hwcontext requires a non-zero fixed pool. Eight
@@ -296,6 +296,9 @@ public:
         // references. Each submitted AVFrame retains its array slice until AMF
         // releases it; capture never maps this GPU-only texture array.
         frames_context->initial_pool_size = 8;
+        auto* d3d_frames = reinterpret_cast<AVD3D11VAFramesContext*>(
+            frames_context->hwctx);
+        d3d_frames->BindFlags = D3D11_BIND_DECODER | D3D11_BIND_VIDEO_ENCODER;
         result = av_hwframe_ctx_init(hw_frames_ctx_);
         if (result < 0) {
             error = "could not initialize FFmpeg D3D11 hardware frame context: "
@@ -420,7 +423,7 @@ public:
         d3d11_device_ = shared_device;
         initialized_ = true;
         std::cout << "[AMF] Opened " << selection.encoder_name
-                  << " on the selected AMD D3D11 adapter (BGRA hardware frames)"
+                  << " on the selected AMD D3D11 adapter (NV12 hardware frames)"
                   << std::endl;
         return true;
     }
@@ -469,7 +472,7 @@ public:
             1U, destination_description.ArraySize);
         if (destination_description.Width != output_width_
             || destination_description.Height != output_height_
-            || destination_description.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+            || destination_description.Format != DXGI_FORMAT_NV12
             || destination_subresource >= destination_mips * destination_arrays) {
             error = "AMF hardware frame texture geometry, format, or subresource is invalid";
             return false;
@@ -723,15 +726,15 @@ private:
             return false;
         }
         result = video_processor_enumerator_->CheckVideoProcessorFormat(
-            DXGI_FORMAT_B8G8R8A8_UNORM, &output_support);
+            DXGI_FORMAT_NV12, &output_support);
         if (FAILED(result)) {
             error = diagnostics::FormatHResultFailure(
-                "ID3D11VideoProcessorEnumerator::CheckVideoProcessorFormat(BGRA,output)",
+                "ID3D11VideoProcessorEnumerator::CheckVideoProcessorFormat(NV12,output)",
                 result);
             return false;
         }
         if ((output_support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0) {
-            error = "ID3D11VideoProcessorEnumerator::CheckVideoProcessorFormat(BGRA,output) reports unsupported format";
+            error = "ID3D11VideoProcessorEnumerator::CheckVideoProcessorFormat(NV12,output) reports unsupported format";
             return false;
         }
         result = video_device_->CreateVideoProcessor(
@@ -745,14 +748,14 @@ private:
         converter_description.Height = output_height_;
         converter_description.MipLevels = 1;
         converter_description.ArraySize = 1;
-        converter_description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        converter_description.Format = DXGI_FORMAT_NV12;
         converter_description.SampleDesc.Count = 1;
         converter_description.Usage = D3D11_USAGE_DEFAULT;
         converter_description.BindFlags = D3D11_BIND_RENDER_TARGET;
         result = shared_device->CreateTexture2D(
             &converter_description, nullptr, &converter_texture_);
         if (FAILED(result) || !converter_texture_) {
-            error = HResultString("AMF BGRA converter texture creation", result);
+            error = HResultString("AMF NV12 converter texture creation", result);
             return false;
         }
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_description{};
@@ -789,6 +792,18 @@ private:
             video_processor_, FALSE, &background);
         video_context_->VideoProcessorSetStreamAutoProcessingMode(
             video_processor_, 0, FALSE);
+
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE input_color{};
+        input_color.RGB_Range = 0;
+        input_color.YCbCr_Matrix = 1;
+        input_color.Nominal_Range = 2;
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE output_color{};
+        output_color.YCbCr_Matrix = 1;
+        output_color.Nominal_Range = 1;
+        video_context_->VideoProcessorSetStreamColorSpace(
+            video_processor_, 0, &input_color);
+        video_context_->VideoProcessorSetOutputColorSpace(
+            video_processor_, &output_color);
         return true;
     }
 
@@ -813,6 +828,10 @@ private:
             av_frame_unref(frame_);
             return false;
         }
+        frame_->color_range = AVCOL_RANGE_MPEG;
+        frame_->color_primaries = AVCOL_PRI_BT709;
+        frame_->color_trc = AVCOL_TRC_BT709;
+        frame_->colorspace = AVCOL_SPC_BT709;
         return true;
     }
 
