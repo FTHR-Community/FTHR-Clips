@@ -158,6 +158,25 @@ void TestDynamicMemoryLimitReduction() {
     assert(ring.PacketCount() == 5);
 }
 
+void TestReconfigurePreservesMemoryLimit() {
+    fthr::CaptureConfig cfg;
+    cfg.buffer_seconds = 30;
+    cfg.fps = 60;
+    cfg.max_buffer_mb = 2048;
+    cfg.audio_enabled = false;
+
+    // Verify initializing sets ring_ max_bytes
+    fthr::CaptureEngine engine;
+    assert(engine.Initialize(cfg));
+    assert(engine.GetRingBuffer() != nullptr);
+    assert(engine.GetRingBuffer()->MaxBytes() == 2048ULL * 1024ULL * 1024ULL);
+
+    // Reconfigure codec/preset
+    engine.Reconfigure(static_cast<uint32_t>(fthr::CodecPref::H264), 4);
+    assert(engine.GetRingBuffer() != nullptr);
+    assert(engine.GetRingBuffer()->MaxBytes() == 2048ULL * 1024ULL * 1024ULL);
+}
+
 } // namespace
 
 int main() {
@@ -167,5 +186,6 @@ int main() {
     TestMeasuredMemoryGuardPruning();
     TestMeasuredMemoryGuardUnderBudget();
     TestDynamicMemoryLimitReduction();
+    TestReconfigurePreservesMemoryLimit();
     return 0;
 }

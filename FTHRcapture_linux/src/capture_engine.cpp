@@ -421,7 +421,8 @@ void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
     if (cfg_.preset > 7) cfg_.preset = 7;
     // Re-allocate ring (Shutdown() freed it)
     size_t ring_ms = (static_cast<size_t>(cfg_.buffer_seconds) + 5) * 1000;
-    ring_ = new EncodedRingBuffer(ring_ms, cfg_.fps);
+    size_t max_bytes = static_cast<size_t>(cfg_.max_buffer_mb) * 1024 * 1024;
+    ring_ = new EncodedRingBuffer(ring_ms, cfg_.fps, max_bytes);
     // Restart audio (Shutdown() stopped it)
     if (cfg_.audio_enabled) {
         if (cfg_.multiband_enabled && !cfg_.audio_categories.empty()) {
