@@ -1,4 +1,4 @@
-<"""Generated release bindings for optional uploader packages."""
+"""Generated release bindings for optional uploader packages."""
 
 UPLOADER_PLUGIN_ID = 'com.fthrclips.uploader'
 UPLOADER_PLUGIN_VERSION = '1.1.0'
