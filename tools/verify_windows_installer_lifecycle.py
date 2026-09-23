@@ -74,6 +74,19 @@ def require(report: Report, source: str, fragment: str, description: str) -> Non
         report.fail(f'{description}: missing {fragment!r}')
 
 
+def require_string_define(report: Report, source: str, name: str, value: str,
+                          description: str) -> None:
+    """Check one exact string definition without depending on column alignment."""
+    definitions = re.findall(
+        rf'^[ \t]*#define[ \t]+{re.escape(name)}(?=[ \t\r\n]|$)([^\r\n]*)',
+        source, re.MULTILINE,
+    )
+    if len(definitions) == 1 and definitions[0].strip(' \t') == f'"{value}"':
+        report.ok(description)
+    else:
+        report.fail(f'{description}: expected exactly one #define {name} "{value}"')
+
+
 def check_source(report: Report) -> None:
     if not INSTALLER.is_file():
         report.fail('installer_windows.iss is missing')
@@ -84,14 +97,14 @@ def check_source(report: Report) -> None:
         APP_NAME, PUBLISHER, __version__, windows_file_version,
     )
 
-    require(report, source, f'#define MyAppName      "{APP_NAME}"',
-            'installer name matches the product source of truth')
-    require(report, source, f'#define MyAppVersion   "{__version__}"',
-            'installer version matches the product source of truth')
-    require(report, source, f'#define MyAppPublisher "{PUBLISHER}"',
-            'installer publisher matches the product source of truth')
-    require(report, source, f'#define MyAppId        "{APP_ID}"',
-            'stable existing AppId is retained')
+    require_string_define(report, source, 'MyAppName', APP_NAME,
+                          'installer name matches the product source of truth')
+    require_string_define(report, source, 'MyAppVersion', __version__,
+                          'installer version matches the product source of truth')
+    require_string_define(report, source, 'MyAppPublisher', PUBLISHER,
+                          'installer publisher matches the product source of truth')
+    require_string_define(report, source, 'MyAppId', APP_ID,
+                          'stable existing AppId is retained')
     require(report, source, 'AppId={#MyAppId}',
             'AppId is used as the install/update identity')
     require(report, source, 'UninstallDisplayIcon={app}\\{#MyAppExeName}',
