@@ -3128,7 +3128,8 @@ class MainWindow(QMainWindow):
         self._active_clip_viewer = None
 
         # Frameless window --
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        if QApplication.instance().platformName() != 'wayland':
+            self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
         self.settings_manager = SettingsManager()
@@ -12015,6 +12016,9 @@ def main():
         print('[Lifecycle] BackgroundStartup')
 
     try:
+        def check_window():
+            print(f'[Debug] Window visible={window.isVisible()}, rect={window.geometry()}, platform={app.platformName()}')
+        QTimer.singleShot(2000, check_window)
         return app.exec()
     finally:
         try:

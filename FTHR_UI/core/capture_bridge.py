@@ -199,6 +199,7 @@ class CaptureBridge:
 
         if not self._layout.is_initialized:
             print('Linux engine not initialized yet')
+            del self._layout
             self._linux_mmap.close()
             self._linux_mmap = None
             self._layout = None
