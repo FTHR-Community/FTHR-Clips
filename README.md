@@ -22,7 +22,7 @@
 
 ## What it does
 
-FTHRClips run silently in the background capturing your game and when you press a hotkey it saves the clip. But unlike other applications FTHRClips is built to protect your privacy and doesn't depend on a network connection.
+FTHRClips runs silently in the background, capturing your game, and saves the clip when you press a hotkey. Unlike other applications, FTHRClips is built to protect your privacy and doesn't depend on a network connection.
 
 ---
 
@@ -51,9 +51,9 @@ FTHRClips run silently in the background capturing your game and when you press 
 
 ## Download
 
-you can download a ready installer or app image right on our downloads page 
+You can download a ready installer or AppImage right on our downloads page
 [downloads.fthrclips.com](https://downloads.fthrclips.com)
-or compile the code yourself with this repo.
+or compile the code yourself from this repo.
 
 
 ## Linux Setup
@@ -119,9 +119,9 @@ audio. Platform hotkey activation is
 forwarded by the UI through the same shared-memory command contract; Linux also
 uses an owner-only Unix socket for compositor key bindings.
 
-the uploader is separate from the main app and doesn't work unless deliberately installed. 
-Even after it installing it only connects when you allow it to.
-please note that all clips uploaded to third party services fall under their terms and privacy policy:
+The uploader is separate from the main app and doesn't work unless deliberately installed. 
+Even after installation, it only connects when you allow it to.
+Please note that all clips uploaded to third-party services fall under their terms and privacy policies:
 `THIRD_PARTY_NOTICES.md`.
 
 ---
@@ -138,7 +138,7 @@ AI-Generated Contributions
 
 The use of generative AI when contributing to this repository is generally permitted with the following exceptions:
 
-any AI-assisted contribution that affect any security-critical systems, privacy, data handling, encryption, authentication, update mechanisms, must be reviewed by a competent human contributor, gary does not count.
+Any AI-assisted contribution that affects security-critical systems, privacy, data handling, encryption, authentication, or update mechanisms must be reviewed by a competent human contributor; Gary does not count.
 
 All creative work that is part of your contribution, including icons, illustrations, audio, music, and sound effects, must be fully created by human artists. 
 AI is a tool to assist, not a replacement for human creativity.
@@ -189,8 +189,8 @@ Licence texts: [`licenses/`](licenses/), also installed alongside the app.
 ## Transparency
 Note about AI usage
 
-AI tools were used to review and edit parts of the code. (also the comments cuz I'm lazy)
+AI tools were used to review and edit parts of the code (and the comments, because I'm lazy).
 
-NONE of the assets used on both app and website were created with AI.
+None of the assets used in either the app or the website were created with AI.
 
-All changes made by AI were reviewed/corrected by human contributors.
+All changes made by AI were reviewed and corrected by human contributors.
