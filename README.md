@@ -20,7 +20,7 @@
 
 ## What it does
 
-FTHRClips runs silently in the background capturing your game and when you press a hotkey it saves the clip. But unlike other applications FTHRClips is built to protect your privacy and doesn't depend on a network connection.
+FTHRClips runs silently in the background, capturing your game, and saves the clip when you press a hotkey. Unlike other applications, FTHRClips is built to protect your privacy and doesn't depend on a network connection.
 
 ---
 
