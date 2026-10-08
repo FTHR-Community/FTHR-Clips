@@ -265,6 +265,17 @@ echo "    Removed $_removed file(s)."
 echo ">>> FFmpeg libraries remaining in the bundle:"
 find "$INT" -regextype posix-extended -regex "$_FFMPEG_LIB_RE" -printf '    %f\n' | sort
 
+# PyInstaller's strip corrupts wheel libraries that auditwheel already
+# rewrote (numpy's OpenBLAS/gfortran, Qt Multimedia's FFmpeg): their segments
+# end up misaligned and the loader refuses them at import time, which the
+# launch check below cannot see. Restore the unstripped originals and fail
+# the build if any bundled ELF is still unloadable.
+echo ""
+echo ">>> Restoring wheel libraries damaged by strip..."
+SITE_PACKAGES="$("$PYTHON_BIN" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+"$PYTHON_BIN" "$SCRIPT_DIR/tools/repair_stripped_elf.py" \
+    --bundle "$INT" --site-packages "$SITE_PACKAGES"
+
 # 5. Verify the app still launches after stripping
 echo ""
 echo ">>> Smoke-testing stripped bundle..."
