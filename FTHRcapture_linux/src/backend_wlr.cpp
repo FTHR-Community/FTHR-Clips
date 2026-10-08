@@ -89,8 +89,11 @@ void WlrBackend::ScFrameBuffer(void* data, zwlr_screencopy_frame_v1* /*frame*/,
     self->native_h_   = height;
 }
 
-static void sc_frame_flags(void* /*data*/, zwlr_screencopy_frame_v1* /*frame*/,
-                            uint32_t /*flags*/) {}
+void WlrBackend::ScFrameFlags(void* data, zwlr_screencopy_frame_v1* /*frame*/,
+                               uint32_t flags) {
+    static_cast<WlrBackend*>(data)->y_invert_ =
+        (flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) != 0;
+}
 
 void WlrBackend::ScFrameReady(void* data, zwlr_screencopy_frame_v1* /*frame*/,
                                uint32_t /*tv_sec_hi*/, uint32_t /*tv_sec_lo*/,
@@ -117,7 +120,7 @@ void WlrBackend::ScFrameBufferDone(void* data, zwlr_screencopy_frame_v1* /*frame
 
 static const zwlr_screencopy_frame_v1_listener kScFrameListener = {
     WlrBackend::ScFrameBuffer,
-    sc_frame_flags,
+    WlrBackend::ScFrameFlags,
     WlrBackend::ScFrameReady,
     WlrBackend::ScFrameFailed,
     sc_frame_damage,
@@ -155,6 +158,10 @@ bool WlrBackend::AllocFramebuffer() {
         static_cast<int32_t>(fb_.height),
         static_cast<int32_t>(fb_.stride),
         fb_.format);
+    alloc_width_  = fb_.width;
+    alloc_height_ = fb_.height;
+    alloc_stride_ = fb_.stride;
+    alloc_format_ = fb_.format;
     return true;
 }
 
@@ -166,6 +173,7 @@ void WlrBackend::FreeFramebuffer() {
         fb_.data = nullptr;
     }
     if (fb_.fd >= 0) { close(fb_.fd); fb_.fd = -1; }
+    alloc_width_ = alloc_height_ = alloc_stride_ = alloc_format_ = 0;
 }
 
 void WlrBackend::DestroyPendingFrame() {
@@ -311,6 +319,12 @@ bool WlrBackend::Initialize(const CaptureConfig& cfg) {
             Shutdown();
             return false;
         }
+        if (WlShmFormatToAvPixFmt(fb_.format) < 0) {
+            std::cerr << "[WlrBackend] Unsupported wl_shm format 0x" << std::hex
+                      << fb_.format << std::dec << std::endl;
+            Shutdown();
+            return false;
+        }
 
         if (!AllocFramebuffer()) {
             std::cerr << "[WlrBackend] Failed to allocate probe framebuffer" << std::endl;
@@ -345,9 +359,7 @@ bool WlrBackend::CaptureFrame(RawFrame& out) {
     frame_ready_  = false;
     frame_failed_ = false;
     buffer_done_  = false;
-
-    uint32_t prev_w = fb_.width;
-    uint32_t prev_h = fb_.height;
+    y_invert_     = false;
 
     sc_frame_ = zwlr_screencopy_manager_v1_capture_output(sc_mgr_, 0, output_);
     if (!sc_frame_) {
@@ -369,8 +381,17 @@ bool WlrBackend::CaptureFrame(RawFrame& out) {
         return false;
     }
 
-    // Reallocate framebuffer if size changed
-    if (fb_.width != prev_w || fb_.height != prev_h || !fb_.buffer) {
+    if (WlShmFormatToAvPixFmt(fb_.format) < 0) {
+        std::cerr << "[WlrBackend] Unsupported wl_shm format 0x" << std::hex
+                  << fb_.format << std::dec << std::endl;
+        DestroyPendingFrame();
+        return false;
+    }
+
+    // Reallocate when the output changed size, stride or format (mode switch,
+    // scale change, HDR/10-bit toggle). The encoder rescales to its fixed size.
+    if (!fb_.buffer || fb_.width != alloc_width_ || fb_.height != alloc_height_ ||
+            fb_.stride != alloc_stride_ || fb_.format != alloc_format_) {
         FreeFramebuffer();
         if (!AllocFramebuffer()) {
             DestroyPendingFrame();
@@ -394,20 +415,16 @@ bool WlrBackend::CaptureFrame(RawFrame& out) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     int64_t now_ns = static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
 
-    out.data         = static_cast<const uint8_t*>(fb_.data);
-    out.stride       = fb_.stride;
-    out.width        = fb_.width;
-    out.height       = fb_.height;
-    out.av_pix_fmt   = AV_PIX_FMT_BGR0;
-    out.timestamp_ns = now_ns;
-
-    return true;
+    return normalizer_.Normalize(
+        static_cast<const uint8_t*>(fb_.data), fb_.stride,
+        fb_.width, fb_.height, fb_.format, y_invert_, now_ns, out);
 }
 
 
 void WlrBackend::Shutdown() {
     DestroyPendingFrame();
     FreeFramebuffer();
+    normalizer_.Reset();
     DestroyWayland();
 }
 
