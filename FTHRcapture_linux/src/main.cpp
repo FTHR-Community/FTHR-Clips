@@ -220,12 +220,19 @@ int main(int argc, char* argv[]) {
         if ((health_flags & fthr::CAPTURE_HEALTH_BACKEND_FAILED) &&
                 !failure_reason_published) {
             // Payload first: the UI reads engine_string as soon as it sees
-            // the BACKEND_FAILED flag. engine_string is shared with save and
-            // recording results, so wait until the UI has consumed any
-            // pending response and hold the flag back until then; no
-            // engine_response is published for the capture failure itself.
-            if (layout->engine_response ==
-                    static_cast<uint32_t>(fthr::ResponseType::NONE)) {
+            // the BACKEND_FAILED flag. engine_string is shared with save
+            // results, so wait until the UI has consumed a pending save
+            // response and hold the flag back until then; no engine_response
+            // is published for the capture failure itself. Pause/resume and
+            // status acknowledgements carry no payload and have no consumer
+            // on Linux, so they must not hold the failure back.
+            const auto pending = static_cast<fthr::ResponseType>(
+                layout->engine_response);
+            const bool save_result_pending =
+                pending == fthr::ResponseType::SAVE_STARTED ||
+                pending == fthr::ResponseType::CLIP_SAVED ||
+                pending == fthr::ResponseType::ERROR_OCCURRED;
+            if (!save_result_pending) {
                 fthr::set_engine_string(layout, engine.GetCaptureFailureReason());
                 failure_reason_published = true;
             } else {

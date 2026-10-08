@@ -49,7 +49,9 @@ def _enumerate_via_hyprctl() -> list:
 def _enumerate_via_xdotool() -> list:
     """List visible windows via xdotool + xprop. Works for XWayland and X11.
     Covers Steam/Proton games and most Linux native games."""
-    if not linux_tools.available('xdotool'):
+    # xprop supplies the fullscreen state that marks a window as a game;
+    # without it every window would be reported as a non-game.
+    if not (linux_tools.available('xdotool') and linux_tools.available('xprop')):
         return []
     try:
         r = subprocess.run(
@@ -100,6 +102,13 @@ def _enumerate_linux_windows() -> list:
     return _enumerate_via_xdotool()
 
 
+def _linux_enumeration_available() -> bool:
+    """True when the compositor's window enumeration tools are installed."""
+    if detect_compositor() == 'hyprland':
+        return linux_tools.available('hyprctl')
+    return linux_tools.available('xdotool') and linux_tools.available('xprop')
+
+
 class GameDetector(QObject):
     game_appeared = Signal(dict)   # new is_game=True window
     game_closed   = Signal(int)    # hwnd of a game that disappeared
@@ -113,6 +122,7 @@ class GameDetector(QObject):
                 enumerate_fn = _enumerate_capturable_windows
             else:
                 enumerate_fn = _enumerate_linux_windows
+        self._default_linux_enumeration = enumerate_fn is _enumerate_linux_windows
         self._enumerate = enumerate_fn
         self._known: dict[int, dict] = {}   # hwnd → window dict
         self._poll_running = False          # skip ticks while worker is busy
@@ -130,6 +140,24 @@ class GameDetector(QObject):
 
     def stop(self):
         self._timer.stop()
+
+    @property
+    def available(self) -> bool:
+        if self._default_linux_enumeration:
+            return _linux_enumeration_available()
+        return True
+
+    def set_enabled(self, enabled: bool) -> bool:
+        """Match ForegroundGameDetector so the UI toggle works on Linux."""
+        if not enabled:
+            self.stop()
+            return True
+        if not self.available:
+            self.stop()
+            return False
+        if not self._timer.isActive():
+            self.start()
+        return True
 
     def _start_poll(self):
         if self._poll_running:
