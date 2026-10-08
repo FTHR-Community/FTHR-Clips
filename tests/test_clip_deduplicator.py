@@ -462,3 +462,29 @@ def test_large_bytes_saved_signal_emission():
     emitter.sig.emit(2, large_bytes)
     assert len(dlg_received) == 1
     assert dlg_received[0] == (2, large_bytes)
+
+
+def test_savings_not_reported_if_quarantine_incomplete(tmp_path: Path, monkeypatch):
+    from core.clip_deduplicator import merge_overlapping_pair, OverlapPair, ClipRecord
+    import core.clip_deduplicator as dedup_mod
+
+    f1 = tmp_path / "clip1.mp4"
+    f2 = tmp_path / "clip2.mp4"
+    f1.write_bytes(b"A" * 1000)
+    f2.write_bytes(b"B" * 1000)
+
+    c1 = ClipRecord(path=f1, start_time=100.0, duration=10.0, end_time=110.0, size_bytes=1000)
+    c2 = ClipRecord(path=f2, start_time=105.0, duration=10.0, end_time=115.0, size_bytes=1000)
+    pair = OverlapPair(first=c1, second=c2, overlap_seconds=5.0, estimated_saved_bytes=500)
+
+    monkeypatch.setattr(dedup_mod, "get_ffmpeg_exe", lambda: "ffmpeg")
+    monkeypatch.setattr(dedup_mod, "_run_ffmpeg_tool", lambda *a, **k: None)
+    out_file = tmp_path / "merged.mp4"
+    out_file.write_bytes(b"M" * 1200)
+    monkeypatch.setattr(dedup_mod, "finalize_output", lambda temp_out, output_path, allow_overwrite: out_file)
+
+    # Simulate quarantine only succeeding for 1 of the 2 files
+    monkeypatch.setattr(dedup_mod, "quarantine_original_clips", lambda paths: [paths[0]])
+
+    merge_overlapping_pair(pair, remove_originals=True, quarantine=True)
+    assert pair.actual_saved_bytes == 0

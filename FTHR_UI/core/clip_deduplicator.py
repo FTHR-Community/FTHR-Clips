@@ -804,8 +804,11 @@ def merge_overlapping_pair(
                     pass
 
         merged_size = output_path.stat().st_size if output_path.exists() else 0
-        freed = sum(orig_sizes.get(p, 0) for p in quarantined)
-        pair.actual_saved_bytes = max(0, freed - merged_size)
+        if len(quarantined) == len(orig_paths):
+            freed = sum(orig_sizes.get(p, 0) for p in quarantined)
+            pair.actual_saved_bytes = max(0, freed - merged_size)
+        else:
+            pair.actual_saved_bytes = 0
     else:
         pair.actual_saved_bytes = 0
 
@@ -919,7 +922,9 @@ def merge_clip_cluster(
         orig_sizes = {p: p.stat().st_size for p in orig_paths if p.exists()}
         quarantined = quarantine_original_clips(orig_paths)
         merged_size = output_path.stat().st_size if output_path.exists() else 0
-        freed = sum(orig_sizes.get(p, 0) for p in quarantined)
-        actual_saved = max(0, freed - merged_size)
-        return output_path, actual_saved
+        if len(quarantined) == len(orig_paths):
+            freed = sum(orig_sizes.get(p, 0) for p in quarantined)
+            actual_saved = max(0, freed - merged_size)
+            return output_path, actual_saved
+        return output_path, 0
     return output_path, 0

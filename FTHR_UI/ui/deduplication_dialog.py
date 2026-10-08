@@ -362,7 +362,7 @@ class ClipDeduplicationDialog(FthrDialog):
 
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels([
-            "Select", "Clip 1", "Clip 2", "Overlap & Savings", "Preview"
+            "Select", "Clip 1", "Clip 2", "Overlap & Estimated Savings", "Preview"
         ])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setStyleSheet(f"""
@@ -505,7 +505,7 @@ class ClipDeduplicationDialog(FthrDialog):
         item_word = "group(s)" if any(len(p.clips or []) > 2 for p in pairs) else "pair(s)"
         self.info_label.setText(
             f"Found {len(pairs)} overlapping clip {item_word}. "
-            f"Estimated potential disk savings: {total_saved_mb:.1f} MB.{note_str} "
+            f"Estimated potential disk savings: ~{total_saved_mb:.1f} MB (confirmed after quarantine/deletion).{note_str} "
             "Double-click any clip to preview."
         )
         self.merge_btn.setEnabled(True)
@@ -542,7 +542,7 @@ class ClipDeduplicationDialog(FthrDialog):
 
             overlap_sec = int(pair.overlap_seconds)
             saved_mb = pair.estimated_saved_bytes / (1024 * 1024)
-            info_text = f"{overlap_sec}s overlap (~{saved_mb:.1f} MB)"
+            info_text = f"{overlap_sec}s overlap (~{saved_mb:.1f} MB est.)"
             if pair.confidence == 'LOW':
                 info_text += " ⚠️ [Low Confidence]"
             elif pair.confidence != 'HIGH':
@@ -715,14 +715,20 @@ class ClipDeduplicationDialog(FthrDialog):
         saved_mb = bytes_saved / (1024 * 1024)
         if success_count > 0:
             if removed:
-                self.info_label.setText(
-                    f"Successfully merged {success_count} overlapping clip item(s)! "
-                    f"Confirmed {saved_mb:.1f} MB disk space recovered (originals safely moved to OS Recycle Bin / Trash)."
-                )
+                if bytes_saved > 0:
+                    self.info_label.setText(
+                        f"Successfully merged {success_count} overlapping clip item(s)! "
+                        f"Confirmed {saved_mb:.1f} MB disk space recovered (originals safely moved to OS Recycle Bin / Trash)."
+                    )
+                else:
+                    self.info_label.setText(
+                        f"Successfully merged {success_count} overlapping clip item(s)! "
+                        "Original files could not be fully quarantined; 0 MB confirmed savings reported."
+                    )
             else:
                 self.info_label.setText(
                     f"Successfully merged {success_count} overlapping clip item(s)! "
-                    "Original files were preserved in place (no disk space freed)."
+                    "Original files were preserved in place (0 MB confirmed savings)."
                 )
             self.deduplication_completed.emit(success_count, bytes_saved)
         else:
