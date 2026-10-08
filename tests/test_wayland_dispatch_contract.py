@@ -93,5 +93,5 @@ def test_ext_destroys_frame_after_bounded_wait() -> None:
     source = _read("backend_ext.cpp")
     wait = source.index("const bool completed = WaitUntil(")
     destroy = source.index("ext_image_copy_capture_frame_v1_destroy(frame)", wait)
-    failure = source.index("if (!completed || frame_failed_ || session_stopped_)", destroy)
+    failure = source.index("return completed && frame_ready_ && !session_stopped_;", destroy)
     assert wait < destroy < failure

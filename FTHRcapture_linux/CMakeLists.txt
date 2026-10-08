@@ -223,6 +223,25 @@ if(BUILD_TESTING)
     target_compile_options(fthr_wayland_dispatch_test PRIVATE
         -Wall -Wextra -Wpedantic -UNDEBUG)
     add_test(NAME wayland_bounded_dispatch COMMAND fthr_wayland_dispatch_test)
+
+    add_executable(fthr_shm_frame_test
+        tests/shm_frame_test.cpp
+        src/shm_frame.cpp
+        src/x11_frame_converter.cpp)
+    target_include_directories(fthr_shm_frame_test PRIVATE src)
+    target_include_directories(fthr_shm_frame_test SYSTEM PRIVATE
+        ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(fthr_shm_frame_test PRIVATE
+        PkgConfig::WAYLAND
+        $<$<BOOL:${FTHR_FFMPEG_BUNDLED}>:${FTHR_FFMPEG_LINK_LIBRARIES}>
+        $<$<NOT:$<BOOL:${FTHR_FFMPEG_BUNDLED}>>:PkgConfig::FFMPEG>)
+    target_compile_options(fthr_shm_frame_test PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_options(fthr_shm_frame_test PRIVATE "-Wl,--disable-new-dtags")
+    set_target_properties(fthr_shm_frame_test PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN/../third_party/ffmpeg/lib")
+    add_test(NAME shm_frame_normalisation COMMAND fthr_shm_frame_test)
 endif()
 
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
@@ -309,6 +328,8 @@ set(FTHR_ENGINE_SOURCES
     src/encoder.cpp
     src/save_clip.cpp
     src/ring_buffer.cpp
+    src/shm_frame.cpp
+    src/x11_frame_converter.cpp
     ${PROTO_GEN_DIR}/wlr-screencopy-protocol.c
     ${PROTO_GEN_DIR}/xdg-output-protocol.c
     ${PROTO_GEN_DIR}/ext-image-copy-capture-protocol.c
@@ -319,8 +340,7 @@ set(FTHR_ENGINE_SOURCES
 if(FTHR_X11_CAPTURE)
     list(APPEND FTHR_ENGINE_SOURCES
         src/backend_x11.cpp
-        src/x11_capture_target.cpp
-        src/x11_frame_converter.cpp)
+        src/x11_capture_target.cpp)
 endif()
 
 if(FTHR_PORTAL_BACKEND)
@@ -493,6 +513,26 @@ if(BUILD_TESTING)
         INSTALL_RPATH "$ORIGIN/../third_party/ffmpeg/lib")
     add_test(NAME linux_encoder_timestamps
         COMMAND fthr_linux_encoder_timestamp_test)
+
+    add_executable(fthr_linux_encoder_resize_test
+        tests/linux_encoder_resize_test.cpp
+        src/encoder.cpp)
+    target_include_directories(fthr_linux_encoder_resize_test PRIVATE src)
+    target_include_directories(fthr_linux_encoder_resize_test SYSTEM PRIVATE
+        ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(fthr_linux_encoder_resize_test PRIVATE
+        $<$<BOOL:${FTHR_FFMPEG_BUNDLED}>:${FTHR_FFMPEG_LINK_LIBRARIES}>
+        $<$<NOT:$<BOOL:${FTHR_FFMPEG_BUNDLED}>>:PkgConfig::FFMPEG>
+        pthread)
+    target_compile_options(fthr_linux_encoder_resize_test PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_options(fthr_linux_encoder_resize_test PRIVATE
+        "-Wl,--disable-new-dtags")
+    set_target_properties(fthr_linux_encoder_resize_test PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN/../third_party/ffmpeg/lib")
+    add_test(NAME linux_encoder_resize
+        COMMAND fthr_linux_encoder_resize_test)
 
     add_executable(fthr_short_save_mp4_integration_test
         tests/short_save_mp4_integration_test.cpp

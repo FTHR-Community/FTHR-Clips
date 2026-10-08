@@ -1,5 +1,6 @@
 #pragma once
 #include "capture_backend.h"
+#include "shm_frame.h"
 #include "wayland_dispatch.h"
 #include <atomic>
 #include <chrono>
@@ -67,7 +68,17 @@ private:
     uint32_t buf_width_  = 0;
     uint32_t buf_height_ = 0;
     uint32_t shm_format_ = 0;
+    // Constraints arrive as a batch closed by `done` and are re-sent in full
+    // whenever they change; offered formats are collected per batch.
+    std::vector<uint32_t> offered_formats_;
+    bool     constraints_open_ = false;
+    uint32_t constraints_serial_ = 0;   // bumped on every `done`
     bool     buf_done_        = false;
+    uint32_t alloc_width_  = 0;
+    uint32_t alloc_height_ = 0;
+    uint32_t alloc_format_ = 0;
+    uint32_t frame_failure_reason_ = 0;
+    ShmFrameNormalizer normalizer_;
     bool     session_stopped_ = false;
 
     void*        shm_data_ = nullptr;
@@ -82,6 +93,9 @@ private:
     uint32_t native_w_ = 0;
     uint32_t native_h_ = 0;
 
+    void BeginConstraints();
+    bool EnsureShmBuffer();
+    bool CaptureOnce(std::chrono::steady_clock::time_point deadline);
     bool AllocShmBuffer();
     void FreeShmBuffer();
     void DestroyWayland();

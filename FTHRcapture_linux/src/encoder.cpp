@@ -227,25 +227,7 @@ bool Encoder::Open(const EncoderConfig& cfg, std::string& codec_used_out) {
 
     const bool is_vaapi = IsVaapi();
     AVPixelFormat dst_fmt = is_vaapi ? AV_PIX_FMT_NV12 : codec_ctx_->pix_fmt;
-    sws_ctx_ = sws_getContext(
-        static_cast<int>(cfg.src_width),
-        static_cast<int>(cfg.src_height),
-        AV_PIX_FMT_BGRA,
-        codec_ctx_->width,
-        codec_ctx_->height,
-        dst_fmt,
-        SWS_BILINEAR, nullptr, nullptr, nullptr
-    );
-    if (!sws_ctx_) {
-        std::cerr << "[Encoder] sws_getContext failed" << std::endl;
-        Close();
-        return false;
-    }
-    const int* bt709 = sws_getCoefficients(SWS_CS_ITU709);
-    if (!bt709 || sws_setColorspaceDetails(
-            sws_ctx_, bt709, 1, bt709, 0, 0, 1 << 16, 1 << 16) < 0) {
-        std::cerr << "[Encoder] Failed to configure explicit full-range BGRA -> "
-                     "studio-range BT.709 conversion" << std::endl;
+    if (!ConfigureScaler(cfg.src_width, cfg.src_height)) {
         Close();
         return false;
     }
@@ -277,11 +259,45 @@ bool Encoder::Open(const EncoderConfig& cfg, std::string& codec_used_out) {
 }
 
 
+bool Encoder::ConfigureScaler(uint32_t src_width, uint32_t src_height) {
+    if (sws_ctx_) { sws_freeContext(sws_ctx_); sws_ctx_ = nullptr; }
+    sws_src_width_ = sws_src_height_ = 0;
+    const AVPixelFormat dst_fmt =
+        IsVaapi() ? AV_PIX_FMT_NV12 : codec_ctx_->pix_fmt;
+    sws_ctx_ = sws_getContext(
+        static_cast<int>(src_width),
+        static_cast<int>(src_height),
+        AV_PIX_FMT_BGRA,
+        codec_ctx_->width,
+        codec_ctx_->height,
+        dst_fmt,
+        SWS_BILINEAR, nullptr, nullptr, nullptr
+    );
+    if (!sws_ctx_) {
+        std::cerr << "[Encoder] sws_getContext failed" << std::endl;
+        return false;
+    }
+    const int* bt709 = sws_getCoefficients(SWS_CS_ITU709);
+    if (!bt709 || sws_setColorspaceDetails(
+            sws_ctx_, bt709, 1, bt709, 0, 0, 1 << 16, 1 << 16) < 0) {
+        std::cerr << "[Encoder] Failed to configure explicit full-range BGRA -> "
+                     "studio-range BT.709 conversion" << std::endl;
+        sws_freeContext(sws_ctx_);
+        sws_ctx_ = nullptr;
+        return false;
+    }
+    sws_src_width_ = src_width;
+    sws_src_height_ = src_height;
+    return true;
+}
+
+
 void Encoder::Close() {
     if (pkt_)       { av_packet_free(&pkt_);       }
     if (hw_frame_)  { av_frame_free(&hw_frame_);  }
     if (yuv_frame_) { av_frame_free(&yuv_frame_);  }
     if (sws_ctx_)   { sws_freeContext(sws_ctx_);   sws_ctx_   = nullptr; }
+    sws_src_width_ = sws_src_height_ = 0;
     if (codec_ctx_) { avcodec_free_context(&codec_ctx_); }
     av_buffer_unref(&hw_frames_ctx_);
     av_buffer_unref(&hw_device_ctx_);
@@ -295,8 +311,24 @@ void Encoder::Close() {
 
 bool Encoder::EncodeFrame(const uint8_t* bgra, uint32_t stride,
                            int64_t wall_time_ns, PushFn push_fn) {
+    return EncodeFrame(bgra, stride, sws_src_width_, sws_src_height_,
+                       wall_time_ns, std::move(push_fn));
+}
+
+
+bool Encoder::EncodeFrame(const uint8_t* bgra, uint32_t stride,
+                           uint32_t width, uint32_t height,
+                           int64_t wall_time_ns, PushFn push_fn) {
     if (!codec_ctx_ || !sws_ctx_ || !yuv_frame_ || !pkt_)
         return false;
+    if (!bgra || width == 0 || height == 0 || stride < width * 4)
+        return false;
+    if (width != sws_src_width_ || height != sws_src_height_) {
+        std::cerr << "[Encoder] Source size changed to " << width << "x" << height
+                  << "; rescaling to " << codec_ctx_->width << "x"
+                  << codec_ctx_->height << std::endl;
+        if (!ConfigureScaler(width, height)) return false;
+    }
 
     if (av_frame_make_writable(yuv_frame_) < 0)
         return false;
@@ -306,7 +338,7 @@ bool Encoder::EncodeFrame(const uint8_t* bgra, uint32_t stride,
     int src_strides[4] = { static_cast<int>(stride), 0, 0, 0 };
     sws_scale(sws_ctx_,
               src_planes, src_strides,
-              0, static_cast<int>(cfg_.src_height),
+              0, static_cast<int>(height),
               yuv_frame_->data, yuv_frame_->linesize);
 
     // Derive presentation time from CLOCK_MONOTONIC capture time. A frame

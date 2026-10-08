@@ -1,5 +1,6 @@
 #pragma once
 #include "capture_backend.h"
+#include "shm_frame.h"
 #include "wayland_dispatch.h"
 #include <atomic>
 #include <chrono>
@@ -56,6 +57,14 @@ private:
         uint32_t     stride = 0;
         uint32_t     format = 0;
     } fb_;
+    // Parameters the current wl_buffer was created with. The buffer event
+    // overwrites fb_ for every frame, so these detect a size or format change.
+    uint32_t alloc_width_  = 0;
+    uint32_t alloc_height_ = 0;
+    uint32_t alloc_stride_ = 0;
+    uint32_t alloc_format_ = 0;
+    bool     y_invert_     = false;
+    ShmFrameNormalizer normalizer_;
 
     zwlr_screencopy_frame_v1* sc_frame_    = nullptr;
     bool frame_ready_  = false;
@@ -80,6 +89,7 @@ public:
     static void RegistryGlobalRemove(void*, wl_registry*, uint32_t);
     static void ScFrameBuffer(void*, zwlr_screencopy_frame_v1*,
                                uint32_t, uint32_t, uint32_t, uint32_t);
+    static void ScFrameFlags(void*, zwlr_screencopy_frame_v1*, uint32_t);
     static void ScFrameReady(void*, zwlr_screencopy_frame_v1*,
                               uint32_t, uint32_t, uint32_t);
     static void ScFrameFailed(void*, zwlr_screencopy_frame_v1*);

@@ -110,18 +110,12 @@ static std::string resolve_default_sink_monitor() {
 
 // Start / Stop
 
-bool AudioCapture::Start(const std::string& device_name) {
-    Stop();
+// Reconnect pacing after the audio server drops the stream, and how often
+// the default output device is re-checked.
+static constexpr auto kReopenInterval = std::chrono::seconds(1);
+static constexpr auto kDefaultOutputPoll = std::chrono::seconds(2);
 
-    std::string source_name = device_name;
-    if (source_name.empty() || source_name == "auto")
-        source_name = resolve_default_sink_monitor();
-    if (source_name.empty()) {
-        std::cerr << "[Audio] Default output monitor could not be resolved"
-                  << std::endl;
-        return false;
-    }
-
+pa_simple* AudioCapture::OpenStream(const std::string& source_name) const {
     pa_sample_spec ss;
     ss.format   = PA_SAMPLE_FLOAT32LE;
     ss.rate     = static_cast<uint32_t>(kSampleRate);
@@ -131,34 +125,83 @@ bool AudioCapture::Start(const std::string& device_name) {
     buffer_attr.fragsize = static_cast<uint32_t>(kFramesPerChunk * kChannels * sizeof(float));
     buffer_attr.prebuf = buffer_attr.minreq = buffer_attr.tlength = static_cast<uint32_t>(-1);
     int pa_err = 0;
-    stream_ = pa_simple_new(
+    pa_simple* stream = pa_simple_new(
         nullptr, "FTHRclips", PA_STREAM_RECORD, source_name.c_str(),
         "desktop-output-loopback", &ss, nullptr, &buffer_attr, &pa_err);
-    if (!stream_) {
+    if (!stream) {
         std::cerr << "[Audio] Could not open output monitor '" << source_name
                   << "': " << pa_strerror(pa_err) << std::endl;
+    }
+    return stream;
+}
+
+bool AudioCapture::Start(const std::string& device_name) {
+    Stop();
+
+    follow_default_ = device_name.empty() || device_name == "auto";
+    std::string source_name =
+        follow_default_ ? resolve_default_sink_monitor() : device_name;
+    if (source_name.empty()) {
+        std::cerr << "[Audio] Default output monitor could not be resolved"
+                  << std::endl;
         return false;
     }
+
+    stream_ = OpenStream(source_name);
+    if (!stream_) return false;
 
     {
         std::lock_guard<std::mutex> lk(mutex_);
         chunks_.clear();
         ring_total_ = 0;
     }
+    {
+        std::lock_guard<std::mutex> lk(source_mutex_);
+        source_name_ = source_name;
+        pending_source_.clear();
+    }
     std::cout << "[Audio] Capturing default output monitor: "
               << source_name << std::endl;
     running_.store(true);
     thread_ = std::thread(&AudioCapture::CaptureLoop, this);
+    if (follow_default_)
+        watcher_ = std::thread(&AudioCapture::WatchDefaultOutput, this);
     return true;
 }
 
 void AudioCapture::Stop() {
-    running_.store(false);
+    {
+        // Under the watcher's mutex so a watcher between its predicate check
+        // and wait cannot miss the wake-up.
+        std::lock_guard<std::mutex> lk(source_mutex_);
+        running_.store(false);
+    }
+    watcher_cv_.notify_all();
+    if (watcher_.joinable())
+        watcher_.join();
     if (thread_.joinable())
         thread_.join();
     if (stream_) {
         pa_simple_free(stream_);
         stream_ = nullptr;
+    }
+}
+
+void AudioCapture::WatchDefaultOutput() {
+    std::unique_lock<std::mutex> lk(source_mutex_);
+    while (running_.load()) {
+        watcher_cv_.wait_for(lk, kDefaultOutputPoll,
+                             [this] { return !running_.load(); });
+        if (!running_.load()) break;
+        lk.unlock();
+        const std::string resolved = resolve_default_sink_monitor();
+        lk.lock();
+        if (!resolved.empty() && resolved != source_name_ &&
+                resolved != pending_source_) {
+            std::cout << "[Audio] Default output changed to " << resolved
+                      << std::endl;
+            pending_source_ = resolved;
+        }
     }
 }
 
@@ -171,13 +214,58 @@ void AudioCapture::CaptureLoop() {
 
     const int kSamplesPerChunk = kFramesPerChunk * kChannels;
     std::vector<float> buf(static_cast<size_t>(kSamplesPerChunk));
+    auto next_reopen = std::chrono::steady_clock::now();
 
     while (running_.load()) {
+        std::string switch_to;
+        {
+            std::lock_guard<std::mutex> lk(source_mutex_);
+            switch_to.swap(pending_source_);
+        }
+        if (!switch_to.empty()) {
+            // Open the new monitor before dropping the old one so a failed
+            // switch keeps recording from the previous device.
+            if (pa_simple* next = OpenStream(switch_to)) {
+                if (stream_) pa_simple_free(stream_);
+                stream_ = next;
+                std::lock_guard<std::mutex> lk(source_mutex_);
+                source_name_ = switch_to;
+            }
+        }
+
+        if (!stream_) {
+            // The audio server went away. Retry at a fixed pace; captured
+            // video keeps its timeline and the gap is saved as silence.
+            if (std::chrono::steady_clock::now() < next_reopen) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+            next_reopen = std::chrono::steady_clock::now() + kReopenInterval;
+            std::string source;
+            if (follow_default_) {
+                source = resolve_default_sink_monitor();
+            } else {
+                std::lock_guard<std::mutex> lk(source_mutex_);
+                source = source_name_;
+            }
+            if (source.empty()) continue;
+            stream_ = OpenStream(source);
+            if (!stream_) continue;
+            {
+                std::lock_guard<std::mutex> lk(source_mutex_);
+                source_name_ = source;
+            }
+            std::cout << "[Audio] Reconnected to " << source << std::endl;
+        }
+
         if (pa_simple_read(stream_, buf.data(),
                            buf.size() * sizeof(float), &pa_err) < 0) {
             std::cerr << "[Audio] pa_simple_read error: "
-                      << pa_strerror(pa_err) << std::endl;
-            break;
+                      << pa_strerror(pa_err) << "; reconnecting" << std::endl;
+            pa_simple_free(stream_);
+            stream_ = nullptr;
+            next_reopen = std::chrono::steady_clock::now() + kReopenInterval;
+            continue;
         }
         int64_t delivery_end_ns = mono_ns();
         pa_usec_t latency_us = pa_simple_get_latency(stream_, &pa_err);
@@ -224,41 +312,13 @@ std::vector<float> AudioCapture::ExtractSegment(int64_t end_time_ns,
             static_cast<int64_t>(last.samples.size() / kChannels) * ns_per_sample;
     }
 
-    int64_t start_time_ns = end_time_ns -
-        static_cast<int64_t>(duration_ms) * 1'000'000LL;
-
-    std::vector<float> result;
-    int64_t ns_per_frame = 1'000'000'000LL / kSampleRate;
-
-    for (const auto& chunk : chunks_) {
-        int64_t frames_in_chunk = static_cast<int64_t>(chunk.samples.size() / kChannels);
-        int64_t chunk_end_ns    = chunk.start_ns + frames_in_chunk * ns_per_frame;
-
-        // Skip chunks entirely outside the window
-        if (chunk_end_ns < start_time_ns) continue;
-        if (chunk.start_ns > end_time_ns)  break;
-
-        // Compute per-chunk sample slice
-        int64_t skip_frames = 0;
-        if (chunk.start_ns < start_time_ns)
-            skip_frames = (start_time_ns - chunk.start_ns) / ns_per_frame;
-
-        int64_t take_frames = frames_in_chunk - skip_frames;
-        int64_t overshoot   = (chunk_end_ns - end_time_ns) / ns_per_frame;
-        if (overshoot > 0) take_frames -= overshoot;
-        if (take_frames <= 0) continue;
-
-        size_t skip_samples = static_cast<size_t>(skip_frames * kChannels);
-        size_t take_samples = static_cast<size_t>(take_frames * kChannels);
-        if (skip_samples + take_samples > chunk.samples.size())
-            take_samples = chunk.samples.size() - skip_samples;
-
-        result.insert(result.end(),
-                      chunk.samples.begin() + static_cast<ptrdiff_t>(skip_samples),
-                      chunk.samples.begin() + static_cast<ptrdiff_t>(skip_samples + take_samples));
-    }
-
-    return result;
+    std::vector<TimedAudioBlock> blocks;
+    blocks.reserve(chunks_.size());
+    for (const auto& chunk : chunks_)
+        blocks.push_back({chunk.samples.data(), chunk.samples.size() / kChannels,
+                          chunk.start_ns});
+    return AssembleAudioWindow(blocks, kChannels, kSampleRate,
+                               end_time_ns, duration_ms);
 }
 
 } // namespace fthr

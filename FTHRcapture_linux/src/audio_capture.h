@@ -5,6 +5,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <pulse/simple.h>
 
@@ -37,6 +38,8 @@ public:
 
 private:
     void CaptureLoop();
+    void WatchDefaultOutput();
+    pa_simple* OpenStream(const std::string& source_name) const;
 
     struct TimedChunk {
         std::vector<float> samples;  // interleaved stereo float32
@@ -48,7 +51,17 @@ private:
     size_t                    ring_total_{0};  // guarded by mutex_
     std::thread               thread_;
     std::atomic<bool>         running_{false};
-    pa_simple*                stream_{nullptr};
+    pa_simple*                stream_{nullptr};   // owned by the capture thread
+
+    // Following the default output: when Start() was given no explicit
+    // source, a watcher re-resolves the default sink's monitor and asks the
+    // capture thread to switch when it changes (headphones, Bluetooth).
+    bool                      follow_default_{false};
+    std::thread               watcher_;
+    std::mutex                source_mutex_;
+    std::condition_variable   watcher_cv_;
+    std::string               source_name_;       // guarded by source_mutex_
+    std::string               pending_source_;    // guarded by source_mutex_
 };
 
 } // namespace fthr

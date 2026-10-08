@@ -23,8 +23,12 @@ def test_auto_desktop_audio_resolves_default_sink_monitor():
 
 
 def test_audio_open_failure_is_synchronous_and_video_only_diagnostic_exists():
+    open_stream = AUDIO_CPP[AUDIO_CPP.index('pa_simple* AudioCapture::OpenStream'):
+                            AUDIO_CPP.index('bool AudioCapture::Start')]
+    assert 'pa_simple_new' in open_stream
     start = AUDIO_CPP[AUDIO_CPP.index('bool AudioCapture::Start'):]
-    assert start.index('pa_simple_new') < start.index('std::thread')
+    assert start.index('stream_ = OpenStream(') < start.index('std::thread')
+    assert start.index('if (!stream_) return false;') < start.index('std::thread')
     engine = (ROOT / 'FTHRcapture_linux/src/capture_engine.cpp').read_text()
     assert 'FTHR_STARTUP_WARNING: DESKTOP_AUDIO_UNAVAILABLE' in engine
 

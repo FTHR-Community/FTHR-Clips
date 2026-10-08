@@ -209,7 +209,8 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration() {
 
         const uint64_t produced = frame_count_.load() + 1;
         SampleContent(raw, produced);
-        encoder_.EncodeFrame(raw.data, raw.stride, raw.timestamp_ns,
+        encoder_.EncodeFrame(raw.data, raw.stride, raw.width, raw.height,
+            raw.timestamp_ns,
             [this](EncodedPacket pkt) { ring_->Push(std::move(pkt)); });
 
         frame_count_.fetch_add(1);

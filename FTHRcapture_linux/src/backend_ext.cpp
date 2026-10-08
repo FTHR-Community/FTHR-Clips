@@ -53,23 +53,35 @@ void ExtBackend::RegistryGlobal(void* d, wl_registry* reg,
 void ExtBackend::RegistryRemove(void*, wl_registry*, uint32_t) {}
 
 // session listener
+void ExtBackend::BeginConstraints() {
+    if (constraints_open_) return;
+    constraints_open_ = true;
+    offered_formats_.clear();
+}
 void ExtBackend::SessionBufferSize(void* d,
         ext_image_copy_capture_session_v1*, uint32_t w, uint32_t h) {
     auto* b = static_cast<ExtBackend*>(d);
+    b->BeginConstraints();
     b->buf_width_ = w; b->buf_height_ = h;
     b->native_w_  = w; b->native_h_   = h;
 }
 void ExtBackend::SessionShmFormat(void* d,
         ext_image_copy_capture_session_v1*, uint32_t fmt) {
     auto* b = static_cast<ExtBackend*>(d);
-    if (b->shm_format_ == 0) b->shm_format_ = fmt;
+    b->BeginConstraints();
+    b->offered_formats_.push_back(fmt);
 }
 void ExtBackend::SessionDmabufDevice(void*, ext_image_copy_capture_session_v1*,
         struct wl_array*) {}
 void ExtBackend::SessionDmabufFormat(void*, ext_image_copy_capture_session_v1*,
         uint32_t, struct wl_array*) {}
 void ExtBackend::SessionDone(void* d, ext_image_copy_capture_session_v1*) {
-    static_cast<ExtBackend*>(d)->buf_done_ = true;
+    auto* b = static_cast<ExtBackend*>(d);
+    uint32_t chosen = 0;
+    b->shm_format_ = PickWlShmFormat(b->offered_formats_, chosen) ? chosen : 0;
+    b->constraints_open_ = false;
+    b->constraints_serial_++;
+    b->buf_done_ = true;
 }
 void ExtBackend::SessionStopped(void* d, ext_image_copy_capture_session_v1*) {
     static_cast<ExtBackend*>(d)->session_stopped_ = true;
@@ -92,8 +104,11 @@ void ExtBackend::FramePresentationTime(void*, ext_image_copy_capture_frame_v1*,
 void ExtBackend::FrameReady(void* d, ext_image_copy_capture_frame_v1*) {
     static_cast<ExtBackend*>(d)->frame_ready_ = true;
 }
-void ExtBackend::FrameFailed(void* d, ext_image_copy_capture_frame_v1*, uint32_t) {
-    static_cast<ExtBackend*>(d)->frame_failed_ = true;
+void ExtBackend::FrameFailed(void* d, ext_image_copy_capture_frame_v1*,
+                              uint32_t reason) {
+    auto* b = static_cast<ExtBackend*>(d);
+    b->frame_failed_ = true;
+    b->frame_failure_reason_ = reason;
 }
 static const ext_image_copy_capture_frame_v1_listener kFrameListener = {
     ExtBackend::FrameTransform,
@@ -119,7 +134,23 @@ bool ExtBackend::AllocShmBuffer() {
     wl_buf_ = wl_shm_pool_create_buffer(shm_pool_, 0,
         static_cast<int32_t>(buf_width_), static_cast<int32_t>(buf_height_),
         static_cast<int32_t>(buf_width_ * 4), shm_format_);
-    return wl_buf_ != nullptr;
+    if (!wl_buf_) return false;
+    alloc_width_  = buf_width_;
+    alloc_height_ = buf_height_;
+    alloc_format_ = shm_format_;
+    return true;
+}
+
+bool ExtBackend::EnsureShmBuffer() {
+    if (shm_format_ == 0 || buf_width_ == 0 || buf_height_ == 0) {
+        std::cerr << "[ExtBackend] Compositor offered no usable shm buffer\n";
+        return false;
+    }
+    if (wl_buf_ && alloc_width_ == buf_width_ && alloc_height_ == buf_height_ &&
+            alloc_format_ == shm_format_)
+        return true;
+    FreeShmBuffer();
+    return AllocShmBuffer();
 }
 
 void ExtBackend::FreeShmBuffer() {
@@ -127,6 +158,7 @@ void ExtBackend::FreeShmBuffer() {
     if (shm_pool_) { wl_shm_pool_destroy(shm_pool_); shm_pool_ = nullptr; }
     if (shm_data_ && shm_data_ != MAP_FAILED) { munmap(shm_data_, shm_size_); shm_data_ = nullptr; }
     if (shm_fd_ >= 0) { close(shm_fd_); shm_fd_ = -1; }
+    alloc_width_ = alloc_height_ = alloc_format_ = 0;
 }
 
 void ExtBackend::DestroyWayland() {
@@ -241,10 +273,10 @@ bool ExtBackend::Initialize(const CaptureConfig& cfg) {
     return true;
 }
 
-bool ExtBackend::CaptureFrame(RawFrame& out) {
-    if (session_stopped_) return false;
-    const auto deadline = std::chrono::steady_clock::now() + kFrameTimeout;
+bool ExtBackend::CaptureOnce(std::chrono::steady_clock::time_point deadline) {
+    if (!EnsureShmBuffer()) return false;
     frame_ready_ = frame_failed_ = false;
+    frame_failure_reason_ = 0;
 
     auto* frame = ext_image_copy_capture_session_v1_create_frame(session_);
     if (!frame) {
@@ -262,20 +294,44 @@ bool ExtBackend::CaptureFrame(RawFrame& out) {
         [this] { return frame_ready_ || frame_failed_ || session_stopped_; },
         "frame request");
     ext_image_copy_capture_frame_v1_destroy(frame);
+    return completed && frame_ready_ && !session_stopped_;
+}
 
-    if (!completed || frame_failed_ || session_stopped_) return false;
+bool ExtBackend::CaptureFrame(RawFrame& out) {
+    if (session_stopped_) return false;
+    const auto deadline = std::chrono::steady_clock::now() + kFrameTimeout;
+    const uint32_t serial_before = constraints_serial_;
+
+    if (!CaptureOnce(deadline)) {
+        // A resolution or format change fails the in-flight frame with
+        // buffer_constraints and re-sends the constraints. Reallocate once
+        // against the new batch instead of restarting the whole generation.
+        if (!frame_failed_ || session_stopped_ ||
+                frame_failure_reason_ !=
+                    EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS)
+            return false;
+        if (!WaitUntil(
+                deadline,
+                [this, serial_before] {
+                    return constraints_serial_ != serial_before || session_stopped_;
+                },
+                "buffer constraints update"))
+            return false;
+        if (session_stopped_ || !CaptureOnce(deadline)) return false;
+    }
 
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    out.data         = static_cast<const uint8_t*>(shm_data_);
-    out.stride       = buf_width_ * 4;
-    out.width        = buf_width_;
-    out.height       = buf_height_;
-    out.av_pix_fmt   = AV_PIX_FMT_BGR0;
-    out.timestamp_ns = static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
-    return true;
+    const int64_t now_ns =
+        static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
+    return normalizer_.Normalize(
+        static_cast<const uint8_t*>(shm_data_), buf_width_ * 4,
+        buf_width_, buf_height_, shm_format_, false, now_ns, out);
 }
 
-void ExtBackend::Shutdown() { DestroyWayland(); }
+void ExtBackend::Shutdown() {
+    DestroyWayland();
+    normalizer_.Reset();
+}
 
 } // namespace fthr

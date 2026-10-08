@@ -46,6 +46,12 @@ public:
     using PushFn = std::function<void(EncodedPacket)>;
     bool EncodeFrame(const uint8_t* bgra, uint32_t stride,
                      int64_t wall_time_ns, PushFn push_fn);
+    // Same, for a source whose size may differ from EncoderConfig::src_*
+    // (output mode or scale change). The output size stays fixed; the
+    // scaler is rebuilt for the new source size.
+    bool EncodeFrame(const uint8_t* bgra, uint32_t stride,
+                     uint32_t width, uint32_t height,
+                     int64_t wall_time_ns, PushFn push_fn);
 
     // Returns codec extradata (SPS/PPS) needed to write MP4 headers.
     std::vector<uint8_t> GetExtradata() const;
@@ -61,10 +67,13 @@ public:
 
 private:
     bool TryOpen(const char* codec_name, const EncoderConfig& cfg);
+    bool ConfigureScaler(uint32_t src_width, uint32_t src_height);
     bool IsVaapi() const { return codec_ctx_ && codec_ctx_->pix_fmt == AV_PIX_FMT_VAAPI; }
 
     AVCodecContext* codec_ctx_ = nullptr;
     SwsContext*     sws_ctx_   = nullptr;
+    uint32_t        sws_src_width_  = 0;
+    uint32_t        sws_src_height_ = 0;
     AVFrame*        yuv_frame_ = nullptr;
     AVFrame*        hw_frame_  = nullptr;
     AVPacket*       pkt_       = nullptr;
