@@ -300,3 +300,36 @@ def test_get_status_exposes_failure_detail_only_with_backend_failed():
     expected = ('' if sys.platform == 'win32'
                 else "Screen sharing was declined in the desktop's dialog.")
     assert bridge.get_status()['capture_failure_detail'] == expected
+
+
+def test_linux_connect_before_engine_ready_returns_false_without_buffererror():
+    import os
+    import uuid
+
+    import pytest
+
+    if not sys.platform.startswith('linux') or not os.path.isdir('/dev/shm'):
+        pytest.skip('POSIX shared memory in /dev/shm is Linux-only')
+
+    # A private segment shaped like the engine's, still marked uninitialised:
+    # the window between the engine creating the mapping and finishing
+    # startup, which the UI's connect loop polls through.
+    name = f'FTHR_SharedMemory_test_{uuid.uuid4().hex}'
+    path = f'/dev/shm/{name}'
+    with open(path, 'wb') as handle:
+        handle.write(b'\0' * ctypes.sizeof(SharedMemoryLayout))
+    try:
+        # Bypass the process-wide singleton so no real bridge state leaks.
+        bridge = object.__new__(CaptureBridge)
+        bridge._initialized = False
+        bridge._linux_mmap = None
+        bridge._layout = None
+        bridge._logged_read_errors = set()
+        bridge.SHARED_MEM_NAME = name
+
+        assert bridge._initialize_linux() is False   # used to raise BufferError
+        assert bridge._layout is None
+        assert bridge._linux_mmap is None
+        assert bridge._initialize_linux() is False   # and stays retryable
+    finally:
+        os.unlink(path)
