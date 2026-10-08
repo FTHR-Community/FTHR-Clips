@@ -26,17 +26,17 @@ This is a narrow qualification, not a promise of universal Linux support:
 
 ## Install the AppImage
 
-Download the current Linux pre-release from the [GitHub release page](https://github.com/FTHR-Community/FTHR-Clips/releases/tag/v1.1.1-alpha):
+Download the current Linux pre-release from the [GitHub release page](https://github.com/FTHR-Community/FTHR-Clips/releases/tag/v1.1.2-alpha):
 
-- [FTHRClips-1.1.1-alpha-x86_64.AppImage](https://github.com/FTHR-Community/FTHR-Clips/releases/download/v1.1.1-alpha/FTHRClips-1.1.1-alpha-x86_64.AppImage)
-- [SHA-256 checksum](https://github.com/FTHR-Community/FTHR-Clips/releases/download/v1.1.1-alpha/FTHRClips-1.1.1-alpha-x86_64.AppImage.sha256)
+- [FTHRClips-1.1.2-alpha-x86_64.AppImage](https://github.com/FTHR-Community/FTHR-Clips/releases/download/v1.1.2-alpha/FTHRClips-1.1.2-alpha-x86_64.AppImage)
+- [SHA-256 checksum](https://github.com/FTHR-Community/FTHR-Clips/releases/download/v1.1.2-alpha/FTHRClips-1.1.2-alpha-x86_64.AppImage.sha256)
 
 Then verify and run:
 
 ```bash
-sha256sum -c FTHRClips-1.1.1-alpha-x86_64.AppImage.sha256
-chmod +x FTHRClips-1.1.1-alpha-x86_64.AppImage
-./FTHRClips-1.1.1-alpha-x86_64.AppImage
+sha256sum -c FTHRClips-1.1.2-alpha-x86_64.AppImage.sha256
+chmod +x FTHRClips-1.1.2-alpha-x86_64.AppImage
+./FTHRClips-1.1.2-alpha-x86_64.AppImage
 ```
 
 If FUSE is unavailable:
