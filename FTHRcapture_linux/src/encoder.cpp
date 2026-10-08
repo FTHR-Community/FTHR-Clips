@@ -20,9 +20,6 @@ static bool IsVaapiSymbolSupported() {
     void* h = dlopen("libva.so.2", RTLD_LAZY | RTLD_LOCAL);
     if (!h) return false;
     void* sym = dlsym(h, "vaMapBuffer2");
-    if (!sym) {
-        sym = dlsym(h, "vaMapBuffer");
-    }
     dlclose(h);
     return sym != nullptr;
 }
