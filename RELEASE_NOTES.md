@@ -10,6 +10,31 @@ This release includes a Linux audio/video synchronization fix. Desktop audio
 capture now compensates for measured PulseAudio delivery latency and uses a
 bounded recording buffer before extracting replay audio.
 
+## Linux fixes in this build
+
+- **Launches on stable distributions again.** Built on Ubuntu 22.04 with a
+  GLIBC 2.35 ceiling over every bundled binary (fixes the `GLIBC_2.44` error
+  on Fedora, Ubuntu and similar, #28).
+- **numpy and Qt Multimedia load inside the AppImage.** Packaging left four
+  stripped wheel libraries unloadable, which broke playback mixing, the clip
+  editor, microphone recording and the webcam overlay (#53).
+- **Capture survives resolution, scale and HDR changes** without corrupting
+  frames or clearing the replay buffer. Compositors offering RGB-order or
+  10-bit buffers, or y-inverted frames, now record with correct colours and
+  orientation (#51).
+- **Desktop audio reconnects** after the audio server drops and follows the
+  default output when you switch to headphones or Bluetooth. Audio gaps are
+  saved as silence, so sound stays in sync with video (#51).
+- **The app no longer fails to connect** to a running engine when it polls
+  during engine startup (#50).
+- **Game detection toggle** no longer errors when changed at runtime, and
+  reports when the tools it needs are missing (#49).
+- A capture failure now reports its reason after a focus pause (#49).
+
+Known Linux limitations: screenshots on KDE Plasma and GNOME Wayland (#52),
+automatic hotkeys outside Hyprland (#16), and window/game-specific capture
+(the whole output is captured).
+
 ## What is in here
 
 - Replay capture and transactional clip saving
