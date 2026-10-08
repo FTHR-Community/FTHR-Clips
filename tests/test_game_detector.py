@@ -55,3 +55,36 @@ def test_game_closed_emitted_when_window_disappears(qtbot):
     detector._poll()       # 1001 gone
 
     assert closed == [1001]
+
+
+def test_set_enabled_starts_and_stops_polling(qtbot):
+    detector = GameDetector(enumerate_fn=lambda: [])
+
+    assert detector.set_enabled(True) is True
+    assert detector._timer.isActive()
+
+    assert detector.set_enabled(False) is True
+    assert not detector._timer.isActive()
+
+
+def test_set_enabled_reports_missing_linux_tools(qtbot, monkeypatch):
+    from core import game_detector
+
+    monkeypatch.setattr(game_detector, '_linux_enumeration_available', lambda: False)
+    detector = GameDetector(enumerate_fn=game_detector._enumerate_linux_windows)
+
+    assert detector.set_enabled(True) is False
+    assert not detector._timer.isActive()
+
+
+def test_xdotool_enumeration_requires_xprop(monkeypatch):
+    from core import game_detector
+
+    monkeypatch.setattr(game_detector.linux_tools, 'available',
+                        lambda name: name == 'xdotool')
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError('must not shell out without xprop')
+
+    monkeypatch.setattr(game_detector.subprocess, 'run', fail)
+    assert game_detector._enumerate_via_xdotool() == []
