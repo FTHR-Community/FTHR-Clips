@@ -478,7 +478,7 @@ if(BUILD_TESTING)
     target_link_libraries(fthr_linux_vaapi_encoder_test PRIVATE
         $<$<BOOL:${FTHR_FFMPEG_BUNDLED}>:${FTHR_FFMPEG_LINK_LIBRARIES}>
         $<$<NOT:$<BOOL:${FTHR_FFMPEG_BUNDLED}>>:PkgConfig::FFMPEG>
-        pthread)
+        pthread ${CMAKE_DL_LIBS})
     target_compile_options(fthr_linux_vaapi_encoder_test PRIVATE
         -Wall -Wextra -Wpedantic -UNDEBUG)
     target_link_options(fthr_linux_vaapi_encoder_test PRIVATE
@@ -503,7 +503,7 @@ if(BUILD_TESTING)
     target_link_libraries(fthr_linux_encoder_timestamp_test PRIVATE
         $<$<BOOL:${FTHR_FFMPEG_BUNDLED}>:${FTHR_FFMPEG_LINK_LIBRARIES}>
         $<$<NOT:$<BOOL:${FTHR_FFMPEG_BUNDLED}>>:PkgConfig::FFMPEG>
-        pthread)
+        pthread ${CMAKE_DL_LIBS})
     target_compile_options(fthr_linux_encoder_timestamp_test PRIVATE
         -Wall -Wextra -Wpedantic -UNDEBUG)
     target_link_options(fthr_linux_encoder_timestamp_test PRIVATE

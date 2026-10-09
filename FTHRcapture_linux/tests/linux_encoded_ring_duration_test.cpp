@@ -77,11 +77,108 @@ void TestRecoveryClearsOldGeneration() {
     assert(snapshot.presentation_start_pts == snapshot.packets.front().pts);
 }
 
+void TestMeasuredMemoryGuardPruning() {
+    constexpr int64_t second = 1'000'000'000LL;
+    constexpr int fps = 60;
+    // Set 60-second time window, but limit memory to 1 MB (1024 * 1024 bytes)
+    constexpr size_t max_bytes = 1024 * 1024;
+    fthr::EncodedRingBuffer ring(60'000, fps, max_bytes);
+    assert(ring.MaxBytes() == max_bytes);
+
+    // Each packet has 64 KB of payload (simulating high-bitrate video stream)
+    std::vector<uint8_t> payload(64 * 1024, 0xAA);
+    // Push 30 packets = 30 * 64 KB = 1920 KB (> 1 MB budget)
+    for (int frame = 0; frame < 30; ++frame) {
+        fthr::EncodedPacket pkt;
+        pkt.data = payload;
+        pkt.pts = frame;
+        pkt.dts = frame;
+        pkt.is_keyframe = (frame % 5 == 0);
+        pkt.wall_time_ns = frame * second / fps;
+        ring.Push(std::move(pkt));
+        // Hard resource guard invariant: total bytes must NEVER exceed max_bytes
+        assert(ring.TotalBytes() <= max_bytes);
+    }
+
+    // At 64 KB per packet, a 1 MB limit can retain at most 16 packets
+    assert(ring.PacketCount() <= 16);
+    assert(ring.TotalBytes() <= max_bytes);
+
+    // Snapshot should still work correctly and align to a keyframe within retained packets
+    const auto snapshot = ring.TakeSnapshot(30'000, 29 * second / fps);
+    assert(!snapshot.packets.empty());
+    assert(snapshot.packets.front().is_keyframe);
+    // Earlier packets were pruned strictly by the measured byte limit, not duration
+    assert(snapshot.packets.front().pts > 0);
+}
+
+void TestMeasuredMemoryGuardUnderBudget() {
+    constexpr int64_t second = 1'000'000'000LL;
+    constexpr int fps = 60;
+    constexpr size_t max_bytes = 10 * 1024 * 1024; // 10 MB budget
+    fthr::EncodedRingBuffer ring(2'000, fps, max_bytes); // 2-second time window
+
+    std::vector<uint8_t> payload(1024, 0xBB); // 1 KB each
+    // Push 3 seconds of frames (180 frames = 180 KB, far below 10 MB)
+    for (int frame = 0; frame < 180; ++frame) {
+        fthr::EncodedPacket pkt;
+        pkt.data = payload;
+        pkt.pts = frame;
+        pkt.dts = frame;
+        pkt.is_keyframe = (frame % 30 == 0);
+        pkt.wall_time_ns = frame * second / fps;
+        ring.Push(std::move(pkt));
+    }
+
+    // Since memory was well within budget, pruning was purely duration-based
+    assert(ring.TotalBytes() <= max_bytes);
+    assert(ring.PacketCount() >= 115 && ring.PacketCount() <= 125);
+}
+
+void TestDynamicMemoryLimitReduction() {
+    constexpr int64_t second = 1'000'000'000LL;
+    constexpr int fps = 60;
+    fthr::EncodedRingBuffer ring(60'000, fps, 10 * 1024 * 1024);
+
+    std::vector<uint8_t> payload(100 * 1024, 0xCC); // 100 KB
+    for (int frame = 0; frame < 20; ++frame) {
+        fthr::EncodedPacket pkt;
+        pkt.data = payload;
+        pkt.pts = frame;
+        pkt.dts = frame;
+        pkt.is_keyframe = (frame % 5 == 0);
+        pkt.wall_time_ns = frame * second / fps;
+        ring.Push(std::move(pkt));
+    }
+    assert(ring.TotalBytes() == 20 * 100 * 1024);
+
+    // Dynamically clamp memory limit to 500 KB (5 packets)
+    ring.SetMaxBytes(500 * 1024);
+    assert(ring.TotalBytes() <= 500 * 1024);
+    assert(ring.PacketCount() == 5);
+}
+
+void TestRingBufferReallocationPreservesMemoryLimit() {
+    size_t ring_ms = (30 + 5) * 1000;
+    size_t max_bytes = 2048ULL * 1024ULL * 1024ULL;
+    auto* ring = new fthr::EncodedRingBuffer(ring_ms, 60, max_bytes);
+    assert(ring->MaxBytes() == max_bytes);
+    delete ring;
+
+    ring = new fthr::EncodedRingBuffer(ring_ms, 60, max_bytes);
+    assert(ring->MaxBytes() == max_bytes);
+    delete ring;
+}
+
 } // namespace
 
 int main() {
     TestFullTimestampWindowUsesPriorKeyframe();
     TestVariableTimingAndDelayedPublication();
     TestRecoveryClearsOldGeneration();
+    TestMeasuredMemoryGuardPruning();
+    TestMeasuredMemoryGuardUnderBudget();
+    TestDynamicMemoryLimitReduction();
+    TestRingBufferReallocationPreservesMemoryLimit();
     return 0;
 }
