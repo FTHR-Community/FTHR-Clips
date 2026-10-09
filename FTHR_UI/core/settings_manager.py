@@ -118,6 +118,8 @@ class SettingsManager:
             'clips_directory': str(default_clips_directory()),
             'imported_clip_folders': [],  # additional folders from other clipping software
             'recording_directory': str(default_clips_directory() / 'Recordings'),
+            'deduplication_count': 0,
+            'deduplication_saved_bytes': 0,
             'selected_export_preset': 'discord',
             # Encoder backend + codec + preset. ``auto`` keeps platform-native
             # selection; explicit keys are populated only after a runtime probe.
@@ -183,6 +185,8 @@ class SettingsManager:
                     'x': 0.30, 'y': 0.70, 'w': 0.40, 'h': 0.25,
                 },
             },
+            'merge_overlapping_clips': False,
+            'replay_storage_mode': 'auto',  # 'auto' | 'memory' | 'disk'
             # Empty means the bundled desktop screenshot is used. A user
             # selected image is stored here so the preview remains portable
             # and can be reset to the standard background at any time.

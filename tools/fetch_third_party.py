@@ -20,6 +20,7 @@ import sys
 import stat
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -50,20 +51,33 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _download(url: str, dest: Path) -> None:
+def _download(url: str, dest: Path, max_attempts: int = 5) -> None:
     print(f'  downloading {url}')
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url) as resp, dest.open('wb') as out:
-        total = int(resp.headers.get('Content-Length') or 0)
-        done = 0
-        while chunk := resp.read(1 << 20):
-            out.write(chunk)
-            done += len(chunk)
-            if total:
-                pct = done * 100 // total
-                print(f'\r  {pct:3d}%  {done / 1e6:.1f} / {total / 1e6:.1f} MB',
-                      end='', flush=True)
-        print()
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp, dest.open('wb') as out:
+                total = int(resp.headers.get('Content-Length') or 0)
+                done = 0
+                while chunk := resp.read(1 << 20):
+                    out.write(chunk)
+                    done += len(chunk)
+                    if total:
+                        pct = done * 100 // total
+                        print(f'\r  {pct:3d}%  {done / 1e6:.1f} / {total / 1e6:.1f} MB',
+                              end='', flush=True)
+                print()
+                return
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_err = exc
+            print(f'\n  download failed (attempt {attempt}/{max_attempts}): {exc}',
+                  file=sys.stderr)
+            dest.unlink(missing_ok=True)
+            if attempt < max_attempts:
+                time.sleep(min(2 ** attempt, 16))
+    raise RuntimeError(
+        f'could not download {url} after {max_attempts} attempts: {last_err}')
 
 
 def _verify_download(path: Path, asset: dict[str, object]) -> None:

@@ -73,10 +73,40 @@ void TestInsufficientHistoryAndRecoveryReset() {
     assert(recovered.packets.front().wall_qpc >= 100 * qpc_frequency);
 }
 
+void TestThirtyMinuteReplayBufferStress() {
+    constexpr uint32_t fps = 60;
+    constexpr int64_t qpc_frequency = 6000;
+    constexpr uint8_t byte = 0x01;
+    // Capacity for 30 minutes (1800s * 60fps = 108,000 frames)
+    fthr::EncodedRingBuffer ring(110000, fps, qpc_frequency);
+    fthr::EncodedVideoConfig config;
+    config.width = 1920;
+    config.height = 1080;
+    config.frame_rate = {60, 1};
+    config.time_base = {1, 60};
+    assert(ring.SetVideoConfig(config));
+
+    constexpr int64_t base_qpc = 1000;
+    constexpr int64_t total_frames = 1800 * fps;
+    for (int64_t frame = 0; frame <= total_frames; ++frame) {
+        ring.Push(
+            &byte,
+            1,
+            frame,
+            frame % (fps * 2) == 0, // keyframe every 2 seconds
+            base_qpc + frame * 100);
+    }
+    const auto snapshot = ring.TakeSnapshotByTime(1800, base_qpc + total_frames * 100);
+    assert(snapshot.full_history);
+    assert(!snapshot.packets.empty());
+    assert(snapshot.packets.front().is_keyframe);
+}
+
 } // namespace
 
 int main() {
     TestExactAudit042Regression();
     TestInsufficientHistoryAndRecoveryReset();
+    TestThirtyMinuteReplayBufferStress();
     return 0;
 }

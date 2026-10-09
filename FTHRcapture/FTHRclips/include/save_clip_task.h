@@ -46,6 +46,9 @@ namespace fthr {
         std::wstring output_path;
         uint32_t     duration_seconds = 0;
 
+        // Disk-spooled replay merge path
+        bool                use_spooler = false;
+
         // VIDEO: Encoded path (NVENC) - use_encoded_path = true
         bool                use_encoded_path = false;
         EncodedRingSnapshot encoded_snapshot;

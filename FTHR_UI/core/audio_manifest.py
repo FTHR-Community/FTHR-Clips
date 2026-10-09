@@ -144,6 +144,7 @@ def rebind_manifest_after_media_replace(media_path: str | Path) -> bool:
         write_manifest_atomic(manifest, media)
         return True
     except (OSError, json.JSONDecodeError, AudioManifestError):
+        # Corrupted or inaccessible manifest cannot be refreshed; return False.
         return False
 
 

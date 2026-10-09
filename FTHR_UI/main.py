@@ -1236,7 +1236,7 @@ class CaptureSettingsPopup(_PopupPanel):
     summary_changed     = Signal(str)   # emitted whenever any value changes
 
     _CLIP_VALUES  = list(NORMAL_CLIP_VALUES)
-    _CLIP_LABELS  = ['5s','10s','15s','30s','45s','1m','1m 30s','2m','3m','4m','5m']
+    _CLIP_LABELS  = ['5s','10s','15s','30s','45s','1m','1m 30s','2m','3m','4m','5m','10m','15m (High RAM)','20m (High RAM)','30m (High RAM)']
     _FPS_VALUES   = list(FPS_VALUES)
     _RES_LABELS   = ['480p','720p','1080p','1440p','Source']
     _RES_KEYS     = ['480p','720p','1080p','1440p','source']
@@ -1520,6 +1520,24 @@ class CaptureSettingsPopup(_PopupPanel):
 
     def _on_clip_changed(self, idx):
         self.cur_clip = self._CLIP_VALUES[idx]
+        if self.cur_clip >= 900:
+            try:
+                from ui.dialogs import FthrMessageDialog
+                minutes = self.cur_clip // 60
+                msg = (
+                    f'Selecting a {minutes}-minute buffer requires substantial video history capacity.\n\n'
+                    'On Windows, FTHR-Clips utilizes temporary disk streaming to minimize memory pressure.\n'
+                    'On Linux, in-memory replay enforces a measured budget guard (max 2 GB) to protect system stability.\n'
+                    'Ensure your system has adequate memory and disk space for smooth operation.'
+                )
+                FthrMessageDialog.warning(
+                    self,
+                    'EXTENDED REPLAY BUFFER',
+                    msg,
+                )
+            except Exception:
+                # Warning dialog failure is non-fatal in headless or mock test contexts
+                pass
         self.sm.set('clip_length', self.cur_clip)
         self.sm.save_settings()
         self._mark_restart()
@@ -3273,6 +3291,20 @@ class MainWindow(QMainWindow):
         # Pre-create the special folders so users can find them right away
         for _folder in ('Desktop', 'Recordings', 'Exported', 'Shared', 'Screenshots'):
             (clips_root / _folder).mkdir(parents=True, exist_ok=True)
+
+        # Temporary disk-spooled replay segments directory
+        temp_replay_dir = clips_root / '.fthr-temp-replay'
+        temp_replay_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            for _item in temp_replay_dir.glob('*.mp4*'):
+                try:
+                    _item.unlink(missing_ok=True)
+                except OSError:
+                    # Stale replay segments might be locked by another process; ignore.
+                    pass
+        except OSError:
+            # Replay temp directory enumeration failure is non-fatal on startup.
+            pass
 
         # A hard kill can leave the engine's same-directory transaction file.
         # Only old, FTHR-named partials are removed; fresh files may belong to a
@@ -5146,6 +5178,13 @@ class MainWindow(QMainWindow):
             self._engine_startup_output = EngineLogCapture(
                 engine_log_path, self._diagnostics)
             engine_environment = os.environ.copy()
+            _clips_root = clips_directory_from(self.settings_manager)
+            _temp_replay_dir = _clips_root / '.fthr-temp-replay'
+            _temp_replay_dir.mkdir(parents=True, exist_ok=True)
+            engine_environment['FTHR_REPLAY_TEMP_DIR'] = str(_temp_replay_dir.resolve())
+            if launch_config.buffer_seconds >= 600:
+                engine_environment['FTHR_REPLAY_DISK_SPOOL'] = '1'
+                engine_environment['FTHR_REPLAY_RETENTION_SECONDS'] = str(launch_config.buffer_seconds)
             if self._diagnostics is not None:
                 engine_environment['FTHR_DIAGNOSTIC_SESSION_ID'] = (
                     self._diagnostics.session_id)
@@ -5320,6 +5359,20 @@ class MainWindow(QMainWindow):
                     })
                 def _on_failed():
                     self.stop_engine()
+                    current_mon = str(self.settings_manager.get('capture_monitor', '') or '')
+                    if current_mon and (
+                        failure.code == 'CAPTURE_ADAPTER_UNSUPPORTED'
+                        or 'selected monitor has no matching output' in failure.detail.lower()
+                        or 'output_resolution_failed' in failure.detail.lower()
+                    ):
+                        print('[EngineRecovery] Saved capture_monitor path failed to resolve. Resetting to auto...')
+                        self.settings_manager.set('capture_monitor', '')
+                        self.settings_manager.save_settings()
+                        self._capture_config.fail(failure.detail)
+                        self._restart_pending = False
+                        self._set_capture_apply_state(False)
+                        self._restart_capture_engine()
+                        return
                     self._capture_config.fail(failure.detail)
                     self._restart_pending = False
                     self._set_capture_apply_state(False)
@@ -8429,6 +8482,19 @@ class MainWindow(QMainWindow):
         if self._manual_record_path is not None:
             self._finalize_manual_recording_file(publish_ui=False)
         self._shutdown_mark('EngineStopped')
+        try:
+            _clips_root = clips_directory_from(self.settings_manager)
+            _temp_replay_dir = _clips_root / '.fthr-temp-replay'
+            if _temp_replay_dir.exists():
+                for _item in _temp_replay_dir.glob('*.mp4*'):
+                    try:
+                        _item.unlink(missing_ok=True)
+                    except OSError:
+                        # Stale segment may still be locked during immediate exit; ignore.
+                        pass
+        except OSError:
+            # Temporary replay directory cleanup on shutdown is best-effort.
+            pass
 
         if self._tray_icon is not None:
             self._tray_icon.hide()
@@ -9189,6 +9255,54 @@ class _SettingsPage(QWidget):
         self.clips_directory_edit.setText(resolved)
         self.clips_directory_changed.emit(resolved)
 
+    def _format_saved_space(self, num_bytes: int) -> str:
+        if num_bytes <= 0:
+            return '0 MB'
+        mb = num_bytes / (1024 * 1024)
+        if mb < 1024:
+            return f"{mb:.1f} MB"
+        gb = mb / 1024
+        return f"{gb:.2f} GB"
+
+    def _update_dedup_stats_display(self):
+        if not hasattr(self, 'dedup_stats_badge') or self.dedup_stats_badge is None:
+            return
+        count = int(self.sm.get('deduplication_count', 0))
+        bytes_saved = int(self.sm.get('deduplication_saved_bytes', 0))
+        if count <= 0 or bytes_saved <= 0:
+            self.dedup_stats_badge.setVisible(False)
+            return
+
+        self.dedup_stats_badge.setVisible(True)
+        saved_str = self._format_saved_space(bytes_saved)
+        clip_str = "CLIPS" if count != 1 else "CLIP"
+        self.dedup_stats_badge.setText(f"DEDUPLICATED: {count} {clip_str}   •   SAVED: {saved_str}")
+        self.dedup_stats_badge.setToolTip(
+            f"Total deduplication activity: {count} clip pair(s) merged, "
+            f"reclaiming {saved_str} of disk space."
+        )
+
+    def _on_dedup_completed(self, success_count: int, bytes_saved: int):
+        cur_count = int(self.sm.get('deduplication_count', 0)) + int(success_count)
+        cur_bytes = int(self.sm.get('deduplication_saved_bytes', 0)) + int(bytes_saved)
+        self.sm.set('deduplication_count', cur_count)
+        self.sm.set('deduplication_saved_bytes', cur_bytes)
+        self.sm.save_settings()
+        self._update_dedup_stats_display()
+
+    def _on_deduplicate_clicked(self):
+        try:
+            from ui.deduplication_dialog import ClipDeduplicationDialog
+            dlg = ClipDeduplicationDialog(clips_directory_from(self.sm), self)
+            dlg.deduplication_completed.connect(self._on_dedup_completed)
+            dlg.exec()
+            self.imported_folders_changed.emit()
+            self._update_dedup_stats_display()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f'[Deduplication] Failed to open deduplication dialog: {e}')
+
     def _on_recording_folder_browse(self):
         current = str(self.sm.get(
             'recording_directory', clips_directory_from(self.sm) / 'Recordings'))
@@ -9377,6 +9491,45 @@ class _SettingsPage(QWidget):
             'Choose where manual recordings are written.',
             self._on_recording_folder_browse)
         layout.addWidget(recording_row)
+        layout.addSpacing(8)
+
+        dedup_row = QHBoxLayout()
+        dedup_row.setSpacing(12)
+        self.dedup_btn = QPushButton('DEDUPLICATE OVERLAPPING CLIPS')
+        set_theme_style(self.dedup_btn, button_secondary_qss)
+        self.dedup_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.dedup_btn.setToolTip('Scan and merge clips that share frames to free up hard drive space')
+        self.dedup_btn.clicked.connect(self._on_deduplicate_clicked)
+        dedup_row.addWidget(self.dedup_btn)
+
+        self.dedup_stats_badge = QLabel()
+        self.dedup_stats_badge.setObjectName('dedupStatsBadge')
+        set_theme_style(
+            self.dedup_stats_badge,
+            lambda: (
+                f"QLabel#dedupStatsBadge {{"
+                f"  color: {Colors.ACCENT};"
+                f"  background: {Colors.ACCENT_SOFT};"
+                f"  border: 1px solid {Colors.ACCENT_DIM};"
+                f"  border-radius: 4px;"
+                f"  padding: 5px 12px;"
+                f"  font-family: {Fonts.DISPLAY};"
+                f"  font-size: {Fonts.SIZE_LABEL}px;"
+                f"  font-weight: bold;"
+                f"  letter-spacing: 1px;"
+                f"}}"
+            ),
+        )
+        self._update_dedup_stats_display()
+        dedup_row.addWidget(self.dedup_stats_badge)
+
+        dedup_row.addStretch()
+        layout.addLayout(dedup_row)
+        layout.addSpacing(4)
+
+        dedup_info = QLabel('Find clips recorded in close succession and merge duplicate ranges to save disk space')
+        set_theme_style(dedup_info, lambda: label_body(Colors.TEXT_MUTED, Fonts.SIZE_MICRO))
+        layout.addWidget(dedup_info)
 
         # Import Clips --
         layout.addSpacing(24)

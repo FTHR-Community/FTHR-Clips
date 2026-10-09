@@ -3,6 +3,8 @@ import ctypes, json, math, os, sys, threading, subprocess, time
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from enum import Enum
+
+EXPORT_CANCELLED_SIGNAL_MSG = "<CANCEL_ABORT>"
 from core.ffmpeg_tools import (
     FFmpegUnavailable,
     get_ffmpeg_exe,
@@ -2981,6 +2983,10 @@ class ShareWindow(QDialog):
             output_size_bytes=(os.path.getsize(out) if output_exists else 0))
         if result.state is ExportState.COMPLETED:
             self._export_sig.emit(True, out)
+        elif result.state is ExportState.CANCELLED or getattr(self, '_cancelled', False) or (
+                hasattr(self, '_export_cancel') and self._export_cancel.is_set()):
+            if not getattr(self, '_cancelled', False):
+                self._export_sig.emit(False, EXPORT_CANCELLED_SIGNAL_MSG)
         elif not self._cancelled:
             detail = result.detail
             if result.stderr_tail:
@@ -3015,6 +3021,16 @@ class ShareWindow(QDialog):
             self._drag_hint.raise_()
             QTimer.singleShot(300, self._animate_popup_in)
         else:
+            if msg == EXPORT_CANCELLED_SIGNAL_MSG:
+                self._fname_lbl.setText('Export cancelled')
+                self._fname_lbl.setStyleSheet(
+                    f'color: {Colors.TEXT_MUTED}; font-size: 8px; '
+                    f'font-family: {Fonts.DISPLAY}; background: transparent;')
+                self._status_badge.setText('CANCELLED')
+                self._status_badge.setStyleSheet(
+                    f'color: {Colors.TEXT_MUTED}; font-size: 7px; font-weight: bold; '
+                    f'font-family: {Fonts.DISPLAY}; letter-spacing: 2px; background: transparent;')
+                return
             short = msg if len(msg) <= 44 else msg[:42] + '…'
             self._fname_lbl.setText(short)
             self._fname_lbl.setStyleSheet(
@@ -6525,7 +6541,10 @@ class ClipViewer(QDialog):
             output_size_bytes=(os.path.getsize(out) if output_exists else 0))
         if result.state is ExportState.COMPLETED:
             self._export_done.emit(True, out)
-        elif not getattr(self, '_cancelled', False):
+        elif result.state is ExportState.CANCELLED or (
+                hasattr(self, '_export_cancel') and self._export_cancel.is_set()):
+            self._export_done.emit(False, EXPORT_CANCELLED_SIGNAL_MSG)
+        elif not getattr(self, '_closing', False):
             detail = result.detail
             if result.stderr_tail:
                 detail = next((line for line in reversed(

@@ -186,13 +186,16 @@ class SaveStateMachine:
                       f'{self._current.state.value}): {_short(output_path)}')
             return SubmitResult(accepted=False, reason=RejectReason.BUSY)
 
+        # Scale completion deadline with duration: minimum 60s, plus 0.25s per clip second
+        # (e.g., 30m / 1800s clip gets 450s completion deadline instead of timing out at 60s)
+        completion_timeout = max(self._completion_timeout_s, duration_seconds * 0.25)
         op = SaveOperation(
             op_id=self._next_op_id,
             output_path=output_path,
             duration_seconds=duration_seconds,
             requested_at=now,
             ack_deadline=now + self._ack_timeout_s,
-            completion_deadline=now + self._completion_timeout_s,
+            completion_deadline=now + completion_timeout,
             context=dict(context),
         )
         self._next_op_id += 1

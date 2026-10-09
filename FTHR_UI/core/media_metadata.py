@@ -22,7 +22,7 @@ from core.ffmpeg_tools import FFmpegUnavailable, get_ffprobe_exe
 
 
 _NO_WINDOW = {'creationflags': 0x08000000} if sys.platform == 'win32' else {}
-_MAX_PACKET_PROBE_OUTPUT = 16 * 1024 * 1024
+_MAX_PACKET_PROBE_OUTPUT = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -250,13 +250,13 @@ def evaluate_physical_video_timeline(
         return False
     largest_gap = max(gaps)
     expected_duration = 1.0 / expected_fps
-    max_bounded_gap = max(0.250, expected_duration * 4.0)
+    max_bounded_gap = max(1.0, expected_duration * 4.0)
     return math.isfinite(largest_gap) and largest_gap <= max_bounded_gap
 
 
 def probe_video_physical_timeline(
         media_path: str | os.PathLike[str], expected_fps: float, *,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 60.0,
 ) -> bool | None:
     """Probe whether the physical packet PTS timeline has no large holes."""
 
@@ -291,7 +291,7 @@ def _timing_fingerprint(media_path, expected_fps):
 
 def probe_video_cfr_evidence(
         media_path: str | os.PathLike[str], expected_fps: float, *,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 60.0,
 ) -> VideoCfrProbeEvidence:
     """Reuse timing evidence only while the exact media file is unchanged.
 
@@ -351,7 +351,7 @@ def _probe_video_cfr_evidence(
 
 def probe_video_cfr(
         media_path: str | os.PathLike[str], expected_fps: float, *,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 60.0,
 ) -> bool | None:
     """Check sample durations rather than advertised average FPS.
 

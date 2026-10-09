@@ -148,10 +148,12 @@ a = Analysis(
         'ui.screenshot_editor',
         'ui.style',
         'ui.upload_settings_widget',
+        'ui.deduplication_dialog',
         # Core submodules
         'core.audio_mixer',
         'core.camera_recorder',
         'core.capture_bridge',
+        'core.clip_deduplicator',
         'core.focus_monitor',
         'core.ffmpeg_playback',
         'core.game_detector',

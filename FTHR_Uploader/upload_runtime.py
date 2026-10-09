@@ -30,8 +30,10 @@ _RETRY_DELAYS = (5, 15, 45)
 _PROVIDER_LIMIT_BYTES = {
     'lustful': 100 * 1024 * 1024,
     'catbox': 200 * 1024 * 1024,
+    'discord_webhook': 10 * 1024 * 1024,
 }
 _CUSTOM_PROVIDER = 'custom'
+_DISCORD_WEBHOOK_PROVIDER = 'discord_webhook'
 
 
 class UploadResponseError(RuntimeError):
@@ -73,6 +75,8 @@ class UploadRuntime:
                     if provider == 'catbox'
                     else self._upload_lustful(path)
                     if provider == 'lustful'
+                    else self._upload_discord_webhook(path)
+                    if provider == _DISCORD_WEBHOOK_PROVIDER
                     else self._upload_custom(path)
                 )
                 entry = {
@@ -112,6 +116,8 @@ class UploadRuntime:
             return True, f'Lustful connected ({data.get("role", "user")}).'
         if provider == _CUSTOM_PROVIDER:
             return self._test_custom_connection()
+        if provider == _DISCORD_WEBHOOK_PROVIDER:
+            return self._test_discord_webhook_connection()
         request = urllib.request.Request(CATBOX_URL, method='HEAD')
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
@@ -127,8 +133,10 @@ class UploadRuntime:
             provider = 'lustful'
         if provider in {'own_server', 'your_server'}:
             provider = _CUSTOM_PROVIDER
-        if provider not in {'catbox', 'lustful', _CUSTOM_PROVIDER}:
-            raise ValueError('Only Catbox, Lustful, and your server are supported.')
+        if provider in {'discord', 'discord_webhook'}:
+            provider = _DISCORD_WEBHOOK_PROVIDER
+        if provider not in {'catbox', 'lustful', _CUSTOM_PROVIDER, _DISCORD_WEBHOOK_PROVIDER}:
+            raise ValueError('Only Catbox, Lustful, Discord Webhook, and your server are supported.')
         return provider
 
     def _hardware_id(self) -> str:
@@ -248,6 +256,63 @@ class UploadRuntime:
         except Exception as exc:
             return False, f'Could not reach your server: {exc}'
 
+    def _upload_discord_webhook(self, path: Path) -> dict[str, Any]:
+        raw_url = _discord_webhook_url(self.settings)
+        parsed = urllib.parse.urlparse(raw_url)
+        query = urllib.parse.parse_qs(parsed.query)
+        query['wait'] = ['true']
+        new_query = urllib.parse.urlencode(query, doseq=True)
+        request_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
+
+        payload = json.dumps({'content': f'🎬 New clip: {path.name}'})
+        fields = {'payload_json': payload}
+
+        status, raw = _multipart_post(
+            request_url,
+            fields,
+            'file',
+            path,
+            headers={},
+            require_https=True,
+        )
+        text = raw.decode('utf-8', errors='replace').strip()
+        if not 200 <= status < 300:
+            raise UploadResponseError(
+                text or f'Discord returned HTTP {status}.', status)
+
+        response_url = ''
+        try:
+            data = json.loads(text)
+            if (isinstance(data, dict)
+                    and isinstance(data.get('attachments'), list)
+                    and data['attachments']):
+                response_url = str(data['attachments'][0].get('url') or '').strip()
+        except ValueError:
+            pass
+
+        return {
+            'url': response_url or 'Discord upload complete.',
+            'raw_url': response_url,
+            'response': text[:4096],
+            'favorite': False,
+        }
+
+    def _test_discord_webhook_connection(self) -> tuple[bool, str]:
+        url = _discord_webhook_url(self.settings)
+        request = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'FTHR-Clips/Desktop-Uploader'},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return True, f'Discord Webhook reachable (HTTP {response.status}).'
+        except urllib.error.HTTPError as exc:
+            if exc.code in {200, 204}:
+                return True, f'Discord Webhook reachable (HTTP {exc.code}).'
+            return False, f'Discord Webhook returned HTTP {exc.code}.'
+        except Exception as exc:
+            return False, f'Could not reach Discord Webhook: {exc}'
+
     def _record_success(self, path: str, entry: dict[str, Any]) -> None:
         try:
             history = json.loads(HISTORY_FILE.read_text(encoding='utf-8'))
@@ -342,3 +407,21 @@ def _custom_server_headers(settings: dict[str, Any]) -> dict[str, str]:
     if any(character in auth for character in '\r\n'):
         raise ValueError('The authorization header contains an invalid line break.')
     return {'Authorization': auth} if auth else {}
+
+
+def _discord_webhook_url(settings: dict[str, Any]) -> str:
+    url = str(settings.get('discord_active_webhook', '') or settings.get('discord_webhook_url', '') or '').strip()
+    if not url:
+        webhooks = settings.get('discord_webhooks', [])
+        if isinstance(webhooks, list) and webhooks:
+            first = webhooks[0]
+            if isinstance(first, dict):
+                url = str(first.get('url', '')).strip()
+            elif isinstance(first, str):
+                url = first.strip()
+    if not url:
+        raise ValueError('Set a Discord Webhook URL before uploading.')
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() != 'https' or not parsed.hostname:
+        raise ValueError('Discord Webhook URL must use https://.')
+    return url

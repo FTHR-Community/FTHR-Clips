@@ -7,12 +7,19 @@ namespace fthr {
 void EncodedRingBuffer::Push(EncodedPacket packet) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        total_bytes_ += packet.data.size();
         packets_.push_back(std::move(packet));
         while (packets_.size() > 1) {
             const int64_t span_ms =
                 (packets_.back().wall_time_ns - packets_.front().wall_time_ns)
                 / 1'000'000;
-            if (span_ms <= static_cast<int64_t>(max_duration_ms_)) break;
+            const bool duration_exceeded =
+                span_ms > static_cast<int64_t>(max_duration_ms_);
+            const bool memory_exceeded =
+                (max_bytes_ > 0 && total_bytes_ > max_bytes_);
+            if (!duration_exceeded && !memory_exceeded) break;
+
+            total_bytes_ -= packets_.front().data.size();
             packets_.pop_front();
         }
         latest_wall_time_ns_.store(
@@ -73,7 +80,27 @@ size_t EncodedRingBuffer::PacketCount() const {
 void EncodedRingBuffer::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     packets_.clear();
+    total_bytes_ = 0;
     latest_wall_time_ns_.store(0, std::memory_order_release);
+}
+
+size_t EncodedRingBuffer::TotalBytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return total_bytes_;
+}
+
+size_t EncodedRingBuffer::MaxBytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return max_bytes_;
+}
+
+void EncodedRingBuffer::SetMaxBytes(size_t max_bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    max_bytes_ = max_bytes;
+    while (packets_.size() > 1 && max_bytes_ > 0 && total_bytes_ > max_bytes_) {
+        total_bytes_ -= packets_.front().data.size();
+        packets_.pop_front();
+    }
 }
 
 } // namespace fthr

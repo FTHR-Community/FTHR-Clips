@@ -45,7 +45,7 @@ def test_scan_skips_symlinks_without_following_a_loop(tmp_path: Path) -> None:
     result = scan_library(tmp_path)
 
     assert len(result.records) == 1
-    assert result.stats.skipped_reparse_point_count >= 1
+    assert result.stats.skipped_reparse_points >= 1
 
 
 def test_scan_cancellation_does_not_publish_partial_batches(tmp_path: Path) -> None:
