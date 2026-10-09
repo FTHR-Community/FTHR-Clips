@@ -168,6 +168,71 @@ def test_media_without_audio_sources_can_finish_audio_preparation():
     assert ready_updates == [True]
 
 
+def test_autoplay_starts_when_media_and_audio_become_ready(monkeypatch, qtbot):
+    play_requests = []
+    viewer = SimpleNamespace(
+        _closing=False,
+        _player_lifecycle_state=PlayerLifecycleState.PREPARING,
+        _media_ready=True,
+        _audio_preparation_ready=True,
+        _playback_ready=False,
+        _play_when_ready=True,
+        _audio_prepare_timed_out=False,
+        _playback_requested_at=0.0,
+        _audio_prepare_deadline=QTimer(),
+        _playback_stall_timer=QTimer(),
+        _playback_status_lbl=SimpleNamespace(setText=lambda *_: None),
+        _update_video_renderer=lambda: None,
+        _schedule_timeline_thumbnails=lambda: None,
+        _clear_ready_status=lambda: None,
+    )
+    viewer._set_player_state = ClipViewer._set_player_state.__get__(viewer)
+    viewer._toggle_play = lambda: play_requests.append(True)
+    monkeypatch.setattr('ui.clip_viewer.emit_event', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        ClipViewer, '_toggle_play',
+        lambda _viewer: play_requests.append(True),
+    )
+
+    ClipViewer._update_playback_readiness(viewer)
+    qtbot.waitUntil(lambda: play_requests == [True])
+
+    assert viewer._playback_ready is True
+    assert viewer._play_when_ready is False
+
+
+def test_autoplay_disabled_does_not_queue_playback(monkeypatch, qtbot):
+    play_requests = []
+    viewer = SimpleNamespace(
+        _closing=False,
+        _player_lifecycle_state=PlayerLifecycleState.PREPARING,
+        _media_ready=True,
+        _audio_preparation_ready=True,
+        _playback_ready=False,
+        _play_when_ready=False,
+        _audio_prepare_timed_out=False,
+        _playback_requested_at=0.0,
+        _audio_prepare_deadline=QTimer(),
+        _playback_stall_timer=QTimer(),
+        _playback_status_lbl=SimpleNamespace(setText=lambda *_: None),
+        _update_video_renderer=lambda: None,
+        _schedule_timeline_thumbnails=lambda: None,
+        _clear_ready_status=lambda: None,
+    )
+    viewer._set_player_state = ClipViewer._set_player_state.__get__(viewer)
+    monkeypatch.setattr('ui.clip_viewer.emit_event', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        ClipViewer, '_toggle_play',
+        lambda _viewer: play_requests.append(True),
+    )
+
+    ClipViewer._update_playback_readiness(viewer)
+    qtbot.wait(20)
+
+    assert viewer._playback_ready is True
+    assert play_requests == []
+
+
 def test_failed_player_rejects_new_play_command():
     viewer = SimpleNamespace(
         _closing=False,

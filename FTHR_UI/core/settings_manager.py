@@ -131,6 +131,8 @@ class SettingsManager:
             # Clip editor preview. When disabled, visual edits are retained
             # for export but the editor keeps showing the source frame.
             'clip_editor_live_preview': True,
+            # Start clip playback automatically when the viewer opens.
+            'clip_viewer_autoplay': True,
             'game_detection_enabled':  False,
             # Foreground-game handoff. ``auto`` switches capture immediately;
             # ``prompt`` waits for the configured accept/dismiss hotkeys.
