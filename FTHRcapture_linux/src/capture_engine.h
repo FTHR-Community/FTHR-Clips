@@ -23,6 +23,7 @@ struct CaptureConfig {
     uint32_t    target_width;    // 0 = native
     uint32_t    target_height;   // 0 = native
     uint32_t    bitrate_kbps;
+    uint32_t    max_buffer_mb = 2048;
     uint32_t    scaling_mode;    // 0 = stretch, 1 = fit (letterbox)
     std::string target_output;   // wl_output name, e.g. "HDMI-A-1" — empty = first
     bool      multiband_enabled = false;
