@@ -12033,6 +12033,8 @@ def main():
         print('[FTHR] Another instance is already running — exiting.')
         configure_qt_for_linux_ui()
         _app = QApplication(sys.argv)
+        if sys.platform != 'win32':
+            _app.setDesktopFileName('fthr-clips')
         from core.instance_activation import request_existing_instance_activation
         if request_existing_instance_activation():
             print('[Lifecycle] ExistingInstanceActivated')
@@ -12055,6 +12057,9 @@ def main():
     configure_qt_for_linux_ui()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    if sys.platform != 'win32':
+        # Match the installed desktop entry for Wayland taskbar/icon grouping.
+        app.setDesktopFileName('fthr-clips')
     app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)
     app_icon = _load_icon('favicon.ico', 32)

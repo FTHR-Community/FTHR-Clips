@@ -4,5 +4,6 @@ Name=FTHR Clips
 Comment=Game capture and clip management
 Exec=AppRun
 Icon=fthr-clips
-Categories=AudioVideo;Video;Game;
+StartupWMClass=FTHR Clips
+Categories=AudioVideo;Video;
 Terminal=false
