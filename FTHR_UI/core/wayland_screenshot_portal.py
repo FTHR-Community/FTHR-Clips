@@ -18,6 +18,13 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImageReader
 
 
+# Strong references to image workers whose thread may still be running.  A
+# worker is owned by its Python wrapper (it has no Qt parent and is never
+# deleteLater()'d): the registry keeps it alive until the GUI thread has handled
+# its ``finished`` signal, and the owning portal keeps it alive for as long as it
+# references it.  The C++ QThread is therefore only destroyed when the last
+# Python reference goes away, after the thread has finished, and never while a
+# caller still holds the wrapper.
 _ACTIVE_IMAGE_WORKERS: set['_PortalImageWorker'] = set()
 _ACTIVE_IMAGE_WORKERS_LOCK = threading.Lock()
 
@@ -278,16 +285,17 @@ class WaylandScreenshotPortal(QObject):
             self._worker = worker
             with _ACTIVE_IMAGE_WORKERS_LOCK:
                 _ACTIVE_IMAGE_WORKERS.add(worker)
+            # No finished -> deleteLater: that would destroy the C++ object
+            # behind self._worker as soon as any event loop ran after the
+            # thread ended, leaving a dangling wrapper for close() and callers.
             worker.finished.connect(
                 lambda target=worker: _release_image_worker(target))
-            worker.finished.connect(worker.deleteLater)
-            self._worker.succeeded.connect(self._on_image_saved)
-            self._worker.failed.connect(self._on_image_failed)
+            worker.succeeded.connect(self._on_image_saved)
+            worker.failed.connect(self._on_image_failed)
             try:
                 worker.start()
             except RuntimeError:
                 _release_image_worker(worker)
-                worker.deleteLater()
                 self._worker = None
                 raise
         except (OSError, RuntimeError, ValueError) as error:
@@ -390,6 +398,9 @@ class WaylandScreenshotPortal(QObject):
                 worker.cancelled.set()
             if worker.isRunning():
                 worker.wait(1500)
+            # A worker still running after the bounded wait stays alive through
+            # _ACTIVE_IMAGE_WORKERS until its finished signal is handled.
+            self._worker = None
         self._staged_path.unlink(missing_ok=True)
         self.deleteLater()
 
