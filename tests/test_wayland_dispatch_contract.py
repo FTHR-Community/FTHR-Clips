@@ -54,7 +54,10 @@ def test_engine_running_flag_cancels_waits_and_failure_enters_recovery() -> None
     engine = _read("capture_engine.cpp")
     assert "std::make_unique<WlrBackend>(running)" in factory
     assert "std::make_unique<ExtBackend>(running)" in factory
-    assert factory.count("if (cancelled()) return nullptr;") >= 4
+    # Cancellation is checked around every Initialize and between candidates,
+    # so shutdown never waits for a full backend attempt.
+    assert factory.count("if (running && !running->load()) return nullptr;") >= 2
+    assert factory.count("if (cancelled()) return nullptr;") >= 2
     assert "CreateBestBackend(cfg_, &running_, &failure)" in engine
 
     capture_failure = engine.index("if (!backend_->CaptureFrame(raw))")
@@ -68,7 +71,7 @@ def test_engine_running_flag_cancels_waits_and_failure_enters_recovery() -> None
 
 def test_failed_generation_cleans_stale_backend_before_retry() -> None:
     engine = _read("capture_engine.cpp")
-    generation = engine[engine.index("CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration()") :]
+    generation = engine[engine.index("CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration(") :]
     capture_failure = generation.index("if (!backend_->CaptureFrame(raw))")
     shutdown = generation.index("backend_->Shutdown()", capture_failure)
     reset = generation.index("backend_.reset()", shutdown)
