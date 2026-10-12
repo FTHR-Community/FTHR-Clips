@@ -56,6 +56,7 @@ void CaptureEngine::Shutdown() {
         audio_.Stop();
         multi_audio_.Stop();
     }
+    { std::lock_guard<std::mutex> lk(codec_mutex_); encoder_snapshot_ = EncoderSnapshot{}; }
     encoder_.Close();
     delete ring_;
     ring_ = nullptr;
@@ -169,7 +170,15 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration() {
     }
     SetCaptureFailureReason("");
     nvenc_active_.store(codec_used.find("nvenc") != std::string::npos);
-    { std::lock_guard<std::mutex> lk(codec_mutex_); active_codec_ = codec_used; }
+    ++encoder_generation_;
+    encoder_.SetGeneration(encoder_generation_);
+    {
+        std::lock_guard<std::mutex> lk(codec_mutex_);
+        active_codec_ = codec_used;
+        encoder_snapshot_ = EncoderSnapshot{
+            encoder_.GetExtradata(), encoder_.GetWidth(), encoder_.GetHeight(),
+            encoder_.GetCodecID(), encoder_generation_, true};
+    }
     capture_generation_.fetch_add(1);
     capture_health_flags_.store(CAPTURE_HEALTH_ACTIVE);
     if (ring_) ring_->Clear();
@@ -229,6 +238,7 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration() {
 
     backend_->Shutdown();
     backend_.reset();
+    { std::lock_guard<std::mutex> lk(codec_mutex_); encoder_snapshot_ = EncoderSnapshot{}; }
     encoder_.Close();
     nvenc_active_.store(false);
     std::cout << "[Capture] Loop exited. Frames: " << frame_count_.load() << std::endl;
@@ -341,6 +351,17 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
         return false;
     }
 
+    // Copy the codec parameters once. The capture thread may close and
+    // reopen the encoder during recovery while this save runs; muxing one
+    // generation's packets against another's extradata yields a broken file.
+    const EncoderSnapshot enc = TakeEncoderSnapshot();
+    if (!enc.valid) {
+        std::cerr << "[SaveClip] Refused: no open encoder generation" << std::endl;
+        if (error_message)
+            *error_message = "Capture restarted; the replay buffer is still rebuilding";
+        return false;
+    }
+
     const uint32_t duration_ms = duration_sec * 1000;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -349,13 +370,19 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
     const auto publish_timeout = std::chrono::milliseconds(
         std::max<uint32_t>(100, 3000 / std::max<uint32_t>(cfg_.fps, 1)));
     ring_->WaitUntilPublished(save_end_ns, publish_timeout);
-    auto video_snapshot = ring_->TakeSnapshot(duration_ms, save_end_ns);
+    auto video_snapshot = ring_->TakeSnapshot(duration_ms, save_end_ns, enc.generation);
     const auto& video_packets = video_snapshot.packets;
 
     if (video_packets.empty()) {
-        std::cerr << "[SaveClip] No video packets in buffer" << std::endl;
+        const bool ring_empty = ring_->PacketCount() == 0;
+        std::cerr << (ring_empty
+            ? "[SaveClip] No video packets in buffer"
+            : "[SaveClip] Buffer holds only packets of an earlier encoder generation")
+            << std::endl;
         if (error_message)
-            *error_message = "Nothing to save: the replay buffer contains no video packets";
+            *error_message = ring_empty
+                ? "Nothing to save: the replay buffer contains no video packets"
+                : "Capture restarted; the replay buffer is still rebuilding";
         return false;
     }
 
@@ -397,11 +424,11 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
         audio_pcm,
         AudioCapture::kSampleRate,
         AudioCapture::kChannels,
-        encoder_.GetExtradata(),
+        enc.extradata,
         cfg_.fps,
-        encoder_.GetWidth(),
-        encoder_.GetHeight(),
-        encoder_.GetCodecID(),
+        enc.width,
+        enc.height,
+        enc.codec_id,
         shm,
         error_message,
         cfg_.separate_audio_enabled,
