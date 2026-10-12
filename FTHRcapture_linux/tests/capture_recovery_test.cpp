@@ -148,5 +148,19 @@ int main() {
         assert(fthr::NextEncodeDeadline(1'000'000'000, frame_ns, 1'000'000'000 + 3 * frame_ns)
                == 1'000'000'000 + 3 * frame_ns);
     }
+
+    // A transient failure (compositor unreachable, output absent) retries
+    // every 2 s without consuming the three-attempt budget.
+    {
+        fthr::CaptureRecoveryPolicy policy(300);
+        for (int i = 0; i < 10; ++i) {
+            const auto waiting = policy.OnGenerationFailed(0, /*transient=*/true);
+            assert(waiting.retry && !waiting.exhausted);
+            assert(waiting.backoff.count() == 2000);
+        }
+        assert(policy.Attempts() == 0);
+        const auto real = policy.OnGenerationFailed(0, false);
+        assert(real.retry && real.attempt == 1 && real.backoff.count() == 250);
+    }
     return 0;
 }

@@ -72,14 +72,14 @@ void CaptureEngine::CaptureLoop() {
         if (recovery.Attempts() > 0)
             capture_health_flags_.store(CAPTURE_HEALTH_RECOVERING);
 
-        const GenerationEnd end = RunCaptureGeneration();
+        bool transient = false;
+        const GenerationEnd end = RunCaptureGeneration(transient);
         if (end == GenerationEnd::Stopped) break;
         if (!running_.load()) break;
 
-        if (ring_) ring_->Clear();
         content_suspicious_streak_.store(0);
         const auto decision = recovery.OnGenerationFailed(
-            frame_count_.load() - frames_before);
+            frame_count_.load() - frames_before, transient);
         if (decision.exhausted || end == GenerationEnd::FailedForGood) {
             if (decision.exhausted)
                 std::cerr << "[Capture] Recovery exhausted after 3 attempts" << std::endl;
@@ -97,9 +97,12 @@ void CaptureEngine::CaptureLoop() {
 
         capture_health_flags_.store(CAPTURE_HEALTH_RECOVERING);
         const auto backoff = decision.backoff;
-        std::cerr << "[Capture] Recovery attempt " << decision.attempt << "/3 in "
-                  << backoff.count() << " ms"
-                  << std::endl;
+        if (transient)
+            std::cerr << "[Capture] " << GetCaptureFailureReason()
+                      << "; retrying in " << backoff.count() << " ms" << std::endl;
+        else
+            std::cerr << "[Capture] Recovery attempt " << decision.attempt << "/3 in "
+                      << backoff.count() << " ms" << std::endl;
         const bool continue_recovery = WaitForRecoveryBackoff(
             backoff,
             [this] { return running_.load(); },
@@ -118,11 +121,34 @@ void CaptureEngine::SetCaptureFailureReason(const std::string& reason) {
     capture_failure_reason_ = reason;
 }
 
-CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration() {
+CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration(
+        bool& transient_out) {
+    transient_out = false;
     BackendFailure failure;
-    backend_ = CreateBestBackend(cfg_, &running_, &failure);
+    if (have_last_good_backend_) {
+        // Never re-run first-time selection here: the reference incident was
+        // a stalled compositor whose recovery fell through to the portal and
+        // ended capture on an unanswered dialog.
+        backend_ = CreateBackend(RecoveryCandidate(last_good_backend_), cfg_,
+                                 &running_, &failure, /*strict_output=*/true);
+    } else {
+        backend_ = CreateBestBackend(cfg_, &running_, &failure);
+    }
     if (!backend_) {
         if (!running_.load()) return GenerationEnd::Stopped;
+        switch (failure.kind) {
+        case BackendFailureKind::CompositorUnreachable:
+            transient_out = true;
+            SetCaptureFailureReason("Waiting for the compositor");
+            return GenerationEnd::Failed;
+        case BackendFailureKind::OutputAbsent:
+            transient_out = true;
+            SetCaptureFailureReason(
+                "Waiting for output " + cfg_.target_output + " to return");
+            return GenerationEnd::Failed;
+        default:
+            break;
+        }
         std::cerr << "[Capture] No capture backend available — exiting" << std::endl;
         SetCaptureFailureReason(failure.reason.empty()
             ? "No capture backend is available" : failure.reason);
@@ -161,27 +187,37 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration() {
     enc_cfg.preset       = cfg_.preset;
 
     std::string codec_used;
-    if (!encoder_.Open(enc_cfg, codec_used)) {
-        std::cerr << "[Capture] Encoder open failed" << std::endl;
-        SetCaptureFailureReason("No video encoder could be opened");
-        backend_->Shutdown();
-        backend_.reset();
-        return GenerationEnd::Failed;
+    const bool reuse_encoder = encoder_.IsOpen() && !last_generation_encoder_failed_;
+    if (reuse_encoder) {
+        // Only the backend restarted. The encoder rescales a changed source
+        // size itself, and keeping it open keeps the replay history; the
+        // monotonic PTS scheme renders the outage as a gap.
+        codec_used = GetActiveCodec();
+        std::cout << "[Capture] Backend restarted; keeping encoder and replay history"
+                  << std::endl;
+    } else {
+        if (!encoder_.Open(enc_cfg, codec_used)) {
+            std::cerr << "[Capture] Encoder open failed" << std::endl;
+            SetCaptureFailureReason("No video encoder could be opened");
+            backend_->Shutdown();
+            backend_.reset();
+            return GenerationEnd::Failed;
+        }
+        nvenc_active_.store(codec_used.find("nvenc") != std::string::npos);
+        ++encoder_generation_;
+        encoder_.SetGeneration(encoder_generation_);
+        {
+            std::lock_guard<std::mutex> lk(codec_mutex_);
+            active_codec_ = codec_used;
+            encoder_snapshot_ = EncoderSnapshot{
+                encoder_.GetExtradata(), encoder_.GetWidth(), encoder_.GetHeight(),
+                encoder_.GetCodecID(), encoder_generation_, true};
+        }
+        if (ring_) ring_->Clear();
     }
     SetCaptureFailureReason("");
-    nvenc_active_.store(codec_used.find("nvenc") != std::string::npos);
-    ++encoder_generation_;
-    encoder_.SetGeneration(encoder_generation_);
-    {
-        std::lock_guard<std::mutex> lk(codec_mutex_);
-        active_codec_ = codec_used;
-        encoder_snapshot_ = EncoderSnapshot{
-            encoder_.GetExtradata(), encoder_.GetWidth(), encoder_.GetHeight(),
-            encoder_.GetCodecID(), encoder_generation_, true};
-    }
     capture_generation_.fetch_add(1);
     capture_health_flags_.store(CAPTURE_HEALTH_ACTIVE);
-    if (ring_) ring_->Clear();
     content_suspicious_streak_.store(0);
 
     int64_t frame_ns       = 1'000'000'000LL / cfg_.fps;
@@ -233,14 +269,23 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration() {
             encoder_failed = true;
             break;
         }
-        if (encoded) frame_count_.fetch_add(1);
+        if (encoded) {
+            frame_count_.fetch_add(1);
+            if (!have_last_good_backend_ || last_good_backend_ != backend_->Type()) {
+                have_last_good_backend_ = true;
+                last_good_backend_ = backend_->Type();
+            }
+        }
     }
 
     backend_->Shutdown();
     backend_.reset();
-    { std::lock_guard<std::mutex> lk(codec_mutex_); encoder_snapshot_ = EncoderSnapshot{}; }
-    encoder_.Close();
-    nvenc_active_.store(false);
+    last_generation_encoder_failed_ = encoder_failed;
+    if (encoder_failed || !running_.load()) {
+        { std::lock_guard<std::mutex> lk(codec_mutex_); encoder_snapshot_ = EncoderSnapshot{}; }
+        encoder_.Close();
+        nvenc_active_.store(false);
+    }
     std::cout << "[Capture] Loop exited. Frames: " << frame_count_.load() << std::endl;
     if (!running_.load()) return GenerationEnd::Stopped;
     return encoder_failed ? GenerationEnd::FailedEncoder : GenerationEnd::Failed;
@@ -440,6 +485,8 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
 
 void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
     Shutdown();   // stops thread, deletes ring_, stops audio
+    have_last_good_backend_ = false;
+    last_generation_encoder_failed_ = false;
     cfg_.codec_pref = static_cast<CodecPref>(codec_pref);
     cfg_.preset     = preset;
     if (cfg_.preset < 1) cfg_.preset = 1;

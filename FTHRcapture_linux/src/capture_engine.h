@@ -4,6 +4,7 @@
 #include "audio_capture.h"
 #include "audio_multi_capture.h"
 #include "shared_memory.h"
+#include "capture_backend_policy.h"
 #include <string>
 #include <thread>
 #include <atomic>
@@ -97,7 +98,9 @@ private:
     };
 
     void CaptureLoop();
-    GenerationEnd RunCaptureGeneration();
+    // transient_out is set when the generation could not start for a reason
+    // worth waiting out (compositor unreachable, output absent).
+    GenerationEnd RunCaptureGeneration(bool& transient_out);
     void SetCaptureFailureReason(const std::string& reason);
     void SampleContent(const RawFrame& frame, uint64_t produced_frame);
 
@@ -121,6 +124,12 @@ private:
     std::string capture_failure_reason_;   // guarded by codec_mutex_
     EncoderSnapshot encoder_snapshot_;     // guarded by codec_mutex_
     uint32_t encoder_generation_ = 0;      // capture thread only
+    // Recovery retries the backend that last delivered frames and keeps the
+    // open encoder (and with it the replay ring) unless the encoder itself
+    // failed. Capture thread only.
+    BackendType last_good_backend_{};
+    bool have_last_good_backend_ = false;
+    bool last_generation_encoder_failed_ = false;
     mutable std::mutex codec_mutex_;
     AudioMultiCapture   multi_audio_;
 };

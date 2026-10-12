@@ -228,9 +228,11 @@ bool WlrBackend::Initialize(const CaptureConfig& cfg) {
     target_output_ = cfg.target_output;
     const auto deadline = std::chrono::steady_clock::now() + kInitializationTimeout;
 
+    init_failure_kind_ = BackendFailureKind::Error;
     display_ = wl_display_connect(nullptr);
     if (!display_) {
         std::cerr << "[WlrBackend] wl_display_connect failed — WAYLAND_DISPLAY set?" << std::endl;
+        init_failure_kind_ = BackendFailureKind::CompositorUnreachable;
         return false;
     }
 
@@ -238,6 +240,9 @@ bool WlrBackend::Initialize(const CaptureConfig& cfg) {
     wl_registry_add_listener(registry_, &kRegistryListener, this);
     if (!Roundtrip(deadline, "registry discovery") ||
             !Roundtrip(deadline, "output discovery")) {
+        // A live compositor answers a roundtrip within milliseconds; silence
+        // means it is stalled or gone, which is worth waiting out.
+        init_failure_kind_ = BackendFailureKind::CompositorUnreachable;
         Shutdown();
         return false;
     }
@@ -248,6 +253,13 @@ bool WlrBackend::Initialize(const CaptureConfig& cfg) {
         if (!target_output_.empty()) {
             for (auto* e : all_outputs_) {
                 if (e->name == target_output_) { selected = e; break; }
+            }
+            if (!selected && strict_output_) {
+                std::cerr << "[WlrBackend] Output '" << target_output_
+                          << "' not found; waiting for it" << std::endl;
+                init_failure_kind_ = BackendFailureKind::OutputAbsent;
+                Shutdown();
+                return false;
             }
             if (!selected)
                 std::cerr << "[WlrBackend] Output '" << target_output_

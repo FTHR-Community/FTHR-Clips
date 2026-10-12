@@ -23,7 +23,13 @@ public:
         : healthy_reset_frames_(std::max<uint64_t>(1, healthy_reset_frames))
         , max_attempts_(std::max<uint32_t>(1, max_attempts)) {}
 
-    RecoveryDecision OnGenerationFailed(uint64_t produced_frames) {
+    // A transient failure (the compositor is not answering, or the selected
+    // output is not advertised) is waited out every 2 s without consuming
+    // the attempt budget; only genuine backend errors count toward it.
+    RecoveryDecision OnGenerationFailed(uint64_t produced_frames,
+                                        bool transient = false) {
+        if (transient)
+            return {true, false, attempts_, kTransientBackoff};
         if (produced_frames >= healthy_reset_frames_)
             attempts_ = 0;
         ++attempts_;
@@ -36,6 +42,7 @@ public:
     uint32_t Attempts() const noexcept { return attempts_; }
 
 private:
+    inline static constexpr std::chrono::milliseconds kTransientBackoff{2000};
     inline static constexpr std::array<std::chrono::milliseconds, 3> kBackoffs{
         std::chrono::milliseconds(250),
         std::chrono::milliseconds(750),

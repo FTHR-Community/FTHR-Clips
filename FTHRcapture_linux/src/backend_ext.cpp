@@ -206,14 +206,19 @@ bool ExtBackend::Roundtrip(WaylandDeadline deadline, const char* operation) {
 bool ExtBackend::Initialize(const CaptureConfig& cfg) {
     target_output_ = cfg.target_output;
     const auto deadline = std::chrono::steady_clock::now() + kInitializationTimeout;
+    init_failure_kind_ = BackendFailureKind::Error;
     display_ = wl_display_connect(nullptr);
-    if (!display_) return false;
+    if (!display_) {
+        init_failure_kind_ = BackendFailureKind::CompositorUnreachable;
+        return false;
+    }
 
     static const wl_registry_listener kRegListener = { RegistryGlobal, RegistryRemove };
     registry_ = wl_display_get_registry(display_);
     wl_registry_add_listener(registry_, &kRegListener, this);
     if (!Roundtrip(deadline, "registry discovery") ||
             !Roundtrip(deadline, "output discovery")) {
+        init_failure_kind_ = BackendFailureKind::CompositorUnreachable;
         Shutdown();
         return false;
     }
@@ -227,6 +232,13 @@ bool ExtBackend::Initialize(const CaptureConfig& cfg) {
     if (!target_output_.empty())
         for (auto* e : all_outputs_)
             if (e->name == target_output_) { sel = e; break; }
+    if (!sel && !target_output_.empty() && strict_output_) {
+        std::cerr << "[ExtBackend] Output '" << target_output_
+                  << "' not found; waiting for it" << std::endl;
+        init_failure_kind_ = BackendFailureKind::OutputAbsent;
+        Shutdown();
+        return false;
+    }
     if (!sel && !all_outputs_.empty()) sel = all_outputs_[0];
     if (!sel) { std::cerr << "[ExtBackend] No wl_output\n"; DestroyWayland(); return false; }
     output_ = sel->handle;

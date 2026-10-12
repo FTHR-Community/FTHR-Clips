@@ -362,11 +362,13 @@ bool PortalBackend::OpenPortalSession(const CaptureConfig& cfg) {
         failure_reason_ = "Screen sharing was declined in the desktop's dialog. "
                           "Restart the engine and pick a screen to capture.";
         retry_pointless_ = true;
+        init_failure_kind_ = BackendFailureKind::UserDeclined;
         return false;
     case PortalOutcome::TimedOut:
         failure_reason_ = "The desktop's screen sharing dialog was not answered in time. "
                           "Restart the engine and pick a screen to capture.";
         retry_pointless_ = true;
+        init_failure_kind_ = BackendFailureKind::UserDeclined;
         return false;
     case PortalOutcome::Failed:
         failure_reason_ = "the ScreenCast portal refused the capture session: " + detail;
@@ -461,6 +463,7 @@ bool PortalBackend::ConnectStream(int pipewire_fd, uint32_t node_id, uint32_t fp
 bool PortalBackend::Initialize(const CaptureConfig& cfg) {
     failure_reason_.clear();
     retry_pointless_ = false;
+    init_failure_kind_ = BackendFailureKind::Error;
     frame_interval_ = std::chrono::nanoseconds(
         1'000'000'000LL / std::max<uint32_t>(1, cfg.fps));
 
