@@ -62,6 +62,30 @@ def test_performance_toggle_does_not_change_card_or_sound_options(
     assert settings.get('sound_volume_screenshot') == 18
 
 
+def test_clip_viewer_autoplay_toggle_loads_and_persists(
+        qtbot, tmp_path, monkeypatch):
+    qt_widgets = pytest.importorskip('PySide6.QtWidgets')
+    from core.settings_manager import SettingsManager
+    from main import _SettingsPage
+
+    monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
+    monkeypatch.setattr(_SettingsPage, '_start_encoder_probe', lambda _self: None)
+    qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    settings = SettingsManager()
+    settings.set('clip_viewer_autoplay', False)
+    settings.save_settings()
+
+    page = _SettingsPage(settings)
+    qtbot.addWidget(page)
+
+    assert page.performance_clip_autoplay_check.isChecked() is False
+    page.performance_clip_autoplay_check.setChecked(True)
+
+    assert settings.get('clip_viewer_autoplay') is True
+    settings.save_settings()
+    assert SettingsManager().get('clip_viewer_autoplay') is True
+
+
 def test_clip_grid_coalesces_refreshes_until_foreground(
         qtbot, tmp_path, monkeypatch):
     qt_widgets = pytest.importorskip('PySide6.QtWidgets')

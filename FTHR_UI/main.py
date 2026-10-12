@@ -11702,6 +11702,14 @@ class _SettingsPage(QWidget):
         self.performance_clip_preview_check.toggled.connect(
             self._on_clip_editor_preview_toggled)
         layout.addWidget(self.performance_clip_preview_check)
+        self.performance_clip_autoplay_check = QCheckBox(
+            'Autoplay clip when opening the editor')
+        set_theme_style(self.performance_clip_autoplay_check, checkbox_qss)
+        self.performance_clip_autoplay_check.setChecked(bool(
+            self.sm.get('clip_viewer_autoplay', True)))
+        self.performance_clip_autoplay_check.toggled.connect(
+            self._on_clip_viewer_autoplay_toggled)
+        layout.addWidget(self.performance_clip_autoplay_check)
         layout.addSpacing(6)
 
         layout.addStretch()
@@ -11719,6 +11727,12 @@ class _SettingsPage(QWidget):
         if self.sm is None:
             return
         self.sm.set('clip_editor_live_preview', bool(checked))
+        self.sm.save_settings()
+
+    def _on_clip_viewer_autoplay_toggled(self, checked: bool):
+        if self.sm is None:
+            return
+        self.sm.set('clip_viewer_autoplay', bool(checked))
         self.sm.save_settings()
 
     def _on_capture_card_toggled(self, checked: bool):
