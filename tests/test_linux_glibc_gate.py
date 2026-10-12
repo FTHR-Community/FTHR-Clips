@@ -137,3 +137,12 @@ def test_linux_spec_leaves_the_compiler_runtime_to_the_host():
     assert "'libstdc++.so.6'" in spec and "'libgcc_s.so.1'" in spec
     assert 'name not in _HOST_TOOLCHAIN_LIBS' in spec
 
+
+def test_appimage_job_pip_cache_covers_both_requirement_files():
+    # The job installs from both lock files, so its cache key must change
+    # when either does, as in the other Python jobs.
+    text = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+    job = text[text.index('linux-appimage-package:'):]
+    cache = job[job.index('cache-dependency-path:'):][:200]
+    assert 'requirements-alpha.txt' in cache and 'requirements-dev.txt' in cache
+
