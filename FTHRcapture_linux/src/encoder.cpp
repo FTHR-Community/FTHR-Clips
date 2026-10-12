@@ -6,6 +6,8 @@
 #include <cstdlib>
 
 
+#include <dlfcn.h>
+
 extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/error.h>
@@ -13,6 +15,18 @@ extern "C" {
 }
 
 namespace fthr {
+
+// The pinned FFmpeg reaches libva through generated trampolines that call
+// vaMapBuffer2 (libva >= 2.19). On older distributions (Ubuntu 22.04 ships
+// libva 2.14) the trampoline aborts the process on first use, so refuse
+// VA-API up front and let the encoder fallback order continue.
+static bool IsVaapiSymbolSupported() {
+    void* h = dlopen("libva.so.2", RTLD_LAZY | RTLD_LOCAL);
+    if (!h) return false;
+    void* sym = dlsym(h, "vaMapBuffer2");
+    dlclose(h);
+    return sym != nullptr;
+}
 
 // ApplyPreset — maps P1–P7 to vendor-specific preset strings
 
@@ -101,6 +115,12 @@ bool Encoder::TryOpen(const char* codec_name, const EncoderConfig& cfg) {
     AVBufferRef* device = nullptr;
     AVBufferRef* frames = nullptr;
     if (is_vaapi) {
+        if (!IsVaapiSymbolSupported()) {
+            std::cerr << "[Encoder] VA-API runtime library missing required buffer "
+                         "mapping symbols (vaMapBuffer2); skipping VA-API" << std::endl;
+            avcodec_free_context(&ctx);
+            return false;
+        }
         const char* device_path = std::getenv("FTHR_VAAPI_DEVICE");
         if (!device_path || !*device_path) device_path = "/dev/dri/renderD128";
         if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VAAPI,

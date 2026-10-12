@@ -1,4 +1,4 @@
-﻿import sys, os
+import sys, os
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'FTHR_UI'))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
@@ -17,6 +17,7 @@ def test_oversized_catbox_upload_requires_compression_confirmation(
         'upload_provider': 'catbox',
     }.get(key, default)
     manager = UploadManager(sm)
+    manager.set('upload_provider', 'catbox')
     manager.is_enabled = lambda: True
     clip = tmp_path / 'large.mp4'
     with clip.open('wb') as stream:

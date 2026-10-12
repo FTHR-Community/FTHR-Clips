@@ -9,6 +9,7 @@
 minversion = "9.0"
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+pythonpath = [".", "FTHR_UI"]
 # QT_QPA_PLATFORM=offscreen is set in tests/conftest.py rather than here, so it
 # works without the pytest-env plugin.
 markers = [
