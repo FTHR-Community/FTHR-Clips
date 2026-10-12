@@ -304,6 +304,43 @@ def test_portal_imports_valid_response_after_method_reply_once(
     portal.close()
 
 
+def test_portal_worker_outlives_its_thread_until_released(
+        monkeypatch, tmp_path, qapp):
+    """The worker's C++ object must not die while the portal still holds it.
+
+    Waiting for the thread before spinning the event loop reproduces the CI
+    ordering where the image import finishes before the caller's loop starts.
+    """
+
+    import shiboken6
+
+    portal, bus, staged, completed = _start_fake_portal(monkeypatch, tmp_path)
+    original = tmp_path / 'compositor screenshot.png'
+    image = QImage(32, 18, QImage.Format.Format_RGBA8888)
+    image.fill(0xFF336699)
+    assert image.save(str(original), 'PNG')
+
+    bus.watcher.finish()
+    bus.receiver.on_response(0, {'uri': original.as_uri()})
+    worker = portal._worker
+    assert worker is not None
+    assert worker.wait(3000)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not completed:
+        qapp.processEvents()
+        time.sleep(0.01)
+    for _ in range(5):
+        qapp.processEvents()
+
+    assert completed == [(True, '')]
+    assert shiboken6.isValid(worker)
+    assert portal._worker is worker
+    assert worker.isFinished()
+    with portal_module._ACTIVE_IMAGE_WORKERS_LOCK:
+        assert worker not in portal_module._ACTIVE_IMAGE_WORKERS
+    portal.close()
+
+
 def test_portal_close_cancels_blocked_real_image_worker(
         monkeypatch, tmp_path, qapp):
     portal, bus, staged, completed = _start_fake_portal(monkeypatch, tmp_path)
