@@ -33,11 +33,13 @@ bool ApplyPreset(AVCodecContext* ctx, const char* codec_name, int p) {
         av_opt_set(ctx->priv_data, "quality", kAmf[p - 1],   0);
         av_opt_set(ctx->priv_data, "rc",      "vbr_latency", 0);
     } else if (strstr(codec_name, "_vaapi")) {
-        // compression_level is a generic AVCodecContext field that
-        // vaapi_encode reads, not a priv_data option. Mesa treats 1 as
-        // highest quality and 7 as fastest, the opposite of P1 (fastest)
-        // to P7 (best).
-        ctx->compression_level = 8 - p;
+        // Deliberately not mapped. FFmpeg sends avctx->compression_level to
+        // the driver as a quality-level parameter, but its meaning is
+        // driver-specific: Mesa radeonsi reads it as bit fields (preset,
+        // pre-encode, VBAQ) so 1..7 is non-monotonic, while Intel uses a
+        // linear 1 = best .. 7 = fastest. Leaving it unset (-1) sends nothing
+        // and the driver default applies. Known limitation: the preset has no
+        // effect on VA-API.
     } else if (strstr(codec_name, "qsv")) {
         static const char* kQsv[] = {
             "veryfast","fast","medium","medium","slow","slower","slowest"};
