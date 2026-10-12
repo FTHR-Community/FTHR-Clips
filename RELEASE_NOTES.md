@@ -1,4 +1,64 @@
-# FTHR Clips 1.1.2-alpha
+# FTHR Clips 1.1.3-alpha
+
+Linux hardening release before the UI overhaul. Windows artifacts are unchanged apart from shared test and packaging fixes.
+
+## Linux capture engine
+
+- Capture survives a compositor stall. Recovery retries the backend that last
+  delivered frames instead of re-running first-time selection (which could
+  reach the ScreenCast portal dialog and end capture), waits out an
+  unreachable compositor or a missing output every two seconds, and keeps the
+  replay history when only the backend restarts. Reproduced and verified on
+  Hyprland with a frozen compositor.
+- Encoder failures are visible. A failing encoder ends the capture generation
+  with a reason instead of reporting healthy frames into an empty buffer.
+- Saving no longer races recovery; clips are muxed from a per-generation
+  snapshot of the encoder parameters.
+- ext-image-copy-capture keeps capturing on a static screen at the configured
+  frame rate.
+- Desktop audio attaches when PulseAudio/PipeWire-Pulse appears after startup;
+  the audio buffer is sized to the replay window.
+- Clips are fsynced before they are published; AAC setup failures fall back to
+  video-only instead of failing the save.
+- VA-API on older libva (Ubuntu 22.04) no longer aborts the engine: the
+  `vaMapBuffer2` symbol is probed first (from #42 by @Victor7996).
+- `FTHR_CAPTURE_BACKEND=wlr|ext|portal|x11` forces one backend for
+  diagnostics.
+- Known limitation: the encoder preset is not applied to VA-API encoders
+  (driver semantics differ between radeonsi and Intel).
+
+## Linux app
+
+- Global hotkeys through the XDG GlobalShortcuts portal on desktops with a
+  backend (KDE Plasma 6, GNOME 48+); the `keyboard` library and `/dev/input`
+  access are gone, so the `input` group is no longer needed (from #16 by
+  @NorkelL). Hyprland keeps the generated socket binds, which now cover every
+  action and reload only when they change.
+- Wayland screenshots on KDE Plasma and GNOME through the Screenshot portal;
+  microphone selection by name; camera refresh fixes (#57; addresses #52 and
+  #56, field validation welcome).
+- The engine connection no longer races the status poll during startup.
+- Compositor detection follows the session, not installed binaries (a machine
+  with Plasma packages in a GNOME or Sway session is no longer treated as KDE).
+- Uploader settings are written owner-only.
+- Desktop identity and launcher categories fixed (from #19 by @Vaspyyy).
+
+## Linux packaging and docs
+
+- The AppImage ships the pinned LGPL `ffmpeg` and `ffprobe`, so exports and
+  watermarking no longer use the distribution's GPL build.
+- `BUILDING.md` and `docs/linux.md` describe the real build steps, the glibc
+  2.35 baseline, backends and diagnostics; the licence gate's `--all` mode
+  inspects the real AppDir; the third-party notices record the Linux FFmpeg
+  build.
+
+## Known limitations
+
+- NVIDIA and Intel hardware encoding are unqualified on Linux.
+- Window-specific capture is not available on Linux; the whole output is
+  captured.
+
+# Previous release: FTHR Clips 1.1.2-alpha
 
 This is the Linux compatibility rebuild of the alpha release. Linux packaging is
 built on Ubuntu 22.04 and rejects bundled ELF objects requiring GLIBC newer than

@@ -6,17 +6,17 @@
 from __future__ import annotations
 
 # PEP 440 / SemVer pre-release string. Keep the two in sync when releasing.
-__version__ = '1.1.2-alpha'
+__version__ = '1.1.3-alpha'
 
 # Numeric (major, minor, patch) triple. Windows VERSIONINFO resources cannot
 # express a pre-release suffix, so the packaging code uses this and records the
 # full string in the FileVersion / ProductVersion text fields.
-VERSION_INFO = (1, 1, 0)
+VERSION_INFO = (1, 1, 3)
 
 PRERELEASE = 'alpha'
 
 # ISO 8601 release date shown in About. Update alongside __version__.
-BUILD_DATE = '2026-09-19'
+BUILD_DATE = '2026-10-12'
 
 # FTHR's application code uses GPLv3. Separately distributed third-party
 # components and project assets retain the licences listed in
