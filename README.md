@@ -98,7 +98,7 @@ available on Linux.
 - PipeWire with PulseAudio compatibility, or PulseAudio
 - `grim` for screenshots (the ScreenCast portal path covers video only) and
   `nc`/netcat for compositor hotkey commands
-- A working FFmpeg runtime supplied by the AppImage
+- A working FFmpeg runtime supplied by the AppImage, including `ffmpeg` and `ffprobe` (a source checkout needs a system `ffmpeg` on `PATH` for exports and watermarking)
 - AMD VA-API users should install the Mesa VA-API driver and ensure the user
   can access `/dev/dri/renderD*`; software encoding remains the fallback
 
