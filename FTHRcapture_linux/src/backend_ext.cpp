@@ -302,6 +302,7 @@ WaylandWaitResult ExtBackend::CaptureOnceResult(WaylandDeadline deadline) {
         if (!EnsureShmBuffer()) return WaylandWaitResult::Error;
         frame_ready_ = frame_failed_ = false;
         frame_failure_reason_ = 0;
+        frame_constraints_serial_ = constraints_serial_;
 
         pending_frame_ = ext_image_copy_capture_session_v1_create_frame(session_);
         if (!pending_frame_) {
@@ -341,7 +342,6 @@ WaylandDeadline ExtBackend::FrameDeadline() const {
 
 bool ExtBackend::CaptureFrame(RawFrame& out) {
     if (session_stopped_) return false;
-    const uint32_t serial_before = constraints_serial_;
 
     WaylandWaitResult result = CaptureOnceResult(FrameDeadline());
     if (result == WaylandWaitResult::EventReceived && frame_failed_ &&
@@ -352,7 +352,10 @@ bool ExtBackend::CaptureFrame(RawFrame& out) {
         // buffer_constraints and re-sends the constraints. Reallocate once
         // against the new batch instead of restarting the whole generation.
         // The constraints wait gets the full timeout: the frame-rate deadline
-        // is far too short for a compositor to re-send them.
+        // is far too short for a compositor to re-send them. The baseline is
+        // the serial at request creation: the new batch may have been
+        // dispatched during an earlier call's wait, before `failed` arrived.
+        const uint32_t serial_before = frame_constraints_serial_;
         if (!WaitUntil(
                 std::chrono::steady_clock::now() + kFrameTimeout,
                 [this, serial_before] {
@@ -368,13 +371,15 @@ bool ExtBackend::CaptureFrame(RawFrame& out) {
             !session_stopped_) {
         // Keep an owned copy: the wl_shm buffer is reused for the next
         // request, and a repeated frame must not alias a buffer the
-        // compositor may be writing.
-        const size_t bytes = static_cast<size_t>(buf_width_) * 4 * buf_height_;
+        // compositor may be writing. Sized from the allocation, not buf_*:
+        // a resize batch dispatched in the same wait as `ready` has already
+        // overwritten those, and the mapping still has the old size.
+        const size_t bytes = static_cast<size_t>(alloc_width_) * 4 * alloc_height_;
         const auto* src = static_cast<const uint8_t*>(shm_data_);
         last_frame_.assign(src, src + bytes);
-        last_w_ = buf_width_;
-        last_h_ = buf_height_;
-        last_format_ = shm_format_;
+        last_w_ = alloc_width_;
+        last_h_ = alloc_height_;
+        last_format_ = alloc_format_;
     } else if (ShouldRepeatLastFrame(result, !last_frame_.empty())) {
         // The protocol lets the compositor hold the request until the screen
         // changes; a static desktop must still fill the replay buffer.

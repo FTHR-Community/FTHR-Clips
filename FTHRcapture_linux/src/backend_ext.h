@@ -100,6 +100,10 @@ private:
     // Outstanding across timeouts: the protocol forbids a second frame
     // request on the session while one is pending.
     ext_image_copy_capture_frame_v1* pending_frame_ = nullptr;
+    // Constraints serial when pending_frame_ was created. The request can
+    // outlive a CaptureFrame call, so a per-call snapshot could already
+    // include the batch that fails it.
+    uint32_t frame_constraints_serial_ = 0;
 
     // Owned copy of the last completed frame, repeated while the compositor
     // holds the request on a static screen.
