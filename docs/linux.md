@@ -50,8 +50,13 @@ file together when verifying a download.
 
 ## Runtime requirements
 
-The AppImage carries the application and its pinned FFmpeg runtime. The desktop
-session still needs these system services and helpers:
+The AppImage carries the application and its pinned LGPL FFmpeg runtime,
+including the `ffmpeg` and `ffprobe` command-line tools used for export and
+watermarking, so it does not depend on the distribution's FFmpeg. A source
+checkout has no bundled tools unless you run
+`python tools/fetch_third_party.py --ffmpeg-linux`; otherwise exports and
+watermarking need a system `ffmpeg` on `PATH`. The desktop session still needs
+these system services and helpers:
 
 - Wayland compositor exposing `wlr-screencopy` or `ext-image-copy-capture`,
   or an `org.freedesktop.portal.ScreenCast` backend (KDE Plasma/KWin:

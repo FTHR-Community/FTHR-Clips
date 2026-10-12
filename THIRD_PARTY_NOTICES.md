@@ -93,6 +93,26 @@ remain fully available.
 > outside the scope of the LGPL fix — but it is worth a deliberate decision
 > before a large public release.
 
+### FFmpeg (Linux engine and AppImage)
+
+| | |
+|---|---|
+| **Version** | `n8.1.2-34-g9b6c8969e0` (release branch 8.1) |
+| **Source** | [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), release `autobuild-2026-07-31-14-10`, asset `ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-lgpl-shared-8.1.tar.xz` |
+| **SHA-256 (archive)** | `c882a80f06617149...` — full value, and the hash of every shipped library, recorded in [`tools/ffmpeg_manifest_linux.json`](tools/ffmpeg_manifest_linux.json) |
+| **Licence** | **LGPL v3 or later** (`--enable-version3`, no `--enable-gpl`, no `--enable-nonfree`) — self-reported by the binaries as `LGPL version 3 or later` |
+| **Linkage** | Dynamic. The native capture engine (`FTHRclips`) and `libFTHRPlaybackMixer.so` link the shared libraries through an `$ORIGIN` RPATH; the Python UI shells out to the bundled `ffmpeg` and `ffprobe`, which use the same libraries. |
+| **Used for** | The same roles as the Windows build: encoding and muxing in the capture engine; audio mix, watermark, webcam overlay, clip export and share in the UI. |
+| **Shipped files** | `libavcodec.so.62`, `libavdevice.so.62`, `libavfilter.so.11`, `libavformat.so.62`, `libavutil.so.60`, `libswresample.so.6`, `libswscale.so.9` (seven libraries, hash-pinned), and the `ffmpeg` and `ffprobe` command-line tools (RPATH `$ORIGIN/../lib:$ORIGIN`, verified by banner, configure flags, NEEDED and RPATH rather than by hash) |
+| **Source route** | The binaries are the unmodified upstream build apart from the RPATH of the two command-line tools, which `tools/fetch_third_party.py --ffmpeg-linux` rewrites with `patchelf`. The corresponding source is FFmpeg tag `n8.1.2` plus the build scripts in the BtbN release named above; the exact asset is reproduced with `python tools/fetch_third_party.py --ffmpeg-linux`. |
+| **Licence text** | [`licenses/FFmpeg-LICENSE.txt`](licenses/FFmpeg-LICENSE.txt) |
+
+The configuration is the Windows build's LGPL configuration (see above): no
+GPL encoders, software H.264 through `libopenh264`, H.265 through `libkvazaar`,
+AV1 through `libsvtav1`. The distribution's own FFmpeg (a GPL build on Ubuntu)
+is never bundled; the licence gate refuses an AppDir that contains it, or an
+`ffmpeg`/`ffprobe` that links it or carries a non-`$ORIGIN` RPATH.
+
 ### Qt 6
 
 | | |
@@ -306,6 +326,7 @@ files described here. Run it before every release:
 ```bash
 python tools/verify_release_licenses.py --tree .
 python tools/verify_release_licenses.py --windows-dist dist/FTHRClips
+python tools/verify_release_licenses.py --appdir build_output/AppDir
 ```
 
 **This is a technical verification, not legal advice.**
