@@ -1,4 +1,5 @@
 import sys, os
+import pytest
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'FTHR_UI'))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
@@ -226,6 +227,8 @@ def test_failed_finalization_never_uploads(qapp, tmp_path):
         um.stop()
 
 
+@pytest.mark.skipif(sys.platform == 'win32',
+                    reason='POSIX permission bits do not apply on NTFS')
 def test_atomic_json_writes_owner_only(tmp_path):
     import stat
     from core import upload_manager
