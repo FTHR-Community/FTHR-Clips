@@ -388,7 +388,9 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: requirements-alpha.txt
+          cache-dependency-path: |
+            requirements-alpha.txt
+            requirements-dev.txt
 
       - name: Install packaging dependencies
         run: |
