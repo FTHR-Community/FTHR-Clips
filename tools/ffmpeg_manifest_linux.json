@@ -114,6 +114,12 @@
     "libavfilter.so.11"
   ],
 
+  "cli_tools": {
+    "shipped": ["ffmpeg", "ffprobe"],
+    "rpath": "$ORIGIN/../lib:$ORIGIN",
+    "verified_by": "banner, configure flags, NEEDED, RPATH; not hash-pinned because patchelf output varies by patchelf version"
+  },
+
   "soname_map": {
     "libavcodec.so.62.28.102": "libavcodec.so.62",
     "libavdevice.so.62.3.102": "libavdevice.so.62",

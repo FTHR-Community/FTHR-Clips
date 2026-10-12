@@ -122,6 +122,18 @@ if len(_FFMPEG_LIBS) < 7:
         f'found {len(_FFMPEG_LIBS)}. Re-run '
         f'`python tools/fetch_third_party.py --ffmpeg-linux --force`.')
 
+# The CLI tools the exporter and watermarking shell out to. RPATH
+# `$ORIGIN/../lib:$ORIGIN` (patched by fetch_third_party.py) resolves the
+# libraries beside them in _internal/. Verified by banner/NEEDED/RPATH in the
+# licence gate; strip=True is fine because they are not hash-pinned.
+_FFMPEG_TOOLS = [_FFMPEG_ROOT / 'bin' / n for n in ('ffmpeg', 'ffprobe')]
+_missing_tools = [p.name for p in _FFMPEG_TOOLS if not p.is_file()]
+if _missing_tools:
+    raise SystemExit(
+        'FTHR_linux.spec: the pinned FFmpeg CLI tools are missing: '
+        f'{", ".join(_missing_tools)} (expected in {_FFMPEG_ROOT / "bin"}).\n'
+        '  Re-run `python tools/fetch_third_party.py --ffmpeg-linux --force`.')
+
 a = Analysis(
     [str(UI_DIR / 'main.py')],
     pathex=[str(UI_DIR)],
@@ -131,6 +143,7 @@ a = Analysis(
         (_PORTAUDIO, '.'),
         # The verified LGPL FFmpeg the engine was built against.
         *[(str(p), '.') for p in _FFMPEG_LIBS],
+        *[(str(p), '.') for p in _FFMPEG_TOOLS],
         *_so('platforms'),
         *_so('wayland-decoration-client'),
         *_so('wayland-shell-integration'),

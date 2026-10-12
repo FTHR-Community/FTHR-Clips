@@ -243,7 +243,13 @@ def _verify_vcredist(path: Path) -> dict[str, str]:
 
 
 def _ensure_linux_ffmpeg_tool_rpaths(bin_dir: Path) -> None:
-    """Make bundled FFmpeg CLI tools find libraries beside the archive.
+    """Make bundled FFmpeg CLI tools find their libraries in both layouts.
+
+    The RPATH is ``$ORIGIN/../lib:$ORIGIN``. In the fetched dev tree the tools
+    sit in ``bin/`` and resolve ``../lib``; in the PyInstaller bundle the tools
+    and libraries share ``_internal/`` and resolve ``$ORIGIN``. No system path
+    is ever listed, so a trimmed bundle fails to load instead of using the
+    distribution FFmpeg.
 
     BtbN's Linux archive currently embeds the linker flag ``-Wl:../lib`` as
     DT_RPATH. That is a literal, invalid loader path rather than a path
@@ -261,7 +267,8 @@ def _ensure_linux_ffmpeg_tool_rpaths(bin_dir: Path) -> None:
         if not tool.is_file():
             raise RuntimeError(f'Linux FFmpeg archive is missing bin/{name}')
         subprocess.run(
-            [patchelf, '--force-rpath', '--set-rpath', '$ORIGIN/../lib', str(tool)],
+            [patchelf, '--force-rpath', '--set-rpath',
+             '$ORIGIN/../lib:$ORIGIN', str(tool)],
             check=True,
             capture_output=True,
             text=True,

@@ -47,7 +47,8 @@ def _candidate_paths() -> list[Path]:
         out.append(Path(meipass) / 'engine' / _EXE_NAME)
         out.append(Path(meipass) / _EXE_NAME)
 
-    # AppImage layout: the engine sits beside AppRun.
+    # PyInstaller layout: the engine, FFmpeg libraries and CLI tools sit in
+    # `_internal/` next to the executable.
     out.append(Path(sys.executable).parent / _EXE_NAME)
     out.append(Path(sys.executable).parent / 'engine' / _EXE_NAME)
 
