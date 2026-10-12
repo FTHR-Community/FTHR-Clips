@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 // Signal handling for clean shutdown
@@ -101,6 +102,15 @@ int main(int argc, char* argv[]) {
     // Signal handlers for clean exit
     signal(SIGINT,  on_signal);
     signal(SIGTERM, on_signal);
+
+    // The UI normally sends SHUTDOWN and reaps the process. If the UI dies
+    // without doing so (SIGKILL, a crash, a terminal closing), the engine
+    // must not outlive it: an orphan keeps capturing, keeps the shared-memory
+    // name, and the next UI connects to the wrong engine. Ask the kernel for
+    // SIGTERM when the parent exits; if it already has, leave now.
+    const pid_t launcher = getppid();
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) == 0 && getppid() != launcher)
+        g_quit = true;
 
     // After a terminal capture failure the process lingers briefly so the
     // UI's 500 ms status poll can observe BACKEND_FAILED and its reason
