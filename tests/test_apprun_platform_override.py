@@ -33,8 +33,7 @@ def _run_apprun(tmp_path: Path, env: dict[str, str]) -> str:
     stub.write_text('#!/bin/sh\nprintf "%s" "${QT_QPA_PLATFORM:-unset}"\n', encoding='utf-8')
     for path in (apprun, stub):
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
-    # FTHR_SCOPED skips the systemd-run re-exec; keep the test in-process.
-    base = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'FTHR_SCOPED': '1'}
+    base = {'PATH': os.environ.get('PATH', '/usr/bin:/bin')}
     base.update(env)
     result = subprocess.run(
         [str(apprun)], env=base, capture_output=True, text=True, timeout=10)

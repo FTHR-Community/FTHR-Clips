@@ -342,3 +342,27 @@ def test_socket_command_still_available_for_fallback_binds(tmp_path, monkeypatch
         pytest.skip('Linux hotkey socket')
     cmd = hotkeys.HotkeyManager.socket_command(SimpleNamespace(), 'save_clip')
     assert 'save_clip' in cmd and '-U' in cmd
+
+
+def test_hyprland_keeps_socket_path_unless_forced(tmp_path, monkeypatch):
+    # xdg-desktop-portal-hyprland answers GlobalShortcuts but binds no keys
+    # by itself, so the generated socket binds stay the Hyprland default.
+    if sys.platform == 'win32':
+        pytest.skip('Linux portal path')
+    monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
+    monkeypatch.setattr(portal, 'is_available', lambda: True)
+    monkeypatch.setattr(hotkeys.linux_runtime, 'ensure_desktop_entry', lambda: True)
+    monkeypatch.delenv('FTHR_FORCE_PORTAL_SHORTCUTS', raising=False)
+    import core.compositor as compositor
+    monkeypatch.setattr(compositor, 'detect_compositor', lambda: 'hyprland')
+
+    def _never(owner):
+        raise AssertionError('portal client constructed on Hyprland')
+    monkeypatch.setattr(portal, 'PortalShortcuts', _never)
+
+    manager = hotkeys.HotkeyManager()
+    assert manager._ensure_portal() is False
+    assert manager.portal_active is False
+
+    monkeypatch.setenv('FTHR_FORCE_PORTAL_SHORTCUTS', '1')
+    assert hotkeys.HotkeyManager._hyprland_prefers_socket() is False

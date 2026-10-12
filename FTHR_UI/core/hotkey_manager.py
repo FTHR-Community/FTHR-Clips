@@ -691,6 +691,8 @@ class HotkeyManager(QObject):
             return False
         if self._portal is not None:
             return True
+        if self._hyprland_prefers_socket():
+            return False
         if not portal_shortcuts.is_available():
             return False
         # The portal ties shortcuts to a desktop identity; give packaged
@@ -707,6 +709,26 @@ class HotkeyManager(QObject):
             return False
         self._portal = portal
         return True
+
+    @staticmethod
+    def _hyprland_prefers_socket() -> bool:
+        """Hyprland keeps the socket path and the generated binds.
+
+        xdg-desktop-portal-hyprland implements GlobalShortcuts, but it binds
+        no keys by itself: the user would have to add `global` dispatcher
+        lines to hyprland.conf for every action. The generated binds over
+        the private socket already work there, so the portal is used only
+        when FTHR_FORCE_PORTAL_SHORTCUTS=1 asks for it (diagnostics).
+        """
+        if os.environ.get('FTHR_FORCE_PORTAL_SHORTCUTS') == '1':
+            return False
+        try:
+            from core.compositor import detect_compositor
+            return detect_compositor() == 'hyprland'
+        except Exception:
+            # Detection only consults environment variables; if it cannot
+            # run at all, the portal path is the safer default to try.
+            return False
 
     def _bind_portal_shortcuts(self) -> None:
         """Announce every action to the portal with the saved key as preference."""
