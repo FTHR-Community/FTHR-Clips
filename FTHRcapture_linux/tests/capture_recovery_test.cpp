@@ -120,5 +120,33 @@ int main() {
     if (start_reconnect) ++reconnect_starts;
     assert(!start_reconnect);
     assert(reconnect_starts == 0);
+    
+
+    // Encoder failures give up after max(fps/2, 5) consecutive misses and
+    // reset on any success.
+    {
+        fthr::EncodeFailurePolicy encode_policy(60);
+        for (uint32_t i = 0; i < 29; ++i)
+            assert(!encode_policy.OnEncodeResult(false));
+        assert(encode_policy.ConsecutiveFailures() == 29);
+        assert(encode_policy.OnEncodeResult(false));          // 30th = fps/2
+        assert(!encode_policy.OnEncodeResult(true));
+        assert(encode_policy.ConsecutiveFailures() == 0);
+
+        fthr::EncodeFailurePolicy low_fps(1);
+        for (uint32_t i = 0; i < 4; ++i)
+            assert(!low_fps.OnEncodeResult(false));
+        assert(low_fps.OnEncodeResult(false));                // minimum of 5
+    }
+
+    // After a stall the throttle re-anchors instead of encoding a burst of
+    // back-to-back frames to "catch up" with wall time.
+    {
+        constexpr int64_t frame_ns = 16'666'667;
+        assert(fthr::NextEncodeDeadline(1'000'000'000, frame_ns, 1'000'000'000) == 1'000'000'000);
+        assert(fthr::NextEncodeDeadline(1'000'000'000, frame_ns, 1'000'000'000 + frame_ns) == 1'000'000'000);
+        assert(fthr::NextEncodeDeadline(1'000'000'000, frame_ns, 1'000'000'000 + 3 * frame_ns)
+               == 1'000'000'000 + 3 * frame_ns);
+    }
     return 0;
 }

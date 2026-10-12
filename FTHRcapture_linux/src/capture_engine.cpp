@@ -177,6 +177,8 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration() {
 
     int64_t frame_ns       = 1'000'000'000LL / cfg_.fps;
     int64_t next_encode_ns = 0;
+    EncodeFailurePolicy encode_policy(cfg_.fps);
+    bool encoder_failed = false;
 
     std::cout << "[Capture] Loop started: "
               << enc_w << "x" << enc_h
@@ -204,16 +206,25 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration() {
 
         // Frame rate throttling
         if (next_encode_ns == 0) next_encode_ns = raw.timestamp_ns;
+        next_encode_ns = NextEncodeDeadline(next_encode_ns, frame_ns, raw.timestamp_ns);
         if (raw.timestamp_ns < next_encode_ns) continue;
         next_encode_ns += frame_ns;
 
         const uint64_t produced = frame_count_.load() + 1;
         SampleContent(raw, produced);
-        encoder_.EncodeFrame(raw.data, raw.stride, raw.width, raw.height,
-            raw.timestamp_ns,
+        const bool encoded = encoder_.EncodeFrame(raw.data, raw.stride,
+            raw.width, raw.height, raw.timestamp_ns,
             [this](EncodedPacket pkt) { ring_->Push(std::move(pkt)); });
-
-        frame_count_.fetch_add(1);
+        if (encode_policy.OnEncodeResult(encoded)) {
+            std::cerr << "[Capture] Encoder stopped accepting frames after "
+                      << encode_policy.ConsecutiveFailures()
+                      << " consecutive failures" << std::endl;
+            SetCaptureFailureReason(
+                "The video encoder (" + codec_used + ") stopped accepting frames");
+            encoder_failed = true;
+            break;
+        }
+        if (encoded) frame_count_.fetch_add(1);
     }
 
     backend_->Shutdown();
@@ -221,7 +232,8 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration() {
     encoder_.Close();
     nvenc_active_.store(false);
     std::cout << "[Capture] Loop exited. Frames: " << frame_count_.load() << std::endl;
-    return running_.load() ? GenerationEnd::Failed : GenerationEnd::Stopped;
+    if (!running_.load()) return GenerationEnd::Stopped;
+    return encoder_failed ? GenerationEnd::FailedEncoder : GenerationEnd::Failed;
 }
 
 void CaptureEngine::SampleContent(const RawFrame& frame, uint64_t produced_frame) {

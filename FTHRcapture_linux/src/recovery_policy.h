@@ -46,6 +46,39 @@ private:
     uint32_t attempts_ = 0;
 };
 
+// A broken encoder (for example a VA-API upload that the driver refuses)
+// otherwise leaves capture reporting healthy frames while the ring stays
+// empty. Half a second of consecutive failures, but never fewer than five
+// frames, ends the generation so the encoder is reopened.
+class EncodeFailurePolicy {
+public:
+    explicit EncodeFailurePolicy(uint32_t fps)
+        : threshold_(std::max<uint32_t>(5, fps / 2)) {}
+
+    // Returns true when the generation must give up on this encoder.
+    bool OnEncodeResult(bool ok) {
+        if (ok) { consecutive_ = 0; return false; }
+        ++consecutive_;
+        return consecutive_ >= threshold_;
+    }
+
+    uint32_t ConsecutiveFailures() const noexcept { return consecutive_; }
+
+private:
+    uint32_t threshold_;
+    uint32_t consecutive_ = 0;
+};
+
+// The capture loop encodes at most one frame per 1/fps of capture time. After
+// a stall the next deadline would lie far in the past and every arriving
+// frame would be encoded back to back until wall time was caught up, which
+// compresses the gap in media time. Re-anchor on the first late frame instead.
+inline int64_t NextEncodeDeadline(int64_t next_encode_ns, int64_t frame_ns,
+                                  int64_t frame_timestamp_ns) {
+    return frame_timestamp_ns > next_encode_ns + 2 * frame_ns
+        ? frame_timestamp_ns : next_encode_ns;
+}
+
 // Production backoff primitive with injected clock/sleeper behavior.  The
 // 50 ms slices bound shutdown latency and make cancellation deterministic in
 // the native fake-backend harness without sleeping the test process.
