@@ -153,65 +153,70 @@ static bool write_clip_to_temporary_file(
 
     if (has_audio) {
         const AVCodec* aac_codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+
+        // The audio stream is added to the container only after every piece
+        // of the AAC pipeline exists: libavformat cannot remove a stream, and
+        // an empty one would make avformat_write_header fail the whole save.
+        const auto abandon_audio = [&](const char* failed_call) {
+            std::cerr << "[SaveClip] " << failed_call
+                      << " failed; saving video only" << std::endl;
+            if (aac_pkt) av_packet_free(&aac_pkt);
+            if (aac_frame) av_frame_free(&aac_frame);
+            if (swr_ctx) swr_free(&swr_ctx);
+            if (aac_ctx) avcodec_free_context(&aac_ctx);
+            has_audio = false;
+        };
+
         if (!aac_codec) {
             std::cerr << "[SaveClip] AAC encoder not found — saving video-only" << std::endl;
             has_audio = false;
+        } else if (!(aac_ctx = avcodec_alloc_context3(aac_codec))) {
+            abandon_audio("avcodec_alloc_context3");
         } else {
-            aud_stream = avformat_new_stream(fmt_ctx, nullptr);
-            if (!aud_stream) {
-                has_audio = false;
+            aac_ctx->sample_rate = audio_sample_rate;
+            aac_ctx->bit_rate = 128000;
+            aac_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+            av_channel_layout_default(&aac_ctx->ch_layout, audio_channels);
+#else
+            aac_ctx->channels = audio_channels;
+            aac_ctx->channel_layout = av_get_default_channel_layout(audio_channels);
+#endif
+            aac_ctx->time_base = { 1, audio_sample_rate };
+
+            if (fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
+                aac_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+            if (avcodec_open2(aac_ctx, aac_codec, nullptr) < 0) {
+                abandon_audio("avcodec_open2");
             } else {
-                aud_stream->id = 1;
-
-                aac_ctx = avcodec_alloc_context3(aac_codec);
-                aac_ctx->sample_rate = audio_sample_rate;
-                aac_ctx->bit_rate = 128000;
-                aac_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
-
+                swr_ctx = swr_alloc();
 #if LIBAVUTIL_VERSION_MAJOR >= 57
-                av_channel_layout_default(&aac_ctx->ch_layout, audio_channels);
+                AVChannelLayout src_layout, dst_layout;
+                av_channel_layout_default(&src_layout, audio_channels);
+                av_channel_layout_default(&dst_layout, audio_channels);
+                swr_alloc_set_opts2(&swr_ctx,
+                    &dst_layout, AV_SAMPLE_FMT_FLTP, audio_sample_rate,
+                    &src_layout, AV_SAMPLE_FMT_FLT, audio_sample_rate,
+                    0, nullptr);
 #else
-                aac_ctx->channels = audio_channels;
-                aac_ctx->channel_layout = av_get_default_channel_layout(audio_channels);
+                av_opt_set_int(swr_ctx, "in_channel_layout",
+                               av_get_default_channel_layout(audio_channels), 0);
+                av_opt_set_int(swr_ctx, "out_channel_layout",
+                               av_get_default_channel_layout(audio_channels), 0);
+                av_opt_set_int(swr_ctx, "in_sample_rate", audio_sample_rate, 0);
+                av_opt_set_int(swr_ctx, "out_sample_rate", audio_sample_rate, 0);
+                av_opt_set_sample_fmt(swr_ctx, "in_sample_fmt",
+                                      AV_SAMPLE_FMT_FLT, 0);
+                av_opt_set_sample_fmt(swr_ctx, "out_sample_fmt",
+                                      AV_SAMPLE_FMT_FLTP, 0);
 #endif
-                aac_ctx->time_base = { 1, audio_sample_rate };
-
-                if (fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
-                    aac_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-                if (avcodec_open2(aac_ctx, aac_codec, nullptr) < 0) {
-                    std::cerr << "[SaveClip] AAC avcodec_open2 failed" << std::endl;
-                    avcodec_free_context(&aac_ctx);
-                    aac_ctx = nullptr;
-                    has_audio = false;
+                if (!swr_ctx || swr_init(swr_ctx) < 0) {
+                    abandon_audio("swr_init");
+                } else if (!(aac_frame = av_frame_alloc())) {
+                    abandon_audio("av_frame_alloc");
                 } else {
-                    avcodec_parameters_from_context(aud_stream->codecpar, aac_ctx);
-                    aud_stream->time_base = { 1, audio_sample_rate };
-
-                    swr_ctx = swr_alloc();
-#if LIBAVUTIL_VERSION_MAJOR >= 57
-                    AVChannelLayout src_layout, dst_layout;
-                    av_channel_layout_default(&src_layout, audio_channels);
-                    av_channel_layout_default(&dst_layout, audio_channels);
-                    swr_alloc_set_opts2(&swr_ctx,
-                        &dst_layout, AV_SAMPLE_FMT_FLTP, audio_sample_rate,
-                        &src_layout, AV_SAMPLE_FMT_FLT, audio_sample_rate,
-                        0, nullptr);
-#else
-                    av_opt_set_int(swr_ctx, "in_channel_layout",
-                                   av_get_default_channel_layout(audio_channels), 0);
-                    av_opt_set_int(swr_ctx, "out_channel_layout",
-                                   av_get_default_channel_layout(audio_channels), 0);
-                    av_opt_set_int(swr_ctx, "in_sample_rate", audio_sample_rate, 0);
-                    av_opt_set_int(swr_ctx, "out_sample_rate", audio_sample_rate, 0);
-                    av_opt_set_sample_fmt(swr_ctx, "in_sample_fmt",
-                                          AV_SAMPLE_FMT_FLT, 0);
-                    av_opt_set_sample_fmt(swr_ctx, "out_sample_fmt",
-                                          AV_SAMPLE_FMT_FLTP, 0);
-#endif
-                    swr_init(swr_ctx);
-
-                    aac_frame = av_frame_alloc();
                     aac_frame->nb_samples = aac_ctx->frame_size;
                     aac_frame->format = AV_SAMPLE_FMT_FLTP;
 #if LIBAVUTIL_VERSION_MAJOR >= 57
@@ -221,9 +226,17 @@ static bool write_clip_to_temporary_file(
                     aac_frame->channels = audio_channels;
 #endif
                     aac_frame->sample_rate = audio_sample_rate;
-                    av_frame_get_buffer(aac_frame, 0);
-
-                    aac_pkt = av_packet_alloc();
+                    if (av_frame_get_buffer(aac_frame, 0) < 0) {
+                        abandon_audio("av_frame_get_buffer");
+                    } else if (!(aac_pkt = av_packet_alloc())) {
+                        abandon_audio("av_packet_alloc");
+                    } else if (!(aud_stream = avformat_new_stream(fmt_ctx, nullptr))) {
+                        abandon_audio("avformat_new_stream");
+                    } else {
+                        aud_stream->id = 1;
+                        avcodec_parameters_from_context(aud_stream->codecpar, aac_ctx);
+                        aud_stream->time_base = { 1, audio_sample_rate };
+                    }
                 }
             }
         }

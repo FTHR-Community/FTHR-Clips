@@ -243,9 +243,58 @@ void TestDefaultFilesystemPreservesExistingDestination() {
     std::filesystem::remove(directory, cleanup_error);
 }
 
+void TestSyncOrdering() {
+    FakeFilesystem fs;
+    auto ops = fs.Ops();
+    ops.sync_file = [&fs](const std::filesystem::path& path, std::error_code&) {
+        fs.operations.push_back("sync_file:" + path.filename().string());
+        return true;
+    };
+    ops.sync_directory = [&fs](const std::filesystem::path& path, std::error_code&) {
+        fs.operations.push_back("sync_dir:" + path.string());
+        return true;
+    };
+    const auto result = tx::Run(
+        "dir/clip.mp4",
+        [&fs](const std::filesystem::path&, std::string&) {
+            fs.temporary_exists = true;
+            return true;
+        },
+        ops);
+    assert(result.success);
+    // Data must be durable before the name is published, and the directory
+    // entry synced after.
+    const auto& o = fs.operations;
+    assert(o[o.size() - 3] == "sync_file:clip.mp4.partial");
+    assert(o[o.size() - 2] == "rename:clip.mp4.partial->clip.mp4");
+    assert(o[o.size() - 1] == "sync_dir:dir");
+}
+
+void TestSyncFailureIsWriterFailure() {
+    FakeFilesystem fs;
+    auto ops = fs.Ops();
+    ops.sync_file = [](const std::filesystem::path&, std::error_code& error) {
+        error = std::make_error_code(std::errc::io_error);
+        return false;
+    };
+    const auto result = tx::Run(
+        "clip.mp4",
+        [&fs](const std::filesystem::path&, std::string&) {
+            fs.temporary_exists = true;
+            return true;
+        },
+        ops);
+    assert(!result.success);
+    assert(result.failure == tx::Failure::Writer);
+    assert(!fs.final_exists);
+    assert(!fs.temporary_exists);
+}
+
 } // namespace
 
 int main() {
+    TestSyncOrdering();
+    TestSyncFailureIsWriterFailure();
     TestSuccessfulSave();
     TestWriterFailureCleansTemporary();
     TestTrailerFailureNeverCommits();

@@ -40,6 +40,14 @@ struct FileOps {
     std::function<bool(const fs::path&, const fs::path&, std::error_code&)>
         rename_no_replace;
     std::function<bool(const fs::path&, std::error_code&)> remove;
+    // Flush a finished temporary file to disk before it is published, and the
+    // containing directory after the rename, so a power loss cannot leave a
+    // published name over empty data. Defaults succeed for fakes that do not
+    // care about durability.
+    std::function<bool(const fs::path&, std::error_code&)> sync_file =
+        [](const fs::path&, std::error_code&) { return true; };
+    std::function<bool(const fs::path&, std::error_code&)> sync_directory =
+        [](const fs::path&, std::error_code&) { return true; };
 };
 
 struct Result {
@@ -146,6 +154,28 @@ inline FileOps DefaultFileOps() {
         return false;
 #endif
     };
+#if defined(__linux__)
+    const auto fsync_path = [](const fs::path& path, int flags,
+                               std::error_code& error) {
+        const int fd = ::open(path.c_str(), flags | O_CLOEXEC);
+        if (fd < 0) {
+            error = std::error_code(errno, std::generic_category());
+            return false;
+        }
+        const bool synced = ::fsync(fd) == 0;
+        if (!synced) error = std::error_code(errno, std::generic_category());
+        ::close(fd);
+        return synced;
+    };
+    ops.sync_file = [fsync_path](const fs::path& path, std::error_code& error) {
+        return fsync_path(path, O_RDONLY, error);
+    };
+    ops.sync_directory = [fsync_path](const fs::path& path, std::error_code& error) {
+        return fsync_path(path.empty() ? fs::path(".") : path,
+                          O_RDONLY | O_DIRECTORY, error);
+    };
+#endif
+    // Windows: MoveFileExW(MOVEFILE_WRITE_THROUGH) already flushes the rename.
     return ops;
 }
 
@@ -205,6 +235,15 @@ inline Result Run(
     }
 
     error.clear();
+    if (!ops.sync_file(result.temporary_path, error)) {
+        result.failure = Failure::Writer;
+        result.writer_error = "Could not flush the temporary clip to disk: "
+            + (error ? error : std::make_error_code(std::errc::io_error)).message();
+        CleanupTemporary(result, ops);
+        return result;
+    }
+
+    error.clear();
     if (!ops.rename_no_replace(result.temporary_path, result.final_path, error)) {
         result.failure = Failure::Rename;
         result.operation_error = error
@@ -213,6 +252,11 @@ inline Result Run(
         CleanupTemporary(result, ops);
         return result;
     }
+
+    // The clip is already published; a failed directory sync only weakens
+    // durability and must not turn a finished save into an error.
+    error.clear();
+    (void)ops.sync_directory(result.final_path.parent_path(), error);
 
     result.success = true;
     result.failure = Failure::None;
