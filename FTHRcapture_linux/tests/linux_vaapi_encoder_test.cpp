@@ -12,8 +12,8 @@ extern "C" {
 namespace {
 constexpr int kSkip = 77;
 
-// Mesa's compression_level runs opposite to P1..P7: 1 is highest quality and
-// 7 fastest, so P1 must map to 7 and P7 to 1.
+// ApplyPreset must not set a VA-API quality level: its meaning differs
+// between drivers, so the unset default (-1) is the contract.
 int CompressionLevelFor(const AVCodec* codec, int preset) {
     AVCodecContext* ctx = avcodec_alloc_context3(codec);
     assert(ctx);
@@ -26,9 +26,8 @@ int CompressionLevelFor(const AVCodec* codec, int preset) {
 
 int main() {
     if (const AVCodec* vaapi = avcodec_find_encoder_by_name("h264_vaapi")) {
-        assert(CompressionLevelFor(vaapi, 1) == 7);
-        assert(CompressionLevelFor(vaapi, 4) == 4);
-        assert(CompressionLevelFor(vaapi, 7) == 1);
+        assert(CompressionLevelFor(vaapi, 1) == -1);
+        assert(CompressionLevelFor(vaapi, 7) == -1);
     }
 
     fthr::EncoderConfig cfg{};

@@ -36,7 +36,7 @@ bool CaptureEngine::Initialize(const CaptureConfig& cfg) {
             if (!audio_.IsStreamOpen()) {
                 std::cerr << "FTHR_STARTUP_WARNING: DESKTOP_AUDIO_UNAVAILABLE: "
                           << "Default output monitor could not be opened; "
-                          << "capture continues video-only." << std::endl;
+                          << "audio will attach when it becomes available." << std::endl;
             }
         }
     }
@@ -520,9 +520,11 @@ void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
         } else {
             audio_.Start("", cfg_.buffer_seconds);
             if (!audio_.IsStreamOpen()) {
-                std::cerr << "FTHR_STARTUP_WARNING: DESKTOP_AUDIO_UNAVAILABLE: "
-                          << "Default output monitor could not be opened; "
-                          << "capture continues video-only." << std::endl;
+                // No startup warning here: the UI already received one, and
+                // the capture thread keeps retrying.
+                std::cerr << "[Audio] Desktop audio not yet available after "
+                          << "reconfigure; will attach when it appears."
+                          << std::endl;
             }
         }
     }

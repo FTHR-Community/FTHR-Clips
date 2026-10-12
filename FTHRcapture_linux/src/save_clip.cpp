@@ -230,12 +230,29 @@ static bool write_clip_to_temporary_file(
                         abandon_audio("av_frame_get_buffer");
                     } else if (!(aac_pkt = av_packet_alloc())) {
                         abandon_audio("av_packet_alloc");
-                    } else if (!(aud_stream = avformat_new_stream(fmt_ctx, nullptr))) {
-                        abandon_audio("avformat_new_stream");
                     } else {
-                        aud_stream->id = 1;
-                        avcodec_parameters_from_context(aud_stream->codecpar, aac_ctx);
-                        aud_stream->time_base = { 1, audio_sample_rate };
+                        // Parameters are built off-stream first so a failure
+                        // here cannot leave an empty stream in the container.
+                        AVCodecParameters* aac_par = avcodec_parameters_alloc();
+                        if (!aac_par ||
+                                avcodec_parameters_from_context(aac_par, aac_ctx) < 0) {
+                            abandon_audio("avcodec_parameters_from_context");
+                        } else if (!(aud_stream = avformat_new_stream(fmt_ctx, nullptr))) {
+                            abandon_audio("avformat_new_stream");
+                        } else if (avcodec_parameters_copy(aud_stream->codecpar, aac_par) < 0) {
+                            // The stream already exists; the video-only
+                            // fallback cannot remove it, so fail the save.
+                            abandon_audio("avcodec_parameters_copy");
+                            error_message = "Failed to set up the audio stream";
+                            ok = false;
+                            avcodec_parameters_free(&aac_par);
+                            cleanup();
+                            return false;
+                        } else {
+                            aud_stream->id = 1;
+                            aud_stream->time_base = { 1, audio_sample_rate };
+                        }
+                        avcodec_parameters_free(&aac_par);
                     }
                 }
             }

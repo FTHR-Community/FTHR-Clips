@@ -36,13 +36,13 @@ def test_detail_is_bounded_for_ui_display():
 def test_extracts_linux_video_only_audio_warning():
     output = (
         'FTHR_STARTUP_WARNING: DESKTOP_AUDIO_UNAVAILABLE: '
-        'Default output monitor could not be opened; capture continues video-only.\n')
+        'Default output monitor could not be opened; audio will attach when it becomes available.\n')
 
     warnings = extract_startup_warnings(output)
 
     assert len(warnings) == 1
     assert warnings[0].code == 'DESKTOP_AUDIO_UNAVAILABLE'
-    assert 'video-only' in warnings[0].detail
+    assert 'will attach' in warnings[0].detail
 
 
 def test_winerror_4551_launch_failure_preserves_native_call_and_context():

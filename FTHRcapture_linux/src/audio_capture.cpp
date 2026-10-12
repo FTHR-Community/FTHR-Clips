@@ -150,8 +150,10 @@ bool AudioCapture::Start(const std::string& device_name, uint32_t keep_seconds) 
         stream_ = OpenStream(source_name);
     stream_open_.store(stream_ != nullptr);
     if (!stream_) {
-        std::cerr << "[Audio] Default output monitor unavailable; "
-                     "will keep trying every second" << std::endl;
+        std::cerr << "[Audio] "
+                  << (follow_default_ ? std::string("Default output monitor")
+                                      : "Source '" + source_name + "'")
+                  << " unavailable; will keep trying every second" << std::endl;
     }
 
     {
@@ -161,7 +163,8 @@ bool AudioCapture::Start(const std::string& device_name, uint32_t keep_seconds) 
     }
     {
         std::lock_guard<std::mutex> lk(source_mutex_);
-        source_name_ = stream_ ? source_name : std::string();
+        // An explicit device keeps its name so the reopen loop retries it.
+        source_name_ = (stream_ || !follow_default_) ? source_name : std::string();
         pending_source_.clear();
     }
     if (stream_) {
@@ -241,11 +244,21 @@ void AudioCapture::CaptureLoop() {
             // Open the new monitor before dropping the old one so a failed
             // switch keeps recording from the previous device.
             if (pa_simple* next = OpenStream(switch_to)) {
+                const bool was_closed = (stream_ == nullptr);
                 if (stream_) pa_simple_free(stream_);
                 stream_ = next;
                 stream_open_.store(true);
-                std::lock_guard<std::mutex> lk(source_mutex_);
-                source_name_ = switch_to;
+                {
+                    std::lock_guard<std::mutex> lk(source_mutex_);
+                    source_name_ = switch_to;
+                }
+                // The watcher can resolve the monitor before the reopen
+                // branch below does; log the open from either path.
+                if (was_closed) {
+                    announce();
+                    std::cout << "[Audio] Reconnected to " << switch_to
+                              << std::endl;
+                }
             }
         }
 
