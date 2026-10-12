@@ -322,3 +322,96 @@ def test_qt_multimedia_ffmpeg_is_accepted(manifest_root, tmp_path):
     rep = vrl.Report()
     vrl.check_linux_ffmpeg_libs(art, rep, 'test', manifest_root=manifest_root)
     assert not rep.failures, rep.failures
+
+
+# Bundled ffmpeg / ffprobe CLI tools
+
+PINNED_NEEDED = [
+    'libavdevice.so.62', 'libavfilter.so.11', 'libavformat.so.62',
+    'libavcodec.so.62', 'libswresample.so.6', 'libswscale.so.9',
+    'libavutil.so.60', 'libm.so.6', 'libpthread.so.0', 'libc.so.6',
+]
+
+
+def _cli_appdir(tmp_path, names=('ffmpeg', 'ffprobe')):
+    d = tmp_path / 'AppDir' / '_internal'
+    for n in names:
+        _write_lib(d, n, b'\x7fELF' + b'\0' * 60)
+    return tmp_path / 'AppDir'
+
+
+def _patch_cli(monkeypatch, needed, rpath):
+    monkeypatch.setattr(vrl, '_elf_needed', lambda p: list(needed))
+    monkeypatch.setattr(vrl, '_elf_rpath', lambda p: list(rpath))
+    monkeypatch.setattr(vrl, 'check_ffmpeg_executable',
+                        lambda exe, rep: rep.ok(f'{exe.name}: stub'))
+
+
+def test_cli_tools_with_pinned_needed_and_origin_rpath_pass(
+        manifest_root, tmp_path, monkeypatch):
+    appdir = _cli_appdir(tmp_path)
+    _patch_cli(monkeypatch, PINNED_NEEDED, ['$ORIGIN/../lib', '$ORIGIN'])
+    rep = vrl.Report()
+    vrl.check_linux_ffmpeg_cli(appdir, rep, 'appdir', manifest_root=manifest_root)
+    assert not rep.failures, rep.failures
+
+
+def test_cli_tool_with_system_rpath_fails(manifest_root, tmp_path, monkeypatch):
+    appdir = _cli_appdir(tmp_path)
+    _patch_cli(monkeypatch, PINNED_NEEDED, ['$ORIGIN', '/usr/lib'])
+    rep = vrl.Report()
+    vrl.check_linux_ffmpeg_cli(appdir, rep, 'appdir', manifest_root=manifest_root)
+    assert any('RPATH' in f for f in rep.failures), rep.failures
+
+
+def test_cli_tool_without_rpath_fails(manifest_root, tmp_path, monkeypatch):
+    appdir = _cli_appdir(tmp_path)
+    _patch_cli(monkeypatch, PINNED_NEEDED, [])
+    rep = vrl.Report()
+    vrl.check_linux_ffmpeg_cli(appdir, rep, 'appdir', manifest_root=manifest_root)
+    assert any('RPATH' in f for f in rep.failures), rep.failures
+
+
+def test_cli_tool_linked_to_system_ffmpeg_fails(
+        manifest_root, tmp_path, monkeypatch):
+    appdir = _cli_appdir(tmp_path)
+    needed = [n for n in PINNED_NEEDED if n != 'libavcodec.so.62']
+    _patch_cli(monkeypatch, needed + ['libavcodec.so.60'], ['$ORIGIN'])
+    rep = vrl.Report()
+    vrl.check_linux_ffmpeg_cli(appdir, rep, 'appdir', manifest_root=manifest_root)
+    assert any('libavcodec.so.60' in f for f in rep.failures), rep.failures
+
+
+def test_cli_tool_with_unlisted_ffmpeg_needed_fails(
+        manifest_root, tmp_path, monkeypatch):
+    appdir = _cli_appdir(tmp_path)
+    _patch_cli(monkeypatch, PINNED_NEEDED + ['libavcodec.so.99'], ['$ORIGIN'])
+    rep = vrl.Report()
+    vrl.check_linux_ffmpeg_cli(appdir, rep, 'appdir', manifest_root=manifest_root)
+    assert rep.failures
+
+
+def test_appdir_without_cli_tools_fails(manifest_root, tmp_path, monkeypatch):
+    appdir = tmp_path / 'AppDir'
+    appdir.mkdir()
+    _patch_cli(monkeypatch, PINNED_NEEDED, ['$ORIGIN'])
+    rep = vrl.Report()
+    vrl.check_linux_ffmpeg_cli(appdir, rep, 'appdir', manifest_root=manifest_root)
+    assert any('does not ship ffmpeg' in f for f in rep.failures), rep.failures
+
+
+def test_tree_without_cli_tools_only_warns(manifest_root, tmp_path, monkeypatch):
+    tree = tmp_path / 'ffmpeg'
+    tree.mkdir()
+    _patch_cli(monkeypatch, PINNED_NEEDED, ['$ORIGIN'])
+    rep = vrl.Report()
+    vrl.check_linux_ffmpeg_cli(tree, rep, 'tree', manifest_root=manifest_root,
+                               required=False)
+    assert not rep.failures
+    assert rep.warnings
+
+
+def test_manifest_records_cli_tools():
+    cli = _manifest_data()['cli_tools']
+    assert cli['shipped'] == ['ffmpeg', 'ffprobe']
+    assert cli['rpath'] == '$ORIGIN/../lib:$ORIGIN'

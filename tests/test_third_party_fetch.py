@@ -57,7 +57,30 @@ def test_linux_ffmpeg_cli_rpaths_are_repaired(tmp_path: Path, monkeypatch) -> No
             ['readelf', '-d', str(bin_dir / name)],
             check=True, capture_output=True, text=True,
         )
-        assert 'Library rpath: [$ORIGIN/../lib]' in result.stdout
+        assert 'Library rpath: [$ORIGIN/../lib:$ORIGIN]' in result.stdout
+
+
+def test_linux_ffmpeg_cli_rpath_covers_tree_and_bundle_layouts(
+        tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+
+    from tools import fetch_third_party
+
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    for name in ('ffmpeg', 'ffprobe'):
+        (bin_dir / name).write_bytes(b'x')
+    calls: list[list[str]] = []
+    monkeypatch.setattr(fetch_third_party.shutil, 'which', lambda n: '/x/patchelf')
+    monkeypatch.setattr(
+        subprocess, 'run',
+        lambda argv, **kw: calls.append(list(argv)))
+
+    _ensure_linux_ffmpeg_tool_rpaths(bin_dir)
+
+    assert len(calls) == 2
+    for argv in calls:
+        assert argv[argv.index('--set-rpath') + 1] == '$ORIGIN/../lib:$ORIGIN'
 
 
 def test_linux_release_link_is_confined_to_pinned_ffmpeg_tree() -> None:

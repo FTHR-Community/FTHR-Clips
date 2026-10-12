@@ -765,6 +765,68 @@ def check_linux_ffmpeg_libs(root, rep, label, manifest_root=None) -> None:
                 rep.fail(f'{name}: RPATH entry "{entry}" is an absolute host path')
 
 
+LIBC_FAMILY_NEEDED = re.compile(
+    r'^(libc|libm|libpthread|libdl|librt|libgcc_s|libmvec)\.so(\.\d+)?$|'
+    r'^ld-linux[-\w.]*\.so(\.\d+)?$')
+
+
+def check_linux_ffmpeg_cli(root, rep, label, manifest_root=None,
+                           required=True) -> None:
+    """Gate the bundled ffmpeg/ffprobe CLI tools.
+
+    They are verified by banner, configure flags, NEEDED and RPATH rather than
+    by hash: patchelf output varies by patchelf version. NEEDED must name only
+    the pinned FFmpeg SONAMEs plus the libc family, and every RPATH entry must
+    be $ORIGIN-relative, so a trimmed bundle fails to load instead of picking
+    up the distribution FFmpeg.
+
+    ``required`` is True for an AppDir (the bundle must ship the tools) and
+    False for a source tree (a missing tool is only a warning).
+    """
+    print(f'\n-- Linux FFmpeg CLI tools in {label} --')
+    data = _read_manifest(manifest_root or root, LINUX_MANIFEST_REL, rep)
+    if data is None:
+        rep.fail(f'{label}: cannot validate the CLI tools without the Linux manifest')
+        return
+    allowed = set(data.get('libraries_linked_by_engine') or []) | set(
+        data.get('libraries_transitively_required') or [])
+    shipped = (data.get('cli_tools') or {}).get('shipped') or ['ffmpeg', 'ffprobe']
+
+    for name in shipped:
+        tools = [q for q in sorted(root.rglob(name))
+                 if q.is_file() and not q.is_symlink()]
+        if not tools:
+            msg = f'{label}: AppDir does not ship {name}' if required else (
+                f'{label}: {name} not found')
+            if required:
+                rep.fail(msg)
+            else:
+                rep.warn(msg)
+            continue
+        for tool in tools:
+            check_ffmpeg_executable(tool, rep)
+            for need in _elf_needed(tool):
+                if need in SYSTEM_FFMPEG_SONAMES:
+                    rep.fail(f'{name}: links the system GPL FFmpeg ({need})')
+                elif FFMPEG_SO_RE.match(need):
+                    if need in allowed:
+                        rep.ok(f'{name}: needs {need}')
+                    else:
+                        rep.fail(f'{name}: needs {need}, which is not a pinned '
+                                 f'library in {LINUX_MANIFEST_REL}')
+                elif not LIBC_FAMILY_NEEDED.match(need):
+                    rep.fail(f'{name}: unexpected NEEDED entry {need}')
+            rpath = _elf_rpath(tool)
+            if not rpath:
+                rep.fail(f'{name}: no RPATH - it would load system libraries')
+                continue
+            outside = [e for e in rpath if not e.startswith('$ORIGIN')]
+            if outside:
+                rep.fail(f'{name}: RPATH entry {outside} is not $ORIGIN-relative')
+            else:
+                rep.ok(f'{name}: RPATH is bundle-relative ({":".join(rpath)})')
+
+
 def check_linux_engine(engine, rep) -> None:
     """The engine must load bundled FFmpeg, not whatever the system offers."""
     print(f'\n-- Linux engine linkage ({engine.name}) --')
@@ -846,6 +908,8 @@ def main() -> int:
             scan_dir(vendored_linux, rep, 'vendored ffmpeg (linux)')
             check_linux_ffmpeg_libs(vendored_linux, rep,
                                     'vendored ffmpeg (linux)', manifest_root=root)
+            check_linux_ffmpeg_cli(vendored_linux, rep, 'vendored ffmpeg (linux)',
+                                   manifest_root=root, required=False)
             check_linux_engine(
                 root / 'FTHRcapture_linux' / 'build' / 'FTHRclips', rep)
         else:
@@ -883,6 +947,7 @@ def main() -> int:
         # the engine never loads is still a GPL library being distributed, and
         # PyInstaller collects the system FFmpeg through cv2 and Qt.
         check_linux_ffmpeg_libs(d, rep, 'appdir', manifest_root=_repo_root())
+        check_linux_ffmpeg_cli(d, rep, 'appdir', manifest_root=_repo_root())
         engine = next(iter(sorted(d.rglob('FTHRclips'))), None)
         if engine is not None:
             check_linux_engine(engine, rep)
