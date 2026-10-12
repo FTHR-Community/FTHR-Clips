@@ -1,9 +1,11 @@
 #pragma once
 #include "capture_backend.h"
+#include "ext_repeat_policy.h"
 #include "shm_frame.h"
 #include "wayland_dispatch.h"
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <wayland-client.h>
 #include "ext-image-copy-capture-client-protocol.h"
 #include "ext-image-capture-source-client-protocol.h"
@@ -51,6 +53,10 @@ public:
 private:
     inline static constexpr auto kInitializationTimeout = std::chrono::seconds(5);
     inline static constexpr auto kFrameTimeout = std::chrono::seconds(2);
+    // An expired deadline only dispatches events already queued and never
+    // flushes, so a freshly created frame request would never reach the
+    // compositor; every frame wait gets at least this much time.
+    inline static constexpr auto kMinFrameWait = std::chrono::milliseconds(1);
 
     const std::atomic<bool>* running_ = nullptr;
     wl_display*    display_    = nullptr;
@@ -89,13 +95,24 @@ private:
 
     bool frame_ready_  = false;
     bool frame_failed_ = false;
+    // Outstanding across timeouts: the protocol forbids a second frame
+    // request on the session while one is pending.
+    ext_image_copy_capture_frame_v1* pending_frame_ = nullptr;
+
+    // Owned copy of the last completed frame, repeated while the compositor
+    // holds the request on a static screen.
+    std::vector<uint8_t> last_frame_;
+    uint32_t last_w_ = 0, last_h_ = 0, last_format_ = 0;
+    std::chrono::steady_clock::time_point last_delivery_{};
+    std::chrono::nanoseconds frame_interval_{16'666'667};
 
     uint32_t native_w_ = 0;
     uint32_t native_h_ = 0;
 
     void BeginConstraints();
     bool EnsureShmBuffer();
-    bool CaptureOnce(std::chrono::steady_clock::time_point deadline);
+    WaylandWaitResult CaptureOnceResult(WaylandDeadline deadline);
+    WaylandDeadline FrameDeadline() const;
     bool AllocShmBuffer();
     void FreeShmBuffer();
     void DestroyWayland();
@@ -103,6 +120,8 @@ private:
     bool WaitUntil(WaylandDeadline deadline,
                    const WaylandPredicate& complete,
                    const char* operation);
+    WaylandWaitResult WaitUntilResult(WaylandDeadline deadline,
+                                      const WaylandPredicate& complete);
     bool Roundtrip(WaylandDeadline deadline, const char* operation);
 };
 

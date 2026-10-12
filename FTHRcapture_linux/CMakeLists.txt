@@ -224,6 +224,16 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic -UNDEBUG)
     add_test(NAME wayland_bounded_dispatch COMMAND fthr_wayland_dispatch_test)
 
+    add_executable(fthr_ext_repeat_policy_test
+        tests/ext_repeat_policy_test.cpp
+        src/wayland_dispatch.cpp)
+    target_include_directories(fthr_ext_repeat_policy_test PRIVATE src)
+    target_link_libraries(fthr_ext_repeat_policy_test PRIVATE
+        PkgConfig::WAYLAND pthread)
+    target_compile_options(fthr_ext_repeat_policy_test PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME ext_repeat_policy COMMAND fthr_ext_repeat_policy_test)
+
     add_executable(fthr_shm_frame_test
         tests/shm_frame_test.cpp
         src/shm_frame.cpp
