@@ -27,8 +27,13 @@ def test_audio_open_failure_is_synchronous_and_video_only_diagnostic_exists():
                             AUDIO_CPP.index('bool AudioCapture::Start')]
     assert 'pa_simple_new' in open_stream
     start = AUDIO_CPP[AUDIO_CPP.index('bool AudioCapture::Start'):]
-    assert start.index('stream_ = OpenStream(') < start.index('std::thread')
-    assert start.index('if (!stream_) return false;') < start.index('std::thread')
+    before_thread = start[:start.index('std::thread')]
+    assert 'stream_ = OpenStream(' in before_thread
+    # A monitor that cannot be opened at start no longer fails the session:
+    # the capture thread keeps retrying once per second, as after a
+    # mid-session server loss, and the stream state is published atomically.
+    assert 'will keep trying every second' in before_thread
+    assert 'stream_open_.store(stream_ != nullptr)' in before_thread
     engine = (ROOT / 'FTHRcapture_linux/src/capture_engine.cpp').read_text()
     assert 'FTHR_STARTUP_WARNING: DESKTOP_AUDIO_UNAVAILABLE' in engine
 
