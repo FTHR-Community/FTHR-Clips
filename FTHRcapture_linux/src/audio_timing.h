@@ -14,6 +14,15 @@ int64_t AudioChunkStartNs(int64_t delivery_end_ns,
                           std::size_t frames,
                           uint32_t sample_rate);
 
+// Audio ring size for a replay window: the window plus a margin so a save
+// that lands slightly late still finds its oldest samples.
+inline std::size_t AudioRingCapacitySamples(uint32_t keep_seconds,
+                                            int sample_rate, int channels) {
+    return (static_cast<std::size_t>(keep_seconds) + 10) *
+           static_cast<std::size_t>(sample_rate) *
+           static_cast<std::size_t>(channels);
+}
+
 // One captured block as seen by AssembleAudioWindow: interleaved samples
 // and the CLOCK_MONOTONIC time of its first frame.
 struct TimedAudioBlock {

@@ -77,5 +77,11 @@ int main() {
         assert(fthr::AssembleAudioWindow({}, 1, rate, 900 * ms, 100).empty());
     }
 
+    // The ring keeps the replay window plus a ten-second margin, never a
+    // fixed five minutes.
+    assert(fthr::AudioRingCapacitySamples(30, 48000, 2) == (30u + 10u) * 48000u * 2u);
+    assert(fthr::AudioRingCapacitySamples(300, 48000, 2) == 310u * 48000u * 2u);
+    assert(fthr::AudioRingCapacitySamples(0, 48000, 2) == 10u * 48000u * 2u);
+
     return 0;
 }

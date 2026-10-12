@@ -20,12 +20,6 @@ static int64_t mono_ns() {
     return static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
 }
 
-// Maximum ring buffer length in samples (interleaved stereo float32)
-static constexpr size_t kMaxRingSamples =
-    static_cast<size_t>(AudioCapture::kSampleRate) *
-    static_cast<size_t>(AudioCapture::kChannels)   *
-    static_cast<size_t>(AudioCapture::kMaxSeconds);
-
 // Chunk size: 10ms worth of frames
 static constexpr int kFramesPerChunk = AudioCapture::kSampleRate / 100;
 
@@ -135,20 +129,30 @@ pa_simple* AudioCapture::OpenStream(const std::string& source_name) const {
     return stream;
 }
 
-bool AudioCapture::Start(const std::string& device_name) {
+bool AudioCapture::Start(const std::string& device_name, uint32_t keep_seconds) {
     Stop();
 
     follow_default_ = device_name.empty() || device_name == "auto";
+    keep_seconds_ = keep_seconds;
+    ring_capacity_samples_ =
+        AudioRingCapacitySamples(keep_seconds, kSampleRate, kChannels);
     std::string source_name =
         follow_default_ ? resolve_default_sink_monitor() : device_name;
-    if (source_name.empty()) {
-        std::cerr << "[Audio] Default output monitor could not be resolved"
-                  << std::endl;
+    if (source_name.empty() && !follow_default_) {
+        std::cerr << "[Audio] No audio device name given" << std::endl;
         return false;
     }
 
-    stream_ = OpenStream(source_name);
-    if (!stream_) return false;
+    // A monitor that cannot be opened now is not fatal: the capture thread
+    // retries every second (the same path as a mid-session server loss), and
+    // the watcher supplies the source once the server is back.
+    if (!source_name.empty())
+        stream_ = OpenStream(source_name);
+    stream_open_.store(stream_ != nullptr);
+    if (!stream_) {
+        std::cerr << "[Audio] Default output monitor unavailable; "
+                     "will keep trying every second" << std::endl;
+    }
 
     {
         std::lock_guard<std::mutex> lk(mutex_);
@@ -157,11 +161,13 @@ bool AudioCapture::Start(const std::string& device_name) {
     }
     {
         std::lock_guard<std::mutex> lk(source_mutex_);
-        source_name_ = source_name;
+        source_name_ = stream_ ? source_name : std::string();
         pending_source_.clear();
     }
-    std::cout << "[Audio] Capturing default output monitor: "
-              << source_name << std::endl;
+    if (stream_) {
+        std::cout << "[Audio] Capturing default output monitor: "
+                  << source_name << std::endl;
+    }
     running_.store(true);
     thread_ = std::thread(&AudioCapture::CaptureLoop, this);
     if (follow_default_)
@@ -185,6 +191,7 @@ void AudioCapture::Stop() {
         pa_simple_free(stream_);
         stream_ = nullptr;
     }
+    stream_open_.store(false);
 }
 
 void AudioCapture::WatchDefaultOutput() {
@@ -209,8 +216,16 @@ void AudioCapture::WatchDefaultOutput() {
 
 void AudioCapture::CaptureLoop() {
     int pa_err = 0;
-    std::cout << "[Audio] PulseAudio capture started ("
-              << kSampleRate << "Hz stereo float32)" << std::endl;
+    // Announced when audio actually flows, which may be well after Start()
+    // if PulseAudio was not running yet.
+    bool announced = false;
+    auto announce = [&announced] {
+        if (announced) return;
+        announced = true;
+        std::cout << "[Audio] PulseAudio capture started ("
+                  << kSampleRate << "Hz stereo float32)" << std::endl;
+    };
+    if (stream_) announce();
 
     const int kSamplesPerChunk = kFramesPerChunk * kChannels;
     std::vector<float> buf(static_cast<size_t>(kSamplesPerChunk));
@@ -228,6 +243,7 @@ void AudioCapture::CaptureLoop() {
             if (pa_simple* next = OpenStream(switch_to)) {
                 if (stream_) pa_simple_free(stream_);
                 stream_ = next;
+                stream_open_.store(true);
                 std::lock_guard<std::mutex> lk(source_mutex_);
                 source_name_ = switch_to;
             }
@@ -251,6 +267,8 @@ void AudioCapture::CaptureLoop() {
             if (source.empty()) continue;
             stream_ = OpenStream(source);
             if (!stream_) continue;
+            stream_open_.store(true);
+            announce();
             {
                 std::lock_guard<std::mutex> lk(source_mutex_);
                 source_name_ = source;
@@ -264,6 +282,7 @@ void AudioCapture::CaptureLoop() {
                       << pa_strerror(pa_err) << "; reconnecting" << std::endl;
             pa_simple_free(stream_);
             stream_ = nullptr;
+            stream_open_.store(false);
             next_reopen = std::chrono::steady_clock::now() + kReopenInterval;
             continue;
         }
@@ -283,11 +302,11 @@ void AudioCapture::CaptureLoop() {
             ring_total_ += chunk.samples.size();
             chunks_.push_back(std::move(chunk));
 
-            // Prune oldest chunks to stay within kMaxSeconds.
+            // Prune oldest chunks to stay within the replay window.
             // Maintain ring_total_ incrementally instead of re-summing all
             // chunks every callback — at 10ms intervals with 90s of history
             // that's ~9000 iterations per callback without this optimization.
-            while (ring_total_ > kMaxRingSamples && !chunks_.empty()) {
+            while (ring_total_ > ring_capacity_samples_ && !chunks_.empty()) {
                 ring_total_ -= chunks_.front().samples.size();
                 chunks_.pop_front();
             }

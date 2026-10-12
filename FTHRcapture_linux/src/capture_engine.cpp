@@ -32,7 +32,8 @@ bool CaptureEngine::Initialize(const CaptureConfig& cfg) {
         if (cfg.multiband_enabled && !cfg.audio_categories.empty()) {
             multi_audio_.Start(cfg.audio_categories);
         } else {
-            if (!audio_.Start("")) {
+            audio_.Start("", cfg.buffer_seconds);
+            if (!audio_.IsStreamOpen()) {
                 std::cerr << "FTHR_STARTUP_WARNING: DESKTOP_AUDIO_UNAVAILABLE: "
                           << "Default output monitor could not be opened; "
                           << "capture continues video-only." << std::endl;
@@ -517,7 +518,8 @@ void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
         if (cfg_.multiband_enabled && !cfg_.audio_categories.empty()) {
             multi_audio_.Start(cfg_.audio_categories);
         } else {
-            if (!audio_.Start("")) {
+            audio_.Start("", cfg_.buffer_seconds);
+            if (!audio_.IsStreamOpen()) {
                 std::cerr << "FTHR_STARTUP_WARNING: DESKTOP_AUDIO_UNAVAILABLE: "
                           << "Default output monitor could not be opened; "
                           << "capture continues video-only." << std::endl;

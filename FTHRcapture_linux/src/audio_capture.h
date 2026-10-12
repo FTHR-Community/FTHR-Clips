@@ -25,10 +25,20 @@ public:
 
     // device_name: PulseAudio source name.
     //   Pass "" or "auto" to use the default sink monitor (loopback).
-    bool Start(const std::string& device_name = "");
+    // keep_seconds: replay window the ring must cover.
+    // Returns true whenever the capture thread started, even if the monitor
+    // could not be opened yet: the thread keeps retrying once a second, so
+    // audio attaches when PulseAudio appears later. False only when an
+    // explicit device name is unusable.
+    bool Start(const std::string& device_name = "",
+               uint32_t keep_seconds = kMaxSeconds);
     void Stop();
 
     bool IsRunning() const { return running_.load(); }
+
+    // True while the capture thread holds an open PulseAudio stream.
+    bool IsStreamOpen() const { return stream_open_.load(); }
+    uint32_t KeepSeconds() const { return keep_seconds_; }
 
     // Returns interleaved float32 samples covering the last duration_ms
     // milliseconds ending at end_time_ns (CLOCK_MONOTONIC). If end_time_ns
@@ -52,6 +62,9 @@ private:
     std::thread               thread_;
     std::atomic<bool>         running_{false};
     pa_simple*                stream_{nullptr};   // owned by the capture thread
+    std::atomic<bool>         stream_open_{false};
+    uint32_t                  keep_seconds_{kMaxSeconds};
+    size_t                    ring_capacity_samples_{0};
 
     // Following the default output: when Start() was given no explicit
     // source, a watcher re-resolves the default sink's monitor and asks the
