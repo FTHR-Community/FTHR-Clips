@@ -214,7 +214,7 @@ _rm "libQt6WebEngine*.so*"
 
 # PyInstaller's Qt hook can re-add the optional TIFF image plugin after the
 # spec-level TOC filter.  The pinned PySide6 wheel builds it against
-# libtiff.so.5, which is not part of the Ubuntu 24.04 baseline.  FTHR ships no
+# libtiff.so.5, which is not part of the Ubuntu 22.04 build baseline.  FTHR ships no
 # TIFF assets, so omit the unusable plugin deterministically from every build.
 _rm "libqtiff.so"
 _rm "libQt6Location*.so*"

@@ -39,7 +39,7 @@ _QT6_PLUGIN_DEST = Path('PySide6') / _QT6_PLUG_REL
 
 _SKIPPED_QT_PLUGINS = {
     # The wheel plugin targets libtiff.so.5, which is not shipped by the wheel
-    # and is unavailable on the supported Ubuntu 24.04 build baseline. FTHR
+    # and is unavailable on the Ubuntu 22.04 build baseline. FTHR
     # does not load TIFF assets, so carrying a plugin that cannot load is worse
     # than omitting that optional format handler.
     'libqtiff.so',

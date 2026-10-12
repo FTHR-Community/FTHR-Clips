@@ -278,9 +278,10 @@ Notes on the build:
   `CMAKE_BUILD_TYPE=Release` contributes, silently downgrading Release builds.
   The redundant `-O2` was removed; `-Wall -Wextra` stayed.
 - The binary is not stripped; `FTHR_linux.spec` strips it when bundling.
-- Ubuntu 24.04's `wayland-scanner` 1.22 may print two XML DTD validation warnings
-  for the newer `deprecated-since` attribute. The generated bindings still
-  compile; compiler/linker warnings are not expected.
+- The build baseline is Ubuntu 22.04. A newer `wayland-scanner` (for example
+  1.22 on Ubuntu 24.04) may print two XML DTD validation warnings about the
+  `deprecated-since` attribute. The generated bindings still compile;
+  compiler/linker warnings are not expected.
 
 ### 3. Run from source
 
@@ -315,21 +316,35 @@ FTHRclips <fps> <buffer_s> <w> <h> <bitrate_kbps> <_> <_> <_> <scaling>
 FTHRcapture_linux/build/FTHRclips 30 10 1280 720 6000 0 0 0 0 "" 0 4 0 1
 ```
 
-The alpha build tries `wlr-screencopy`, then `ext-image-copy-capture`, then
-the `org.freedesktop.portal.ScreenCast` portal with PipeWire (KDE Plasma/KWin
+The engine tries `wlr-screencopy`, then `ext-image-copy-capture`, then the
+`org.freedesktop.portal.ScreenCast` portal with PipeWire (KDE Plasma/KWin
 sessions advertise neither protocol). The portal shows the desktop's screen
-picker on the first run of a standalone engine and stores the restore token in
-`~/.fthr/portal_screencast_token`; a declined picker ends the engine with
-`CAPTURE_HEALTH_BACKEND_FAILED` and the reason in `engine_string` instead of
-retrying. The portal binds restore tokens to the caller's app id, which
-xdg-desktop-portal derives from the systemd scope: a token granted to an
-engine started from a terminal belongs to that terminal's identity, so the
-packaged app (scope `app-fthr\x2dclips-<pid>`) is asked once more on its
-first start. FFmpeg `x11grab` is compiled out by default because
-AUDIT-044 has no proven bounded-cancellation path. Unsupported sessions fail
-clearly after bounded recovery instead of falling back to X11. Developers can
-compile the known-unbounded backend only with
-`-DFTHR_EXPERIMENTAL_X11GRAB=ON`; such a build is not an alpha release build.
+picker the first time and stores the restore token in
+`~/.fthr/portal_screencast_token`; later starts show no picker. The picker
+appears once per app identity, so a standalone engine started from a terminal
+and the packaged app are asked separately. A declined picker ends the engine
+with `CAPTURE_HEALTH_BACKEND_FAILED` and the reason in `engine_string` instead
+of retrying.
+
+`FTHR_X11_CAPTURE` defaults to ON and builds the process-isolated x11grab
+backend, which is used for native X11 sessions and never under XWayland.
+`-DFTHR_X11_CAPTURE=OFF` removes it. `-DFTHR_PORTAL_BACKEND=OFF` removes the
+portal backend. A session that no compiled backend supports fails clearly after
+bounded recovery.
+
+`FTHR_CAPTURE_BACKEND` forces one backend and disables the fallback order:
+`wlr`, `ext`, `portal` or `x11`. A forced backend that cannot start fails
+capture with that backend's reason instead of trying another; an unknown value
+is logged and ignored.
+
+```bash
+FTHR_CAPTURE_BACKEND=ext FTHRcapture_linux/build/FTHRclips 30 10 1280 720 6000 0 0 0 0 "" 0 4 0 1
+```
+
+When capture is interrupted, the engine retries the backend that last
+delivered frames, keeps the replay history when only the capture backend had to
+restart, and waits for a stalled compositor or a missing output every two
+seconds.
 
 ### 4. Audio
 
@@ -351,9 +366,34 @@ sudo usermod -aG audio "$USER"   # then log out and back in
 bash build_linux.sh
 ```
 
-Steps: dependency check → engine build → PyInstaller bundle → strip unused
-libraries → smoke test → assemble AppDir → **licence verification** →
-`appimagetool`. The filename carries the version from `FTHR_UI/version.py`.
+`build_linux.sh` runs these steps in order:
+
+1. Dependency checks (tools, headers, Python modules).
+2. Fetch the pinned LGPL FFmpeg if it is not already installed.
+3. CMake configure and build of the engine and the playback mixer.
+4. `ctest` for the native tests.
+5. Linkage check: the engine and mixer need only libraries in the pinned tree
+   and the engine must carry an RPATH.
+6. Build the optional uploader bundle.
+7. PyInstaller bundle.
+8. Strip unused libraries.
+9. Remove the GPL FFmpeg copies collected from the system.
+10. Restore wheel libraries damaged by stripping (ELF repair) and smoke-test
+    the bundle.
+11. Assemble `build_output/AppDir`.
+12. Licence gate (`verify_release_licenses.py --appdir`).
+13. Fetch the pinned `appimagetool` and pack the AppImage.
+14. glibc gate (`verify_linux_glibc.py`) on the AppDir and the AppImage.
+
+The filename carries the version from `FTHR_UI/version.py`.
+
+#### Build baseline
+
+The release AppImage is built by the `linux-appimage-package` CI job on
+ubuntu-22.04 with a GLIBC 2.35 ceiling, so it runs on distributions at least
+that new. A local `build_linux.sh` on a newer glibc host fails the glibc gate
+by design and is for engine and bundle debugging only; do not publish its
+output.
 
 #### The licence gate (AUDIT-014)
 
@@ -375,21 +415,9 @@ FFmpeg at all:
 
 If it does fail, it is telling you something real. Do not add exceptions to it.
 
-### Verified build state
+### Build state
 
-Ubuntu 24.04 / WSL2, 2026-08-06:
-
-| Step | Result |
-|---|---|
-| CMake configure from an empty directory | OK |
-| Build | OK — 0 errors, 2 warnings |
-| `ldd` missing libraries | 0 |
-| Engine starts, creates `/dev/shm/FTHR_SharedMemory_v3` | OK |
-| PyInstaller bundle | OK — 580 MB, engine included |
-| AppDir contents (licences, icon, `.desktop`, no user data) | OK |
-| Licence gate | **PASS** — 83 checks, 0 failed, 0 warnings |
-| AppImage produced | **YES** — 219 MB, starts (offscreen), engine loads all 7 bundled FFmpeg libraries |
-
-Current platform evidence and remaining physical gaps are recorded in
-[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md). Historical build numbers are not release
-evidence for the current commit.
+The state of the current build is whatever the `linux-appimage-package` CI job
+reports for the commit; [`docs/linux.md`](docs/linux.md) describes what the
+packaged app does. Open platform gaps are recorded in
+[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).

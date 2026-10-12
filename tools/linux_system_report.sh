@@ -41,7 +41,7 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
 fi
 # Which capture backend the engine will pick, by the same rule it uses.
 if [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    _kv 'engine will try'  'wlr-screencopy, then ext-image-copy-capture'
+    _kv 'engine will try'  'wlr-screencopy, then ext-image-copy-capture, then the ScreenCast portal'
     _kv 'x11grab'          'XWayland fallback is refused'
 elif [ -n "${DISPLAY:-}" ]; then
     _kv 'engine will try'  'native X11 x11grab with RandR-selected geometry'
