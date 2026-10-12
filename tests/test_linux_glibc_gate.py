@@ -128,3 +128,12 @@ def test_ci_uses_ubuntu_2204_glibc_gate_and_uploads_verified_artifact() -> None:
     assert "actions/upload-artifact@v4" in job
     assert "gh release create" not in workflow
     assert not (WORKFLOWS / "linux-release.yml").exists()
+
+
+def test_linux_spec_leaves_the_compiler_runtime_to_the_host():
+    # A bundled libstdc++ shadows the host's for Mesa's VA-API driver; see
+    # the comment above _HOST_TOOLCHAIN_LIBS in FTHR_linux.spec.
+    spec = (ROOT / 'FTHR_linux.spec').read_text(encoding='utf-8')
+    assert "'libstdc++.so.6'" in spec and "'libgcc_s.so.1'" in spec
+    assert 'name not in _HOST_TOOLCHAIN_LIBS' in spec
+

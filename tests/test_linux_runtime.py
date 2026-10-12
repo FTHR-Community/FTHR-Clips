@@ -241,3 +241,43 @@ def test_legacy_cleanup_removes_our_dead_socket(monkeypatch, tmp_path):
     msg = linux_runtime.cleanup_legacy_socket()
     assert not legacy.exists()
     assert msg and 'removed stale legacy socket' in msg
+
+
+def test_child_environment_restores_the_host_library_path():
+    frozen = {'LD_LIBRARY_PATH': '/mnt/app/_internal', 'LD_LIBRARY_PATH_ORIG': '/opt/lib',
+              'PATH': '/usr/bin'}
+    env = linux_runtime.child_process_environment(frozen)
+    assert env['LD_LIBRARY_PATH'] == '/opt/lib'
+    assert 'LD_LIBRARY_PATH_ORIG' not in env
+    assert env['PATH'] == '/usr/bin'
+    assert frozen['LD_LIBRARY_PATH'] == '/mnt/app/_internal'   # input untouched
+
+
+def test_child_environment_drops_the_bundle_path_when_host_had_none():
+    env = linux_runtime.child_process_environment(
+        {'LD_LIBRARY_PATH': '/mnt/app/_internal', 'LD_LIBRARY_PATH_ORIG': ''})
+    assert 'LD_LIBRARY_PATH' not in env
+
+
+def test_child_environment_is_identity_outside_pyinstaller():
+    env = linux_runtime.child_process_environment({'LD_LIBRARY_PATH': '/custom'})
+    assert env == {'LD_LIBRARY_PATH': '/custom'}
+
+
+def test_restore_is_a_no_op_when_not_frozen(monkeypatch):
+    monkeypatch.setenv('LD_LIBRARY_PATH', '/mnt/app/_internal')
+    monkeypatch.setenv('LD_LIBRARY_PATH_ORIG', '/opt/lib')
+    monkeypatch.setattr(sys, 'frozen', False, raising=False)
+    linux_runtime.restore_library_search_path_for_children()
+    assert os.environ['LD_LIBRARY_PATH'] == '/mnt/app/_internal'
+
+
+def test_restore_rewrites_the_process_environment_when_frozen(monkeypatch):
+    monkeypatch.setenv('LD_LIBRARY_PATH', '/mnt/app/_internal')
+    monkeypatch.setenv('LD_LIBRARY_PATH_ORIG', '')
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    linux_runtime.restore_library_search_path_for_children()
+    assert 'LD_LIBRARY_PATH' not in os.environ
+    assert 'LD_LIBRARY_PATH_ORIG' not in os.environ
+

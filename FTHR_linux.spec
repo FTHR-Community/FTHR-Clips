@@ -240,11 +240,23 @@ a = Analysis(
 # GPL-only Qt module and drags in unused QML/Quick libraries. Excludes stop
 # Python imports but not hook-added binaries, so filter the actual artifact
 # TOCs as a second, deterministic boundary.
+# The compiler runtime stays on the host. PyInstaller puts _internal first on
+# LD_LIBRARY_PATH, so a bundled libstdc++/libgcc_s built on the Ubuntu 22.04
+# baseline shadows the host's newer copy for every library the process or its
+# children dlopen; Mesa's VA-API driver (radeonsi_drv_video.so via
+# libSPIRV-Tools) then fails with "GLIBCXX_3.4.32 not found" and the engine
+# silently falls back to software encoding. Every supported host (glibc 2.35
+# baseline and newer) ships a libstdc++ at least as new as the one the bundle
+# was built against.
+_HOST_TOOLCHAIN_LIBS = {'libstdc++.so.6', 'libgcc_s.so.1'}
+
+
 def _keep_reviewed_qt_runtime(entry):
     dest = str(entry[0]).replace('\\', '/').casefold()
     name = dest.rsplit('/', 1)[-1]
     forbidden_prefixes = ('libqt6virtualkeyboard',)
     return (name not in _SKIPPED_QT_PLUGINS
+            and name not in _HOST_TOOLCHAIN_LIBS
             and 'virtualkeyboard' not in dest
             and not name.startswith(forbidden_prefixes))
 
