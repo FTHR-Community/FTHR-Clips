@@ -224,3 +224,15 @@ def test_failed_finalization_never_uploads(qapp, tmp_path):
         assert uploaded == []
     finally:
         um.stop()
+
+
+def test_atomic_json_writes_owner_only(tmp_path):
+    import stat
+    from core import upload_manager
+
+    target = tmp_path / 'settings.json'
+    target.write_text('{}')
+    os.chmod(target, 0o644)  # an older build's file
+    upload_manager._atomic_json(target, {'catbox_userhash': 'secret'})
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert not (tmp_path / 'settings.json.tmp').exists()

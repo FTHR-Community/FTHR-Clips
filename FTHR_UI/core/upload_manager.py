@@ -176,10 +176,11 @@ def _read_object(path: Path) -> dict[str, Any]:
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + '.tmp')
-    temporary.write_text(
-        json.dumps(value, indent=2, sort_keys=True),
-        encoding='utf-8',
-    )
+    # The file holds catbox_userhash and the auth header, so it is owner-only.
+    fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        handle.write(json.dumps(value, indent=2, sort_keys=True))
+    os.chmod(temporary, 0o600)  # the umask or a stale temp file may have widened it
     os.replace(str(temporary), str(path))
 
 
