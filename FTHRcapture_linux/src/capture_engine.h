@@ -76,7 +76,8 @@ public:
 private:
     enum class GenerationEnd {
         Stopped,          // running_ went false: normal shutdown
-        Failed,           // backend or encoder failure worth a bounded retry
+        Failed,           // backend failure worth a bounded retry
+        FailedEncoder,    // encoder stopped accepting frames: reopen it
         FailedForGood,    // only user action can help (declined portal dialog)
     };
 
