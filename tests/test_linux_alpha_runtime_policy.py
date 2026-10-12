@@ -49,8 +49,13 @@ def test_native_x11_is_enabled_but_never_used_as_xwayland_fallback():
     assert '#if FTHR_X11_CAPTURE' in BACKEND_CPP
     wayland_failure = BACKEND_CPP.index(
         'refusing XWayland/x11grab fallback')
-    assert BACKEND_CPP.index('return nullptr;', wayland_failure) < \
-        BACKEND_CPP.index('auto x11', wayland_failure)
+    assert 'return nullptr;' in BACKEND_CPP[wayland_failure:wayland_failure + 600]
+    # x11grab is a candidate only when there is no Wayland display at all;
+    # the selection order lives in the policy unit the factory iterates.
+    policy = (ROOT / 'FTHRcapture_linux/src/capture_backend_policy.cpp').read_text()
+    wayland_branch = policy[policy.index('if (has_wayland)'):
+                            policy.index('return {BackendType::X11Grab}')]
+    assert 'X11Grab' not in wayland_branch
 
 
 def test_x11_shutdown_has_callback_and_process_escalation_boundaries():
