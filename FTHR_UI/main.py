@@ -208,6 +208,7 @@ from core.screenshot_save import (
     publish_staged_png,
     reserve_screenshot_paths,
 )
+from core.wayland_screenshot_portal import WaylandScreenshotPortal
 from core.x11_monitor import (
     X11MonitorError,
     is_native_x11_session,
@@ -3123,6 +3124,9 @@ class MainWindow(QMainWindow):
         self._screenshot_capture_process = None
         self._screenshot_capture_paths = None
         self._screenshot_save_worker = None
+        self._screenshot_portal = None
+        self._screenshot_portal_paths = None
+        self._screenshot_portal_offer_paths = None
         self._lifecycle_log = get_logger('lifecycle')
         self._diagnostics = get_diagnostic_session()
         self._last_capture_health_event_at = 0.0
@@ -4273,7 +4277,25 @@ class MainWindow(QMainWindow):
             self._show_screenshot_error(error.code, error.detail)
             return
 
+        is_wayland = (
+            sys.platform != 'win32' and bool(os.environ.get('WAYLAND_DISPLAY')))
         screen = self._resolve_screenshot_screen(selected_monitor)
+        if is_wayland:
+            # grim is a Wayland backend, not an X11 probe. Run it asynchronously
+            # and always name the exact selected output; plain `grim` would
+            # combine all outputs into one image.
+            grim = linux_tools.path('grim')
+            output_name = qt_screen_name(screen) if screen is not None else ''
+            if grim and output_name:
+                self._start_grim_screenshot(
+                    paths, selected_monitor, grim, output_name)
+                return
+            reason = (
+                'The configured replay monitor is not available to grim.'
+                if grim else 'grim is not installed or could not be found.')
+            self._offer_wayland_portal_screenshot(paths, reason)
+            return
+
         if screen is None:
             self._fail_screenshot_request(
                 paths,
@@ -4282,17 +4304,6 @@ class MainWindow(QMainWindow):
                 'fall back to another display.',
             )
             return
-
-        if sys.platform != 'win32' and os.environ.get('WAYLAND_DISPLAY'):
-            # grim is a Wayland backend, not an X11 probe. Run it asynchronously
-            # and always name the exact selected output; plain `grim` would
-            # combine all outputs into one image.
-            grim = linux_tools.path('grim')
-            output_name = qt_screen_name(screen)
-            if grim and output_name:
-                self._start_grim_screenshot(
-                    paths, selected_monitor, grim, output_name)
-                return
 
         self._capture_selected_qt_screen(paths, selected_monitor)
 
@@ -4370,10 +4381,76 @@ class MainWindow(QMainWindow):
 
         if timed_out:
             detail = 'grim exceeded the 5-second capture deadline'
-        print(
-            '[Screenshot] grim capture failed; trying the selected Qt '
-            f'screen instead: {detail or f"exit code {exit_code}"}')
-        self._capture_selected_qt_screen(paths, selected_monitor)
+        reason = detail or f'grim exited with code {exit_code}'
+        self._offer_wayland_portal_screenshot(paths, reason)
+
+    def _offer_wayland_portal_screenshot(self, paths, reason: str) -> None:
+        """Offer a compositor-selected still without claiming replay monitor."""
+
+        self._screenshot_portal_offer_paths = paths
+        detail = (
+            'FTHR could not capture the configured replay monitor with grim. '
+            'CHOOSE SCREENSHOT opens your desktop screenshot permission dialog; '
+            'the compositor chooses the screenshot content independently of '
+            f'the replay monitor. Reason: {str(reason)[:300]}')
+        print(f'[Screenshot] Portal choice offered: {detail}')
+        self.push_error(
+            'CAPTURE UNAVAILABLE',
+            detail,
+            level='warning',
+            actions=[(
+                'CHOOSE SCREENSHOT',
+                lambda target=paths: self._start_wayland_portal_screenshot(
+                    target),
+            )],
+        )
+        QTimer.singleShot(
+            60_000,
+            lambda target=paths: self._expire_wayland_portal_offer(target),
+        )
+
+    def _expire_wayland_portal_offer(self, paths) -> None:
+        if (self._screenshot_portal_offer_paths is paths
+                and self._screenshot_portal is None):
+            self._screenshot_portal_offer_paths = None
+            self._fail_screenshot_request(
+                paths,
+                'SCREENSHOT_NOT_SELECTED',
+                'No compositor screenshot was requested; no image was saved.',
+            )
+
+    def _start_wayland_portal_screenshot(self, paths) -> None:
+        if (self._shutdown_requested
+                or self._screenshot_portal_offer_paths is not paths
+                or self._screenshot_portal is not None):
+            return
+        self._screenshot_portal_offer_paths = None
+        portal_holder = {}
+
+        def completed(succeeded, detail):
+            self._on_wayland_portal_screenshot_finished(
+                paths, portal_holder.get('portal'), succeeded, detail)
+
+        portal = WaylandScreenshotPortal(paths.staged, completed, self)
+        portal_holder['portal'] = portal
+        self._screenshot_portal = portal
+        self._screenshot_portal_paths = paths
+        portal.start()
+
+    def _on_wayland_portal_screenshot_finished(
+            self, paths, portal, succeeded: bool, detail: str) -> None:
+        if (self._shutdown_requested
+                or self._screenshot_portal is not portal
+                or self._screenshot_portal_offer_paths is not None):
+            paths.staged.unlink(missing_ok=True)
+            return
+        self._screenshot_portal = None
+        self._screenshot_portal_paths = None
+        if succeeded:
+            self._publish_screenshot(paths)
+        else:
+            self._fail_screenshot_request(
+                paths, 'PORTAL_SCREENSHOT_FAILED', detail)
 
     def _capture_selected_qt_screen(self, paths, selected_monitor: str) -> None:
         # Resolve again after an asynchronous Wayland attempt. Windows receives
@@ -4469,6 +4546,18 @@ class MainWindow(QMainWindow):
         """Bound screenshot-worker cleanup during full application shutdown."""
 
         self._screenshot_pending_requests = 0
+        offer_paths = self._screenshot_portal_offer_paths
+        self._screenshot_portal_offer_paths = None
+        if offer_paths is not None:
+            offer_paths.staged.unlink(missing_ok=True)
+        portal = self._screenshot_portal
+        portal_paths = self._screenshot_portal_paths
+        self._screenshot_portal = None
+        self._screenshot_portal_paths = None
+        if portal is not None:
+            portal.close()
+            if portal_paths is not None:
+                portal_paths.staged.unlink(missing_ok=True)
         process = self._screenshot_capture_process
         paths = self._screenshot_capture_paths
         self._screenshot_capture_process = None
@@ -5490,11 +5579,26 @@ class MainWindow(QMainWindow):
             return None
         try:
             import sounddevice as _sd
+            if sys.platform.startswith('linux'):
+                matches = [
+                    i for i, dev in enumerate(_sd.query_devices())
+                    if dev.get('max_input_channels', 0) > 0
+                    and dev.get('name') == name
+                ]
+                if len(matches) == 1:
+                    return matches[0]
+                if len(matches) > 1:
+                    print('[Mic] Saved microphone name is ambiguous; using system default')
+                else:
+                    print('[Mic] Saved microphone name was not found; using system default')
+                return None
             for i, dev in enumerate(_sd.query_devices()):
                 if dev.get('max_input_channels', 0) > 0 and dev.get('name') == name:
                     return i
-        except Exception:
-            # Device enumeration is optional; no match means mic capture stays off.
+        except Exception as e:
+            # Device enumeration is optional; a missing match uses system default.
+            if sys.platform.startswith('linux'):
+                print(f'[Mic] Device lookup failed; using system default: {e}')
             pass
         return None
 
@@ -9870,24 +9974,28 @@ class _SettingsPage(QWidget):
 
     def _populate_camera_devices(self):
         from core.camera_recorder import CameraRecorder
-        self.camera_device_combo.clear()
-        if not CameraRecorder.is_available():
-            self.camera_device_combo.addItem('cv2 not available')
-            self.camera_device_combo.setEnabled(False)
-            return
-        devices = CameraRecorder.list_devices()
-        if not devices:
-            self.camera_device_combo.addItem('No cameras detected')
-            self.camera_device_combo.setEnabled(False)
-            return
-        self.camera_device_combo.setEnabled(True)
-        for device in devices:
-            self.camera_device_combo.addItem(
-                str(device['name']), int(device['index']))
-        saved = int(self.sm.get('camera_device_index', 0) or 0)
-        saved_index = self.camera_device_combo.findData(saved)
-        self.camera_device_combo.setCurrentIndex(
-            saved_index if saved_index >= 0 else 0)
+        signals_were_blocked = self.camera_device_combo.blockSignals(True)
+        try:
+            self.camera_device_combo.clear()
+            if not CameraRecorder.is_available():
+                self.camera_device_combo.addItem('cv2 not available')
+                self.camera_device_combo.setEnabled(False)
+                return
+            devices = CameraRecorder.list_devices()
+            if not devices:
+                self.camera_device_combo.addItem('No cameras detected')
+                self.camera_device_combo.setEnabled(False)
+                return
+            self.camera_device_combo.setEnabled(True)
+            for device in devices:
+                self.camera_device_combo.addItem(
+                    str(device['name']), int(device['index']))
+            saved = int(self.sm.get('camera_device_index', 0) or 0)
+            saved_index = self.camera_device_combo.findData(saved)
+            self.camera_device_combo.setCurrentIndex(
+                saved_index if saved_index >= 0 else 0)
+        finally:
+            self.camera_device_combo.blockSignals(signals_were_blocked)
 
     def _on_camera_toggled(self, checked: bool):
         self.sm.set('camera_enabled', checked)
@@ -10799,7 +10907,13 @@ class _SettingsPage(QWidget):
         endpoint_id = data.get('endpoint_id') if isinstance(data, dict) else None
         display_name = data.get('display_name') if isinstance(data, dict) else None
         self.sm.set('mic_device_id', endpoint_id)
-        self.sm.set('mic_device_name', display_name if endpoint_id else None)
+        legacy_linux_selection = (
+            sys.platform.startswith('linux') and isinstance(data, dict)
+            and data.get('legacy_index') is not None
+        )
+        self.sm.set(
+            'mic_device_name',
+            display_name if endpoint_id or legacy_linux_selection else None)
         self.sm.set('mic_volume', self.mic_vol_slider.value())
         self.sm.set('mic_loopback', self.mic_loopback_check.isChecked())
         self.sm.save_settings()
@@ -10856,6 +10970,23 @@ class _SettingsPage(QWidget):
 
     def _on_mic_device_changed(self, _idx: int):
         idx = self._selected_mic_index()
+        if sys.platform.startswith('linux'):
+            # Tear down every old reader before MicRecorder replaces its stream.
+            # The meter can share the recorder only after the new stream is live.
+            self.mic_level_meter.stop()
+            loopback_enabled = self.mic_loopback_check.isChecked()
+            if loopback_enabled:
+                self._stop_loopback()
+            self._save_audio_settings()
+            if (self.isVisible() and self.stack.currentIndex() == 2
+                    and not getattr(self, '_background_ui_paused', False)):
+                self.mic_level_meter.set_gain(
+                    self.mic_vol_slider.value() / 100.0)
+                self.mic_level_meter.start(idx)
+            if loopback_enabled:
+                self._start_loopback(idx)
+            return
+
         # Restart meter on the new device
         self.mic_level_meter.stop()
         if (self.isVisible() and self.stack.currentIndex() == 2

@@ -159,6 +159,7 @@ a = Analysis(
         *_asset_tree(ASSETS_DIR / 'sounds',  'assets/sounds'),
     ],
     hiddenimports=[
+        'PySide6.QtDBus',
         'PySide6.QtMultimedia',
         'PySide6.QtMultimediaWidgets',
         'sounddevice',

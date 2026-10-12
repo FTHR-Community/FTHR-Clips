@@ -18,6 +18,16 @@ except ImportError:
 KEEP_SECONDS  = 90
 DEFAULT_FPS   = 30
 JPEG_QUALITY  = 85  # ~150-300 KB/frame at 1080p vs ~6 MB raw
+_LOG_MESSAGE_LIMIT = 512
+
+
+def _log_exception(context: str, exc: Exception) -> None:
+    try:
+        detail = str(exc)
+    except Exception:
+        detail = '<exception text unavailable>'
+    print(f'[Camera] {context}: {type(exc).__name__}: '
+          f'{detail[:_LOG_MESSAGE_LIMIT]}')
 
 
 class CameraRecorder:
@@ -42,6 +52,11 @@ class CameraRecorder:
         self._running = False
         self._thread: threading.Thread | None = None
         self._latest_frame = None
+        self._generation = 0
+        self._stop_event = None
+        self._run_context = None
+        self._retired_thread = None
+        self._retired_context = None
 
     @classmethod
     def is_available(cls) -> bool:
@@ -76,22 +91,45 @@ class CameraRecorder:
             except Exception as exc:
                 print(f'[Camera] Named device scan failed: {exc}')
 
-        # Cross-platform fallback: do not invent four entries. Only expose
-        # indices that OpenCV can actually open.
+        # Cross-platform fallback: do not invent inactive entries. On Linux,
+        # an active V4L2 device can be exclusive, so preserve that known-open
+        # entry without attempting a second open.
         devices = []
+        active_device = None
+        if sys.platform.startswith('linux'):
+            instance = cls._instance
+            if instance is not None:
+                with instance._lock:
+                    if instance._running and instance._cap is not None:
+                        active_device = instance._device_index
+                if active_device is not None:
+                    devices.append({
+                        'index': active_device,
+                        'name': f'Camera {active_device + 1}',
+                    })
         for index in range(8):
+            if index == active_device:
+                continue
+            cap = None
             try:
                 cap = _cv2.VideoCapture(index)
-                opened = cap.isOpened()
-                cap.release()
-                if opened:
+                if cap.isOpened():
                     devices.append({'index': index, 'name': f'Camera {index + 1}'})
             except Exception:
                 pass
-        return devices
+            finally:
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except Exception:
+                        # A failed probe may have lost its backend; it must not
+                        # prevent releasing other probes or retaining the feed.
+                        pass
+        return sorted(devices, key=lambda device: device['index'])
 
     def is_running(self) -> bool:
-        return self._running
+        with self._lock:
+            return self._running
 
     def start(self, device_index: int = 0) -> bool:
         """Blocking open — cv2.VideoCapture can take seconds on Windows/MSMF.
@@ -102,77 +140,213 @@ class CameraRecorder:
             # Settings refreshes and unrelated UI updates can ask for the
             # already-active device again. Reopening MSMF here caused visible
             # camera freezes and could briefly leave two native sessions alive.
-            if (self._running and self._device_index == device_index
-                    and self._cap is not None):
+            with self._lock:
+                current_cap = self._cap
+                already_running = (self._running
+                                   and self._device_index == device_index
+                                   and current_cap is not None)
+            if already_running:
                 try:
-                    if self._cap.isOpened():
+                    if current_cap.isOpened():
                         return True
-                except (AttributeError, RuntimeError):
+                except Exception as exc:
                     # A stale backend is treated as closed and replaced below.
-                    pass
-            self._stop_locked()
-            self._device_index = device_index
-            self._cap = _cv2.VideoCapture(device_index)
-            if not self._cap.isOpened():
+                    _log_exception('Active device health check failed', exc)
+            if not self._stop_locked():
                 return False
-            self._running = True
-            self._thread = threading.Thread(
-                target=self._capture_loop, daemon=True, name='fthr-camera')
-            self._thread.start()
+
+            cap = None
+            try:
+                cap = _cv2.VideoCapture(device_index)
+                if not cap.isOpened():
+                    print(f'[Camera] Device {device_index} did not open')
+                    self._release_capture({
+                        'cap': cap, 'released': False,
+                        'release_lock': threading.Lock(),
+                    })
+                    return False
+            except Exception as exc:
+                _log_exception(f'Could not open device {device_index}', exc)
+                if cap is not None:
+                    self._release_capture({
+                        'cap': cap, 'released': False,
+                        'release_lock': threading.Lock(),
+                    })
+                return False
+
+            stop_event = threading.Event()
+            context = {'cap': cap, 'event': stop_event,
+                       'release_lock': threading.Lock(), 'released': False}
+            try:
+                with self._lock:
+                    generation = self._generation + 1
+                    thread = threading.Thread(
+                        target=self._capture_loop,
+                        args=(cap, stop_event, generation, context),
+                        daemon=True, name='fthr-camera')
+                    self._generation = generation
+                    self._device_index = device_index
+                    self._cap = cap
+                    self._stop_event = stop_event
+                    self._run_context = context
+                    self._running = True
+                    self._latest_frame = None
+                    self._chunks.clear()
+                    self._thread = thread
+                thread.start()
+            except Exception as exc:
+                _log_exception('Could not create or start capture worker', exc)
+                with self._lock:
+                    if (self._generation == generation
+                            and self._run_context is context):
+                        self._running = False
+                        self._cap = None
+                        self._thread = None
+                        self._stop_event = None
+                        self._run_context = None
+                        self._latest_frame = None
+                        self._chunks.clear()
+                self._release_capture(context)
+                return False
             return True
 
     def start_async(self, device_index: int = 0, on_result=None):
         """Open the device off the UI thread. on_result(ok: bool) is invoked
         from the worker thread — marshal back to Qt yourself if needed."""
-        def _work():
-            ok = self.start(device_index)
+        def _report(ok):
             if on_result:
                 try:
                     on_result(ok)
-                except Exception:
-                    pass
-        threading.Thread(target=_work, daemon=True,
-                         name='fthr-camera-open').start()
+                except Exception as exc:
+                    _log_exception('Open-result callback failed', exc)
+
+        def _work():
+            try:
+                ok = self.start(device_index)
+            except Exception as exc:
+                _log_exception('Asynchronous open failed', exc)
+                ok = False
+            _report(ok)
+
+        try:
+            threading.Thread(target=_work, daemon=True,
+                              name='fthr-camera-open').start()
+        except Exception as exc:
+            _log_exception('Could not start asynchronous open', exc)
+            _report(False)
 
     def stop(self):
         with self._op_lock:
             self._stop_locked()
 
     def _stop_locked(self):
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=2.0)
-            self._thread = None
-        if self._cap:
-            self._cap.release()
-            self._cap = None
         with self._lock:
-            self._chunks.clear()
-        self._latest_frame = None
+            active_context = self._run_context
+            thread = self._thread or self._retired_thread
+            context = active_context or self._retired_context
+            if self._stop_event is not None:
+                self._stop_event.set()
+            if active_context is not None:
+                self._running = False
+                self._thread = None
+                self._cap = None
+                self._stop_event = None
+                self._run_context = None
+                self._generation += 1
+                self._chunks.clear()
+                self._latest_frame = None
+        if thread is not None:
+            try:
+                if thread is not threading.current_thread():
+                    thread.join(timeout=2.0)
+            except RuntimeError as exc:
+                _log_exception('Could not join capture worker', exc)
+            try:
+                alive = thread.is_alive()
+            except AttributeError:
+                # Lightweight adapters may not run the target or expose health.
+                alive = False
+            if not alive and context is not None:
+                self._release_capture(context)
+                with self._lock:
+                    if self._retired_context is context:
+                        self._retired_thread = None
+                        self._retired_context = None
+            elif alive and context is not None:
+                with self._lock:
+                    self._retired_thread = thread
+                    self._retired_context = context
+                _log_exception('Capture worker cleanup is still pending',
+                               RuntimeError('previous capture worker is still active'))
+                return False
+        elif context is not None:
+            self._release_capture(context)
+        return True
 
     @property
     def latest_frame(self):
         return self._latest_frame
 
-    def _capture_loop(self):
-        while self._running:
-            if not self._cap or not self._cap.isOpened():
-                break
-            ret, frame = self._cap.read()
-            if not ret:
-                time.sleep(0.033)
-                continue
-            ts = time.monotonic()
-            self._latest_frame = frame  # raw BGR for UI preview (single frame)
-            ok, buf = _cv2.imencode('.jpg', frame,
-                                    [_cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-            if not ok:
-                continue
-            cutoff = ts - KEEP_SECONDS
+    @staticmethod
+    def _release_capture(context):
+        with context['release_lock']:
+            if context['released']:
+                return
+            context['released'] = True
+        try:
+            context['cap'].release()
+        except Exception as exc:
+            _log_exception('Capture release failed', exc)
+
+    def _capture_loop(self, cap, stop_event, generation, context):
+        try:
+            while not stop_event.is_set():
+                if not cap.isOpened():
+                    break
+                ret, frame = cap.read()
+                if stop_event.is_set():
+                    break
+                if not ret:
+                    time.sleep(0.033)
+                    continue
+                ts = time.monotonic()
+                with self._lock:
+                    if (stop_event.is_set() or self._generation != generation
+                            or self._run_context is not context):
+                        break
+                    self._latest_frame = frame
+                ok, buf = _cv2.imencode(
+                    '.jpg', frame,
+                    [_cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                if stop_event.is_set():
+                    break
+                if not ok:
+                    continue
+                cutoff = ts - KEEP_SECONDS
+                with self._lock:
+                    if (stop_event.is_set() or self._generation != generation
+                            or self._run_context is not context):
+                        break
+                    self._chunks.append((ts, buf))
+                    while self._chunks and self._chunks[0][0] < cutoff:
+                        self._chunks.popleft()
+        except Exception as exc:
+            _log_exception('Capture worker failed', exc)
+        finally:
+            self._release_capture(context)
             with self._lock:
-                self._chunks.append((ts, buf))
-                while self._chunks and self._chunks[0][0] < cutoff:
-                    self._chunks.popleft()
+                if (self._generation == generation
+                        and self._run_context is context):
+                    self._running = False
+                    self._cap = None
+                    self._thread = None
+                    self._stop_event = None
+                    self._run_context = None
+                    self._latest_frame = None
+                    self._chunks.clear()
+                elif self._retired_context is context:
+                    self._retired_thread = None
+                    self._retired_context = None
 
     def extract_segment(self, end_time: float, duration_sec: float) -> list | None:
         start_time = end_time - duration_sec
