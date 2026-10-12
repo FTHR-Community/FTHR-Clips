@@ -428,6 +428,7 @@ bool Encoder::EncodeFrame(const uint8_t* bgra, uint32_t stride,
         ep.pts          = pkt_->pts;
         ep.dts          = pkt_->dts;
         ep.is_keyframe  = (pkt_->flags & AV_PKT_FLAG_KEY) != 0;
+        ep.generation   = generation_;
         // Encoders may delay output. Associate the packet with the input frame
         // carrying its PTS instead of the most recently submitted frame.
         ep.wall_time_ns = wall_time_ns;

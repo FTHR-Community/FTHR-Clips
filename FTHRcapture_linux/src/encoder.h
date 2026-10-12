@@ -61,6 +61,10 @@ public:
 
     bool IsOpen() const { return codec_ctx_ != nullptr; }
 
+    // Stamped onto every packet so the ring can keep packets of one encoder
+    // generation apart from the next.
+    void SetGeneration(uint32_t generation) { generation_ = generation; }
+
     AVCodecID GetCodecID() const {
         return codec_ctx_ ? codec_ctx_->codec->id : AV_CODEC_ID_NONE;
     }
@@ -88,6 +92,7 @@ private:
     int64_t         last_input_pts_ = -1;
     int64_t         last_forced_keyframe_pts_ = -1;
     std::deque<FrameTiming> pending_timings_;
+    uint32_t        generation_ = 0;
     EncoderConfig   cfg_       = {};
 };
 

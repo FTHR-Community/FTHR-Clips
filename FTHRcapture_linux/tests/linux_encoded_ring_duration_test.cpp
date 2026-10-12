@@ -77,11 +77,43 @@ void TestRecoveryClearsOldGeneration() {
     assert(snapshot.presentation_start_pts == snapshot.packets.front().pts);
 }
 
+void TestSnapshotIgnoresOtherGenerations() {
+    constexpr int64_t second = 1'000'000'000LL;
+    constexpr int fps = 30;
+    fthr::EncodedRingBuffer ring(40'000, fps);
+    for (int frame = 0; frame <= 10 * fps; ++frame) {
+        auto packet = Packet(frame, frame * second / fps, frame % 60 == 0);
+        packet.generation = 1;
+        ring.Push(packet);
+    }
+    for (int frame = 0; frame <= 3 * fps; ++frame) {
+        auto packet = Packet(frame, 10 * second + frame * second / fps, frame % 60 == 0);
+        packet.generation = 2;
+        ring.Push(packet);
+    }
+
+    // Generation 2 only: three seconds of history, starting at its keyframe.
+    const auto newer = ring.TakeSnapshot(30'000, 13 * second, 2);
+    assert(!newer.full_history);
+    assert(!newer.packets.empty());
+    assert(newer.packets.front().generation == 2);
+    assert(newer.packets.front().wall_time_ns >= 10 * second);
+
+    // Unknown generation yields nothing rather than mixing extradata.
+    const auto none = ring.TakeSnapshot(30'000, 13 * second, 7);
+    assert(none.packets.empty());
+
+    // 0 keeps the historical behaviour.
+    const auto all = ring.TakeSnapshot(30'000, 13 * second, 0);
+    assert(all.packets.front().generation == 1);
+}
+
 } // namespace
 
 int main() {
     TestFullTimestampWindowUsesPriorKeyframe();
     TestVariableTimingAndDelayedPublication();
     TestRecoveryClearsOldGeneration();
+    TestSnapshotIgnoresOtherGenerations();
     return 0;
 }

@@ -22,15 +22,22 @@ void EncodedRingBuffer::Push(EncodedPacket packet) {
 }
 
 EncodedRingSnapshot EncodedRingBuffer::TakeSnapshot(
-    uint32_t duration_ms, int64_t target_end_ns) const {
+    uint32_t duration_ms, int64_t target_end_ns, uint32_t generation) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (packets_.empty() || duration_ms == 0 || fps_ == 0) return {};
-    if (target_end_ns <= 0) target_end_ns = packets_.back().wall_time_ns;
+
+    std::vector<const EncodedPacket*> eligible;
+    eligible.reserve(packets_.size());
+    for (const auto& packet : packets_)
+        if (generation == 0 || packet.generation == generation)
+            eligible.push_back(&packet);
+    if (eligible.empty()) return {};
+    if (target_end_ns <= 0) target_end_ns = eligible.back()->wall_time_ns;
 
     std::vector<replay_interval::Sample> samples;
-    samples.reserve(packets_.size());
-    for (const auto& packet : packets_)
-        samples.push_back({packet.wall_time_ns, packet.is_keyframe});
+    samples.reserve(eligible.size());
+    for (const auto* packet : eligible)
+        samples.push_back({packet->wall_time_ns, packet->is_keyframe});
     const auto selection = replay_interval::Select(
         samples,
         target_end_ns,
@@ -38,9 +45,9 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshot(
     if (!selection.valid) return {};
 
     EncodedRingSnapshot snapshot;
-    snapshot.packets.assign(
-        packets_.begin() + static_cast<ptrdiff_t>(selection.decode_start),
-        packets_.begin() + static_cast<ptrdiff_t>(selection.end + 1));
+    snapshot.packets.reserve(selection.end + 1 - selection.decode_start);
+    for (size_t i = selection.decode_start; i <= selection.end; ++i)
+        snapshot.packets.push_back(*eligible[i]);
     snapshot.full_history = selection.full_history;
     snapshot.presentation_start_pts = replay_interval::PresentationStartPts(
         snapshot.packets.back().pts,

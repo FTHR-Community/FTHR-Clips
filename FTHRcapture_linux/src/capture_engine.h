@@ -17,6 +17,17 @@ namespace fthr {
 class ICaptureBackend;
 struct RawFrame;
 
+// What SaveClip needs from the encoder, copied at open time so the save
+// thread never reads codec state the capture thread may be tearing down.
+struct EncoderSnapshot {
+    std::vector<uint8_t> extradata;
+    uint32_t  width = 0;
+    uint32_t  height = 0;
+    AVCodecID codec_id = AV_CODEC_ID_NONE;
+    uint32_t  generation = 0;
+    bool      valid = false;
+};
+
 struct CaptureConfig {
     uint32_t    fps;
     uint32_t    buffer_seconds;
@@ -72,6 +83,10 @@ public:
         return capture_failure_reason_;
     }
     std::string GetAudioMappingsJson() const;
+    EncoderSnapshot TakeEncoderSnapshot() const {
+        std::lock_guard<std::mutex> lk(codec_mutex_);
+        return encoder_snapshot_;
+    }
 
 private:
     enum class GenerationEnd {
@@ -104,6 +119,8 @@ private:
     std::atomic<float>      content_luma_variance_{0.0f};
     std::string active_codec_;
     std::string capture_failure_reason_;   // guarded by codec_mutex_
+    EncoderSnapshot encoder_snapshot_;     // guarded by codec_mutex_
+    uint32_t encoder_generation_ = 0;      // capture thread only
     mutable std::mutex codec_mutex_;
     AudioMultiCapture   multi_audio_;
 };

@@ -16,6 +16,9 @@ struct EncodedPacket {
     int64_t  dts;
     bool     is_keyframe;
     int64_t  wall_time_ns;  // CLOCK_MONOTONIC nanoseconds when captured
+    // Encoder generation that produced the packet. Packets from different
+    // generations carry different extradata and cannot share an MP4 track.
+    uint32_t generation = 0;
 };
 
 struct EncodedRingSnapshot {
@@ -37,9 +40,12 @@ public:
     void Push(EncodedPacket pkt);
 
     // Returns all packets that fall within the last duration_ms milliseconds.
-    // Starts from the nearest keyframe before the window.
+    // Starts from the nearest keyframe before the window. A non-zero
+    // generation restricts the selection to packets of that encoder
+    // generation; 0 accepts every packet.
     EncodedRingSnapshot TakeSnapshot(
-        uint32_t duration_ms, int64_t target_end_ns) const;
+        uint32_t duration_ms, int64_t target_end_ns,
+        uint32_t generation = 0) const;
     bool WaitUntilPublished(
         int64_t target_end_ns, std::chrono::milliseconds timeout) const;
 
