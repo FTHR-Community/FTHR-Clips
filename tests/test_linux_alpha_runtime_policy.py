@@ -80,3 +80,11 @@ def test_linux_report_describes_native_x11_without_xwayland_claim():
 
 def test_linux_report_mentions_the_screencast_portal():
     assert 'then the ScreenCast portal' in SYSTEM_REPORT
+
+
+def test_engine_dies_with_its_launcher():
+    # A UI killed without sending SHUTDOWN must not leave an orphan engine
+    # holding the shared-memory name.
+    assert 'prctl(PR_SET_PDEATHSIG, SIGTERM)' in MAIN_CPP
+    assert MAIN_CPP.index('signal(SIGTERM, on_signal)') < MAIN_CPP.index('PR_SET_PDEATHSIG')
+
