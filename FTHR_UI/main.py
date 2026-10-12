@@ -112,6 +112,7 @@ from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QCursor, QPaint
 from version import __version__ as APP_VERSION, APP_NAME
 from core import linux_tools
 from core.capture_bridge import CaptureBridge
+from core import linux_runtime
 from core.alpha_capabilities import (
     encoder_preset_supported,
     filter_alpha_preset,
@@ -12164,6 +12165,9 @@ def _prewarm_heavy_modules():
 
 
 def main():
+    # Children (engine, ffmpeg, grim, hyprctl) must see the host's
+    # library path, not PyInstaller's _internal; see linux_runtime.
+    linux_runtime.restore_library_search_path_for_children()
     # When the frozen Windows exe is relaunched as the capture-card subprocess,
     # route into the card process instead of the main application.
     if '--card-process' in sys.argv:

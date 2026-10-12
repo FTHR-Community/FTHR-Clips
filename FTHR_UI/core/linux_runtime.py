@@ -236,3 +236,41 @@ def ensure_desktop_entry() -> bool:
     except OSError as exc:
         print(f'[Runtime] Could not install desktop entry: {exc}')
         return False
+
+
+def child_process_environment(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for subprocesses of a frozen Linux build.
+
+    PyInstaller points LD_LIBRARY_PATH at the bundle's _internal directory and
+    every child inherits it. The capture engine and the bundled ffmpeg find
+    their libraries through their own $ORIGIN RPATH, while host programs and
+    drivers (grim, hyprctl, Mesa's VA-API and GL drivers loaded by the engine)
+    must see the host's libraries: a bundled libstdc++ older than the host's
+    stops the AMD VA-API driver from loading at all. Restore the caller's
+    original path, which PyInstaller preserves in LD_LIBRARY_PATH_ORIG.
+    """
+    env = dict(os.environ if environ is None else environ)
+    if 'LD_LIBRARY_PATH_ORIG' in env:
+        original = env.pop('LD_LIBRARY_PATH_ORIG')
+        if original:
+            env['LD_LIBRARY_PATH'] = original
+        else:
+            env.pop('LD_LIBRARY_PATH', None)
+    return env
+
+
+def restore_library_search_path_for_children() -> None:
+    """Apply child_process_environment() to this process's environment.
+
+    Safe to call after the interpreter started: the dynamic loader reads
+    LD_LIBRARY_PATH once at exec time, so this process keeps loading its own
+    bundled libraries while every subprocess started from now on gets the
+    host's search path.
+    """
+    if not sys.platform.startswith('linux') or not getattr(sys, 'frozen', False):
+        return
+    env = child_process_environment()
+    os.environ.pop('LD_LIBRARY_PATH', None)
+    os.environ.pop('LD_LIBRARY_PATH_ORIG', None)
+    if 'LD_LIBRARY_PATH' in env:
+        os.environ['LD_LIBRARY_PATH'] = env['LD_LIBRARY_PATH']

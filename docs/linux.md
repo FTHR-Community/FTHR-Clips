@@ -62,6 +62,10 @@ these system services and helpers:
   or an `org.freedesktop.portal.ScreenCast` backend (KDE Plasma/KWin:
   `xdg-desktop-portal-kde`) with PipeWire and D-Bus
 - PipeWire with PulseAudio compatibility, or PulseAudio
+- A system `libstdc++` from GCC 11 or newer (any distribution current as of
+  Ubuntu 22.04, Debian 12 or Fedora 36). The AppImage deliberately does not
+  bundle the compiler runtime, so the host's graphics and VA-API drivers can
+  load inside the capture engine
 - `grim` for direct, selected-output screenshots on supported compositors,
   or an `org.freedesktop.portal.Screenshot` backend for compositor-selected
   screenshots (see below)
