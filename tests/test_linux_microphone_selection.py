@@ -314,9 +314,9 @@ def _production_audio_harness(monkeypatch, qtbot):
     _ExclusiveInputStream.opens = {}
     _ExclusiveInputStream.attempts = []
     audio_backend = SimpleNamespace(InputStream=_ExclusiveInputStream)
-    monkeypatch.setattr(mic_recorder_module, '_sd', audio_backend)
+    monkeypatch.setattr(mic_recorder_module, '_sd', audio_backend, raising=False)
     monkeypatch.setattr(mic_recorder_module, '_AVAILABLE', True)
-    monkeypatch.setattr(main, '_sd', audio_backend)
+    monkeypatch.setattr(main, '_sd', audio_backend, raising=False)
     monkeypatch.setattr(main, '_SD_AVAILABLE', True)
     monkeypatch.setattr(main.sys, 'platform', 'linux')
 
