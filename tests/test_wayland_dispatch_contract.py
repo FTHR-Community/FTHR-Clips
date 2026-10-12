@@ -93,8 +93,16 @@ def test_wlr_destroys_timed_out_requests_before_recovery() -> None:
 
 
 def test_ext_destroys_frame_after_bounded_wait() -> None:
+    # One request per session: it is created only when none is pending,
+    # waited on with a bounded dispatch, destroyed exactly once on a terminal
+    # event, and otherwise destroyed by DestroyWayland() on shutdown.
     source = _read("backend_ext.cpp")
-    wait = source.index("const bool completed = WaitUntil(")
-    destroy = source.index("ext_image_copy_capture_frame_v1_destroy(frame)", wait)
-    failure = source.index("return completed && frame_ready_ && !session_stopped_;", destroy)
-    assert wait < destroy < failure
+    shutdown_destroy = source.index(
+        "ext_image_copy_capture_frame_v1_destroy(pending_frame_);")
+    create = source.index("ext_image_copy_capture_session_v1_create_frame(session_)")
+    wait = source.index("WaitUntilResult(", create)
+    terminal = source.index("if (result == WaylandWaitResult::EventReceived) {", wait)
+    destroy = source.index(
+        "ext_image_copy_capture_frame_v1_destroy(pending_frame_);", terminal)
+    assert shutdown_destroy < create < wait < terminal < destroy
+    assert source.count("ext_image_copy_capture_frame_v1_destroy(") == 2
