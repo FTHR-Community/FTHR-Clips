@@ -46,6 +46,12 @@ bool ApplyPreset(AVCodecContext* ctx, const char* codec_name, int p) {
             "speed","speed","balanced","balanced","balanced","quality","quality"};
         av_opt_set(ctx->priv_data, "quality", kAmf[p - 1],   0);
         av_opt_set(ctx->priv_data, "rc",      "vbr_latency", 0);
+    } else if (strstr(codec_name, "_vaapi")) {
+        // compression_level is a generic AVCodecContext field that
+        // vaapi_encode reads, not a priv_data option. Mesa treats 1 as
+        // highest quality and 7 as fastest, the opposite of P1 (fastest)
+        // to P7 (best).
+        ctx->compression_level = 8 - p;
     } else if (strstr(codec_name, "qsv")) {
         static const char* kQsv[] = {
             "veryfast","fast","medium","medium","slow","slower","slowest"};

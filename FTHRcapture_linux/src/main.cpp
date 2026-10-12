@@ -189,6 +189,17 @@ int main(int argc, char* argv[]) {
                     static_cast<uint32_t>(fthr::ResponseType::STATUS_UPDATE);
                 break;
 
+            default:
+                // Kept ahead of the recording cases rather than last: the
+                // response-order checker pairs each STATUS_UPDATE with the
+                // next publish and would otherwise match this one against the
+                // failure-reason write that follows the switch.
+                // Retired or Windows-only commands (SET_FRAMERATE, SET_HOTKEY,
+                // SET_TARGET_WINDOW). Acknowledge so a caller never waits.
+                layout->engine_response =
+                    static_cast<uint32_t>(fthr::ResponseType::STATUS_UPDATE);
+                break;
+
             case fthr::CommandType::STOP_RECORDING:
                 engine.SetPaused(true);
                 layout->engine_response =
@@ -208,9 +219,6 @@ int main(int argc, char* argv[]) {
                 // terminates, kills and reaps this isolated engine process.
                 std::cout << "[FTHR] SHUTDOWN requested" << std::endl;
                 g_quit = 1;
-                break;
-
-            default:
                 break;
             }
         }
