@@ -555,6 +555,10 @@ bool PortalBackend::CaptureFrame(RawFrame& out) {
         std::cerr << "[PortalBackend] No frame arrived within 5 s of stream start" << std::endl;
         return false;
     }
+    // A repeat is stamped "now", which can be later than the compositor pts
+    // of the next real frame; the encoded ring assumes sorted timestamps.
+    timestamp_ns = std::max(timestamp_ns, last_timestamp_ns_ + 1);
+    last_timestamp_ns_ = timestamp_ns;
     last_delivery_ = std::chrono::steady_clock::now();
     out.data = front_.data();
     out.stride = native_w_ * 4;
