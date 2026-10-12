@@ -171,6 +171,8 @@ a = Analysis(
         # the engine. See core/ffmpeg_tools.py.
         'imageio_ffmpeg',
         # Qt modules unused on Windows (no Wayland, no QML)
+        # QtDBus is only used by the Wayland screenshot portal path (Linux).
+        'PySide6.QtDBus',
         'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtWebEngine',
         'PySide6.QtWebEngineCore', 'PySide6.QtBluetooth', 'PySide6.QtPositioning',
         'PySide6.QtSensors', 'PySide6.QtLocation', 'PySide6.Qt3D',

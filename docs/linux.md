@@ -57,7 +57,9 @@ session still needs these system services and helpers:
   or an `org.freedesktop.portal.ScreenCast` backend (KDE Plasma/KWin:
   `xdg-desktop-portal-kde`) with PipeWire and D-Bus
 - PipeWire with PulseAudio compatibility, or PulseAudio
-- `grim` for screenshots
+- `grim` for direct, selected-output screenshots on supported compositors,
+  or an `org.freedesktop.portal.Screenshot` backend for compositor-selected
+  screenshots (see below)
 - `nc`/netcat for compositor hotkey commands
 - Mesa VA-API drivers and access to `/dev/dri/renderD*` for AMD hardware encoding
 
@@ -92,14 +94,35 @@ bundled: the engine loads the two libraries only when it takes that path and
 otherwise reports why it could not. Its limits: the picker appears once per
 app identity (a source build started from a terminal is not the packaged
 app), the app's monitor selection is advisory because the portal picks the
-screen, and screenshots are a separate path (`grim`) that the portal backend
-does not provide.
+screen. Screenshots are a separate operation, not a frame read from this
+ScreenCast session.
 
 On `wlr-screencopy` and `ext-image-copy-capture` compositors the selected
 output and scaling settings are controlled from the application. The KDE
 portal path uses the desktop's source chooser instead.
 For a compositor or output that is not detected correctly, run the diagnostic
 commands below and include their redacted output in a support report.
+
+### Screenshots
+
+On supported Wayland compositors, FTHR runs `grim -o <selected-output>` to capture
+only the configured replay monitor. If `grim` is missing, fails, or times out,
+FTHR does **not** fall back to a Qt screen grab that can be empty on Wayland.
+Instead the error bar offers **CHOOSE SCREENSHOT**. This opens the desktop's
+Screenshot portal dialog; its source selection is independent of the replay
+monitor. Check the selected screen/area in that dialog before approving it.
+
+KDE and GNOME need a Screenshot portal backend for this path. FTHR imports only
+the returned local PNG and publishes it through the normal screenshot save
+path; it does not delete the portal's original image. Canceling or an
+unavailable/timed-out portal reports a failure, not a successful black image.
+The offer expires after 60 seconds, the portal method has a 5-second deadline,
+and the desktop dialog has a 60-second deadline. X11 and Windows retain their
+existing selected-screen capture paths.
+
+These changes need native compositor testing before claiming KDE/GNOME
+screenshot qualification. An isolated D-Bus test checks protocol handling, not
+screen capture on a real desktop.
 
 ## Audio
 
@@ -115,6 +138,24 @@ pactl info
 pactl list short sinks
 pactl list short sources
 ```
+
+Microphone recording uses a separate input stream. When changing **Settings →
+Audio → Microphone**, FTHR stops the old level meter and monitoring stream,
+opens the recorder on the selected input, and then lets the meter share that
+recorder. This avoids opening a second input before the recorder on exclusive
+ALSA devices. The selected input name is saved, rather than a transient device
+index; after enumeration changes FTHR resolves a unique input with that name.
+A missing or ambiguous saved name falls back to System Default with a log
+message. This does not change desktop-audio selection, gain, or timing.
+
+### Camera refresh
+
+A running Linux camera is retained in the device list without opening it again
+for a probe. Refreshing the list does not emit intermediate selection changes
+that could restart the recorder. Failed readers release their capture and
+cannot start using a later recorder generation. Other camera indices still
+require synchronous OpenCV probes; a slow or stuck driver can still delay the
+refresh. These fixes do not establish camera/audio synchronization.
 
 ## AMD VA-API encoding
 
