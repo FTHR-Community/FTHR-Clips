@@ -102,6 +102,7 @@ private:
     uint32_t native_h_ = 0;
     std::chrono::nanoseconds frame_interval_{16'666'667};
     std::chrono::steady_clock::time_point last_delivery_{};
+    int64_t last_timestamp_ns_ = 0;
     uint32_t poll_counter_ = 0;
 
     std::string failure_reason_;
