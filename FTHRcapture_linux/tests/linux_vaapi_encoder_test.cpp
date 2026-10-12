@@ -5,11 +5,32 @@
 #include <iostream>
 #include <vector>
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+}
+
 namespace {
 constexpr int kSkip = 77;
+
+// Mesa's compression_level runs opposite to P1..P7: 1 is highest quality and
+// 7 fastest, so P1 must map to 7 and P7 to 1.
+int CompressionLevelFor(const AVCodec* codec, int preset) {
+    AVCodecContext* ctx = avcodec_alloc_context3(codec);
+    assert(ctx);
+    assert(fthr::ApplyPreset(ctx, "h264_vaapi", preset));
+    const int level = ctx->compression_level;
+    avcodec_free_context(&ctx);
+    return level;
+}
 }
 
 int main() {
+    if (const AVCodec* vaapi = avcodec_find_encoder_by_name("h264_vaapi")) {
+        assert(CompressionLevelFor(vaapi, 1) == 7);
+        assert(CompressionLevelFor(vaapi, 4) == 4);
+        assert(CompressionLevelFor(vaapi, 7) == 1);
+    }
+
     fthr::EncoderConfig cfg{};
     cfg.src_width = 320;
     cfg.src_height = 180;
