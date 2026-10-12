@@ -5,11 +5,13 @@ and capture source (desktop / window) selector.
 """
 import sys
 import ctypes
+from html import escape
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
                               QPushButton, QFrame, QSizePolicy, QFileIconProvider)
 from PySide6.QtCore import Qt, QSize, QFileInfo, Signal
 from PySide6.QtGui import QIcon, QCursor
 from ui.style import Colors, Fonts, ThemedDropdownArrow, WheelSafeComboBox
+from ui.window_preview import WindowPreview
 
 if sys.platform == 'win32':
     import ctypes.wintypes as wintypes
@@ -533,7 +535,15 @@ class CaptureSettingsWidget(QWidget):
         self.window_combo.setMinimumWidth(260)
         self.window_combo.setIconSize(QSize(16, 16))
         self.window_combo.currentIndexChanged.connect(self._on_window_selected)
-        source_row.addWidget(self.window_combo)
+        window_column = QVBoxLayout()
+        window_column.setContentsMargins(0, 0, 0, 0)
+        window_column.setSpacing(5)
+        window_column.addWidget(self.window_combo)
+        self.window_preview = WindowPreview(self, eyebrow=False)
+        self.window_preview.setMaximumWidth(300)
+        self.window_preview.setVisible(False)
+        window_column.addWidget(self.window_preview)
+        source_row.addLayout(window_column)
 
         self.refresh_btn = QPushButton('REFRESH')
         self.refresh_btn.setStyleSheet(f'''
@@ -689,6 +699,7 @@ class CaptureSettingsWidget(QWidget):
         if self.current_capture_mode == 'desktop':
             self.current_target_hwnd = 0
             self.settings_manager.set('target_hwnd', 0)
+            self.window_preview.set_window(None)
         self._update_window_picker_visibility()
         if self.current_capture_mode == 'window':
             self._refresh_window_list()
@@ -700,6 +711,7 @@ class CaptureSettingsWidget(QWidget):
             return
         entry = self._window_list[index]
         self.current_target_hwnd = entry['hwnd']
+        self.window_preview.set_window(entry)
         self.settings_manager.set('target_hwnd', self.current_target_hwnd)
         self.settings_manager.save_settings()
         self._show_restart_button()
@@ -718,6 +730,9 @@ class CaptureSettingsWidget(QWidget):
                 self.window_combo.addItem(icon, label)
             else:
                 self.window_combo.addItem(label)
+            self.window_combo.setItemData(
+                i, escape(str(w.get('title', '') or '')),
+                Qt.ItemDataRole.ToolTipRole)
             if w['hwnd'] == self.current_target_hwnd:
                 select_idx = i
 
@@ -726,6 +741,9 @@ class CaptureSettingsWidget(QWidget):
             entry = self._window_list[select_idx]
             self.current_target_hwnd = entry['hwnd']
             self.settings_manager.set('target_hwnd', self.current_target_hwnd)
+            self.window_preview.set_window(entry, force_refresh=True)
+        else:
+            self.window_preview.set_window(None)
 
         self.window_combo.blockSignals(False)
 
@@ -733,6 +751,7 @@ class CaptureSettingsWidget(QWidget):
         show = (self.current_capture_mode == 'window')
         self.window_combo.setVisible(show)
         self.refresh_btn.setVisible(show)
+        self.window_preview.setVisible(show)
 
     def _show_restart_button(self):
         self.restart_needed = True
@@ -767,6 +786,8 @@ class CaptureSettingsWidget(QWidget):
             self.restart_button.setStyleSheet(_restart_style())
         for combo in self.findChildren(WheelSafeComboBox):
             combo.setStyleSheet(_combo_style())
+        if hasattr(self, 'window_preview'):
+            self.window_preview.refresh_theme()
         if hasattr(self, 'refresh_btn'):
             self.refresh_btn.setStyleSheet(f'''
                 QPushButton {{
