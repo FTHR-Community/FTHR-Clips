@@ -195,9 +195,14 @@ The defaults are:
 - **F9**: save clip
 - **F12**: save screenshot
 
-Linux hotkeys use a private owner-only Unix socket in the user's runtime
- directory. The application generates Hyprland bindings when its hotkeys are
-configured.
+On desktops with a GlobalShortcuts portal backend (KDE Plasma 6, GNOME 48 and
+later), the application registers its actions with the desktop through
+`org.freedesktop.portal.GlobalShortcuts`. The desktop owns the key grab and
+lists the actions in its own shortcut settings; no root access or `input` group
+membership is involved. On Hyprland the application instead generates Hyprland
+bindings that reach it over a private owner-only Unix socket in the user's
+runtime directory, because the Hyprland portal binds no keys on its own.
+Desktops with neither path keep the socket and show the command to bind.
 
 ### Traditional Hyprland configuration
 
