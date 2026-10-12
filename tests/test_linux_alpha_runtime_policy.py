@@ -76,3 +76,7 @@ def test_linux_report_describes_native_x11_without_xwayland_claim():
     assert 'then x11grab' not in SYSTEM_REPORT
     assert 'native X11 x11grab' in SYSTEM_REPORT
     assert 'XWayland fallback is refused' in SYSTEM_REPORT
+
+
+def test_linux_report_mentions_the_screencast_portal():
+    assert 'then the ScreenCast portal' in SYSTEM_REPORT
