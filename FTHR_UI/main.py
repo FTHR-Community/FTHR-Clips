@@ -3212,6 +3212,7 @@ class MainWindow(QMainWindow):
         self._capture_config = CaptureConfigTracker()
 
         self.engine_process = None
+        self._engine_connect_thread: threading.Thread | None = None
         self._engine_startup_output = None
         self.bridge         = CaptureBridge()
         self._engine_profile = 'clips'
@@ -5424,8 +5425,9 @@ class MainWindow(QMainWindow):
                             'The recording quality profile could not connect to capture.')
                 self._ui_call.emit(_on_failed)
 
-            threading.Thread(target=_poll_connect, daemon=True,
-                             name='fthr-engine-connect').start()
+            self._engine_connect_thread = threading.Thread(
+                target=_poll_connect, daemon=True, name='fthr-engine-connect')
+            self._engine_connect_thread.start()
             return True
         except Exception as e:
             print(f"Engine start error: {e}")
@@ -7837,6 +7839,12 @@ class MainWindow(QMainWindow):
 
     # UI state
 
+    def _connect_worker_active(self) -> bool:
+        # The connect worker calls initialize() on the singleton bridge; the
+        # status poll must not shut that bridge down underneath it.
+        thread = getattr(self, '_engine_connect_thread', None)
+        return thread is not None and thread.is_alive()
+
     def _update_status(self):
         # Detect an engine crash. The shared-memory mapping outlives the
         # process (is_initialized stays true), so is_connected() keeps lying
@@ -7878,7 +7886,9 @@ class MainWindow(QMainWindow):
             # on Linux a crashed engine leaves its /dev/shm segment behind
             # with is_initialized still true, so initialize() would happily
             # "reconnect" to a corpse.
-            if self.engine_process is not None and self._reconnect_counter % 3 == 1:
+            if (self.engine_process is not None
+                    and not self._connect_worker_active()
+                    and self._reconnect_counter % 3 == 1):
                 if self.bridge:
                     self.bridge.shutdown()
                 self.bridge = CaptureBridge()
