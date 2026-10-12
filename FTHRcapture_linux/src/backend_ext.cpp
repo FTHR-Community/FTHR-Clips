@@ -162,6 +162,10 @@ void ExtBackend::FreeShmBuffer() {
 }
 
 void ExtBackend::DestroyWayland() {
+    if (pending_frame_) {
+        ext_image_copy_capture_frame_v1_destroy(pending_frame_);
+        pending_frame_ = nullptr;
+    }
     FreeShmBuffer();
     if (session_) { ext_image_copy_capture_session_v1_destroy(session_); session_ = nullptr; }
     if (source_)  { ext_image_capture_source_v1_destroy(source_);        source_  = nullptr; }
@@ -179,14 +183,19 @@ bool ExtBackend::KeepRunning() const noexcept {
     return !running_ || running_->load();
 }
 
-bool ExtBackend::WaitUntil(WaylandDeadline deadline,
-                           const WaylandPredicate& complete,
-                           const char* operation) {
-    const auto result = DispatchWaylandUntil(
+WaylandWaitResult ExtBackend::WaitUntilResult(WaylandDeadline deadline,
+                                              const WaylandPredicate& complete) {
+    return DispatchWaylandUntil(
         display_,
         deadline,
         [this] { return KeepRunning(); },
         complete);
+}
+
+bool ExtBackend::WaitUntil(WaylandDeadline deadline,
+                           const WaylandPredicate& complete,
+                           const char* operation) {
+    const auto result = WaitUntilResult(deadline, complete);
     if (result == WaylandWaitResult::EventReceived) return true;
     std::cerr << "[ExtBackend] Wayland " << operation << " "
               << WaylandWaitResultName(result) << std::endl;
@@ -205,6 +214,8 @@ bool ExtBackend::Roundtrip(WaylandDeadline deadline, const char* operation) {
 // ICaptureBackend impl
 bool ExtBackend::Initialize(const CaptureConfig& cfg) {
     target_output_ = cfg.target_output;
+    frame_interval_ = std::chrono::nanoseconds(
+        1'000'000'000LL / std::max<uint32_t>(1, cfg.fps));
     const auto deadline = std::chrono::steady_clock::now() + kInitializationTimeout;
     init_failure_kind_ = BackendFailureKind::Error;
     display_ = wl_display_connect(nullptr);
@@ -286,65 +297,115 @@ bool ExtBackend::Initialize(const CaptureConfig& cfg) {
     return true;
 }
 
-bool ExtBackend::CaptureOnce(std::chrono::steady_clock::time_point deadline) {
-    if (!EnsureShmBuffer()) return false;
-    frame_ready_ = frame_failed_ = false;
-    frame_failure_reason_ = 0;
+WaylandWaitResult ExtBackend::CaptureOnceResult(WaylandDeadline deadline) {
+    if (!pending_frame_) {
+        if (!EnsureShmBuffer()) return WaylandWaitResult::Error;
+        frame_ready_ = frame_failed_ = false;
+        frame_failure_reason_ = 0;
 
-    auto* frame = ext_image_copy_capture_session_v1_create_frame(session_);
-    if (!frame) {
-        std::cerr << "[ExtBackend] Failed to create frame request\n";
-        return false;
+        pending_frame_ = ext_image_copy_capture_session_v1_create_frame(session_);
+        if (!pending_frame_) {
+            std::cerr << "[ExtBackend] Failed to create frame request\n";
+            return WaylandWaitResult::Error;
+        }
+        ext_image_copy_capture_frame_v1_add_listener(pending_frame_, &kFrameListener, this);
+        ext_image_copy_capture_frame_v1_attach_buffer(pending_frame_, wl_buf_);
+        ext_image_copy_capture_frame_v1_damage_buffer(pending_frame_, 0, 0,
+            static_cast<int32_t>(buf_width_), static_cast<int32_t>(buf_height_));
+        ext_image_copy_capture_frame_v1_capture(pending_frame_);
     }
-    ext_image_copy_capture_frame_v1_add_listener(frame, &kFrameListener, this);
-    ext_image_copy_capture_frame_v1_attach_buffer(frame, wl_buf_);
-    ext_image_copy_capture_frame_v1_damage_buffer(frame, 0, 0,
-        static_cast<int32_t>(buf_width_), static_cast<int32_t>(buf_height_));
-    ext_image_copy_capture_frame_v1_capture(frame);
 
-    const bool completed = WaitUntil(
+    const auto result = WaitUntilResult(
         deadline,
-        [this] { return frame_ready_ || frame_failed_ || session_stopped_; },
-        "frame request");
-    ext_image_copy_capture_frame_v1_destroy(frame);
-    return completed && frame_ready_ && !session_stopped_;
+        [this] { return frame_ready_ || frame_failed_ || session_stopped_; });
+    // Only a terminal frame event ends the request. After a timeout it stays
+    // pending and the next call resumes waiting on it; after a disconnect or
+    // error Shutdown() destroys it.
+    if (result == WaylandWaitResult::EventReceived) {
+        ext_image_copy_capture_frame_v1_destroy(pending_frame_);
+        pending_frame_ = nullptr;
+    }
+    return result;
+}
+
+WaylandDeadline ExtBackend::FrameDeadline() const {
+    const auto now = std::chrono::steady_clock::now();
+    if (last_frame_.empty()) return now + kFrameTimeout;
+    // Anchored on the previous delivery, like the portal backend, so a static
+    // desktop still yields frames at the target rate.
+    return std::max(
+        last_delivery_ +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(frame_interval_),
+        now + kMinFrameWait);
 }
 
 bool ExtBackend::CaptureFrame(RawFrame& out) {
     if (session_stopped_) return false;
-    const auto deadline = std::chrono::steady_clock::now() + kFrameTimeout;
     const uint32_t serial_before = constraints_serial_;
 
-    if (!CaptureOnce(deadline)) {
+    WaylandWaitResult result = CaptureOnceResult(FrameDeadline());
+    if (result == WaylandWaitResult::EventReceived && frame_failed_ &&
+            !session_stopped_ &&
+            frame_failure_reason_ ==
+                EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS) {
         // A resolution or format change fails the in-flight frame with
         // buffer_constraints and re-sends the constraints. Reallocate once
         // against the new batch instead of restarting the whole generation.
-        if (!frame_failed_ || session_stopped_ ||
-                frame_failure_reason_ !=
-                    EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS)
-            return false;
+        // The constraints wait gets the full timeout: the frame-rate deadline
+        // is far too short for a compositor to re-send them.
         if (!WaitUntil(
-                deadline,
+                std::chrono::steady_clock::now() + kFrameTimeout,
                 [this, serial_before] {
                     return constraints_serial_ != serial_before || session_stopped_;
                 },
                 "buffer constraints update"))
             return false;
-        if (session_stopped_ || !CaptureOnce(deadline)) return false;
+        if (session_stopped_) return false;
+        result = CaptureOnceResult(FrameDeadline());
     }
 
+    if (result == WaylandWaitResult::EventReceived && frame_ready_ &&
+            !session_stopped_) {
+        // Keep an owned copy: the wl_shm buffer is reused for the next
+        // request, and a repeated frame must not alias a buffer the
+        // compositor may be writing.
+        const size_t bytes = static_cast<size_t>(buf_width_) * 4 * buf_height_;
+        const auto* src = static_cast<const uint8_t*>(shm_data_);
+        last_frame_.assign(src, src + bytes);
+        last_w_ = buf_width_;
+        last_h_ = buf_height_;
+        last_format_ = shm_format_;
+    } else if (ShouldRepeatLastFrame(result, !last_frame_.empty())) {
+        // The protocol lets the compositor hold the request until the screen
+        // changes; a static desktop must still fill the replay buffer.
+    } else {
+        if (result != WaylandWaitResult::EventReceived)
+            std::cerr << "[ExtBackend] Wayland frame request "
+                      << WaylandWaitResultName(result) << std::endl;
+        else if (session_stopped_)
+            std::cerr << "[ExtBackend] Capture session stopped" << std::endl;
+        else if (frame_failed_)
+            std::cerr << "[ExtBackend] Frame request failed, reason "
+                      << frame_failure_reason_ << std::endl;
+        return false;
+    }
+
+    last_delivery_ = std::chrono::steady_clock::now();
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     const int64_t now_ns =
         static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
     return normalizer_.Normalize(
-        static_cast<const uint8_t*>(shm_data_), buf_width_ * 4,
-        buf_width_, buf_height_, shm_format_, false, now_ns, out);
+        last_frame_.data(), last_w_ * 4,
+        last_w_, last_h_, last_format_, false, now_ns, out);
 }
 
 void ExtBackend::Shutdown() {
     DestroyWayland();
     normalizer_.Reset();
+    // A later Initialize may pick another output; never repeat this one.
+    last_frame_.clear();
+    last_w_ = last_h_ = last_format_ = 0;
 }
 
 } // namespace fthr
