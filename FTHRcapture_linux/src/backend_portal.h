@@ -41,7 +41,7 @@ public:
     uint32_t NativeHeight() const override { return native_h_; }
 
     // Why Initialize() failed, in words meant for the UI. Empty on success.
-    const std::string& FailureReason() const noexcept { return failure_reason_; }
+    std::string FailureReason() const override { return failure_reason_; }
     // True when the user dismissed or ignored the portal dialog: the capture
     // engine's automatic retries would only show the dialog again.
     bool RetryIsPointless() const noexcept { return retry_pointless_; }

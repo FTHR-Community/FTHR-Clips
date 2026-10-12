@@ -108,6 +108,7 @@ int main(int argc, char* argv[]) {
     constexpr auto kFailurePublishGrace = std::chrono::milliseconds(2000);
     std::chrono::steady_clock::time_point capture_stopped_at{};
     bool failure_reason_published = false;
+    std::string published_recovery_reason;
 
     // Command poll loop — same 20ms cadence as Windows version
     while (!g_quit) {
@@ -217,21 +218,22 @@ int main(int argc, char* argv[]) {
         layout->frames_captured = engine.GetFrameCount();
         layout->nvenc_active    = engine.IsNvencActive();
         uint32_t health_flags = engine.GetCaptureHealthFlags();
+        // engine_string is shared with save results, so nothing below may
+        // overwrite it while the UI has yet to consume a save response.
+        // Pause/resume and status acknowledgements carry no payload and have
+        // no consumer on Linux, so they never hold a publication back.
+        const auto pending = static_cast<fthr::ResponseType>(
+            layout->engine_response);
+        const bool save_result_pending =
+            pending == fthr::ResponseType::SAVE_STARTED ||
+            pending == fthr::ResponseType::CLIP_SAVED ||
+            pending == fthr::ResponseType::ERROR_OCCURRED;
         if ((health_flags & fthr::CAPTURE_HEALTH_BACKEND_FAILED) &&
                 !failure_reason_published) {
             // Payload first: the UI reads engine_string as soon as it sees
-            // the BACKEND_FAILED flag. engine_string is shared with save
-            // results, so wait until the UI has consumed a pending save
-            // response and hold the flag back until then; no engine_response
-            // is published for the capture failure itself. Pause/resume and
-            // status acknowledgements carry no payload and have no consumer
-            // on Linux, so they must not hold the failure back.
-            const auto pending = static_cast<fthr::ResponseType>(
-                layout->engine_response);
-            const bool save_result_pending =
-                pending == fthr::ResponseType::SAVE_STARTED ||
-                pending == fthr::ResponseType::CLIP_SAVED ||
-                pending == fthr::ResponseType::ERROR_OCCURRED;
+            // the BACKEND_FAILED flag, so hold the flag back until the
+            // string can be written; no engine_response is published for
+            // the capture failure itself.
             if (!save_result_pending) {
                 fthr::set_engine_string(layout, engine.GetCaptureFailureReason());
                 failure_reason_published = true;
@@ -241,6 +243,15 @@ int main(int argc, char* argv[]) {
         } else if (!(health_flags & fthr::CAPTURE_HEALTH_BACKEND_FAILED)) {
             // A RECONFIGURE_ENCODER restart may fail again later.
             failure_reason_published = false;
+            // While recovering, say what is being waited for; clear it again
+            // once capture is back so a later failure never shows stale text.
+            const std::string recovery_reason =
+                (health_flags & fthr::CAPTURE_HEALTH_RECOVERING)
+                    ? engine.GetCaptureFailureReason() : std::string();
+            if (recovery_reason != published_recovery_reason && !save_result_pending) {
+                fthr::set_engine_string(layout, recovery_reason);
+                published_recovery_reason = recovery_reason;
+            }
         }
         layout->capture_health_flags = health_flags;
         layout->capture_generation = engine.GetCaptureGeneration();

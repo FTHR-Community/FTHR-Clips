@@ -79,6 +79,15 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic -UNDEBUG)
     add_test(NAME capture_recovery_policy COMMAND fthr_capture_recovery_test)
 
+    add_executable(fthr_capture_backend_candidates_test
+        tests/capture_backend_candidates_test.cpp
+        src/capture_backend_policy.cpp)
+    target_include_directories(fthr_capture_backend_candidates_test PRIVATE src)
+    target_compile_options(fthr_capture_backend_candidates_test PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME capture_backend_candidates
+        COMMAND fthr_capture_backend_candidates_test)
+
     add_executable(fthr_x11_capture_target_test
         tests/x11_capture_target_test.cpp
         src/x11_capture_target.cpp)
@@ -322,6 +331,7 @@ set(FTHR_ENGINE_SOURCES
     src/backend_ext.cpp
     src/wayland_dispatch.cpp
     src/capture_backend.cpp
+    src/capture_backend_policy.cpp
     src/audio_capture.cpp
     src/audio_multi_capture.cpp
     src/audio_timing.cpp

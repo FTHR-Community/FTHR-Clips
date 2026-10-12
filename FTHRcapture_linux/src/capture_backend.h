@@ -1,5 +1,6 @@
 #pragma once
 #include "capture_engine.h"
+#include "capture_backend_policy.h"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -7,7 +8,15 @@
 
 namespace fthr {
 
-enum class BackendType { WlrScreencopy, ExtImageCopy, X11Grab, PortalScreenCast };
+// How Initialize() failed. The engine waits out the transient kinds and
+// spends its bounded retry budget only on genuine errors.
+enum class BackendFailureKind {
+    None,
+    Error,                  // genuine failure: counts toward the retry budget
+    CompositorUnreachable,  // display connect or registry roundtrip failed
+    OutputAbsent,           // the selected output is not advertised right now
+    UserDeclined,           // portal dialog declined or unanswered: never retry
+};
 
 // Raw frame delivered synchronously by CaptureFrame().
 // data pointer is valid only until the next CaptureFrame() call.
@@ -36,6 +45,18 @@ public:
     virtual BackendType Type()       const = 0;
     virtual uint32_t NativeWidth()  const = 0;
     virtual uint32_t NativeHeight() const = 0;
+
+    // Why the last Initialize() failed; Error unless the backend knows better.
+    BackendFailureKind InitFailureKind() const noexcept { return init_failure_kind_; }
+    // Words for the UI, when the backend has them. Empty otherwise.
+    virtual std::string FailureReason() const { return {}; }
+    // During recovery the user's output is the only acceptable source;
+    // first-time selection may still fall back to the first output.
+    void SetStrictOutput(bool strict) noexcept { strict_output_ = strict; }
+
+protected:
+    BackendFailureKind init_failure_kind_ = BackendFailureKind::Error;
+    bool strict_output_ = false;
 };
 
 // Why CreateBestBackend() returned nullptr, worded for the UI. Empty when
@@ -44,13 +65,22 @@ public:
 // recovery would otherwise re-open that dialog on every attempt.
 struct BackendFailure {
     std::string reason;
-    bool retry_pointless = false;
+    BackendFailureKind kind = BackendFailureKind::None;
+    bool retry_pointless = false;   // == kind is UserDeclined
 };
 
-// Factory. On Wayland: wlr-screencopy → ext-image-copy-capture → ScreenCast
-// portal (PipeWire); the protocol backends come first because they need no
-// dialog. Native X11: x11grab. Returns nullptr if no backend works or capture
-// cancellation is requested; `failure` (optional) then explains why.
+// Creates and initialises exactly one backend type with no fallback. Returns
+// nullptr on failure or cancellation; `failure` (optional) then says why.
+std::unique_ptr<ICaptureBackend> CreateBackend(
+    BackendType type,
+    const CaptureConfig& cfg,
+    const std::atomic<bool>* running,
+    BackendFailure* failure,
+    bool strict_output);
+
+// First-time selection: tries BackendCandidates() in order, or the single
+// type named by FTHR_CAPTURE_BACKEND. Returns nullptr if no backend works or
+// capture cancellation is requested; `failure` (optional) then explains why.
 std::unique_ptr<ICaptureBackend> CreateBestBackend(
     const CaptureConfig& cfg,
     const std::atomic<bool>* running,
