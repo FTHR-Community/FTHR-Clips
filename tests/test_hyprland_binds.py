@@ -4,6 +4,10 @@ import pytest
 
 from FTHR_UI.core import hotkey_manager
 from FTHR_UI.core.hotkey_manager import HotkeyManager
+import sys
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == 'win32', reason='Hyprland binds are a Linux-only path')
 
 SOCK = '/run/user/1000/fthr/hotkey.sock'
 
