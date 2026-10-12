@@ -242,6 +242,7 @@ bool ExtBackend::Initialize(const CaptureConfig& cfg) {
     if (!sel && !all_outputs_.empty()) sel = all_outputs_[0];
     if (!sel) { std::cerr << "[ExtBackend] No wl_output\n"; DestroyWayland(); return false; }
     output_ = sel->handle;
+    selected_output_ = sel->name;
     if (!WaitUntil(
             deadline,
             [sel] { return sel->done; },

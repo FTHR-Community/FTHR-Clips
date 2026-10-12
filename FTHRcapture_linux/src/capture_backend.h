@@ -50,6 +50,10 @@ public:
     BackendFailureKind InitFailureKind() const noexcept { return init_failure_kind_; }
     // Words for the UI, when the backend has them. Empty otherwise.
     virtual std::string FailureReason() const { return {}; }
+    // Name of the output actually captured (wl_output name), empty when the
+    // backend has no notion of one. Recovery insists on this output only
+    // when it is the one the user selected.
+    virtual std::string SelectedOutput() const { return {}; }
     // During recovery the user's output is the only acceptable source;
     // first-time selection may still fall back to the first output.
     void SetStrictOutput(bool strict) noexcept { strict_output_ = strict; }
@@ -59,7 +63,7 @@ protected:
     bool strict_output_ = false;
 };
 
-// Why CreateBestBackend() returned nullptr, worded for the UI. Empty when
+// Why CreateBackend() or CreateBestBackend() returned nullptr, worded for the UI. Empty when
 // capture was merely cancelled. retry_pointless marks failures that only user
 // action can resolve (a dismissed portal dialog); the engine's bounded
 // recovery would otherwise re-open that dialog on every attempt.

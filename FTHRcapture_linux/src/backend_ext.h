@@ -24,6 +24,7 @@ public:
     BackendType Type() const override { return BackendType::ExtImageCopy; }
     uint32_t NativeWidth()  const override { return native_w_; }
     uint32_t NativeHeight() const override { return native_h_; }
+    std::string SelectedOutput() const override { return selected_output_; }
 
     struct OutputEntry {
         wl_output*  handle = nullptr;
@@ -61,6 +62,7 @@ private:
     ext_output_image_capture_source_manager_v1* src_mgr_ = nullptr;
     std::vector<OutputEntry*> all_outputs_;
     std::string target_output_;
+    std::string selected_output_;
 
     ext_image_capture_source_v1*               source_  = nullptr;
     ext_image_copy_capture_session_v1*         session_ = nullptr;
