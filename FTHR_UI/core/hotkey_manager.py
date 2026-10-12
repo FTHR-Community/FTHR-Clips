@@ -1321,33 +1321,56 @@ class HotkeyManager(QObject):
         mod, k    = self._to_hyprland_bind(key)
         return f'bind = {mod}, {k}, exec, {self.socket_command(action)}'
 
-    def _write_hyprland_config(self) -> None:
-        """Write ~/.config/hypr/fthr-hotkeys.conf with current hotkeys."""
+    # Every action the socket server dispatches, in a fixed order so the
+    # generated files are stable between runs.
+    _HYPRLAND_SOCKET_ACTIONS = (
+        'save_clip', 'save_screenshot', 'start_recording', 'stop_recording',
+        'confirm_game_detection', 'dismiss_game_detection',
+    )
+
+    def _hyprland_bind_actions(self) -> list[str]:
+        """Socket actions that currently have a key assigned."""
+        return [a for a in self._HYPRLAND_SOCKET_ACTIONS
+                if self.hotkeys.get(a, '')]
+
+    def _write_hyprland_config(self) -> bool:
+        """Write ~/.config/hypr/fthr-hotkeys.conf; True when content changed."""
         lines = [
             '# FTHR Clips hotkeys — auto-generated, do not edit manually.',
             '# Change hotkeys inside FTHR Clips → Hotkeys menu.',
-            self._build_bind_line('save_clip'),
-            self._build_bind_line('save_screenshot'),
+            *(self._build_bind_line(a) for a in self._hyprland_bind_actions()),
             '',
         ]
+        text = '\n'.join(lines)
         tmp = _FTHR_HYPR_CONF.with_suffix('.conf.tmp')
         try:
+            try:
+                if _FTHR_HYPR_CONF.read_text() == text:
+                    return False
+            except OSError:
+                pass
             _FTHR_HYPR_CONF.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text('\n'.join(lines))
+            tmp.write_text(text)
             os.replace(str(tmp), str(_FTHR_HYPR_CONF))
             print(f'[Hotkey] Written {_FTHR_HYPR_CONF}')
+            return True
         except Exception as e:
             print(f'[Hotkey] Failed to write Hyprland config: {e}')
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
+            return False
 
-    def _write_hyprland_lua_config(self, path: Path = _HYPR_CUSTOM_LUA) -> None:
-        """Add/update bindings in a Lua-based Hyprland custom keybind file."""
+    def _write_hyprland_lua_config(self, path: Path = _HYPR_CUSTOM_LUA) -> bool:
+        """Add/update bindings in a Lua-based Hyprland custom keybind file.
+
+        Returns True when the file content changed.
+        """
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            existing = path.read_text() if path.exists() else ''
+            original = path.read_text() if path.exists() else ''
+            existing = original
             begin = existing.find(_FTHR_LUA_BEGIN)
             if begin >= 0:
                 end = existing.find(_FTHR_LUA_END, begin)
@@ -1356,20 +1379,23 @@ class HotkeyManager(QObject):
                 end += len(_FTHR_LUA_END)
                 existing = existing[:begin].rstrip() + existing[end:]
             lines = [existing.rstrip(), '', _FTHR_LUA_BEGIN]
-            for action in ('save_clip', 'save_screenshot'):
+            for action in self._hyprland_bind_actions():
                 key = self.hotkeys.get(action, '')
-                if not key:
-                    continue
                 combo = ' + '.join(part.upper() for part in key.split('+'))
                 command = self.socket_command(action).replace('\\', '\\\\').replace('"', '\\"')
                 lines.append(
                     f'hl.bind("{combo}", hl.dsp.exec_cmd("{command}"), '
                     f'{{ description = "FTHR Clips: {action}" }})')
             lines.append(_FTHR_LUA_END)
-            path.write_text('\n'.join(lines).rstrip() + '\n')
+            text = '\n'.join(lines).rstrip() + '\n'
+            if text == original:
+                return False
+            path.write_text(text)
             print(f'[Hotkey] Written Lua bindings to {path}')
+            return True
         except (OSError, ValueError) as e:
             print(f'[Hotkey] Failed to write Lua bindings: {e}')
+            return False
 
     def _ensure_hyprland_source(self) -> None:
         """Add a source line to hyprland.conf if it doesn't already exist.
@@ -1384,7 +1410,8 @@ class HotkeyManager(QObject):
         except Exception:
             return
         # Already sourced, or user has manual FTHR binds — either way, skip.
-        if 'fthr-hotkeys.conf' in content or 'fthr_hotkey.sock' in content:
+        if ('fthr-hotkeys.conf' in content or 'fthr_hotkey.sock' in content
+                or 'hotkey.sock' in content):
             return
         source_line = f'\n# FTHR Clips hotkeys (auto-added)\nsource = {_FTHR_HYPR_CONF}\n'
         try:
@@ -1406,13 +1433,12 @@ class HotkeyManager(QObject):
         if comp != 'hyprland':
             return
         if _HYPR_CUSTOM_LUA.exists() or _HYPR_LUA_CONF.exists():
-            self._write_hyprland_lua_config()
+            changed = self._write_hyprland_lua_config()
         else:
-            self._write_hyprland_config()
+            changed = self._write_hyprland_config()
             self._ensure_hyprland_source()
-        # Apply live without a full reload — one keyword per binding.
-        # hyprctl keyword bind accepts the same format as the config file.
-        if os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'):
+        # A full `hyprctl reload`, run only when the generated file changed.
+        if changed and os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'):
             def _reload():
                 try:
                     hyprctl = linux_tools.path('hyprctl')
