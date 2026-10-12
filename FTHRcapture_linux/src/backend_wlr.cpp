@@ -247,7 +247,8 @@ bool WlrBackend::Initialize(const CaptureConfig& cfg) {
         return false;
     }
 
-    // Select the target wl_output by name; fall back to first available.
+    // Select the target wl_output by name. First-time selection falls back
+    // to the first output; a strict (recovery) attempt waits for the named one.
     {
         OutputEntry* selected = nullptr;
         if (!target_output_.empty()) {
@@ -270,6 +271,7 @@ bool WlrBackend::Initialize(const CaptureConfig& cfg) {
 
         if (selected) {
             output_ = selected->handle;
+            selected_output_ = selected->name;
             std::cerr << "[WlrBackend] Using output: '"
                       << (selected->name.empty() ? "(unnamed)" : selected->name)
                       << "'" << std::endl;

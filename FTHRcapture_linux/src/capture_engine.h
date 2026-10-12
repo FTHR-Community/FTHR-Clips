@@ -77,8 +77,9 @@ public:
         std::lock_guard<std::mutex> lk(codec_mutex_);
         return active_codec_;
     }
-    // Why capture stopped for good, for the UI. Set before the health flags
-    // publish CAPTURE_HEALTH_BACKEND_FAILED; empty while capture is alive.
+    // What the UI should know about capture trouble: while recovering, what
+    // is being waited for; after a terminal failure, why. Set before the
+    // health flags publish RECOVERING or BACKEND_FAILED; empty while healthy.
     std::string GetCaptureFailureReason() const {
         std::lock_guard<std::mutex> lk(codec_mutex_);
         return capture_failure_reason_;
@@ -129,6 +130,9 @@ private:
     // failed. Capture thread only.
     BackendType last_good_backend_{};
     bool have_last_good_backend_ = false;
+    // Insist on cfg_.target_output during recovery only when the backend
+    // actually captured it; a name that never matched keeps its fallback.
+    bool strict_recovery_output_ = false;
     bool last_generation_encoder_failed_ = false;
     mutable std::mutex codec_mutex_;
     AudioMultiCapture   multi_audio_;

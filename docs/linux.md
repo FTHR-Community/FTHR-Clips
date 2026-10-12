@@ -312,8 +312,8 @@ delivered frames rather than running the first-time selection again, so a
 compositor stall never reaches the portal's screen picker. A compositor that
 stops answering, or a selected output that disappears, is waited for every two
 seconds for as long as the app runs, and the replay history is kept whenever
-only the capture backend had to restart. The status bar shows what is being
-waited for.
+only the capture backend had to restart. The engine log in
+`~/.fthr/diagnostics/<session>/engine.log` records what is being waited for.
 
 ## Redacted support reports
 

@@ -130,7 +130,7 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration(
         // a stalled compositor whose recovery fell through to the portal and
         // ended capture on an unanswered dialog.
         backend_ = CreateBackend(RecoveryCandidate(last_good_backend_), cfg_,
-                                 &running_, &failure, /*strict_output=*/true);
+                                 &running_, &failure, strict_recovery_output_);
     } else {
         backend_ = CreateBestBackend(cfg_, &running_, &failure);
     }
@@ -149,12 +149,28 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration(
         default:
             break;
         }
-        std::cerr << "[Capture] No capture backend available — exiting" << std::endl;
-        SetCaptureFailureReason(failure.reason.empty()
-            ? "No capture backend is available" : failure.reason);
+        std::string reason = failure.reason;
+        if (reason.empty()) {
+            reason = have_last_good_backend_
+                ? std::string(BackendTypeName(last_good_backend_))
+                      + " could not restart after capture was interrupted"
+                : "No capture backend is available";
+        }
+        std::cerr << "[Capture] " << reason
+                  << (failure.retry_pointless ? "; not retrying" : "; will retry")
+                  << std::endl;
+        SetCaptureFailureReason(reason);
         return failure.retry_pointless ? GenerationEnd::FailedForGood
                                        : GenerationEnd::Failed;
     }
+
+    // Remember the backend as soon as it initialised, not after the first
+    // encoded frame: a failure before any frame (screen locked at start) must
+    // not re-run first-time selection and reach the portal dialog either.
+    have_last_good_backend_ = true;
+    last_good_backend_ = backend_->Type();
+    strict_recovery_output_ = !cfg_.target_output.empty()
+        && backend_->SelectedOutput() == cfg_.target_output;
 
     uint32_t native_w = backend_->NativeWidth();
     uint32_t native_h = backend_->NativeHeight();
@@ -187,7 +203,8 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration(
     enc_cfg.preset       = cfg_.preset;
 
     std::string codec_used;
-    const bool reuse_encoder = encoder_.IsOpen() && !last_generation_encoder_failed_;
+    const bool reuse_encoder = encoder_.IsOpen() && !last_generation_encoder_failed_
+        && enc_w == encoder_.GetWidth() && enc_h == encoder_.GetHeight();
     if (reuse_encoder) {
         // Only the backend restarted. The encoder rescales a changed source
         // size itself, and keeping it open keeps the replay history; the
@@ -196,6 +213,12 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration(
         std::cout << "[Capture] Backend restarted; keeping encoder and replay history"
                   << std::endl;
     } else {
+        if (encoder_.IsOpen()) {
+            // The output geometry changed, so the encoder (and the history
+            // encoded at the old size) cannot be carried over.
+            { std::lock_guard<std::mutex> lk(codec_mutex_); encoder_snapshot_ = EncoderSnapshot{}; }
+            encoder_.Close();
+        }
         if (!encoder_.Open(enc_cfg, codec_used)) {
             std::cerr << "[Capture] Encoder open failed" << std::endl;
             SetCaptureFailureReason("No video encoder could be opened");
@@ -269,13 +292,7 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration(
             encoder_failed = true;
             break;
         }
-        if (encoded) {
-            frame_count_.fetch_add(1);
-            if (!have_last_good_backend_ || last_good_backend_ != backend_->Type()) {
-                have_last_good_backend_ = true;
-                last_good_backend_ = backend_->Type();
-            }
-        }
+        if (encoded) frame_count_.fetch_add(1);
     }
 
     backend_->Shutdown();
@@ -486,6 +503,7 @@ bool CaptureEngine::SaveClip(const std::string& path, uint32_t duration_sec,
 void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
     Shutdown();   // stops thread, deletes ring_, stops audio
     have_last_good_backend_ = false;
+    strict_recovery_output_ = false;
     last_generation_encoder_failed_ = false;
     cfg_.codec_pref = static_cast<CodecPref>(codec_pref);
     cfg_.preset     = preset;

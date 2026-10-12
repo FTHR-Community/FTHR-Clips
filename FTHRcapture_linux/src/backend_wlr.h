@@ -24,6 +24,7 @@ public:
     BackendType Type() const override { return BackendType::WlrScreencopy; }
     uint32_t NativeWidth()  const override { return native_w_; }
     uint32_t NativeHeight() const override { return native_h_; }
+    std::string SelectedOutput() const override { return selected_output_; }
 
     struct OutputEntry {
         wl_output*  handle = nullptr;
@@ -45,6 +46,7 @@ private:
     zxdg_output_manager_v1*     xdg_mgr_    = nullptr;
     std::vector<OutputEntry*>   all_outputs_;
     std::string                 target_output_;
+    std::string                 selected_output_;
 
     struct FrameBuffer {
         void*        data   = nullptr;
