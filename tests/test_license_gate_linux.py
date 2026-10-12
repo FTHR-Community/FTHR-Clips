@@ -415,3 +415,30 @@ def test_manifest_records_cli_tools():
     cli = _manifest_data()['cli_tools']
     assert cli['shipped'] == ['ffmpeg', 'ffprobe']
     assert cli['rpath'] == '$ORIGIN/../lib:$ORIGIN'
+
+
+def _run_all_with_recorded_appdirs(monkeypatch, tree):
+    seen = []
+    for name in ('check_files', 'check_project_license', 'check_manifest',
+                 'check_linux_manifest', 'check_python_sources',
+                 'check_qt_source_selection', 'check_asset_manifest',
+                 'scan_dir', 'check_qt_artifact', 'check_asset_artifact'):
+        monkeypatch.setattr(vrl, name, lambda *a, **k: None)
+    monkeypatch.setattr(
+        vrl, 'check_files',
+        lambda path, required, rep, kind: seen.append((Path(path), kind)))
+    monkeypatch.setattr(sys, 'argv', ['verify_release_licenses.py',
+                                      '--all', '--tree', str(tree)])
+    vrl.main()
+    return [p for p, kind in seen if kind == 'appdir']
+
+
+def test_all_inspects_the_appdir_the_build_script_writes(monkeypatch, tmp_path):
+    (tmp_path / 'build_output' / 'AppDir').mkdir(parents=True)
+    appdirs = _run_all_with_recorded_appdirs(monkeypatch, tmp_path)
+    assert appdirs == [(tmp_path / 'build_output' / 'AppDir').resolve()]
+
+
+def test_all_ignores_a_stale_build_appdir(monkeypatch, tmp_path):
+    (tmp_path / 'build' / 'AppDir').mkdir(parents=True)
+    assert _run_all_with_recorded_appdirs(monkeypatch, tmp_path) == []

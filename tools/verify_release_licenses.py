@@ -918,7 +918,7 @@ def main() -> int:
         if args.all:
             for cand, kind, platform in (
                     (root / 'dist' / 'FTHRClips', 'windows dist', 'windows'),
-                    (root / 'build' / 'AppDir', 'appdir', 'linux')):
+                    (root / 'build_output' / 'AppDir', 'appdir', 'linux')):
                 if cand.is_dir():
                     check_files(cand, REQUIRED_ARTIFACT_FILES, rep, kind)
                     check_project_license(cand, rep, kind)
