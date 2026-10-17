@@ -164,7 +164,14 @@ cd "$SCRIPT_DIR"
 # 3. Build the optional Linux uploader bundle before the main AppImage.
 echo ""
 echo ">>> Building optional Linux upload extension..."
+# Needs requirements-uploader.txt installed in the same interpreter; the
+# builder refuses to freeze an executable without paramiko and friends.
 "$PYTHON_BIN" "$SCRIPT_DIR/tools/build_linux_uploader.py" --python "$PYTHON_BIN"
+UPLOADER_PAYLOAD_ELF="$SCRIPT_DIR/build/optional-uploader-linux/payload-elf"
+[ -d "$UPLOADER_PAYLOAD_ELF" ] || {
+    echo "ERROR: the uploader build left no unpacked payload for the glibc gate." >&2
+    exit 1
+}
 
 # 4. Bundle with PyInstaller
 echo ""
@@ -422,10 +429,14 @@ cp "$NATIVE_OUTPUT" "$OUTPUT"
 # and the success banner so a failed portability check cannot look releasable.
 echo ""
 echo ">>> Verifying Linux glibc baseline..."
+# The optional uploader's one-file payload is compressed inside its
+# .fthrplugin, so tools/build_linux_uploader.py unpacks its ELF members for
+# this gate; the plugin runs on the same hosts as the AppImage.
 if ! "$PYTHON_BIN" "$SCRIPT_DIR/tools/verify_linux_glibc.py" \
     --manifest "$GLIBC_MANIFEST" \
     --target "$APPDIR" \
-    --target "$OUTPUT"; then
+    --target "$OUTPUT" \
+    --target "$UPLOADER_PAYLOAD_ELF"; then
     rm -f "$NATIVE_OUTPUT" "$OUTPUT" "$OUTPUT.sha256"
     echo "ERROR: Linux glibc baseline verification failed; refusing to publish the AppImage." >&2
     exit 1

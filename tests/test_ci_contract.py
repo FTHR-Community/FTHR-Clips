@@ -13,12 +13,35 @@ def _workflow() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
 
+def test_linux_release_ci_fetches_and_uses_pinned_ffmpeg() -> None:
+    workflow = _workflow()
+    linux_job = workflow[workflow.index("  linux-engine:") : workflow.index(
+        "  windows-engine:"
+    )]
+
+    assert "fetch_third_party.py --ffmpeg-linux" in linux_job
+    assert "-DFTHR_FFMPEG_ROOT=${{ github.workspace }}" in linux_job
+    assert "ctest --test-dir" in linux_job
+    assert "verify_release_licenses.py --tree ." in linux_job
+    assert "git diff --exit-code" in linux_job
+
+
+def test_optional_uploader_builds_install_the_uploader_lock() -> None:
+    workflow = _workflow()
+    windows_job = workflow[workflow.index("  windows-engine:") : workflow.index(
+        "  release-verification:"
+    )]
+    appimage_job = workflow[workflow.index("  linux-appimage-package:") :]
+
+    for job in (windows_job, appimage_job):
+        assert "-r requirements-uploader.txt" in job
+    assert "build/optional-uploader-linux/payload-elf" in appimage_job
 
 
 def test_windows_bundle_is_built_only_after_the_engine() -> None:
     workflow = _workflow()
     python_job = workflow[workflow.index("  python:") : workflow.index(
-        "  windows-engine:"
+        "  linux-engine:"
     )]
     windows_job = workflow[workflow.index("  windows-engine:") : workflow.index(
         "  release-verification:"
