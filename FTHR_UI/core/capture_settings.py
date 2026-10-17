@@ -87,6 +87,40 @@ def custom_clip_lengths(values) -> list[int]:
     return sorted(result)
 
 
+# Linux engine argv[6] limits (FTHRcapture_linux/src/engine_args.h).
+LINUX_RING_BUDGET_MIN_MB = 64
+LINUX_RING_BUDGET_MAX_MB = 16384
+
+
+def _total_memory_mb() -> int:
+    import os
+    try:
+        return int(os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') // (1024 * 1024))
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+def linux_ring_budget_mb(bitrate_kbps: int, buffer_seconds: int,
+                         total_memory_mb: int | None = None) -> int:
+    """Byte budget for the Linux engine's encoded replay ring (argv[6]).
+
+    The Windows engine treats argv[6] as a diagnostic raw-frame figure; the
+    Linux engine enforces it on the compressed ring and drops the oldest
+    history beyond it. Size it for the configured bitrate and buffer (the
+    engine keeps buffer + 5 s) with headroom for VBR peaks, so a 15-minute
+    buffer is not cut to the old 2 GB raw ceiling, but never above half of
+    physical memory.
+    """
+    bitrate = max(1, int(bitrate_kbps))
+    seconds = max(1, int(buffer_seconds)) + 5
+    expected_mb = bitrate * 1000 // 8 * seconds / (1024 * 1024)
+    budget = int(expected_mb * 1.25) + 64
+    total = _total_memory_mb() if total_memory_mb is None else int(total_memory_mb)
+    if total > 0:
+        budget = min(budget, total // 2)
+    return max(LINUX_RING_BUDGET_MIN_MB, min(LINUX_RING_BUDGET_MAX_MB, budget))
+
+
 def compute_buffer_seconds(normal_seconds: int, custom_lengths=None) -> int:
     """Retain the longest configured clip with a native-safe safety margin."""
     normal = max([validate_normal_clip_length(normal_seconds)]

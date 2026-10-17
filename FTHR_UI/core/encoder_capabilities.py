@@ -58,11 +58,54 @@ _BACKENDS: tuple[
 )
 
 
+# On Linux the engine's AMD preference (argv[17] = 2) opens VA-API first and
+# AMF only as a fallback (FTHRcapture_linux/src/encoder_policy.cpp); VA-API
+# also drives Intel GPUs there. Probe the same encoders under the same key.
+_LINUX_VAAPI_BACKEND = ('amf', 'VA-API (AMD / Intel)', False, (
+    ('h264', ('h264_vaapi', 'h264_amf')),
+    ('hevc', ('hevc_vaapi', 'hevc_amf')),
+    ('av1', ('av1_vaapi', 'av1_amf')),
+))
+# Bumped only for Linux so Windows caches stay valid.
+_LINUX_CACHE_VERSION = 3
+
+
+def _cache_version(platform: str) -> int:
+    return _CACHE_VERSION if platform.startswith('win') else _LINUX_CACHE_VERSION
+
+
+def _platform_backends(platform: str):
+    if platform.startswith('win'):
+        return _BACKENDS
+    return tuple(_LINUX_VAAPI_BACKEND if entry[0] == 'amf' else entry
+                 for entry in _BACKENDS)
+
+
+def _vaapi_device() -> str:
+    # The engine reads the same variable (encoder.cpp).
+    return os.environ.get('FTHR_VAAPI_DEVICE') or '/dev/dri/renderD128'
+
+
 def _platform_backend_keys(platform: str) -> tuple[str, ...]:
     return ('nvenc', 'amf', 'qsv', 'software')
 
 
 def _probe_command(ffmpeg: str, encoder_name: str) -> list[str]:
+    if encoder_name.endswith('_vaapi'):
+        # VA-API encoders take hardware frames: upload the test frame first.
+        return [
+            ffmpeg,
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-vaapi_device', _vaapi_device(),
+            '-f', 'lavfi',
+            '-i', 'color=c=black:s=640x360:r=30:d=0.1',
+            '-frames:v', '1',
+            '-vf', 'format=nv12,hwupload',
+            '-c:v', encoder_name,
+            '-f', 'null',
+            '-',
+        ]
     return [
         ffmpeg,
         '-hide_banner',
@@ -92,6 +135,11 @@ def _encoder_works(
     }
     if sys.platform == 'win32':
         kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    else:
+        # Host library path, so a frozen build's ffmpeg can load the host's
+        # VA-API/NVENC drivers (see linux_runtime.child_process_environment).
+        from core import linux_runtime
+        kwargs['env'] = linux_runtime.child_process_environment()
     try:
         return runner(_probe_command(ffmpeg, encoder_name), **kwargs).returncode == 0
     except (OSError, subprocess.SubprocessError):
@@ -115,7 +163,7 @@ def probe_encoder_capabilities(
 
     allowed = set(_platform_backend_keys(platform))
     found: list[EncoderCapability] = []
-    for key, label, supports_presets, codec_candidates in _BACKENDS:
+    for key, label, supports_presets, codec_candidates in _platform_backends(platform):
         if key not in allowed:
             continue
         codecs: list[str] = []
@@ -167,7 +215,7 @@ def _ffmpeg_signature(ffmpeg: str, platform: str) -> dict:
     path = Path(ffmpeg).resolve()
     stat = path.stat()
     return {
-        'version': _CACHE_VERSION,
+        'version': _cache_version(platform),
         'platform': platform,
         'ffmpeg': os.path.normcase(str(path)),
         'ffmpeg_size': stat.st_size,

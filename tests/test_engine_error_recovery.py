@@ -785,3 +785,45 @@ def test_display_mode_recovery_is_owned_bounded_and_waits_for_recording(monkeypa
     host._engine_gen += 1
     recover(status)
     assert len(callbacks) == 1  # At most three scheduled attempts in thirty seconds.
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Linux engine launch path')
+def test_linux_launch_passes_ring_budget_and_playback_sink(monkeypatch):
+    import main
+    from core.capture_settings import linux_ring_budget_mb
+
+    host = _host(main, _Bridge(initialize_result=False))
+    config = CaptureConfig(
+        fps=60, buffer_seconds=900, width=0, height=0,
+        bitrate_kbps=50_000, codec='auto', preset=4, monitor='DP-3',
+        scaling='stretch', audio_enabled=True, encoder='software',
+        separate_audio_enabled=True,
+        playback_endpoint_id='alsa_output.pci-0000_13_00.6.analog-stereo',
+    )
+    host._requested_capture_config = lambda: config
+    launched = []
+    monkeypatch.setattr(main.sys, 'platform', 'linux')
+    monkeypatch.setattr(main, 'is_native_x11_session', lambda: False)
+    monkeypatch.setattr(main, 'EngineLogCapture',
+                        lambda *_args: _StartupCapture(''))
+    monkeypatch.setattr(
+        main.subprocess, 'Popen',
+        lambda argv, **kwargs: launched.append((argv, kwargs)) or _Process())
+    monkeypatch.setattr(
+        main.threading, 'Thread',
+        lambda *, target, **_kwargs: SimpleNamespace(start=lambda: None))
+    monkeypatch.setattr(main.time, 'sleep', lambda _seconds: None)
+
+    main.MainWindow.start_engine(host)
+
+    argv, kwargs = launched[0]
+    assert argv[2] == '900'
+    # argv[6]: the Linux engine enforces this on its compressed ring, so it
+    # follows bitrate x buffer instead of the old 2 GB raw-frame ceiling.
+    assert argv[6] == str(linux_ring_budget_mb(50_000, 900))
+    assert argv[10] == 'DP-3'
+    assert argv[17] == '4'        # Software
+    assert argv[23] == '1'        # separate tracks
+    assert argv[24] == 'alsa_output.pci-0000_13_00.6.analog-stereo'
+    assert len(argv) == 26
+    assert 'creationflags' not in kwargs

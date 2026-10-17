@@ -19,6 +19,58 @@ from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime
 _NO_WINDOW = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
+
+
+def _playback_device_labels() -> tuple[str, str, str]:
+    """(default entry, fallback name, hint) for the playback-device picker.
+
+    On Linux the engine captures the monitor of a PulseAudio sink and uses the
+    default output's monitor when the chosen sink is missing at startup.
+    """
+    if sys.platform == 'win32':
+        return ('Windows default', 'Windows default',
+                'If this device disconnects, capture switches to the Windows default.')
+    return ('System default', 'the default output',
+            'If this device is missing when capture starts, the default output is '
+            'captured instead.')
+
+
+FOCUS_PAUSED_STATUS = 'PAUSED — GAME UNFOCUSED'
+
+
+def _is_focus_pause(platform: str, state, engine_flags) -> bool:
+    """True when the Linux engine reports the focus pause the UI requested.
+
+    The engine answers STOP_RECORDING with ACTIVE|PAUSED, which capture health
+    maps to DEGRADED; that is the requested state, not a capture fault.
+    Windows has no focus pause, so its status mapping is unchanged.
+    """
+    from core.capture_health import CaptureHealthFlag, CaptureHealthState
+    try:
+        flags = int(engine_flags or 0)
+    except (TypeError, ValueError):
+        return False
+    return (not platform.startswith('win')
+            and state is CaptureHealthState.DEGRADED
+            and bool(flags & int(CaptureHealthFlag.PAUSED)))
+
+
+def _engine_stopped_detail(platform: str, exit_code, previous_state) -> str:
+    """Error-bar text for an engine process that is gone.
+
+    The Linux engine exits with code 0 a moment after it publishes a terminal
+    capture failure (BACKEND_FAILED plus a reason), so that failure, already
+    shown, is the cause rather than an unexplained exit.
+    """
+    from core.capture_health import CaptureHealthState
+    if (not platform.startswith('win') and exit_code == 0
+            and previous_state is CaptureHealthState.FAILED):
+        return ('The capture engine stopped after the capture failure above. '
+                'Clips cannot be saved until it is restarted.')
+    return (f'The capture engine exited unexpectedly (code {exit_code}). '
+            'Clips cannot be saved until it is restarted.')
+
+
 _BACKGROUND_NO_WINDOW = {
     'creationflags': (
         subprocess.CREATE_NO_WINDOW
@@ -151,6 +203,7 @@ from core.capture_settings import (
     validate_fps,
     validate_normal_clip_length,
     custom_clip_lengths,
+    linux_ring_budget_mb,
 )
 from core.encoder_capabilities import (
     EncoderCapability,
@@ -5067,7 +5120,7 @@ class MainWindow(QMainWindow):
     def _on_focus_lost(self):
         if focus_pause_supported(sys.platform) and self.bridge.is_connected():
             self.bridge.pause_recording()
-            self._set_status('PAUSED — GAME UNFOCUSED', status_warning_qss())
+            self._set_status(FOCUS_PAUSED_STATUS, status_warning_qss())
 
     def _on_focus_regained(self):
         if focus_pause_supported(sys.platform) and self.bridge.is_connected():
@@ -5304,7 +5357,9 @@ class MainWindow(QMainWindow):
                                     == AUDIO_CAPTURE_MODE_SEPARATED),
             microphone_endpoint_id=str(
                 self.settings_manager.get('mic_device_id') or ''),
-            playback_endpoint_id=str(self.settings_manager.get('playback_device_id') or '') if sys.platform == 'win32' else '',
+            # argv[24]: a Windows endpoint ID, or on Linux a PulseAudio sink
+            # name from `--list-playback-devices` (empty = default output).
+            playback_endpoint_id=str(self.settings_manager.get('playback_device_id') or ''),
             microphone_mono=bool(self.settings_manager.get('mic_downmix_mono', False)) if sys.platform == 'win32' else False,
             normal_clip_seconds=self.clip_duration,
             crop_enabled=crop_enabled,
@@ -5480,6 +5535,7 @@ class MainWindow(QMainWindow):
         # backend generation reported later through shared memory.
         self._engine_gen = getattr(self, '_engine_gen', 0) + 1
         _my_gen = self._engine_gen
+        self._engine_exit_code = None
         self._diagnostic_engine_start_count += 1
         capture_restart_count = max(
             0, self._diagnostic_engine_start_count - 1)
@@ -5549,6 +5605,10 @@ class MainWindow(QMainWindow):
         frames_needed   = launch_config.buffer_seconds * launch_config.fps
         mb_needed       = max(64, (frames_needed * bytes_per_frame + (1024*1024-1)) // (1024*1024))
         max_buffer_mb   = min(int(mb_needed) + 64, 2048)   # hard 2 GB ceiling
+        if sys.platform != 'win32':
+            # The Linux engine enforces argv[6] on its compressed ring.
+            max_buffer_mb = linux_ring_budget_mb(
+                launch_config.bitrate_kbps, launch_config.buffer_seconds)
 
         capture_mode    = self.settings_manager.get('capture_mode',    'desktop')
         target_hwnd     = self.settings_manager.get('target_hwnd',     0)
@@ -8517,9 +8577,11 @@ class MainWindow(QMainWindow):
                     or self.bridge is not bridge_owner):
                 return
             code = proc.returncode
+            previous_health = getattr(self, '_capture_health_snapshot', None)
             self._engine_gen = getattr(self, '_engine_gen', 0) + 1
             self.engine_process = None
             self._engine_process_generation = None
+            self._engine_exit_code = code
             self._capture_config.deactivate(
                 f'capture engine exited unexpectedly (code {code})')
             self._pending_launch_config = None
@@ -8552,8 +8614,9 @@ class MainWindow(QMainWindow):
                 unexpected=True)
             self.push_error(
                 'ENGINE STOPPED',
-                f'The capture engine exited unexpectedly (code {code}). '
-                'Clips cannot be saved until it is restarted.',
+                _engine_stopped_detail(
+                    sys.platform, code,
+                    previous_health.state if previous_health is not None else None),
                 level='error',
                 actions=[('RESTART ENGINE', self._restart_capture_engine)],
                 key=recovery_key,
@@ -8609,6 +8672,15 @@ class MainWindow(QMainWindow):
                     self._schedule_owned_hardware_check(
                         generation, process_owner, reconnect_bridge)
                     return
+            if (sys.platform != 'win32'
+                    and not self._capture_settings_applying
+                    and self.engine_process is None
+                    and getattr(self, '_engine_exit_code', None) is not None):
+                # No engine is running to connect to (it exited; the Linux
+                # engine also exits after a terminal capture failure). Keep
+                # the stopped state visible until the user restarts capture.
+                self._set_status('ENGINE STOPPED', status_warning_qss())
+                return
             self._set_status(
                 self._capture_pending_text() if self._capture_settings_applying else 'CONNECTING',
                 status_idle_qss(),
@@ -8820,6 +8892,13 @@ class MainWindow(QMainWindow):
                 self._capture_pending_text()
                 if self._capture_settings_applying else state_text[snapshot.state]
             )
+            focus_paused = (
+                not self._capture_settings_applying
+                and _is_focus_pause(
+                    sys.platform, snapshot.state,
+                    status.get('capture_health_flags', 0)))
+            if focus_paused:
+                new_text = FOCUS_PAUSED_STATUS
             style = (status_idle_qss()
                      if self._capture_settings_applying
                      else status_active_qss()
@@ -8832,6 +8911,8 @@ class MainWindow(QMainWindow):
                          CaptureHealthState.RECOVERING,
                      }
                      else status_warning_qss())
+            if focus_paused:
+                style = status_warning_qss()
             self._set_status(new_text, style)
             if snapshot.request_recovery:
                 self._capture_health_log.warning(
@@ -11191,9 +11272,18 @@ class _SettingsPage(QWidget):
 
         self.mic_mono_check = QCheckBox('Downmix stereo microphone to mono')
         set_theme_style(self.mic_mono_check, checkbox_qss)
-        self.mic_mono_check.setChecked(bool(self.sm.get('mic_downmix_mono', False)))
-        self.mic_mono_check.setToolTip('Center your microphone in both speakers when recording.')
-        self.mic_mono_check.toggled.connect(self._on_mic_mono_changed)
+        if sys.platform == 'win32':
+            self.mic_mono_check.setChecked(bool(self.sm.get('mic_downmix_mono', False)))
+            self.mic_mono_check.setToolTip(
+                'Center your microphone in both speakers when recording.')
+            self.mic_mono_check.toggled.connect(self._on_mic_mono_changed)
+        else:
+            # The Linux microphone path (core/mic_recorder.py) always records
+            # one channel, so a stereo microphone is already downmixed.
+            self.mic_mono_check.setChecked(True)
+            self.mic_mono_check.setEnabled(False)
+            self.mic_mono_check.setToolTip(
+                'On Linux the microphone is always recorded in mono.')
         left_layout.addWidget(self.mic_mono_check)
         left_layout.addSpacing(12)
 
@@ -11424,7 +11514,7 @@ class _SettingsPage(QWidget):
         self.playback_combo.setMinimumWidth(0)
         self.playback_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         set_theme_style(self.playback_combo, combo_qss)
-        self.playback_combo.addItem('Windows default', '')
+        self.playback_combo.addItem(_playback_device_labels()[0], '')
         self.playback_combo.currentIndexChanged.connect(self._on_playback_device_changed)
         playback_row.addWidget(self.playback_combo, 1)
         refresh_playback = QPushButton('Refresh')
@@ -11434,7 +11524,7 @@ class _SettingsPage(QWidget):
         playback_row.addWidget(refresh_playback)
         outer.addLayout(playback_row)
         outer.addSpacing(Sizes.SPACE_3)
-        hint = QLabel('If this device disconnects, capture switches to the Windows default.')
+        hint = QLabel(_playback_device_labels()[2])
         hint.setWordWrap(True)
         outer.addWidget(hint)
         outer.addSpacing(12)
@@ -12266,10 +12356,14 @@ class _SettingsPage(QWidget):
             try:
                 from core.windows_microphone_devices import parse_microphone_inventory
                 if engine:
+                    # The Linux engine lists PulseAudio sinks in the same schema;
+                    # it needs the host library path, not the bundle's.
                     completed = subprocess.run(
                         [str(engine), '--list-playback-devices'], capture_output=True,
                         text=True, encoding='utf-8', timeout=5,
-                        creationflags=subprocess.CREATE_NO_WINDOW)
+                        **({'creationflags': subprocess.CREATE_NO_WINDOW}
+                           if sys.platform == 'win32'
+                           else {'env': linux_runtime.child_process_environment()}))
                     if completed.returncode == 0:
                         result = [endpoint for endpoint in parse_microphone_inventory(completed.stdout)
                                   if endpoint.is_active]
@@ -12284,13 +12378,15 @@ class _SettingsPage(QWidget):
         self.playback_combo.blockSignals(True)
         try:
             self.playback_combo.clear()
-            self.playback_combo.addItem('Windows default', '')
+            default_label, fallback_name, _hint = _playback_device_labels()
+            self.playback_combo.addItem(default_label, '')
             for endpoint in endpoints:
                 self.playback_combo.addItem(endpoint.display_name, endpoint.endpoint_id)
             index = self.playback_combo.findData(saved)
             if saved and index < 0:
                 name = self.sm.get('playback_device_name', 'Selected device')
-                self.playback_combo.addItem(f'{name} (unavailable; using Windows default)', saved)
+                self.playback_combo.addItem(
+                    f'{name} (unavailable; using {fallback_name})', saved)
                 index = self.playback_combo.count() - 1
             self.playback_combo.setCurrentIndex(max(0, index))
         finally:
