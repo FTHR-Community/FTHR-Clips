@@ -19,21 +19,24 @@ def _outside_real_home(path) -> bool:
     return resolved != real and real not in resolved.parents
 
 
-def test_each_test_gets_a_private_home(tmp_path):
-    assert Path.home() == tmp_path / '.fthr-test-home'
-    assert os.environ['HOME'] == str(tmp_path / '.fthr-test-home')
+def test_each_test_gets_a_private_home(tmp_path_factory):
+    base = tmp_path_factory.getbasetemp()
+    assert Path.home().is_relative_to(base)
+    assert os.environ['HOME'] == str(Path.home())
+    assert _outside_real_home(Path.home())
     for var in ('XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
                 'XDG_STATE_HOME'):
-        assert Path(os.environ[var]).is_relative_to(tmp_path)
+        assert Path(os.environ[var]).is_relative_to(Path.home())
     assert 'HYPRLAND_INSTANCE_SIGNATURE' not in os.environ
 
 
-def test_hotkey_state_and_binds_stay_in_tmp(tmp_path):
+def test_hotkey_state_and_binds_stay_in_tmp(tmp_path, tmp_path_factory):
     from core import hotkey_manager
 
     manager = hotkey_manager.HotkeyManager()
-    assert manager.config_file.is_relative_to(tmp_path)
-    assert manager._portal_cleared_file().is_relative_to(tmp_path)
+    base = tmp_path_factory.getbasetemp()
+    assert manager.config_file.is_relative_to(base)
+    assert manager._portal_cleared_file().is_relative_to(base)
     for name in ('_FTHR_HYPR_CONF', '_HYPR_CONF', '_HYPR_LUA_CONF',
                  '_HYPR_CUSTOM_LUA'):
         assert getattr(hotkey_manager, name).is_relative_to(tmp_path)

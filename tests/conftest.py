@@ -59,7 +59,7 @@ def _isolate_windows_videos_storage(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_linux_desktop_hotkeys(monkeypatch, tmp_path):
+def _isolate_linux_desktop_hotkeys(monkeypatch, tmp_path, tmp_path_factory):
     """Keep Linux hotkey tests away from the developer's real desktop.
 
     HotkeyManager writes Hyprland binds to paths fixed at import time,
@@ -69,16 +69,17 @@ def _isolate_linux_desktop_hotkeys(monkeypatch, tmp_path):
     """
     if sys.platform == 'win32':
         return
-    # Not tmp_path / 'home': several tests create that directory themselves.
-    home = tmp_path / '.fthr-test-home'
-    home.mkdir(exist_ok=True)
+    # Outside tmp_path: several tests create tmp_path / 'home' themselves or
+    # assert on exactly what tmp_path contains.
+    home = tmp_path_factory.mktemp('home')
     monkeypatch.setenv('HOME', str(home))
     for var, sub in (('XDG_CONFIG_HOME', '.config'),
                      ('XDG_DATA_HOME', '.local/share'),
                      ('XDG_CACHE_HOME', '.cache'),
                      ('XDG_STATE_HOME', '.local/state')):
         monkeypatch.setenv(var, str(home / sub))
-    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: home))
+    # Path.home() and expanduser('~') follow HOME on POSIX, so tests that
+    # set HOME or patch Path.home() themselves still win.
     monkeypatch.delenv('HYPRLAND_INSTANCE_SIGNATURE', raising=False)
     # No real D-Bus session: the GlobalShortcuts portal answers "absent"
     # unless a test stubs it in, and cached answers never leak between
