@@ -35,6 +35,42 @@ def _playback_device_labels() -> tuple[str, str, str]:
             'captured instead.')
 
 
+FOCUS_PAUSED_STATUS = 'PAUSED — GAME UNFOCUSED'
+
+
+def _is_focus_pause(platform: str, state, engine_flags) -> bool:
+    """True when the Linux engine reports the focus pause the UI requested.
+
+    The engine answers STOP_RECORDING with ACTIVE|PAUSED, which capture health
+    maps to DEGRADED; that is the requested state, not a capture fault.
+    Windows has no focus pause, so its status mapping is unchanged.
+    """
+    from core.capture_health import CaptureHealthFlag, CaptureHealthState
+    try:
+        flags = int(engine_flags or 0)
+    except (TypeError, ValueError):
+        return False
+    return (not platform.startswith('win')
+            and state is CaptureHealthState.DEGRADED
+            and bool(flags & int(CaptureHealthFlag.PAUSED)))
+
+
+def _engine_stopped_detail(platform: str, exit_code, previous_state) -> str:
+    """Error-bar text for an engine process that is gone.
+
+    The Linux engine exits with code 0 a moment after it publishes a terminal
+    capture failure (BACKEND_FAILED plus a reason), so that failure, already
+    shown, is the cause rather than an unexplained exit.
+    """
+    from core.capture_health import CaptureHealthState
+    if (not platform.startswith('win') and exit_code == 0
+            and previous_state is CaptureHealthState.FAILED):
+        return ('The capture engine stopped after the capture failure above. '
+                'Clips cannot be saved until it is restarted.')
+    return (f'The capture engine exited unexpectedly (code {exit_code}). '
+            'Clips cannot be saved until it is restarted.')
+
+
 _BACKGROUND_NO_WINDOW = {
     'creationflags': (
         subprocess.CREATE_NO_WINDOW
@@ -5084,7 +5120,7 @@ class MainWindow(QMainWindow):
     def _on_focus_lost(self):
         if focus_pause_supported(sys.platform) and self.bridge.is_connected():
             self.bridge.pause_recording()
-            self._set_status('PAUSED — GAME UNFOCUSED', status_warning_qss())
+            self._set_status(FOCUS_PAUSED_STATUS, status_warning_qss())
 
     def _on_focus_regained(self):
         if focus_pause_supported(sys.platform) and self.bridge.is_connected():
@@ -5499,6 +5535,7 @@ class MainWindow(QMainWindow):
         # backend generation reported later through shared memory.
         self._engine_gen = getattr(self, '_engine_gen', 0) + 1
         _my_gen = self._engine_gen
+        self._engine_exit_code = None
         self._diagnostic_engine_start_count += 1
         capture_restart_count = max(
             0, self._diagnostic_engine_start_count - 1)
@@ -8540,9 +8577,11 @@ class MainWindow(QMainWindow):
                     or self.bridge is not bridge_owner):
                 return
             code = proc.returncode
+            previous_health = getattr(self, '_capture_health_snapshot', None)
             self._engine_gen = getattr(self, '_engine_gen', 0) + 1
             self.engine_process = None
             self._engine_process_generation = None
+            self._engine_exit_code = code
             self._capture_config.deactivate(
                 f'capture engine exited unexpectedly (code {code})')
             self._pending_launch_config = None
@@ -8575,8 +8614,9 @@ class MainWindow(QMainWindow):
                 unexpected=True)
             self.push_error(
                 'ENGINE STOPPED',
-                f'The capture engine exited unexpectedly (code {code}). '
-                'Clips cannot be saved until it is restarted.',
+                _engine_stopped_detail(
+                    sys.platform, code,
+                    previous_health.state if previous_health is not None else None),
                 level='error',
                 actions=[('RESTART ENGINE', self._restart_capture_engine)],
                 key=recovery_key,
@@ -8632,6 +8672,15 @@ class MainWindow(QMainWindow):
                     self._schedule_owned_hardware_check(
                         generation, process_owner, reconnect_bridge)
                     return
+            if (sys.platform != 'win32'
+                    and not self._capture_settings_applying
+                    and self.engine_process is None
+                    and getattr(self, '_engine_exit_code', None) is not None):
+                # No engine is running to connect to (it exited; the Linux
+                # engine also exits after a terminal capture failure). Keep
+                # the stopped state visible until the user restarts capture.
+                self._set_status('ENGINE STOPPED', status_warning_qss())
+                return
             self._set_status(
                 self._capture_pending_text() if self._capture_settings_applying else 'CONNECTING',
                 status_idle_qss(),
@@ -8843,6 +8892,13 @@ class MainWindow(QMainWindow):
                 self._capture_pending_text()
                 if self._capture_settings_applying else state_text[snapshot.state]
             )
+            focus_paused = (
+                not self._capture_settings_applying
+                and _is_focus_pause(
+                    sys.platform, snapshot.state,
+                    status.get('capture_health_flags', 0)))
+            if focus_paused:
+                new_text = FOCUS_PAUSED_STATUS
             style = (status_idle_qss()
                      if self._capture_settings_applying
                      else status_active_qss()
@@ -8855,6 +8911,8 @@ class MainWindow(QMainWindow):
                          CaptureHealthState.RECOVERING,
                      }
                      else status_warning_qss())
+            if focus_paused:
+                style = status_warning_qss()
             self._set_status(new_text, style)
             if snapshot.request_recovery:
                 self._capture_health_log.warning(
