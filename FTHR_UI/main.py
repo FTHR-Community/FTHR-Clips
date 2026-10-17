@@ -11214,9 +11214,18 @@ class _SettingsPage(QWidget):
 
         self.mic_mono_check = QCheckBox('Downmix stereo microphone to mono')
         set_theme_style(self.mic_mono_check, checkbox_qss)
-        self.mic_mono_check.setChecked(bool(self.sm.get('mic_downmix_mono', False)))
-        self.mic_mono_check.setToolTip('Center your microphone in both speakers when recording.')
-        self.mic_mono_check.toggled.connect(self._on_mic_mono_changed)
+        if sys.platform == 'win32':
+            self.mic_mono_check.setChecked(bool(self.sm.get('mic_downmix_mono', False)))
+            self.mic_mono_check.setToolTip(
+                'Center your microphone in both speakers when recording.')
+            self.mic_mono_check.toggled.connect(self._on_mic_mono_changed)
+        else:
+            # The Linux microphone path (core/mic_recorder.py) always records
+            # one channel, so a stereo microphone is already downmixed.
+            self.mic_mono_check.setChecked(True)
+            self.mic_mono_check.setEnabled(False)
+            self.mic_mono_check.setToolTip(
+                'On Linux the microphone is always recorded in mono.')
         left_layout.addWidget(self.mic_mono_check)
         left_layout.addSpacing(12)
 
