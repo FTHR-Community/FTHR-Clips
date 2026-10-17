@@ -27,6 +27,14 @@ _PROVIDER_LIMIT_BYTES = {
 _CUSTOM_PROVIDER = 'custom'
 
 
+class UploadResponseError(RuntimeError):
+    """An upload response that is safe to classify before retrying."""
+
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = int(status)
+
+
 class UploadRuntime:
     def __init__(
             self,
@@ -75,6 +83,8 @@ class UploadRuntime:
                 return True, str(result.get('url') or 'Upload complete.'), entry
             except Exception as exc:
                 final_error = str(exc)
+                if isinstance(exc, UploadResponseError) and not _retryable_status(exc.status):
+                    break
                 if delay is None:
                     break
                 sys.stderr.write(
@@ -120,8 +130,10 @@ class UploadRuntime:
         status, raw = _multipart_post(
             CATBOX_URL, fields, 'fileToUpload', path, headers={})
         text = raw.decode('utf-8', errors='replace').strip()
-        if not 200 <= status < 300 or not text.startswith('https://'):
-            raise RuntimeError(text or f'Catbox returned HTTP {status}.')
+        if not 200 <= status < 300:
+            raise UploadResponseError(text or f'Catbox returned HTTP {status}.', status)
+        if not text.startswith('https://'):
+            raise RuntimeError(text or 'Catbox returned an invalid upload URL.')
         return {'url': text, 'raw_url': text, 'favorite': False}
 
 
@@ -139,7 +151,7 @@ class UploadRuntime:
         )
         text = raw.decode('utf-8', errors='replace').strip()
         if not 200 <= status < 300:
-            raise RuntimeError(text or f'Your server returned HTTP {status}.')
+            raise UploadResponseError(text or f'Your server returned HTTP {status}.', status)
 
         # Custom endpoints commonly return either a bare URL or a small JSON
         # object. Preserve the useful response in history without requiring
@@ -190,6 +202,11 @@ class UploadRuntime:
         temporary = HISTORY_FILE.with_suffix('.tmp')
         temporary.write_text(json.dumps(history, indent=2), encoding='utf-8')
         os.replace(str(temporary), str(HISTORY_FILE))
+
+
+def _retryable_status(status: int) -> bool:
+    """Retry transient server failures, never permanent client failures."""
+    return status == 429 or 500 <= status < 600
 
 
 def _multipart_post(
