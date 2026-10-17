@@ -6,6 +6,7 @@
 
 #include "replay_encoder.h"
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -115,6 +116,7 @@ public:
     EncodedVideoConfig GetVideoConfig() const override;
     ActiveEncoderInfo GetActiveEncoderInfo() const override;
     std::string GetLastError() const override;
+    ReplayEncoderDiagnostics GetDiagnostics() const noexcept override;
     bool GetEncodeEpoch(
         int64_t& start_qpc, int64_t& qpc_frequency) const override;
     bool IsInitialized() const override;
@@ -131,6 +133,27 @@ private:
     bool SubmitWithBackpressure(int64_t pts, bool force_keyframe);
     bool Flush();
     void SetError(std::string error);
+    void ResetDiagnostics() noexcept;
+    void ClearDiagnosticActivity() noexcept;
+
+    // AMF has no NVENC-style registered resources or completion events. These
+    // counters are backend-neutral progress evidence and are exported through
+    // the existing ReplayEncoderDiagnostics fields without pretending that
+    // AMF has NVENC slots. GetLastError() remains the authoritative bounded
+    // detail for the last submit/receive/device-removal failure.
+    std::atomic<uint64_t> diagnostic_prepare_attempts_{0};
+    std::atomic<uint64_t> diagnostic_prepare_successes_{0};
+    std::atomic<uint64_t> diagnostic_submit_attempts_{0};
+    std::atomic<uint64_t> diagnostic_submit_returns_{0};
+    std::atomic<uint64_t> diagnostic_submit_successes_{0};
+    std::atomic<uint64_t> diagnostic_backpressure_{0};
+    std::atomic<uint64_t> diagnostic_receive_attempts_{0};
+    std::atomic<uint64_t> diagnostic_packets_{0};
+    std::atomic<uint64_t> diagnostic_errors_{0};
+    std::atomic<uint64_t> diagnostic_device_removed_{0};
+    std::atomic<uint32_t> diagnostic_submit_stage_{0};
+    std::atomic<uint32_t> diagnostic_drain_stage_{0};
+    std::atomic<uint32_t> diagnostic_pending_submissions_{0};
 
     VideoCodec codec_;
     std::unique_ptr<detail::IAmfCodecSession> session_;

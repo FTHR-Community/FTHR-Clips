@@ -4,6 +4,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import QTimer
 
 
 class _PauseTarget:
@@ -114,6 +115,100 @@ def test_application_inactive_state_drives_the_saved_pause_preference(qtbot):
     assert applied == [True, False]
 
 
+@pytest.mark.parametrize('hidden,minimized', [(False, True), (True, False)])
+def test_hidden_ui_pauses_even_when_focus_pause_is_disabled(qtbot, hidden, minimized):
+    from PySide6.QtCore import Qt
+    from main import MainWindow
+
+    applied = []
+    host = SimpleNamespace(
+        _background_start=False,
+        settings_manager=SimpleNamespace(get=lambda *_: False),
+        isVisible=lambda: not hidden,
+        isMinimized=lambda: minimized,
+        _apply_background_ui_paused=applied.append,
+    )
+    MainWindow._refresh_background_ui_pause_state(host, Qt.ApplicationState.ApplicationActive)
+    host.isVisible = lambda: True
+    host.isMinimized = lambda: False
+    MainWindow._refresh_background_ui_pause_state(host, Qt.ApplicationState.ApplicationActive)
+    assert applied == [True, False]
+
+
+def test_taskbar_minimize_and_restore_deliver_pause_state(qtbot):
+    from PySide6.QtWidgets import QMainWindow
+    from main import MainWindow
+
+    # Use a real Qt window state event without starting capture services.
+    # MainWindow.changeEvent's super() needs the real class in its MRO.
+    class MainWindowHarness(MainWindow):
+        def __init__(self):
+            QMainWindow.__init__(self)
+            self._background_start = False
+            self.settings_manager = SimpleNamespace(get=lambda *_: False)
+            self.states = []
+
+        def _apply_background_ui_paused(self, paused):
+            self.states.append(paused)
+
+        showEvent = QMainWindow.showEvent
+        hideEvent = QMainWindow.hideEvent
+        paintEvent = QMainWindow.paintEvent
+        closeEvent = QMainWindow.closeEvent
+        resizeEvent = QMainWindow.resizeEvent
+        nativeEvent = QMainWindow.nativeEvent
+
+    window = MainWindowHarness()
+    qtbot.addWidget(window)
+    window.show()
+    window.showMinimized()
+    qtbot.waitUntil(lambda: bool(window.states) and window.states[-1] is True)
+    window.showNormal()
+    qtbot.waitUntil(lambda: window.states[-1] is False)
+
+
+def test_settings_pause_closes_loopback_and_resumes_only_on_audio_page(
+        qtbot, tmp_path, monkeypatch):
+    from main import _SettingsPage
+    from core.settings_manager import SettingsManager
+
+    monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
+    monkeypatch.setattr(_SettingsPage, '_start_encoder_probe', lambda _: None)
+    page = _SettingsPage(SettingsManager())
+    qtbot.addWidget(page)
+    page.stack.setCurrentIndex(2)
+    page._pending_category_index = 2
+    page.show()
+    page.mic_loopback_check.blockSignals(True)
+    page.mic_loopback_check.setChecked(True)
+    page.mic_loopback_check.blockSignals(False)
+    closed = []
+    page._loopback_stream = SimpleNamespace(
+        stop=lambda: closed.append('stop'), close=lambda: closed.append('close'))
+    started = []
+    monkeypatch.setattr(page.mic_level_meter, 'start', lambda _: None)
+    monkeypatch.setattr(page, '_start_loopback', started.append)
+
+    page.set_background_ui_paused(True)
+    assert closed == ['stop', 'close']
+    assert page._loopback_stream is None
+    assert page.mic_loopback_check.isChecked()
+    assert not page._audio_preview_timer.isActive()
+    assert not page.mic_level_meter._peak_decay.isActive()
+    page._start_audio_preview_if_current()
+    assert started == []
+
+    page.set_background_ui_paused(False)
+    qtbot.waitUntil(lambda: len(started) == 1)
+    page.set_background_ui_paused(True)
+    page.stack.setCurrentIndex(0)
+    page._pending_category_index = 0
+    page.set_background_ui_paused(False)
+    assert not page._audio_preview_timer.isActive()
+    page._start_audio_preview_if_current()
+    assert len(started) == 1
+
+
 def test_game_clip_saved_in_background_appears_on_return_without_another_save(
         qtbot, tmp_path, monkeypatch):
     from ui.clip_grid import ClipGrid
@@ -162,6 +257,7 @@ def test_background_pause_leaves_core_timer_card_and_sound_state_alone(qtbot):
     ui_updates: list[bool] = []
     hotkey_state = {'registered': True}
     host = SimpleNamespace(
+        _first_frame_painted=True,
         _background_ui_paused=False,
         _ui_ready=True,
         _pending_status_display=None,
@@ -190,6 +286,54 @@ def test_background_pause_leaves_core_timer_card_and_sound_state_alone(qtbot):
     core_timer.stop()
 
 
+def test_background_pause_waits_for_the_first_painted_frame(qtbot, monkeypatch):
+    """Wayland must receive one buffer before background updates are paused."""
+    import main as main_module
+    from main import MainWindow
+
+    calls: list[str] = []
+    host = SimpleNamespace(
+        _first_frame_painted=False,
+        _background_ui_pause_deferred=False,
+        _background_ui_paused=False,
+        _ui_ready=True,
+        _pending_status_display=None,
+        setUpdatesEnabled=lambda enabled: calls.append(f'updates={enabled}'),
+        clip_grid=SimpleNamespace(
+            set_background_paused=lambda paused: calls.append(f'grid={paused}')),
+        _settings_page_widget=SimpleNamespace(
+            set_background_ui_paused=lambda paused: calls.append(f'settings={paused}')),
+        update=lambda: calls.append('update'),
+        _refresh_background_ui_pause_state=lambda: calls.append('refresh'),
+    )
+    scheduled: list = []
+    monkeypatch.setattr(
+        main_module.QTimer, 'singleShot',
+        staticmethod(lambda _ms, callback: scheduled.append(callback)),
+    )
+
+    MainWindow._apply_background_ui_paused(host, True)
+    assert calls == []
+    assert host._background_ui_pause_deferred is True
+    assert host._background_ui_paused is False
+
+    MainWindow._apply_background_ui_paused(host, False, force=True)
+    assert 'updates=True' in calls
+    calls.clear()
+
+    MainWindow._note_first_frame_painted(host)
+    assert host._first_frame_painted is True
+    assert host._background_ui_pause_deferred is False
+    assert len(scheduled) == 1
+    scheduled[0]()
+    assert calls == ['refresh']
+
+    MainWindow._apply_background_ui_paused(host, True)
+    assert calls[-3:] == ['updates=False', 'grid=True', 'settings=True']
+    MainWindow._note_first_frame_painted(host)
+    assert len(scheduled) == 1
+
+
 def test_thumbnail_cancel_resume_re_enriches_card_and_allows_open(
         qtbot, tmp_path, monkeypatch):
     """A cancelled thumbnail must not strand an otherwise valid library card."""
@@ -211,6 +355,7 @@ def test_thumbnail_cancel_resume_re_enriches_card_and_allows_open(
             super().__init__()
             self.file_path = file_path
             self.cancel_event = cancel_event
+            self.cancel_event = cancel_event
             self.signals = clip_grid_module._ThumbnailSignals()
             self.setAutoDelete(False)
             self.workers.append(self)
@@ -228,6 +373,7 @@ def test_thumbnail_cancel_resume_re_enriches_card_and_allows_open(
     card.opened.connect(lambda path, *_args: opened.append(path))
 
     grid = ClipGrid.__new__(ClipGrid)
+    grid._sm = None
     grid._shutdown_started = False
     grid._background_paused = False
     grid._background_refresh_pending = False
@@ -241,6 +387,13 @@ def test_thumbnail_cancel_resume_re_enriches_card_and_allows_open(
     grid._thumbnail_job_fingerprints = {}
     grid._thumbnail_job_owners = {}
     grid._thumbnail_workers = {}
+    from collections import OrderedDict
+    grid._recent_thumbnails = OrderedDict()
+    grid._resize_timer = QTimer()
+    grid._idle_memory_timer = QTimer()
+    grid._idle_memory_timer.setSingleShot(True)
+    grid._idle_memory_timer.setInterval(15_000)
+    grid._virtual_update_timer = QTimer()
     grid._thumbnail_jobs_submitted = 0
     grid._thumbnail_jobs_completed = 0
     grid._thumbnail_diagnostics_completed = 0
@@ -294,7 +447,7 @@ def test_thumbnail_cancel_resume_re_enriches_card_and_allows_open(
     # Duration survived, but a failed image remains eligible for enrichment.
     assert card._thumbnail_ready is False
     assert card.duration_label.text() == '0:12'
-    qtbot.mouseClick(card, Qt.MouseButton.LeftButton, pos=card.rect().center())
+    qtbot.mouseClick(card.thumb_label, Qt.MouseButton.LeftButton, pos=card.thumb_label.rect().center())
     assert opened == [media_path]
 
 
@@ -303,10 +456,18 @@ def test_thumbnail_terminal_cleanup_releases_only_owned_job(terminal_state):
     from ui.clip_grid import ClipGrid
 
     grid = ClipGrid.__new__(ClipGrid)
+    grid._sm = None
     grid._thumbnail_jobs_inflight = {'clip.mp4'}
     grid._thumbnail_job_fingerprints = {'clip.mp4': 'fp'}
     grid._thumbnail_job_owners = {'clip.mp4': (4, 'fp')}
     grid._thumbnail_workers = {}
+    from collections import OrderedDict
+    grid._recent_thumbnails = OrderedDict()
+    grid._resize_timer = QTimer()
+    grid._idle_memory_timer = QTimer()
+    grid._idle_memory_timer.setSingleShot(True)
+    grid._idle_memory_timer.setInterval(15_000)
+    grid._virtual_update_timer = QTimer()
 
     assert grid._finish_thumbnail_job('clip.mp4', 4, 'fp') is True
     assert grid._thumbnail_jobs_inflight == set()
@@ -366,10 +527,18 @@ def test_stale_thumbnail_terminal_cannot_release_replacement_job():
     from ui.clip_grid import ClipGrid
 
     grid = ClipGrid.__new__(ClipGrid)
+    grid._sm = None
     grid._thumbnail_jobs_inflight = {'clip.mp4'}
     grid._thumbnail_job_fingerprints = {'clip.mp4': 'new-fp'}
     grid._thumbnail_job_owners = {'clip.mp4': (5, 'new-fp')}
     grid._thumbnail_workers = {}
+    from collections import OrderedDict
+    grid._recent_thumbnails = OrderedDict()
+    grid._resize_timer = QTimer()
+    grid._idle_memory_timer = QTimer()
+    grid._idle_memory_timer.setSingleShot(True)
+    grid._idle_memory_timer.setInterval(15_000)
+    grid._virtual_update_timer = QTimer()
 
     assert grid._finish_thumbnail_job('clip.mp4', 4, 'old-fp') is False
     assert grid._thumbnail_jobs_inflight == {'clip.mp4'}
@@ -385,11 +554,19 @@ def test_current_generation_failure_cleanup_does_not_resubmit():
             return 0
 
     grid = ClipGrid.__new__(ClipGrid)
+    grid._sm = None
     grid._thumbnail_generation = 7
     grid._thumbnail_jobs_inflight = {'clip.mp4'}
     grid._thumbnail_job_fingerprints = {'clip.mp4': 'fp'}
     grid._thumbnail_job_owners = {'clip.mp4': (7, 'fp')}
     grid._thumbnail_workers = {}
+    from collections import OrderedDict
+    grid._recent_thumbnails = OrderedDict()
+    grid._resize_timer = QTimer()
+    grid._idle_memory_timer = QTimer()
+    grid._idle_memory_timer.setSingleShot(True)
+    grid._idle_memory_timer.setInterval(15_000)
+    grid._virtual_update_timer = QTimer()
     grid._thumbnail_jobs_completed = 0
     grid._thumbnail_diagnostics_completed = 0
     grid._thumbnail_jobs_submitted = 0
@@ -429,6 +606,7 @@ def test_repeated_pause_resume_does_not_strand_thumbnail_ownership(
 
         def __init__(self, file_path, cancel_event):
             super().__init__()
+            self.cancel_event = cancel_event
             self.signals = clip_grid_module._ThumbnailSignals()
             self.setAutoDelete(False)
             self.workers.append(self)
@@ -440,6 +618,7 @@ def test_repeated_pause_resume_does_not_strand_thumbnail_ownership(
     card = ClipThumbnail(media_path, is_video=True, ready=True)
     qtbot.addWidget(card)
     grid = ClipGrid.__new__(ClipGrid)
+    grid._sm = None
     grid._shutdown_started = False
     grid._background_paused = False
     grid._background_refresh_pending = False
@@ -460,6 +639,13 @@ def test_repeated_pause_resume_does_not_strand_thumbnail_ownership(
     grid._thumbnail_job_fingerprints = {}
     grid._thumbnail_job_owners = {}
     grid._thumbnail_workers = {}
+    from collections import OrderedDict
+    grid._recent_thumbnails = OrderedDict()
+    grid._resize_timer = QTimer()
+    grid._idle_memory_timer = QTimer()
+    grid._idle_memory_timer.setSingleShot(True)
+    grid._idle_memory_timer.setInterval(15_000)
+    grid._virtual_update_timer = QTimer()
     grid._thumbnail_jobs_submitted = 0
     grid._thumbnail_jobs_completed = 0
     grid._thumbnail_diagnostics_completed = 0

@@ -17,6 +17,8 @@ def test_oversized_catbox_upload_requires_compression_confirmation(
         'upload_provider': 'catbox',
     }.get(key, default)
     manager = UploadManager(sm)
+    manager.set("upload_provider", "catbox")
+    manager.set("upload_auto_compress", False)
     manager.is_enabled = lambda: True
     clip = tmp_path / 'large.mp4'
     with clip.open('wb') as stream:
@@ -37,12 +39,12 @@ def test_oversized_upload_auto_compresses_without_confirmation(qapp, tmp_path):
 
     sm = MagicMock()
     manager = UploadManager(sm)
-    manager.set('upload_provider', 'lustful')
+    manager.set('upload_provider', 'catbox')
     manager.set('upload_auto_compress', True)
     manager.is_enabled = lambda: True
     clip = tmp_path / 'large.mp4'
     with clip.open('wb') as stream:
-        stream.truncate(101 * 1024 * 1024)
+        stream.truncate(201 * 1024 * 1024)
     requested = []
     manager.compression_required.connect(
         lambda path, provider, limit: requested.append(

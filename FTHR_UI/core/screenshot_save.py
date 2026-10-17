@@ -13,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from PySide6.QtCore import QThread, Signal
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QThread, Signal, QRect
+from PySide6.QtGui import QImage, QImageReader
 
 
 class _PngWritable(Protocol):
@@ -136,10 +136,8 @@ def publish_staged_png(staged_path: str | Path, final_path: str | Path) -> None:
     staged = Path(staged_path)
     final = Path(final_path)
     try:
-        if os.name == 'nt':
-            os.rename(staged, final)
-            return
-        os.link(staged, final)
+        os.rename(staged, final)
+        return
     except FileExistsError as error:
         raise ScreenshotSaveError(
             'OUTPUT_COLLISION',
@@ -176,6 +174,41 @@ class ScreenshotPngSaveWorker(QThread):
         try:
             write_png_to_staged(self._image, self._staged_path)
         except ScreenshotSaveError as error:
+            self.failed.emit(error.code, error.detail)
+        else:
+            self.succeeded.emit(str(self._staged_path))
+        finally:
+            self._image = QImage()
+
+
+class ScreenshotCropSaveWorker(QThread):
+    """Read original pixels only during saving, with no full image on the GUI."""
+
+    succeeded = Signal(str)
+    failed = Signal(str, str)
+
+    def __init__(self, source_path, crop_rect, staged_path, parent=None):
+        super().__init__(parent)
+        self._source_path = str(source_path)
+        self._crop_rect = QRect(crop_rect)
+        self._staged_path = Path(staged_path)
+
+    def run(self):
+        try:
+            reader = QImageReader(self._source_path)
+            reader.setAutoTransform(True)
+            image = reader.read()
+            if image.isNull():
+                raise ScreenshotSaveError('IMAGE_ENCODE_FAILED', reader.errorString())
+            rect = self._crop_rect.intersected(image.rect())
+            if rect.isEmpty():
+                raise ScreenshotSaveError('IMAGE_ENCODE_FAILED', 'The selected crop is empty.')
+            cropped = image.copy(rect)
+            image = QImage()
+            write_png_to_staged(cropped, self._staged_path)
+            cropped = QImage()
+        except ScreenshotSaveError as error:
+            self._staged_path.unlink(missing_ok=True)
             self.failed.emit(error.code, error.detail)
         else:
             self.succeeded.emit(str(self._staged_path))

@@ -2,8 +2,8 @@
 """Verify release dependency licenses, Qt bindings, and required notices.
 
 Check FFmpeg binary configuration/license data rather than mentions of GPL
-in documentation. --tree checks source inputs; --windows-dist and --appdir
-check artifacts; --all checks available inputs. Exit 1 reports failures.
+in documentation. --tree checks source inputs; --windows-dist
+checks artifacts; --all checks available inputs. Exit 1 reports failures.
 """
 
 from __future__ import annotations
@@ -47,7 +47,6 @@ REQUIRED_TREE_FILES = (
     'licenses/Qt6-LICENSE.txt',
     'licenses/Qt6-SOURCE.txt',
     'licenses/Qt6-THIRD-PARTY-NOTICES.txt',
-    'licenses/Wayland-Protocols-NOTICES.txt',
     'licenses/cffi-LICENSE.txt',
     'licenses/pycparser-LICENSE.txt',
     'tools/ffmpeg_manifest.json',
@@ -64,8 +63,6 @@ PROJECT_LICENSE_SHA256 = (
     'fa20afae8ae04600b02a8092abf8363d4fe4f5245ea8c56dd2de90b7d8439802'
 )
 
-# Linux ships its own pinned LGPL FFmpeg (AUDIT-014) with its own manifest.
-LINUX_MANIFEST_REL = 'tools/ffmpeg_manifest_linux.json'
 
 # Recognize system FFmpeg SONAMEs and exact library basenames. Do not use
 # libav*: it also matches unrelated libavif and libavc1394 libraries.
@@ -153,16 +150,6 @@ def check_binary(path: Path, rep: Report) -> None:
 def check_ffmpeg_executable(exe: Path, rep: Report) -> None:
     """Ask the binary itself. Most authoritative check available."""
     env = os.environ.copy()
-    if os.name != 'nt':
-        # The pinned Linux CLI has no build-tree RPATH. Probe it against the
-        # sibling libraries that ship with it; otherwise the loader exits 127
-        # and an empty stdout used to be misreported as a clean configuration.
-        candidates = (exe.parent / 'lib', exe.parent.parent / 'lib')
-        lib_dir = next((p for p in candidates if p.is_dir()), None)
-        if lib_dir is not None:
-            previous = env.get('LD_LIBRARY_PATH', '')
-            env['LD_LIBRARY_PATH'] = (
-                str(lib_dir) if not previous else f'{lib_dir}{os.pathsep}{previous}')
     try:
         res = subprocess.run([str(exe), '-hide_banner', '-buildconf'],
                              capture_output=True, text=True, timeout=30, env=env)
@@ -359,7 +346,7 @@ def check_qt_source_selection(root: Path, rep: Report) -> None:
             rep.ok(f'no {forbidden} package is present in the release lock')
 
     packaging_files = (
-        'requirements.in', 'FTHR.spec', 'FTHR_linux.spec', 'build_linux.sh',
+        'requirements.in', 'FTHR.spec',
     )
     stale: list[str] = []
     for rel in packaging_files:
@@ -459,15 +446,6 @@ def check_qt_artifact(root: Path, rep: Report, platform: str,
             rep.ok('Windows Qt platform plugin is bundled')
         else:
             rep.fail('qwindows.dll missing from Windows artifact')
-    else:
-        if 'libqxcb.so' in names:
-            rep.ok('Linux XCB Qt platform plugin is bundled')
-        else:
-            rep.fail('libqxcb.so missing from Linux artifact')
-        if any(name.startswith('libqwayland') and name.endswith('.so') for name in names):
-            rep.ok('Linux Wayland Qt platform plugin is bundled')
-        else:
-            rep.fail('Wayland Qt platform plugin missing from Linux artifact')
 
 
 def check_python_sources(root: Path, rep: Report) -> None:
@@ -636,30 +614,6 @@ def check_asset_artifact(root: Path, rep: Report, platform: str,
     else:
         rep.ok(f'{platform} artifact contains exactly {len(expected)} '
                'approved asset files')
-def check_linux_manifest(root, rep) -> None:
-    """The Linux FFmpeg provenance manifest (AUDIT-014)."""
-    print('\n-- Linux FFmpeg provenance manifest --')
-    data = _read_manifest(root, LINUX_MANIFEST_REL, rep)
-    if data is None:
-        return
-    for key in ('version', 'license', 'source', 'shipped_files_sha256'):
-        if not data.get(key):
-            rep.fail(f'{LINUX_MANIFEST_REL}: "{key}" missing')
-    src = data.get('source') or {}
-    if not src.get('sha256'):
-        rep.fail(f'{LINUX_MANIFEST_REL}: source archive checksum not recorded')
-    else:
-        rep.ok(f'Linux FFmpeg {data.get("version")} documented, sha256 recorded')
-    lic = str(data.get('license', ''))
-    if 'LGPL' not in lic.upper():
-        rep.fail(f'{LINUX_MANIFEST_REL}: license is "{lic}", expected LGPL')
-    else:
-        rep.ok(f'Linux manifest licence: {lic}')
-    n = len(data.get('shipped_files_sha256') or {})
-    if n < 7:
-        rep.fail(f'{LINUX_MANIFEST_REL}: only {n} library hashes recorded, expected 7')
-    else:
-        rep.ok(f'{n} shipped library hashes recorded')
 
 
 def _readelf_d(path):
@@ -670,130 +624,19 @@ def _readelf_d(path):
         return ''
 
 
-def _elf_needed(path):
-    return re.findall(r'Shared library: \[([^\]]+)\]', _readelf_d(path))
 
 
-def _elf_rpath(path):
-    entries = re.findall(r'Library r(?:un)?path: \[([^\]]*)\]', _readelf_d(path))
-    return [e for entry in entries for e in entry.split(':') if e]
 
 
-def check_linux_ffmpeg_libs(root, rep, label, manifest_root=None) -> None:
-    """Require every bundled Linux FFmpeg library to have approved license metadata.
-
-    Include system libraries collected through Qt/OpenCV, even if unused by
-    the capture engine.
-    """
-    print(f'\n-- Linux FFmpeg libraries in {label} --')
-    data = _read_manifest(manifest_root or root, LINUX_MANIFEST_REL, rep)
-    if data is None:
-        rep.fail(f'{label}: cannot validate libraries without the Linux manifest')
-        return
-    hashes = data.get('shipped_files_sha256') or {}
-    alias_sources = {}
-    for versioned, soname in (data.get('soname_map') or {}).items():
-        alias_sources[soname] = versioned
-        alias_sources[soname.split('.so.', 1)[0] + '.so'] = versioned
-    # Qt Multimedia and OpenCV wheels may bundle separate FFmpeg libraries,
-    # including auditwheel-renamed files. Check their licenses; their bytes follow
-    # the pinned wheel versions rather than the native-engine FFmpeg manifest.
-    providers = data.get('additional_providers') or []
-    provider_names = set()
-    provider_prefixes = []
-    for prov in providers:
-        for n in prov.get('sonames') or []:
-            provider_names.add(n)
-        for pref in prov.get('name_prefixes') or []:
-            provider_prefixes.append(pref)
-
-    libs = [q for q in sorted(root.rglob('*'))
-            if q.is_file() and not q.is_symlink()
-            and FFMPEG_SO_RE.match(q.name)]
-    if not libs:
-        rep.warn(f'{label}: no FFmpeg shared libraries found')
-        return
-
-    for lib in libs:
-        name = lib.name
-        if name in hashes:
-            digest = hashlib.sha256(lib.read_bytes()).hexdigest()
-            if digest == hashes[name]:
-                rep.ok(f'{name}: documented, sha256 matches the manifest')
-            else:
-                rep.fail(f'{name}: sha256 MISMATCH - expected {hashes[name][:16]}..., '
-                         f'got {digest[:16]}... (not the library the manifest describes)')
-        elif name in alias_sources:
-            source_name = alias_sources[name]
-            expected = hashes.get(source_name)
-            digest = hashlib.sha256(lib.read_bytes()).hexdigest()
-            if expected and digest == expected:
-                rep.ok(f'{name}: verified alias of documented {source_name}')
-            else:
-                rep.fail(
-                    f'{name}: alias sha256 does not match documented {source_name}')
-        elif name in provider_names or any(name.startswith(pf)
-                                           for pf in provider_prefixes):
-            # Documented additional provider: verify the licence, not the hash.
-            blob = lib.read_bytes()
-            gpl = [f.decode() for f in FORBIDDEN_FLAGS if f in blob]
-            banners = {m.group(1).decode().strip()
-                       for m in LICENSE_BANNER.finditer(blob)}
-            gpl_banner = [b for b in banners if re.match(r'^GPL', b)]
-            if gpl:
-                rep.fail(f'{name}: wheel-provided FFmpeg carries GPL flags '
-                         f'({", ".join(gpl)}) - the wheel changed')
-            elif gpl_banner:
-                rep.fail(f'{name}: wheel-provided FFmpeg reports "{gpl_banner[0]}"')
-            else:
-                rep.ok(f'{name}: documented wheel-provided FFmpeg, LGPL')
-        elif name in SYSTEM_FFMPEG_SONAMES:
-            rep.fail(f'{name}: this is the distribution GPL FFmpeg - it must not '
-                     f'be in the artifact (AUDIT-014)')
-        else:
-            rep.fail(f'{name}: FFmpeg library not listed in {LINUX_MANIFEST_REL} - '
-                     f'undocumented provenance, most likely collected from the system')
-
-        for need in _elf_needed(lib):
-            if re.match(r'libx26[45]\.', need) or 'xvidcore' in need:
-                rep.fail(f'{name}: links {need} - GPL codec dependency')
-
-        for entry in _elf_rpath(lib):
-            if not entry.startswith('$ORIGIN'):
-                rep.fail(f'{name}: RPATH entry "{entry}" is an absolute host path')
 
 
-def check_linux_engine(engine, rep) -> None:
-    """The engine must load bundled FFmpeg, not whatever the system offers."""
-    print(f'\n-- Linux engine linkage ({engine.name}) --')
-    if not engine.is_file():
-        rep.warn(f'{engine} not found - skipping linkage check')
-        return
-    needed = [n for n in _elf_needed(engine) if re.match(r'^lib(av|sw)', n)]
-    if not needed:
-        rep.warn(f'{engine.name}: no FFmpeg in DT_NEEDED')
-    for n in needed:
-        if n in SYSTEM_FFMPEG_SONAMES:
-            rep.fail(f'{engine.name}: linked against the system GPL FFmpeg ({n}) - '
-                     f'configure with -DFTHR_FFMPEG_ROOT')
-        else:
-            rep.ok(f'{engine.name}: needs {n}')
-    rpath = _elf_rpath(engine)
-    if not rpath:
-        rep.fail(f'{engine.name}: no RPATH/RUNPATH - it would load system libraries')
-    else:
-        outside = [e for e in rpath if not e.startswith('$ORIGIN')]
-        if outside:
-            rep.fail(f'{engine.name}: RPATH leaks absolute host paths: {outside}')
-        else:
-            rep.ok(f'{engine.name}: RPATH is bundle-relative ({":".join(rpath)})')
 
 
 
 def _repo_root() -> Path:
-    """Repository root, so an --appdir check can still find the manifest.
+    """Repository root, so an artifact check can still find the manifest.
 
-    The AppDir is a build output; the manifest it must be validated against
+    The bundle is a build output; the manifest it must be validated against
     lives in the source tree next to this script.
     """
     return Path(__file__).resolve().parent.parent
@@ -811,15 +654,14 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--tree', type=Path, help='source tree root')
     ap.add_argument('--windows-dist', type=Path, help='PyInstaller output dir (dist/FTHRClips)')
-    ap.add_argument('--appdir', type=Path, help='Linux AppDir before packing')
     ap.add_argument('--all', action='store_true', help='check tree plus any artifacts present')
     args = ap.parse_args()
 
     if args.all and not args.tree:
         args.tree = Path('.')
 
-    if not any((args.tree, args.windows_dist, args.appdir)):
-        ap.error('nothing to check — pass --tree, --windows-dist, --appdir or --all')
+    if not any((args.tree, args.windows_dist)):
+        ap.error('nothing to check — pass --tree, --windows-dist or --all')
 
     rep = Report()
     print('FTHR Clips — release licence verification')
@@ -830,7 +672,6 @@ def main() -> int:
         check_files(root, REQUIRED_TREE_FILES, rep, 'tree')
         check_project_license(root, rep, 'tree')
         check_manifest(root, rep)
-        check_linux_manifest(root, rep)
         check_python_sources(root, rep)
         check_qt_source_selection(root, rep)
         check_asset_manifest(root, rep)
@@ -838,21 +679,10 @@ def main() -> int:
         if vendored.is_dir():
             scan_dir(vendored, rep, 'vendored ffmpeg')
         else:
-            rep.warn('no vendored ffmpeg directory (expected on a Linux checkout)')
-        vendored_linux = root / 'FTHRcapture_linux' / 'third_party' / 'ffmpeg'
-        if vendored_linux.is_dir():
-            scan_dir(vendored_linux, rep, 'vendored ffmpeg (linux)')
-            check_linux_ffmpeg_libs(vendored_linux, rep,
-                                    'vendored ffmpeg (linux)', manifest_root=root)
-            check_linux_engine(
-                root / 'FTHRcapture_linux' / 'build' / 'FTHRclips', rep)
-        else:
-            rep.warn('no vendored linux ffmpeg (run tools/fetch_third_party.py '
-                     '--ffmpeg-linux before a Linux release build)')
+            rep.warn('no vendored ffmpeg directory (fetch it before building Windows)')
         if args.all:
             for cand, kind, platform in (
-                    (root / 'dist' / 'FTHRClips', 'windows dist', 'windows'),
-                    (root / 'build' / 'AppDir', 'appdir', 'linux')):
+                    (root / 'dist' / 'FTHRClips', 'windows dist', 'windows'),):
                 if cand.is_dir():
                     check_files(cand, REQUIRED_ARTIFACT_FILES, rep, kind)
                     check_project_license(cand, rep, kind)
@@ -869,23 +699,6 @@ def main() -> int:
         check_qt_artifact(d, rep, 'windows', manifest_root=_repo_root())
         check_asset_artifact(
             d, rep, 'windows', manifest_root=_repo_root())
-
-    if args.appdir:
-        d = args.appdir.resolve()
-        check_files(d, REQUIRED_ARTIFACT_FILES, rep, 'appdir')
-        check_project_license(d, rep, 'appdir')
-        scan_dir(d, rep, 'appdir')
-        check_qt_artifact(d, rep, 'linux', manifest_root=_repo_root())
-        check_asset_artifact(d, rep, 'linux', manifest_root=_repo_root())
-        # AUDIT-014: the artifact is where it actually matters. A GPL library
-        # the engine never loads is still a GPL library being distributed, and
-        # PyInstaller collects the system FFmpeg through cv2 and Qt.
-        check_linux_ffmpeg_libs(d, rep, 'appdir', manifest_root=_repo_root())
-        engine = next(iter(sorted(d.rglob('FTHRclips'))), None)
-        if engine is not None:
-            check_linux_engine(engine, rep)
-        else:
-            rep.fail('appdir: no FTHRclips engine binary found')
 
     print('\n' + '=' * 60)
     print(f'{rep.checks} checks, {len(rep.failures)} failed, {len(rep.warnings)} warnings')

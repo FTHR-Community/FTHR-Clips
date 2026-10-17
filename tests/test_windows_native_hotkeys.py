@@ -9,7 +9,7 @@ from FTHR_UI.core import hotkey_manager as hotkeys
 
 
 pytestmark = pytest.mark.skipif(
-    hotkeys.sys.platform != 'win32', reason='Windows native hotkey contract')
+    __import__('sys').platform != 'win32', reason='Windows native hotkey contract')
 
 
 class _NativeTarget:
@@ -63,23 +63,25 @@ def test_windows_hotkey_parts_rejects_incomplete_or_multi_key_chords(binding):
         hotkeys.windows_hotkey_parts(binding)
 
 
-def test_native_registration_tracks_action_and_unregisters_cleanly(
+def test_raw_registration_tracks_action_and_unregisters_cleanly(
         qtbot, tmp_path, monkeypatch):
     user32 = _User32()
     monkeypatch.setattr(hotkeys, '_USER32', user32)
     manager = _manager(tmp_path, monkeypatch)
 
     assert manager._register_windows_hotkey('save_clip', 'F9')
-    hotkey_id = hotkeys._WINDOWS_HOTKEY_IDS['save_clip']
-    assert user32.registrations == [
-        (1234, hotkey_id, hotkeys.MOD_NOREPEAT, 0x78)]
-    assert manager._windows_hotkey_actions == {hotkey_id: 'save_clip'}
+    hotkeys._WINDOWS_HOTKEY_IDS['save_clip']
+    assert user32.registrations == []
+    assert user32.raw_registrations == 1
+    assert manager._windows_raw_hotkey_actions == {'save_clip': (0, 0x78)}
+    assert manager._windows_hotkey_actions == {}
     assert manager._windows_hotkey_combos == {'save_clip': 'F9'}
 
     manager._raw_input_widget = _NativeTarget()
     manager._unregister_windows_hotkey('save_clip')
 
-    assert user32.unregistrations == [(1234, hotkey_id)]
+    assert user32.unregistrations == []
+    assert manager._windows_raw_hotkey_actions == {}
     assert manager._windows_hotkey_actions == {}
     assert manager._windows_hotkey_combos == {}
 
@@ -155,43 +157,120 @@ def test_f12_uses_raw_input_without_reviving_low_level_hook(
     assert received == ['screenshot']
 
 
-def test_registration_conflict_is_reported_instead_of_silently_ignored(
-        qtbot, tmp_path, monkeypatch):
+def test_another_app_can_own_the_same_chord(qtbot, tmp_path, monkeypatch):
     user32 = _User32(registration_result=False)
     monkeypatch.setattr(hotkeys, '_USER32', user32)
     manager = _manager(tmp_path, monkeypatch)
-    errors = []
-    manager.error_occurred.connect(
-        lambda title, detail, level: errors.append((title, detail, level)))
+    received, errors = [], []
+    manager.save_clip_triggered.connect(lambda: received.append('clip'))
+    manager.error_occurred.connect(lambda *args: errors.append(args))
+    assert manager.set_hotkey('save_clip', 'F6')
+    assert json.loads(manager.config_file.read_text())['save_clip'] == 'F6'
+    event = hotkeys._RAWKEYBOARD()
+    event.VKey = 0x75
+    manager._process_raw_keyboard_input(event)
+    assert received == ['clip']
+    assert not errors
+    assert not user32.registrations
 
-    assert not manager._register_windows_hotkey('save_clip', 'F9')
 
-    assert errors
-    assert errors[0][0] == 'HOTKEY REGISTRATION FAILED'
-    assert 'another app may already own it' in errors[0][1]
-    assert errors[0][2] == 'warning'
-    assert manager._windows_hotkey_actions == {}
-
-
-def test_conflicting_binding_is_not_saved_and_old_binding_is_restored(
-        qtbot, tmp_path, monkeypatch):
-    user32 = _User32()
+def test_raw_registration_failure_restores_old_binding(qtbot, tmp_path, monkeypatch):
+    manager = _manager(tmp_path, monkeypatch)
     results = iter((False, True))
+    monkeypatch.setattr(manager, '_ensure_raw_keyboard_input', lambda: next(results))
+    manager._save_hotkeys()
+    assert not manager.set_hotkey('save_clip', 'F6')
+    assert manager.hotkeys['save_clip'] == 'F9'
+    assert json.loads(manager.config_file.read_text())['save_clip'] == 'F9'
+    assert manager._windows_raw_hotkey_actions == {'save_clip': (0, 0x78)}
 
-    def _register(hwnd, hotkey_id, modifiers, virtual_key):
-        user32.registrations.append(
-            (hwnd.value, hotkey_id, modifiers, virtual_key))
-        return next(results)
 
-    user32.RegisterHotKey = _register
+def _key(manager, vk, *, up=False, scan=0, device=0, extended=False):
+    event = hotkeys._RAWKEYBOARD()
+    event.VKey, event.MakeCode = vk, scan
+    event.Flags = (hotkeys.RI_KEY_BREAK if up else 0) | (hotkeys.RI_KEY_E0 if extended else 0)
+    manager._process_raw_keyboard_input(event, device)
+
+
+def test_modifiers_repeat_release_and_two_keyboards(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(hotkeys, '_USER32', _User32())
+    manager = _manager(tmp_path, monkeypatch)
+    assert manager._register_windows_hotkey('save_clip', 'Shift+F9')
+    received = []
+    manager.save_clip_triggered.connect(lambda: received.append('clip'))
+    _key(manager, 0x10, scan=0x2A, device=1)
+    _key(manager, 0x10, scan=0x36, device=2)
+    _key(manager, 0x10, scan=0x2A, device=1, up=True)
+    _key(manager, 0x78, device=2)
+    _key(manager, 0x78, device=2)
+    assert received == ['clip']
+    _key(manager, 0x78, device=2, up=True)
+    manager._last_emit_at.clear()
+    _key(manager, 0x78, device=2)
+    assert received == ['clip', 'clip']
+    _key(manager, 0x78, device=2, up=True)
+    _key(manager, 0x10, scan=0x36, device=2, up=True)
+    manager._last_emit_at.clear()
+    _key(manager, 0x78, device=2)
+    assert received == ['clip', 'clip']
+
+
+def test_device_removal_clears_stuck_keys(qtbot, tmp_path, monkeypatch):
+    manager = _manager(tmp_path, monkeypatch)
+    _key(manager, 0x11, device=42)
+    _key(manager, 0x78, device=42)
+    message = hotkeys._MSG()
+    message.message = hotkeys.WM_INPUT_DEVICE_CHANGE
+    message.wParam = hotkeys.GIDC_REMOVAL
+    message.lParam = 42
+    manager.nativeEventFilter(b'windows_generic_MSG', ctypes.addressof(message))
+    assert not manager._raw_keyboard_down
+    assert manager._raw_keyboard_modifiers == 0
+
+
+def test_watchdog_retries_failed_listener(qtbot, tmp_path, monkeypatch):
+    manager = _manager(tmp_path, monkeypatch)
+    manager._windows_failed_actions.add('save_clip')
+    calls = []
+    monkeypatch.setattr(manager, '_schedule_windows_hotkey_refresh', lambda *a, **kw: calls.append(a))
+    manager._windows_hotkey_watchdog()
+    assert calls
+
+
+def test_distinct_fast_presses_are_not_lost(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(hotkeys, '_USER32', _User32())
+    manager = _manager(tmp_path, monkeypatch)
+    assert manager._register_windows_hotkey('save_clip', 'F9')
+    received = []
+    manager.save_clip_triggered.connect(lambda: received.append('clip'))
+    _key(manager, 0x78)
+    _key(manager, 0x78, up=True)
+    _key(manager, 0x78)
+    assert received == ['clip', 'clip']
+
+
+def test_wm_input_reads_device_and_dispatches(qtbot, tmp_path, monkeypatch):
+    user32 = _User32()
+    header = hotkeys._RAWINPUTHEADER()
+    header.dwType, header.hDevice = hotkeys.RIM_TYPEKEYBOARD, 321
+    event = hotkeys._RAWKEYBOARD()
+    event.VKey = 0x78
+    payload = bytes(header) + bytes(event)
+    def get_input(handle, command, buffer, size, header_size):
+        ctypes.cast(size, ctypes.POINTER(ctypes.c_uint)).contents.value = len(payload)
+        if buffer is None:
+            return 0
+        ctypes.memmove(buffer, payload, len(payload))
+        return len(payload)
+    user32.GetRawInputData = get_input
     monkeypatch.setattr(hotkeys, '_USER32', user32)
     manager = _manager(tmp_path, monkeypatch)
-    manager._save_hotkeys()
-
-    assert not manager.set_hotkey('save_clip', 'F6')
-
-    assert manager.hotkeys['save_clip'] == 'F9'
-    saved = json.loads(manager.config_file.read_text(encoding='utf-8'))
-    assert saved['save_clip'] == 'F9'
-    assert [registration[3] for registration in user32.registrations] == [
-        0x75, 0x78]
+    assert manager._register_windows_hotkey('save_clip', 'F9')
+    received = []
+    manager.save_clip_triggered.connect(lambda: received.append('clip'))
+    message = hotkeys._MSG()
+    message.message = hotkeys.WM_INPUT
+    message.lParam = 987
+    assert manager.nativeEventFilter(b'windows_generic_MSG', ctypes.addressof(message)) == (False, 0)
+    assert received == ['clip']
+    assert manager._raw_keyboard_devices[321] == {0x78}

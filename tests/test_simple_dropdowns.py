@@ -4,7 +4,7 @@ from ui.customize_page import _AccordionSection
 from main import _DropdownCombo, TopBarButton
 from ui.clip_viewer import ClipViewer
 from ui.style import (
-    Colors, ThemedDropdownArrow, ThemedDropdownButton, combo_qss,
+    Colors, Sizes, ThemedDropdownArrow, ThemedDropdownButton, combo_qss,
 )
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
@@ -70,7 +70,7 @@ def test_customize_section_content_uses_gray_surface_and_safe_insets(qtbot):
     assert 'QWidget#accordionBody > QWidget#accordionContent' in section.styleSheet()
     assert f'background-color: {Colors.SURFACE_3}' in section.styleSheet()
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
-        24, 16, 24, 20)
+        Sizes.SPACE_5, Sizes.SPACE_5, Sizes.SPACE_5, Sizes.SPACE_5)
 
 
 def test_combo_popup_opens_below_the_control(qtbot):

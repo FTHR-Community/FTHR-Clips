@@ -20,7 +20,6 @@ REPO = Path(__file__).resolve().parent.parent
 DEFAULT_ROOTS = [
     REPO / 'FTHRcapture' / 'FTHRclips' / 'src',
     REPO / 'FTHRcapture' / 'FTHRclips' / 'include',
-    REPO / 'FTHRcapture_linux' / 'src',
 ]
 
 # what counts as an event

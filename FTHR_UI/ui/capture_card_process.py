@@ -16,7 +16,7 @@ if _ROOT not in sys.path:
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QThread, Signal
 
-from ui.app_style import apply_app_style, configure_qt_for_linux_ui
+from ui.app_style import apply_app_style, configure_qt_style
 from ui.capture_card import CaptureCard
 
 
@@ -43,7 +43,7 @@ class _StdinReader(QThread):
 
 
 def main():
-    configure_qt_for_linux_ui()
+    configure_qt_style()
     app = QApplication(sys.argv)
     apply_app_style(app)
     card = CaptureCard(

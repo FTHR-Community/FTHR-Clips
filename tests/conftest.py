@@ -8,6 +8,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # Widget tests construct real QWidgets. On a headless CI runner Qt aborts
@@ -20,3 +22,13 @@ for _p in (ROOT / 'FTHR_UI', ROOT / 'tools'):
     _s = str(_p)
     if _s not in sys.path:
         sys.path.insert(0, _s)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_windows_videos_storage(monkeypatch, tmp_path):
+    """Keep Windows known-folder tests away from a developer's real Videos."""
+    from core import settings_manager
+
+    monkeypatch.setattr(
+        settings_manager, '_windows_videos_directory',
+        lambda: tmp_path / 'Videos', raising=False)

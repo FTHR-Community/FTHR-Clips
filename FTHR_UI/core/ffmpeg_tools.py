@@ -14,8 +14,8 @@ from typing import Optional
 # Suppress the console window ffmpeg would otherwise flash on Windows.
 _NO_WINDOW = {'creationflags': 0x08000000} if sys.platform == 'win32' else {}
 
-_EXE_NAME = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
-_PROBE_NAME = 'ffprobe.exe' if sys.platform == 'win32' else 'ffprobe'
+_EXE_NAME = 'ffmpeg.exe'
+_PROBE_NAME = 'ffprobe.exe'
 
 # Full-quality export uses this bitrate ceiling when OpenH264 must re-encode.
 # OpenH264 doesn't support CRF or lossless encoding.
@@ -47,9 +47,6 @@ def _candidate_paths() -> list[Path]:
         out.append(Path(meipass) / 'engine' / _EXE_NAME)
         out.append(Path(meipass) / _EXE_NAME)
 
-    # AppImage layout: the engine sits beside AppRun.
-    out.append(Path(sys.executable).parent / _EXE_NAME)
-    out.append(Path(sys.executable).parent / 'engine' / _EXE_NAME)
 
     # Development runtime beside the native engine; parents[2] is the repo root.
     root = here.parents[2]
@@ -83,7 +80,7 @@ def get_ffmpeg_exe() -> str:
             # An update may remove a candidate directory; try the remaining locations.
             continue
 
-    # System ffmpeg (typical on Linux; also fine for a dev box on Windows).
+    # Development fallback to an explicitly installed FFmpeg on PATH.
     from shutil import which
     found = which('ffmpeg')
     if found:

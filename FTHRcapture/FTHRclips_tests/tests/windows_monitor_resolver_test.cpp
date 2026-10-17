@@ -8,6 +8,7 @@
 #include "replay_encoder.h"
 #include "wgc_frame_lease.h"
 #include "capture_focus_policy.h"
+#include "replay_pause_clock.h"
 #include <thread>
 #include <chrono>
 
@@ -21,6 +22,7 @@
 #include <vector>
 
 int RunAmfReplayEncoderTests();
+int RunSoftwareReplayEncoderTests();
 int RunQsvReplayEncoderTests();
 int RunWindowsReplayPolicyTests();
 int RunAudioSourceModelTests();
@@ -29,6 +31,7 @@ int RunWindowsProcessLoopbackAudioProviderTests();
 int RunWindowsMicrophoneAudioProviderTests();
 int RunAudioFormatConverterTests();
 int RunWindowsCaptureBorderPolicyTests();
+int RunWindowsCaptureBackendPolicyTests();
 int RunContinuousRecordingWriterTests();
 int RunNvencInputLifecycleTests();
 int RunCaptureScaleGeometryTests();
@@ -118,6 +121,54 @@ public:
 private:
     std::vector<MonitorTopologyEntry> entries_;
 };
+
+void LiveWindowsDesktopAdapterSmoke() {
+    fthr::monitor::WindowsMonitorTopologySource source;
+    const auto topology = source.QueryActiveTopology();
+    Check(topology.ok(), "real Windows desktop topology query");
+    IDXGIFactory1* factory = nullptr;
+    Check(SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))), "real DXGI factory");
+    for (const auto& entry : topology.monitors) {
+        Check(entry.active && entry.hmonitor && entry.width && entry.height, "real live desktop bounds");
+        MonitorResolver resolver(source);
+        Check(resolver.Resolve(entry.monitor_device_path).ok(), "real persistent monitor resolution");
+        Check(resolver.Resolve(fthr::monitor::DesktopMonitorIdentity(entry)).ok(), "real fallback alias resolution");
+        IDXGIAdapter1* adapter = nullptr; std::string detail;
+        Check(fthr::monitor::OpenSelectedDxgiAdapter(factory, entry, &adapter, detail), "real adapter lookup without opening an output");
+        if (adapter) adapter->Release();
+    }
+    factory->Release();
+    std::cout << "Live Windows desktop adapter smoke: " << topology.monitors.size() << " monitor(s)" << std::endl;
+}
+
+void LiveDesktopSurvivesMissingPnpMetadata() {
+    auto live = Monitor(L"", {}, 0, 0, 0x123, L"\\\\.\\DISPLAY2", true);
+    live.width = 1280; live.height = 1024; live.adapter_luid_available = false;
+    auto source_path = Monitor(L"", {7, 0}, 2, 3, 0, live.source_gdi_name.c_str());
+    source_path.active = false; // targetAvailable/PnP state is not live-desktop availability.
+    auto result = fthr::monitor::BuildLiveMonitorTopology({live}, {source_path}, {});
+    Check(result.ok() && result.monitors.size() == 1, "live desktop survives disabled PnP");
+    Check(result.monitors[0].adapter_luid == AdapterLuid{7, 0}, "CCD source supplies adapter without DXGI output");
+    Check(result.monitors[0].monitor_device_path == L"fthr-monitor:123:display2", "explicit handle-qualified fallback identity");
+    FakeTopologySource topology(result.monitors);
+    MonitorResolver resolver(topology);
+    Check(resolver.Resolve(L"fthr-monitor:123:display2").ok(), "fallback selection resolves");
+    auto enriched = result.monitors[0]; enriched.monitor_device_path = L"PATH-NEW";
+    topology.Set({enriched});
+    Check(resolver.Resolve(L"fthr-monitor:123:display2").ok(), "fallback survives restored PnP metadata");
+    enriched.hmonitor = 0x124; topology.Set({enriched});
+    Check(!resolver.Resolve(L"fthr-monitor:123:display2").ok(), "stale handle requires reselection");
+    const DxgiOutputIdentity output{{8, 0}, live.hmonitor, live.source_gdi_name, 1};
+    result = fthr::monitor::BuildLiveMonitorTopology({live}, {}, {output});
+    Check(result.ok() && result.monitors[0].adapter_luid == AdapterLuid{8, 0}, "DXGI adapter metadata fallback");
+    Check(!fthr::monitor::BuildLiveMonitorTopology({live}, {source_path}, {output}).ok(), "conflicting adapters rejected");
+    auto other = source_path; other.source_id++;
+    Check(!fthr::monitor::BuildLiveMonitorTopology({live}, {source_path, other}, {}).ok(), "ambiguous source rejected");
+    Check(fthr::monitor::BuildLiveMonitorTopology({}, {source_path}, {output}).monitors.empty(), "disconnected targets do not create desktop choices");
+    auto selected = result.monitors[0];
+    auto stale = output; stale.hmonitor++;
+    Check(!fthr::monitor::ResolveDxgiOutput(selected, {stale}).ok(), "DXGI requires matching handle and GDI name");
+}
 
 void OneMonitorOneAdapter() {
     FakeTopologySource source({Monitor(L"PATH-A", {1, 0}, 0, 10, 100, L"DISPLAY1", true)});
@@ -333,6 +384,7 @@ void RecentDxgiEvidencePublishesCompleteBoundedEvents() {
     event.acquire_end_qpc = 125;
     event.acquire_hresult = S_OK;
     event.acquired = true;
+    event.pacing_accepted = true;
     event.release_attempted = true;
     event.release_hresult = S_OK;
     event.resource_token = 7;
@@ -343,6 +395,8 @@ void RecentDxgiEvidencePublishesCompleteBoundedEvents() {
     Check(snapshot.size() == 1
               && snapshot.front().acquired
               && snapshot.front().release_attempted
+              && snapshot.front().pacing_accepted
+              && !snapshot.front().pacing_rejected
               && snapshot.front().release_hresult == S_OK
               && snapshot.front().resource_token == 7,
           "one successful DXGI event retains acquire and release evidence");
@@ -397,6 +451,18 @@ void DxgiFrameMetadataAndTextureContractsRejectFalseFrames() {
     Check(std::string(fthr::dxgi::PipelineStallCode(
               Boundary::EncoderOutputStalled)) == "ENCODER_OUTPUT_STALLED",
           "encoder-output stall keeps its stable diagnostic taxonomy");
+    Check(fthr::dxgi::IsDxgiAliveButDesktopStatic(
+              true, true, true, false, true),
+          "recent S_OK pointer-only activity keeps a static DXGI desktop alive");
+    Check(fthr::dxgi::IsDxgiAliveButDesktopStatic(
+              true, true, true, true, false),
+          "recent DXGI WAIT_TIMEOUT keeps a static desktop alive");
+    Check(!fthr::dxgi::IsDxgiAliveButDesktopStatic(
+              true, true, true, false, false),
+          "S_OK without recent pointer-only activity is not exempted");
+    Check(!fthr::dxgi::IsDxgiAliveButDesktopStatic(
+              true, true, false, true, true),
+          "pending encoder work prevents the static DXGI exemption");
     Check(!fthr::dxgi::IsFatalDuplicationRecreateFailure(E_ACCESSDENIED),
           "secure-desktop access denial remains bounded-retryable");
     Check(fthr::dxgi::IsFatalDuplicationRecreateFailure(
@@ -686,6 +752,62 @@ void NativeNvencLowLatencyConfigurationIsCodecSpecific() {
           "AV1 explicitly signals studio-range BT.709 SDR");
 }
 
+void NativeNvencSupportsHighFrameRateMatrix() {
+    for (const uint32_t fps : {30u, 60u, 120u, 144u}) {
+        for (const auto codec : {
+                 VideoCodec::H264, VideoCodec::HEVC, VideoCodec::AV1}) {
+            NV_ENC_CONFIG config = {};
+            Check(fthr::ConfigureNvencCodec(codec, fps, config),
+                "NVENC codec policy accepts the tested frame-rate matrix");
+            uint32_t time_scale = 0;
+            bool timing_enabled = false;
+            switch (codec) {
+            case VideoCodec::H264:
+                time_scale = config.encodeCodecConfig.h264Config
+                    .h264VUIParameters.timeScale;
+                timing_enabled = time_scale != 0;
+                break;
+            case VideoCodec::HEVC:
+                time_scale = config.encodeCodecConfig.hevcConfig
+                    .hevcVUIParameters.timeScale;
+                timing_enabled = time_scale != 0;
+                break;
+            case VideoCodec::AV1:
+                timing_enabled = config.encodeCodecConfig.av1Config
+                    .enableTimingInfo != 0;
+                break;
+            }
+            Check(config.gopLength == fps
+                    && timing_enabled
+                    && ((codec == VideoCodec::AV1)
+                        || time_scale == fps * 2),
+                "NVENC publishes the requested high frame rate timing");
+        }
+    }
+
+    for (const auto resolution : {
+             std::pair<uint32_t, uint32_t>{1920, 1080},
+             std::pair<uint32_t, uint32_t>{2560, 1440},
+             std::pair<uint32_t, uint32_t>{3840, 2160}}) {
+        for (const uint32_t fps : {30u, 60u, 120u, 144u}) {
+            const auto config = fthr::BuildNvencVideoConfig(
+                VideoCodec::H264, resolution.first, resolution.second,
+                fps, 200'000, {});
+            Check(config.width == resolution.first
+                    && config.height == resolution.second
+                    && config.frame_rate.numerator
+                        == static_cast<int32_t>(fps)
+                    && config.frame_rate.denominator == 1
+                    && config.time_base.numerator == 1
+                    && config.time_base.denominator
+                        == static_cast<int32_t>(fps)
+                    && config.bitrate_kbps == 200'000
+                    && fthr::IsValidEncodedVideoConfig(config),
+                "NVENC video config preserves resolution/FPS requests including 4K120");
+        }
+    }
+}
+
 void NativeNvencVideoConfigsPropagateCodecData() {
     const std::vector<uint8_t> h264_extra{1, 100, 0, 31};
     const std::vector<uint8_t> hevc_extra{0, 0, 0, 1, 64};
@@ -710,6 +832,42 @@ void NativeNvencVideoConfigsPropagateCodecData() {
               && av1.packet_format == EncodedPacketFormat::LowOverheadObu
               && av1.codec_extradata == av1_extra,
           "AV1 config propagates its sequence header OBUs");
+
+    const std::pair<uint32_t, uint32_t> resolutions[] = {
+        {1920, 1080}, {2560, 1440}, {3840, 2160},
+    };
+    const uint32_t frame_rates[] = {30, 60, 120, 144};
+    for (const auto codec_and_extra : {
+             std::pair<VideoCodec, const std::vector<uint8_t>*>(
+                 VideoCodec::H264, &h264_extra),
+             std::pair<VideoCodec, const std::vector<uint8_t>*>(
+                 VideoCodec::HEVC, &hevc_extra),
+             std::pair<VideoCodec, const std::vector<uint8_t>*>(
+                 VideoCodec::AV1, &av1_extra)}) {
+        for (const auto resolution : resolutions) {
+            for (const uint32_t fps : frame_rates) {
+                const auto config = fthr::BuildNvencVideoConfig(
+                    codec_and_extra.first,
+                    resolution.first,
+                    resolution.second,
+                    fps,
+                    200'000,
+                    *codec_and_extra.second);
+                Check(config.width == resolution.first
+                        && config.height == resolution.second
+                        && config.frame_rate.numerator
+                            == static_cast<int32_t>(fps)
+                        && config.frame_rate.denominator == 1
+                        && config.time_base.numerator == 1
+                        && config.time_base.denominator
+                            == static_cast<int32_t>(fps)
+                        && config.bitrate_kbps == 200'000
+                        && config.codec_extradata == *codec_and_extra.second
+                        && fthr::IsValidEncodedVideoConfig(config),
+                    "NVENC config preserves the resolution/FPS matrix including 4K120");
+            }
+        }
+    }
 }
 
 void H264CodecMapsCorrectly() {
@@ -821,6 +979,24 @@ void ReplayEncoderInterfaceIsPolymorphic() {
 } // namespace
 
 void FocusPauseAndDeferredRecordingConfig() {
+    fthr::ReplayPauseClock replay_clock(30);
+    constexpr int64_t second = 10'000'000;
+    replay_clock.Observe(true, 10 * second);
+    if (replay_clock.Map(100 * second) != 10 * second) std::abort();
+    if (replay_clock.MapAudio(second, second, 48'000 * 20, 1024, 48'000)) std::abort();
+    replay_clock.Observe(false, 110 * second);
+    if (replay_clock.Map(115 * second) != 15 * second) std::abort();
+    const auto audio_pts = replay_clock.MapAudio(
+        second, second, 48'000 * 114, 1024, 48'000);
+    if (!audio_pts || *audio_pts != 48'000 * 14) std::abort();
+    // Delayed AAC output overlapping a completed pause must still be dropped.
+    if (replay_clock.MapAudio(second, second, 48'000 * 50, 1024, 48'000)) std::abort();
+    replay_clock.Observe(true, 120 * second);
+    replay_clock.Observe(false, 125 * second);
+    if (replay_clock.Map(126 * second) != 21 * second) std::abort();
+    // Pruning old pause spans retains the cumulative offset for future media.
+    replay_clock.Observe(false, 200 * second);
+    if (replay_clock.Map(201 * second) != 96 * second) std::abort();
     fthr::CaptureFocusPolicy focus;
     auto transition = focus.Observe(false);
     if (transition.paused || transition.resumed || transition.discard_queued_frames)
@@ -859,6 +1035,8 @@ void FocusPauseAndDeferredRecordingConfig() {
 
 int main() {
     FocusPauseAndDeferredRecordingConfig();
+    LiveWindowsDesktopAdapterSmoke();
+    LiveDesktopSurvivesMissingPnpMetadata();
     OneMonitorOneAdapter();
     WgcFrameLeaseReturnsEveryPoolSlot();
     TwoMonitorsSameAdapter();
@@ -884,6 +1062,7 @@ int main() {
     NativeNvencCodecSelectionCoversNvidiaMatrix();
     UnsupportedNvencCodecIsRejected();
     NativeNvencLowLatencyConfigurationIsCodecSpecific();
+    NativeNvencSupportsHighFrameRateMatrix();
     NativeNvencVideoConfigsPropagateCodecData();
     H264CodecMapsCorrectly();
     HevcConfigIsProductionEnabled();
@@ -893,6 +1072,7 @@ int main() {
     CodecNeutralRingKeepsTimestampIntervalSelection();
     RingKeepsOneImmutableConfigPerGeneration();
     ReplayEncoderInterfaceIsPolymorphic();
+    RunSoftwareReplayEncoderTests();
     const int amf_checks = RunAmfReplayEncoderTests();
     const int qsv_checks = RunQsvReplayEncoderTests();
     const int policy_checks = RunWindowsReplayPolicyTests();
@@ -902,6 +1082,7 @@ int main() {
     const int windows_microphone_checks = RunWindowsMicrophoneAudioProviderTests();
     const int audio_format_checks = RunAudioFormatConverterTests();
     const int capture_border_checks = RunWindowsCaptureBorderPolicyTests();
+    const int capture_backend_checks = RunWindowsCaptureBackendPolicyTests();
     const int recording_checks = RunContinuousRecordingWriterTests();
     const int nvenc_lifecycle_checks = RunNvencInputLifecycleTests();
     const int capture_scale_checks = RunCaptureScaleGeometryTests();
@@ -909,6 +1090,7 @@ int main() {
               << (checks + amf_checks + qsv_checks + policy_checks + audio_source_checks
                   + windows_audio_checks + windows_process_loopback_checks)
                   + windows_microphone_checks + audio_format_checks + capture_border_checks
+                  + capture_backend_checks
                   + recording_checks
                   + nvenc_lifecycle_checks
                   + capture_scale_checks

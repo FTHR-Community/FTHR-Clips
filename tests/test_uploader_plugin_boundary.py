@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -15,10 +14,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'FTHR_UI'))
 sys.path.insert(0, str(ROOT / 'FTHR_Uploader'))
-sys.path.insert(0, str(ROOT / 'FTHR_Hardware_ID'))
 
 import core.upload_manager as core_uploader
-import hardware_id_service
 import uploader_service
 
 
@@ -67,7 +64,7 @@ def _bundle(
     return path
 
 
-def test_uploader_and_hardware_identity_install_only_after_separate_consents(tmp_path):
+def test_uploader_installs_only_after_consent(tmp_path):
     uploader_bundle = _bundle(
         tmp_path,
         filename='FTHR-Uploader.fthrplugin',
@@ -79,38 +76,22 @@ def test_uploader_and_hardware_identity_install_only_after_separate_consents(tmp
             'privacy_version': core_uploader.UPLOADER_PRIVACY_VERSION,
         },
     )
-    hardware_bundle = _bundle(
-        tmp_path,
-        filename='FTHR-Hardware-Identity.fthrplugin',
-        plugin_id=core_uploader.HARDWARE_PLUGIN_ID,
-        plugin_version=core_uploader.HARDWARE_PLUGIN_VERSION,
-        entrypoint='FTHR Hardware Identity.exe',
-        legal_versions={'policy_version': core_uploader.HARDWARE_POLICY_VERSION},
-    )
     uploader_root = tmp_path / 'installed-uploader'
-    hardware_root = tmp_path / 'installed-hardware'
     settings_file = tmp_path / 'uploader-settings.json'
     manager = core_uploader.UploadManager(_CoreSettings())
 
     def bundle_path(filename='FTHR-Uploader.fthrplugin'):
-        return hardware_bundle if 'Hardware' in filename else uploader_bundle
+        return uploader_bundle
 
     with (
             patch.object(manager, 'bundle_path', side_effect=bundle_path),
             patch.object(
                 core_uploader, 'EXPECTED_UPLOADER_BUNDLE_SHA256',
                 _sha256(uploader_bundle)),
-            patch.object(
-                core_uploader, 'EXPECTED_HARDWARE_BUNDLE_SHA256',
-                _sha256(hardware_bundle)),
             patch.object(core_uploader, '_UPLOADER_ROOT', uploader_root),
-            patch.object(core_uploader, '_HARDWARE_ROOT', hardware_root),
             patch.object(
                 core_uploader, '_UPLOADER_ACTIVATION_FILE',
                 uploader_root / 'activation.json'),
-            patch.object(
-                core_uploader, '_HARDWARE_ACTIVATION_FILE',
-                hardware_root / 'activation.json'),
             patch.object(core_uploader, '_SETTINGS_FILE', settings_file),
             patch.object(core_uploader, '_HISTORY_FILE', tmp_path / 'history.json'),
             patch.object(
@@ -125,16 +106,6 @@ def test_uploader_and_hardware_identity_install_only_after_separate_consents(tmp
         )
         assert ok, message
         assert manager.is_plugin_installed()
-        assert not manager.is_hardware_identity_installed()
-
-        ok, _ = manager.activate_hardware_identity('wrong')
-        assert not ok
-        assert not manager.is_hardware_identity_installed()
-
-        ok, message = manager.activate_hardware_identity(
-            core_uploader.HARDWARE_POLICY_VERSION)
-        assert ok, message
-        assert manager.is_hardware_identity_installed()
 
 
 def test_disabled_uploader_refuses_network_actions(tmp_path):
@@ -192,25 +163,8 @@ def test_toggle_reports_save_failure_and_restores_previous_state():
     assert manager.get('upload_enabled') is True
 
 
-def test_hardware_identity_requires_its_own_activation_receipt(tmp_path):
-    try:
-        hardware_id_service._validate_activation(
-            tmp_path / 'missing.json',
-            {'activation_id': 'missing'},
-        )
-    except PermissionError as exc:
-        assert 'not been installed' in str(exc)
-    else:
-        raise AssertionError('hardware identity accepted a missing receipt')
 
 
-def test_derived_hardware_id_is_stable_and_does_not_expose_raw_value():
-    raw = 'windows-machine-guid:secret-raw-value'
-    first = hardware_id_service.hardware_uuid(raw)
-    second = hardware_id_service.hardware_uuid(raw)
-    assert first == second
-    assert raw not in first
-    assert len(first) == 36
 
 
 def test_core_has_no_provider_network_client_and_uploader_has_no_hardware_reader():
@@ -264,44 +218,35 @@ def built_windows_plugins():
         pytest.skip('frozen optional packages contain Windows executables')
     packages = ROOT / 'plugin-packages'
     if not all((packages / name).is_file() for name in (
-            'FTHR-Uploader.fthrplugin', 'FTHR-Hardware-Identity.fthrplugin')):
+            'FTHR-Uploader.fthrplugin',)):
         pytest.skip('build optional packages with tools/build_optional_uploaders.py first')
 
 
 def test_built_dormant_packages_match_core_release_bindings(built_windows_plugins):
     uploader = ROOT / 'plugin-packages' / 'FTHR-Uploader.fthrplugin'
-    hardware = ROOT / 'plugin-packages' / 'FTHR-Hardware-Identity.fthrplugin'
     assert _sha256(uploader) == core_uploader.EXPECTED_UPLOADER_BUNDLE_SHA256
-    assert _sha256(hardware) == core_uploader.EXPECTED_HARDWARE_BUNDLE_SHA256
     with zipfile.ZipFile(uploader) as archive:
+        manifest = json.loads(archive.read('manifest.json'))
         assert set(archive.namelist()) == {
             'manifest.json',
             'TERMS_OF_SERVICE.txt',
             'PRIVACY_POLICY.txt',
-            'payload/FTHR Uploader.exe',
+            *(entry['path'] for entry in manifest['files']),
         }
-    with zipfile.ZipFile(hardware) as archive:
-        assert set(archive.namelist()) == {
-            'manifest.json',
-            'TERMS_OF_SERVICE.txt',
-            'PRIVACY_POLICY.txt',
-            'payload/FTHR Hardware Identity.exe',
-        }
+        assert 'payload/FTHR Uploader.exe' in archive.namelist()
+        assert 'payload/licenses/optional-uploader/paramiko/LICENSE' in archive.namelist()
+        for entry in manifest['files']:
+            assert hashlib.sha256(archive.read(entry['path'])).hexdigest() == entry['sha256']
 
 
 def test_built_one_shot_packages_activate_and_run_locally(tmp_path, built_windows_plugins):
     uploader_root = tmp_path / 'uploader'
-    hardware_root = tmp_path / 'hardware'
     settings_file = tmp_path / 'settings.json'
     with (
             patch.object(core_uploader, '_UPLOADER_ROOT', uploader_root),
-            patch.object(core_uploader, '_HARDWARE_ROOT', hardware_root),
             patch.object(
                 core_uploader, '_UPLOADER_ACTIVATION_FILE',
                 uploader_root / 'activation.json'),
-            patch.object(
-                core_uploader, '_HARDWARE_ACTIVATION_FILE',
-                hardware_root / 'activation.json'),
             patch.object(core_uploader, '_SETTINGS_FILE', settings_file),
             patch.object(core_uploader, '_HISTORY_FILE', tmp_path / 'history.json'),
             patch.object(
@@ -312,25 +257,28 @@ def test_built_one_shot_packages_activate_and_run_locally(tmp_path, built_window
             core_uploader.UPLOADER_PRIVACY_VERSION,
         )
         assert ok, message
-        response = manager._invoke_plugin('account_status', timeout=30)
-        assert response.get('ok'), response
-
-        ok, message = manager.activate_hardware_identity(
-            core_uploader.HARDWARE_POLICY_VERSION)
+        # Exercise SFTP inside the packaged executable without connecting to
+        # a server or writing a credential to the user's vault.
+        ok, message = manager.sftp_credentials({
+            'sftp_host': 'example.com',
+            'sftp_username': 'tester',
+            'sftp_fingerprint': 'SHA256:' + 'A' * 43,
+        })
         assert ok, message
-        receipt_path = hardware_root / 'activation.json'
-        receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
-        completed = subprocess.run(
-            [receipt['executable'], '--activation-receipt', str(receipt_path)],
-            input=json.dumps({
-                'action': 'derive_hardware_id',
-                'activation_id': receipt['activation_id'],
-            }),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        result = json.loads(completed.stdout.strip())
-        assert result.get('ok'), result
-        assert len(result.get('hardware_id', '')) == 36
+
+
+
+@pytest.mark.parametrize('provider', ['lustful', 'fthr'])
+def test_retired_provider_is_disabled_on_load(tmp_path, monkeypatch, provider):
+    settings = tmp_path / 'settings.json'
+    settings.write_text(json.dumps({
+        'upload_provider': provider, 'upload_enabled': True,
+        'lustful_api_key': 'obsolete', 'lustful_legal_accepted_version': 'obsolete',
+    }), encoding='utf-8')
+    monkeypatch.setattr(core_uploader, '_SETTINGS_FILE', settings)
+    manager = core_uploader.UploadManager(_CoreSettings())
+    assert not manager.get('upload_enabled')
+    assert manager.get('upload_provider') == 'catbox'
+    assert not any(key.startswith('lustful_') for key in manager._settings)
+    manager.save_settings()
+    assert not json.loads(settings.read_text())['upload_enabled']

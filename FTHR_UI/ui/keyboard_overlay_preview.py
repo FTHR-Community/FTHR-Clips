@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Signal, Qt
+from PySide6.QtCore import QRectF, Signal, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
@@ -19,18 +19,41 @@ class KeyboardSourcePreview(QWidget):
         self._image = QImage()
         self._pick_mode = False
         self._empty_text = 'SELECT A WINDOW TO PREVIEW'
+        self._idle_image_timer = QTimer(self)
+        self._idle_image_timer.setSingleShot(True)
+        self._idle_image_timer.setInterval(15_000)
+        self._idle_image_timer.timeout.connect(self._release_hidden_image)
         self.setMinimumSize(220, 110)
         self.setMouseTracking(True)
 
-    def set_image(self, image: QImage | QPixmap | None) -> None:
+    def _release_hidden_image(self):
+        if not self.isVisible():
+            self._image = QImage()
+
+    def hideEvent(self, event):
+        self._idle_image_timer.start()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        self._idle_image_timer.stop()
+        super().showEvent(event)
+
+    def set_image(self, image: QImage | QPixmap | None, *, share_owned=False) -> None:
         if isinstance(image, QPixmap):
             image = image.toImage()
-        self._image = image.copy() if image is not None and not image.isNull() else QImage()
+        # The live updater supplies an owned image. Other callers retain the
+        # historical deep-copy contract, including externally backed QImages.
+        if image is None or image.isNull():
+            self._image = QImage()
+        else:
+            self._image = QImage(image) if share_owned else image.copy()
         self.update()
 
     def set_empty_text(self, text: str) -> None:
-        self._empty_text = str(text)
-        self.update()
+        text = str(text)
+        if text != self._empty_text:
+            self._empty_text = text
+            self.update()
 
     def set_pick_mode(self, enabled: bool) -> None:
         self._pick_mode = bool(enabled)

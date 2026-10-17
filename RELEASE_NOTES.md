@@ -1,6 +1,20 @@
-# FTHR Clips 1.1.0-alpha
+# FTHR Clips 2.0.0-alpha
 
-This is the first patched alpha release.
+## 16 October 2026
+
+- Add hardware-accelerated clip exports with Very fast, High quality and Lossless choices for export and sharing.
+- Keep exports running while browsing clips, with optional simultaneous exports and a progress window.
+- Fix the Discord share window opening behind the editor.
+- Match export window controls to the app and correct the editor's maximize button.
+- Simplify the interface performance descriptions.
+
+## 13 October 2026
+
+- Add interface performance presets and individual controls with estimated impact labels, including a lightweight clip viewer.
+- Support trusted SSH known_hosts entries for SFTP when the fingerprint field is blank, and remember keys after successful fingerprint verification.
+- Rebuild the Upload Extension as version 1.3.1 with the updated SFTP verification.
+
+This alpha release includes the current editor performance and SFTP updates.
 
 ## What is in here
 
@@ -29,5 +43,3 @@ This build is ready for public testing.
   passes construction, licence, and extraction checks there, but native
   Wayland/X11 capture, audio, hotkeys, and multi-monitor behaviour remain
   physically unverified.
-
-

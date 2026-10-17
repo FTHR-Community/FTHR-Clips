@@ -14,7 +14,7 @@
 ## Testing
 
 - [ ] Ran `QT_QPA_PLATFORM=offscreen pytest tests/` — all pass
-- [ ] Tested manually on Linux / Windows (delete whichever doesn't apply)
+- [ ] Tested manually on Windows
 
 ## Notes
 

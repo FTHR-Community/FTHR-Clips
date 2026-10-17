@@ -1,40 +1,130 @@
 """Load and save user preferences in ~/.fthr/settings.json."""
 import json
 import os
+import tempfile
 from pathlib import Path
 
 
-def default_clips_directory() -> Path:
-    """Return the default root used for FTHR's local clip library."""
+class StoragePathError(OSError):
+    """A storage location is invalid or cannot be prepared for use."""
+
+
+_MISSING = object()
+_CLIPS_SUBDIRECTORIES = (
+    'Desktop', 'Recordings', 'Exported', 'Shared', 'Screenshots',
+)
+
+
+def _windows_videos_directory() -> str:
+    """Return Qt's Windows Videos known-folder path without a home fallback."""
+    from PySide6.QtCore import QStandardPaths
+
+    return QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.MoviesLocation)
+
+
+def _legacy_clips_directory() -> Path:
+    """Return the historical library root used by existing installations."""
     return Path.home() / 'FTHR_Clips'
 
 
-def clips_directory_from(settings_manager=None) -> Path:
-    """Resolve the user-selected clip library root, with a safe fallback."""
-    default = default_clips_directory()
-    if settings_manager is None:
-        return default
+def default_clips_directory() -> Path:
+    """Return the new-install default library root for the current platform."""
+
     try:
-        configured = settings_manager.get('clips_directory', default)
-        if not configured:
-            return default
-        return Path(os.path.expandvars(configured)).expanduser().resolve(strict=False)
+        known_folder = _windows_videos_directory()
+        if not known_folder:
+            raise ValueError('Windows returned an empty Videos known-folder path')
+        raw_path = os.fspath(known_folder)
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError('Windows returned an empty Videos known-folder path')
+        videos = Path(os.path.expandvars(raw_path)).expanduser()
+        if not videos.is_absolute():
+            raise ValueError('Windows returned a non-absolute Videos known-folder path')
+        return videos.resolve(strict=False) / 'FTHR Clips'
+    except (OSError, TypeError, ValueError) as exc:
+        raise StoragePathError(
+            'FTHR could not locate the Windows Videos folder. Check that the '
+            'Videos known folder is available, or choose a storage folder in '
+            'Settings. No files were moved.') from exc
+
+
+def _resolve_storage_path(value, label: str) -> Path:
+    try:
+        raw_path = os.fspath(value)
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError('path is empty')
+        resolved = Path(os.path.expandvars(raw_path)).expanduser().resolve(
+            strict=False)
+        if not resolved.is_absolute():
+            raise ValueError('path is not absolute')
+        return resolved
+    except (OSError, TypeError, ValueError) as exc:
+        raise StoragePathError(
+            f'The configured {label} folder is invalid. Choose a valid folder '
+            f'in FTHR Settings. No files were moved.') from exc
+
+
+def clips_directory_from(settings_manager=None, *, missing_default=None) -> Path:
+    """Resolve the selected library root or use the platform's new-install default."""
+    if settings_manager is None:
+        return default_clips_directory()
+    try:
+        configured = settings_manager.get('clips_directory', _MISSING)
+        if configured is _MISSING:
+            if missing_default is not None:
+                return _resolve_storage_path(missing_default, 'clips storage')
+            return default_clips_directory()
+        return _resolve_storage_path(configured, 'clips storage')
+    except StoragePathError:
+        raise
     except (OSError, TypeError, ValueError):
-        # User-editable settings may contain a malformed path; keep the app on
-        # its known local library root instead of failing during startup.
-        return default
+        raise StoragePathError(
+            'The configured clips storage folder is invalid. Choose a valid '
+            'folder in FTHR Settings. No files were moved.') from None
 
 
 def recording_directory_from(settings_manager=None) -> Path:
     """Use the same absolute, environment-expanded path in the UI and engine."""
-    default = clips_directory_from(settings_manager) / 'Recordings'
     try:
-        configured = (settings_manager.get('recording_directory', default)
-                      if settings_manager is not None else default)
-        return Path(os.path.expandvars(configured or default)).expanduser().resolve(
-            strict=False)
+        configured = (settings_manager.get('recording_directory', _MISSING)
+                      if settings_manager is not None else _MISSING)
+        if configured is _MISSING or configured is None:
+            return clips_directory_from(settings_manager) / 'Recordings'
+        return _resolve_storage_path(configured, 'manual recording')
+    except StoragePathError:
+        raise
     except (OSError, TypeError, ValueError):
-        return default
+        raise StoragePathError(
+            'The configured manual recording folder is invalid. Choose a valid '
+            'folder in FTHR Settings. No files were moved.') from None
+
+
+def ensure_storage_directory(directory, *, probe_writable: bool = False) -> Path:
+    """Create and optionally write-probe one storage directory."""
+    resolved = _resolve_storage_path(directory, 'storage')
+    try:
+        resolved.mkdir(parents=True, exist_ok=True)
+        if not resolved.is_dir():
+            raise NotADirectoryError(str(resolved))
+        if probe_writable:
+            fd, probe_name = tempfile.mkstemp(
+                prefix='.fthr-storage-probe-', dir=str(resolved))
+            os.close(fd)
+            Path(probe_name).unlink()
+        return resolved
+    except OSError as exc:
+        raise StoragePathError(
+            f'FTHR cannot use the storage folder "{resolved}". Choose a '
+            f'writable folder in Settings. No files were moved. ({exc})') from exc
+
+
+def prepare_clips_storage(directory, *, probe_writable: bool = False) -> Path:
+    """Create the library root and its standard application subfolders."""
+    root = ensure_storage_directory(directory, probe_writable=probe_writable)
+    for name in _CLIPS_SUBDIRECTORIES:
+        ensure_storage_directory(root / name, probe_writable=probe_writable)
+    return root
 
 
 class SettingsManager:
@@ -44,14 +134,31 @@ class SettingsManager:
         # ~/.fthr is the one true home for all user state (settings, hotkeys,
         # themes). Lives outside the install dir so updates never wipe it.
         self.config_file = Path.home() / '.fthr' / 'settings.json'
+        self._navigation_bindings_migrated = False
         self._retired_settings_removed = False
         self.settings = self._load_settings()
-        if self._retired_settings_removed:
+        if self._retired_settings_removed or self._navigation_bindings_migrated:
             self.save_settings()
     
     def _load_settings(self) -> dict:
         """Load settings from config file"""
+        config_exists = self.config_file.exists()
+        # Do not migrate an existing user's library merely because a new
+        # version has a different first-run default. Only a genuinely fresh
+        # install consults the redirected Windows Videos known folder.
+        clips_root = (_legacy_clips_directory() if config_exists
+                      else default_clips_directory())
+        from core.navigation_bindings import DEFAULT_NAVIGATION_BINDINGS
+        from core.ui_performance import DEFAULTS as UI_PERFORMANCE_DEFAULTS
         default_settings = {
+            **UI_PERFORMANCE_DEFAULTS,
+            "navigation_bindings": dict(DEFAULT_NAVIGATION_BINDINGS),
+            "navigation_bindings_version": 5,
+            'reduce_ui_animations': False,
+            'shortcuts_enabled': True,
+            'shortcut_categories_enabled': {},
+            'custom_clip_lengths': [],
+            'show_kofi_widget': True,
             'clip_length': 30,       # seconds
             'framerate': 60,         # FPS
             'resolution': 'source',  # 480p/720p/1080p/1440p/source
@@ -113,12 +220,14 @@ class SettingsManager:
             # failures. Keep them enabled by default, but let users mute the
             # bar without disabling capture cards or sound cues.
             'error_notifications_enabled': True,
-            # Windows: stable monitor device path. Linux: wl_output name.
             'capture_monitor': '',
-            'clips_directory': str(default_clips_directory()),
+            'clips_directory': str(clips_root),
             'imported_clip_folders': [],  # additional folders from other clipping software
-            'recording_directory': str(default_clips_directory() / 'Recordings'),
+            'recording_directory': str(clips_root / 'Recordings'),
             'selected_export_preset': 'discord',
+            'export_quality': 'quality',
+            'parallel_exports': False,
+            'parallel_export_limit': 2,
             # Encoder backend + codec + preset. ``auto`` keeps platform-native
             # selection; explicit keys are populated only after a runtime probe.
             'encoder_pref':   'auto',   # auto | nvenc | amf | qsv | software
@@ -131,6 +240,9 @@ class SettingsManager:
             # Clip editor preview. When disabled, visual edits are retained
             # for export but the editor keeps showing the source frame.
             'clip_editor_live_preview': True,
+            'timeline_preview_strip_enabled': True,
+            'hide_deleted_timeline_segments': False,
+            'grid_show_edited_duration': False,
             'game_detection_enabled':  False,
             # Foreground-game handoff. ``auto`` switches capture immediately;
             # ``prompt`` waits for the configured accept/dismiss hotkeys.
@@ -189,7 +301,7 @@ class SettingsManager:
             'input_overlay_preview_background': '',
         }
         
-        if not self.config_file.exists():
+        if not config_exists:
             return default_settings
 
         try:
@@ -203,6 +315,38 @@ class SettingsManager:
                     merged[k] = {**merged[k], **v}
                 else:
                     merged[k] = v
+            if 'clips_directory' not in loaded:
+                merged['clips_directory'] = str(_legacy_clips_directory())
+            if 'recording_directory' not in loaded:
+                library_root = _resolve_storage_path(
+                    merged.get('clips_directory'), 'clips storage')
+                merged['recording_directory'] = str(library_root / 'Recordings')
+            if loaded.get('navigation_bindings_version', 1) < 4:
+                bindings = merged.get('navigation_bindings', {})
+                if isinstance(bindings, dict):
+                    if loaded.get('navigation_bindings_version', 1) < 2:
+                        for action, old, new in (
+                                ('editor_next', 'Right', 'Tab+Right'),
+                                ('editor_previous', 'Left', 'Tab+Left')):
+                            if bindings.get(action) == old:
+                                bindings[action] = new
+                    # Move the old default pair together; customized close
+                    # and minimize bindings remain the user's choice.
+                    if (bindings.get('editor_minimize') == 'Escape'
+                            and bindings.get('editor_close') == 'Shift+Escape'):
+                        bindings['editor_minimize'] = 'Shift+Escape'
+                        bindings['editor_close'] = 'Escape'
+                    merged['navigation_bindings'] = {
+                        key: value for key, value in bindings.items()
+                        if key in DEFAULT_NAVIGATION_BINDINGS}
+                merged['navigation_bindings_version'] = 4
+                self._navigation_bindings_migrated = True
+            if loaded.get('navigation_bindings_version', 1) < 5:
+                bindings = merged.get('navigation_bindings', {})
+                if isinstance(bindings, dict) and bindings.get('editor_split') == 'Ctrl+S':
+                    bindings['editor_split'] = 'Ctrl+C'
+                merged['navigation_bindings_version'] = 5
+                self._navigation_bindings_migrated = True
             # Existing installations should not change recording quality just
             # because the profile feature was added.  Seed each missing
             # recording value from the user's established clip value.
@@ -254,6 +398,8 @@ class SettingsManager:
                     loaded.get('camera_size', 'medium'),
                 )
             return merged
+        except StoragePathError:
+            raise
         except Exception as e:
             print(f"Failed to load settings: {e}")
             # Keep invalid settings for diagnosis before falling back to defaults.
@@ -266,21 +412,22 @@ class SettingsManager:
     
     def save_settings(self):
         """Save current settings to file"""
-        self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        # Drop runtime-only scratch values before persisting user settings.
-        persistable = {k: v for k, v in self.settings.items() if not k.startswith('_')}
-        # Write to a temp file first, then atomically replace.
-        # A crash or SIGKILL during a direct write truncates the JSON and
-        # loses all settings on next launch.
-        tmp = self.config_file.with_suffix('.json.tmp')
         try:
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            # Drop runtime-only scratch values before persisting user settings.
+            persistable = {k: v for k, v in self.settings.items() if not k.startswith('_')}
+            # Write to a temp file first, then atomically replace.
+            # A crash or SIGKILL during a direct write truncates the JSON and
+            # loses all settings on next launch.
+            tmp = self.config_file.with_suffix('.json.tmp')
             with open(tmp, 'w') as f:
                 json.dump(persistable, f, indent=2)
             os.replace(str(tmp), str(self.config_file))
         except Exception as e:
             print(f"Failed to save settings: {e}")
             try:
-                tmp.unlink(missing_ok=True)
+                if 'tmp' in locals():
+                    tmp.unlink(missing_ok=True)
             except OSError:
                 pass
             return False

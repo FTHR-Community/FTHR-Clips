@@ -10,7 +10,7 @@ identified below retain their respective licences.
 
 Full licence texts live in [`licenses/`](licenses/), and are installed
 alongside the application (Windows: `licenses\` in the install directory;
-Linux: `licenses/` inside the AppImage).
+the `licenses/` directory).
 
 Last verified: **2026-08-24**.
 
@@ -156,7 +156,7 @@ conflict.
 | **Version** | 0.5.5 · **Licence** MIT |
 | **Used for** | Microphone capture |
 | **Licence text** | [`licenses/sounddevice-LICENSE.txt`](licenses/sounddevice-LICENSE.txt) |
-| **Note** | Wraps **PortAudio** (MIT). On Linux `libportaudio.so.2` is bundled explicitly by `FTHR_linux.spec`. |
+| **Note** | Wraps **PortAudio** (MIT).  |
 
 ### keyboard
 
@@ -185,16 +185,6 @@ conflict.
 | **Linkage** | **None at build time.** NVENC is resolved at runtime via `LoadLibraryA("nvEncodeAPI64.dll")` against the user's installed driver. The header is source-only and the NVIDIA runtime is **not** redistributed. |
 | **Licence text** | [`licenses/NVIDIA-NVENC-SDK-LICENSE.txt`](licenses/NVIDIA-NVENC-SDK-LICENSE.txt) |
 
-### Wayland protocol definitions and generated bindings
-
-| | |
-|---|---|
-| **Files** | `FTHRcapture_linux/protocols/*.xml` and generated client bindings compiled into the Linux engine |
-| **Copyright** | The wlroots, Chromium OS, and Wayland contributors named in the source notices |
-| **Licence** | MIT-style permissive grants stated in the protocol sources |
-| **Used for** | Linux compositor capture and related Wayland protocol integration |
-| **Licence notices** | [`licenses/Wayland-Protocols-NOTICES.txt`](licenses/Wayland-Protocols-NOTICES.txt) |
-
 ### Microsoft Visual C++ Redistributable
 
 | | |
@@ -202,8 +192,6 @@ conflict.
 | **File** | `redist/vc_redist.x64.exe`, executed by the Windows installer |
 | **Licence** | Microsoft Visual Studio redistributable terms |
 | **Note** | Redistributed unmodified as permitted for VC++ runtime redistribution. |
-
----
 
 ## Project assets
 
@@ -251,11 +239,8 @@ Listed so future audits do not have to re-derive it:
 
 - **`imageio-ffmpeg`** — *removed* on 2026-08-05. Its bundled binary is a
   gyan.dev build with `--enable-gpl --enable-libx264 --enable-libx265`
-  (GPLv3). It is now excluded in both PyInstaller specs and removed from
+  (GPLv3). It is now excluded in the Windows PyInstaller spec and removed from
   `requirements.txt`. See `FTHR_UI/core/ffmpeg_tools.py`.
-- **System FFmpeg on Linux** — if the bundled binary is absent, FTHR falls back
-  to `ffmpeg` on `PATH`. That copy belongs to the user's distribution and is not
-  redistributed by this project.
 - **Development tooling** — pytest, ruff, PyInstaller, Inno Setup, MSVC.
 
 ---

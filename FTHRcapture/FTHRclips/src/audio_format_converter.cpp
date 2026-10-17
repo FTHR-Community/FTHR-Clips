@@ -240,6 +240,8 @@ struct AudioFormatConverter::Impl {
     SwrContext* resampler = nullptr;
     std::vector<float> native_float;
     std::vector<float> converted;
+    AudioSignalMetrics input_metrics;
+    AudioSignalMetrics output_metrics;
 
     ~Impl() { swr_free(&resampler); }
 };
@@ -306,6 +308,8 @@ bool AudioFormatConverter::Convert(const uint8_t* input, uint32_t input_frames,
                     input_float_, input_bits_per_sample_, input_valid_bits_per_sample_);
         }
     }
+    impl_->input_metrics.Observe(impl_->native_float.data(), input_frames,
+        input_channels_);
 
     const int64_t delay = swr_get_delay(impl_->resampler,
         static_cast<int64_t>(input_sample_rate_));
@@ -319,6 +323,8 @@ bool AudioFormatConverter::Convert(const uint8_t* input, uint32_t input_frames,
     const int produced = swr_convert(impl_->resampler, &output_plane,
         static_cast<int>(capacity64), &input_plane, static_cast<int>(input_frames));
     if (produced < 0) return false;
+    impl_->output_metrics.Observe(impl_->converted.data(),
+        static_cast<uint32_t>(produced), kOutputChannels);
     output->insert(output->end(), impl_->converted.begin(),
         impl_->converted.begin() + static_cast<size_t>(produced) * kOutputChannels);
     return true;
@@ -338,6 +344,8 @@ bool AudioFormatConverter::Flush(std::vector<float>* output) {
         const int produced = swr_convert(impl_->resampler, &output_plane,
             static_cast<int>(capacity64), nullptr, 0);
         if (produced < 0) return false;
+        impl_->output_metrics.Observe(impl_->converted.data(),
+            static_cast<uint32_t>(produced), kOutputChannels);
         output->insert(output->end(), impl_->converted.begin(),
             impl_->converted.begin() + static_cast<size_t>(produced) * kOutputChannels);
         if (produced == 0) return true;
@@ -353,6 +361,14 @@ bool AudioFormatConverter::ApplyDriftCorrection(
             static_cast<uint32_t>(std::numeric_limits<int>::max())))) >= 0;
 }
 
+AudioSignalMetricsSnapshot AudioFormatConverter::GetInputSignalMetrics() const {
+    return impl_ ? impl_->input_metrics.Snapshot() : AudioSignalMetricsSnapshot{};
+}
+
+AudioSignalMetricsSnapshot AudioFormatConverter::GetOutputSignalMetrics() const {
+    return impl_ ? impl_->output_metrics.Snapshot() : AudioSignalMetricsSnapshot{};
+}
+
 void AudioFormatConverter::Reset() {
     if (impl_) swr_free(&impl_->resampler);
     input_sample_rate_ = 0;
@@ -366,6 +382,8 @@ void AudioFormatConverter::Reset() {
     if (impl_) {
         impl_->native_float.clear();
         impl_->converted.clear();
+        impl_->input_metrics.Reset();
+        impl_->output_metrics.Reset();
     }
 }
 

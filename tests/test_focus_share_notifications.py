@@ -76,7 +76,7 @@ def test_ready_share_dialog_closes_without_closing_editor(
     dialog._on_export_done(True, str(output))
     assert dialog._export_path == str(output)
     if action == 'button':
-        button = next(b for b in dialog.findChildren(QPushButton) if b.text() == '✕')
+        button = next(b for b in dialog.findChildren(QPushButton) if b.accessibleName() == 'Close')
         qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
     elif action == 'escape':
         qtbot.keyClick(dialog, Qt.Key.Key_Escape)

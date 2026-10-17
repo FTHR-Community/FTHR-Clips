@@ -3,25 +3,22 @@ capture_settings_widget.py
 Compact single-row settings bar with hardware encoding status indicator
 and capture source (desktop / window) selector.
 """
-import sys
+
+from ui.style import set_theme_style
 import ctypes
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
-                              QPushButton, QFrame, QSizePolicy, QFileIconProvider)
-from PySide6.QtCore import Qt, QSize, QFileInfo, Signal
+                              QPushButton, QFrame, QSizePolicy)
+from PySide6.QtCore import Qt, QSize, Signal
 from PySide6.QtGui import QIcon, QCursor
-from ui.style import Colors, Fonts, ThemedDropdownArrow, WheelSafeComboBox
+from ui.style import Colors, Fonts, Sizes, ThemedDropdownArrow, WheelSafeComboBox
 
-if sys.platform == 'win32':
-    import ctypes.wintypes as wintypes
+import ctypes.wintypes as wintypes
 
 
 # Window enumeration — Windows only.
-# Returns empty list on Linux: the Linux engine only supports full-desktop
 # capture via wlr-screencopy; per-window targeting is not available.
 
 def _get_exe_info(exe_path: str, size: int = 16) -> 'tuple[str | None, QIcon | None]':
-    if sys.platform != 'win32':
-        return None, None
     name = None
     try:
         class _SHFILEINFOW(ctypes.Structure):
@@ -45,20 +42,10 @@ def _get_exe_info(exe_path: str, size: int = 16) -> 'tuple[str | None, QIcon | N
     except Exception:
         pass
 
-    try:
-        provider = QFileIconProvider()
-        icon = provider.icon(QFileInfo(exe_path))
-        if icon.isNull():
-            icon = None
-    except Exception:
-        icon = None
-
-    return name, icon
+    return name, None
 
 
 def _get_hwnd_exe_path(hwnd: int) -> 'str | None':
-    if sys.platform != 'win32':
-        return None
     try:
         kernel32 = ctypes.windll.kernel32
         pid       = ctypes.c_ulong(0)
@@ -84,14 +71,11 @@ def _get_hwnd_exe_path(hwnd: int) -> 'str | None':
 
 
 def _enumerate_capturable_windows():
-    """List visible, titled capture targets using Win32, hyprctl, or xdotool.
+    """List visible, titled capture targets using Win32.
 
     Records contain hwnd, title, display_name, is_game, and icon (QIcon or None).
     is_game is a borderless/fullscreen heuristic.
     """
-    if sys.platform != 'win32':
-        from core.game_detector import _enumerate_linux_windows
-        return _enumerate_linux_windows()
 
 
     user32 = ctypes.windll.user32
@@ -168,8 +152,8 @@ def _combo_style() -> str:
     QComboBox {{
         combobox-popup: 0;
         background-color: {Colors.SURFACE_2};
-        border: 1px solid {Colors.BORDER_HI};
-        border-radius: 0px;
+        border: none;
+        border-radius: {Sizes.RADIUS_MD}px;
         padding: 3px 8px;
         color: {Colors.TEXT};
         font-size: 11px;
@@ -178,7 +162,6 @@ def _combo_style() -> str:
         max-height: 24px;
     }}
     QComboBox:hover {{
-        border-color: {Colors.ACCENT};
         background-color: {Colors.SURFACE_1};
     }}
     QComboBox::drop-down {{
@@ -193,7 +176,8 @@ def _combo_style() -> str:
     }}
     QComboBox QAbstractItemView {{
         background-color: {Colors.SURFACE_2};
-        border: 1px solid {Colors.BORDER_HI};
+        border: none;
+        border-radius: {Sizes.RADIUS_MD}px;
         color: {Colors.TEXT};
         font-size: 11px;
         selection-background-color: {Colors.SURFACE_3};
@@ -211,7 +195,7 @@ def _label_style() -> str:
     color: {Colors.TEXT_DIM};
     font-size: 10px;
     font-family: {Fonts.DISPLAY};
-    letter-spacing: 1px;
+    letter-spacing: 0px;
 '''
 
 def _restart_style() -> str:
@@ -222,10 +206,10 @@ def _restart_style() -> str:
         color: {Colors.BG};
         font-size: 10px;
         font-family: {Fonts.DISPLAY};
-        font-weight: bold;
-        letter-spacing: 1px;
+        font-weight: 600;
+        letter-spacing: 0px;
         padding: 4px 12px;
-        border-radius: 0px;
+        border-radius: {Sizes.RADIUS_MD}px;
     }}
     QPushButton:hover {{
         background-color: {Colors.TEXT};
@@ -275,7 +259,7 @@ class SettingBlock(QWidget):
         self._header.setObjectName('settingHeader')
         self._header.setFixedHeight(52)
         self._header.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._header.setStyleSheet(self._header_style(False))
+        set_theme_style(self._header, lambda: (self._header_style(False)))
 
         h_layout = QVBoxLayout(self._header)
         h_layout.setContentsMargins(10, 8, 10, 8)
@@ -285,10 +269,8 @@ class SettingBlock(QWidget):
         top_row.setSpacing(0)
 
         self._label_widget = QLabel(self._label)
-        self._label_widget.setStyleSheet(
-            f'color: {Colors.TEXT_DIM}; font-size: 9px; font-family: {Fonts.DISPLAY};'
-            'letter-spacing: 1px; font-weight: bold; background: transparent; border: none;'
-        )
+        set_theme_style(self._label_widget, lambda: (f'color: {Colors.TEXT_DIM}; font-size: 9px; font-family: {Fonts.DISPLAY};'
+            'letter-spacing: 0px; font-weight: 600; background: transparent; border: none;'))
         top_row.addWidget(self._label_widget)
         top_row.addStretch()
 
@@ -296,10 +278,8 @@ class SettingBlock(QWidget):
         top_row.addWidget(self._arrow)
 
         self._value_widget = QLabel(self._current)
-        self._value_widget.setStyleSheet(
-            f'color: {Colors.TEXT}; font-size: 14px; font-family: {Fonts.DISPLAY};'
-            'font-weight: bold; background: transparent; border: none;'
-        )
+        set_theme_style(self._value_widget, lambda: (f'color: {Colors.TEXT}; font-size: 14px; font-family: {Fonts.DISPLAY};'
+            'font-weight: 600; background: transparent; border: none;'))
 
         h_layout.addLayout(top_row)
         h_layout.addWidget(self._value_widget)
@@ -308,10 +288,8 @@ class SettingBlock(QWidget):
         # options panel (hidden by default)
         self._options_frame = QFrame()
         self._options_frame.setObjectName('settingOptions')
-        self._options_frame.setStyleSheet(
-            f'QFrame#settingOptions {{ background-color: {Colors.SURFACE_1};'
-            f'border: 1px solid {Colors.BORDER_HI}; border-top: none; }}'
-        )
+        set_theme_style(self._options_frame, lambda: (f'QFrame#settingOptions {{ background-color: {Colors.SURFACE_1};'
+            f'border: 1px solid {Colors.BORDER_HI}; border-top: none; }}'))
         opts_layout = QVBoxLayout(self._options_frame)
         opts_layout.setContentsMargins(0, 4, 0, 4)
         opts_layout.setSpacing(0)
@@ -319,7 +297,7 @@ class SettingBlock(QWidget):
         for opt in self._options:
             lbl = QLabel(opt)
             is_selected = (opt == self._current)
-            lbl.setStyleSheet(self._option_style(is_selected))
+            set_theme_style(lbl, lambda is_selected=is_selected: (self._option_style(is_selected)))
             lbl.setFixedHeight(28)
             lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             lbl.setContentsMargins(10, 0, 10, 0)
@@ -347,7 +325,7 @@ class SettingBlock(QWidget):
         if selected:
             return (
                 f'color: {Colors.ACCENT}; font-size: 12px; font-family: {Fonts.DISPLAY};'
-                f'font-weight: bold; background: transparent; padding-left: 2px;'
+                f'font-weight: 600; background: transparent; padding-left: 2px;'
             )
         return (
             f'color: {Colors.TEXT_DIM}; font-size: 12px; font-family: {Fonts.DISPLAY};'
@@ -356,19 +334,16 @@ class SettingBlock(QWidget):
 
     def refresh_theme(self):
         """Reapply all local styles after the shared theme changes."""
-        self._header.setStyleSheet(self._header_style(self._expanded))
-        self._label_widget.setStyleSheet(
-            f'color: {Colors.TEXT_DIM}; font-size: 9px; font-family: {Fonts.DISPLAY};'
-            'letter-spacing: 1px; font-weight: bold; background: transparent; border: none;')
+        set_theme_style(self._header, lambda: (self._header_style(self._expanded)))
+        set_theme_style(self._label_widget, lambda: (f'color: {Colors.TEXT_DIM}; font-size: 9px; font-family: {Fonts.DISPLAY};'
+            'letter-spacing: 0px; font-weight: 600; background: transparent; border: none;'))
         self._arrow.refresh_theme()
-        self._value_widget.setStyleSheet(
-            f'color: {Colors.TEXT}; font-size: 14px; font-family: {Fonts.DISPLAY};'
-            'font-weight: bold; background: transparent; border: none;')
-        self._options_frame.setStyleSheet(
-            f'QFrame#settingOptions {{ background-color: {Colors.SURFACE_1};'
-            f'border: 1px solid {Colors.BORDER_HI}; border-top: none; }}')
+        set_theme_style(self._value_widget, lambda: (f'color: {Colors.TEXT}; font-size: 14px; font-family: {Fonts.DISPLAY};'
+            'font-weight: 600; background: transparent; border: none;'))
+        set_theme_style(self._options_frame, lambda: (f'QFrame#settingOptions {{ background-color: {Colors.SURFACE_1};'
+            f'border: 1px solid {Colors.BORDER_HI}; border-top: none; }}'))
         for i, label in enumerate(self._option_labels):
-            label.setStyleSheet(self._option_style(self._options[i] == self._current))
+            set_theme_style(label, lambda i=i: (self._option_style(self._options[i] == self._current)))
 
     def toggle(self):
         if self._expanded:
@@ -380,7 +355,7 @@ class SettingBlock(QWidget):
         if self._expanded:
             return
         self._expanded = True
-        self._header.setStyleSheet(self._header_style(True))
+        set_theme_style(self._header, lambda: (self._header_style(True)))
         self._arrow.setExpanded(True)
         self._options_frame.setVisible(True)
         self.opened.emit(self)
@@ -390,7 +365,7 @@ class SettingBlock(QWidget):
         if not self._expanded:
             return
         self._expanded = False
-        self._header.setStyleSheet(self._header_style(False))
+        set_theme_style(self._header, lambda: (self._header_style(False)))
         self._arrow.setExpanded(False)
         self._options_frame.setVisible(False)
         self.updateGeometry()
@@ -399,7 +374,7 @@ class SettingBlock(QWidget):
         self._current = option
         self._value_widget.setText(option)
         for i, lbl in enumerate(self._option_labels):
-            lbl.setStyleSheet(self._option_style(self._options[i] == option))
+            set_theme_style(lbl, lambda i=i, option=option: (self._option_style(self._options[i] == option)))
         self.collapse()
         self.value_changed.emit(option)
 
@@ -408,7 +383,7 @@ class SettingBlock(QWidget):
         self._current = option
         self._value_widget.setText(option)
         for i, lbl in enumerate(self._option_labels):
-            lbl.setStyleSheet(self._option_style(self._options[i] == option))
+            set_theme_style(lbl, lambda i=i, option=option: (self._option_style(self._options[i] == option)))
 
 
 class CaptureSettingsWidget(QWidget):
@@ -504,7 +479,7 @@ class CaptureSettingsWidget(QWidget):
         settings_row.addStretch()
 
         # Restart button
-        self.restart_button = QPushButton('APPLY + RESTART')
+        self.restart_button = QPushButton('Apply + restart')
         self.restart_button.setStyleSheet(_restart_style())
         self.restart_button.setVisible(False)
         self.restart_button.clicked.connect(self._on_restart_clicked)
@@ -516,7 +491,7 @@ class CaptureSettingsWidget(QWidget):
         source_row = QHBoxLayout()
         source_row.setSpacing(12)
 
-        source_row.addWidget(self._label('SOURCE'))
+        source_row.addWidget(self._label('Source'))
 
         self.capture_mode_combo = WheelSafeComboBox()
         self.capture_mode_combo.addItems(['Desktop', 'Window / Game'])
@@ -535,22 +510,22 @@ class CaptureSettingsWidget(QWidget):
         self.window_combo.currentIndexChanged.connect(self._on_window_selected)
         source_row.addWidget(self.window_combo)
 
-        self.refresh_btn = QPushButton('REFRESH')
-        self.refresh_btn.setStyleSheet(f'''
+        self.refresh_btn = QPushButton('Refresh')
+        set_theme_style(self.refresh_btn, lambda: (f'''
             QPushButton {{
                 background-color: {Colors.SURFACE_2};
                 border: 1px solid {Colors.BORDER_HI};
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
                 padding: 3px 10px;
                 color: {Colors.TEXT_DIM};
                 font-size: 10px;
                 font-family: {Fonts.DISPLAY};
-                font-weight: bold;
-                letter-spacing: 1px;
+                font-weight: 600;
+                letter-spacing: 0px;
                 max-height: 24px;
             }}
             QPushButton:hover {{ border-color: {Colors.ACCENT}; color: {Colors.TEXT}; }}
-        ''')
+        '''))
         self.refresh_btn.clicked.connect(self._refresh_window_list)
         source_row.addWidget(self.refresh_btn)
 
@@ -583,35 +558,34 @@ class CaptureSettingsWidget(QWidget):
         hw_status_layout.setSpacing(12)
 
         # Warning icon + message
-        warning_label = QLabel('⚠')
-        warning_label.setStyleSheet(
-            f'color: {Colors.TEXT}; font-size: 14px;')
+        warning_label = QLabel('Warning')
+        set_theme_style(warning_label, lambda: (f'color: {Colors.TEXT}; font-size: 14px;'))
         hw_status_layout.addWidget(warning_label)
 
         self.hw_status_message = QLabel('Hardware encoding initialization failed - using software encoder (slower)')
-        self.hw_status_message.setStyleSheet(f'''
+        set_theme_style(self.hw_status_message, lambda: (f'''
             color: {Colors.TEXT};
             font-size: 11px;
             font-family: {Fonts.BODY};
-            font-weight: bold;
-        ''')
+            font-weight: 600;
+        '''))
         hw_status_layout.addWidget(self.hw_status_message)
 
         hw_status_layout.addStretch()
 
         # Retry button
-        self.retry_button = QPushButton('RETRY')
-        self.retry_button.setStyleSheet(f'''
+        self.retry_button = QPushButton('Retry')
+        set_theme_style(self.retry_button, lambda: (f'''
             QPushButton {{
                 background-color: {Colors.TEXT};
                 border: none;
                 color: {Colors.ERROR};
                 font-size: 10px;
                 font-family: {Fonts.DISPLAY};
-                font-weight: bold;
-                letter-spacing: 1px;
+                font-weight: 600;
+                letter-spacing: 0px;
                 padding: 4px 16px;
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
             }}
             QPushButton:hover {{
                 background-color: {Colors.SURFACE_3};
@@ -619,7 +593,7 @@ class CaptureSettingsWidget(QWidget):
             QPushButton:pressed {{
                 background-color: {Colors.SURFACE_2};
             }}
-        ''')
+        '''))
         self.retry_button.clicked.connect(self._on_retry_hardware_encoding)
         hw_status_layout.addWidget(self.retry_button)
 
@@ -632,8 +606,7 @@ class CaptureSettingsWidget(QWidget):
 
     def _separator(self):
         sep = QLabel('|')
-        sep.setStyleSheet(
-            f'color: {Colors.BORDER_HI}; font-size: 12px;')
+        set_theme_style(sep, lambda: (f'color: {Colors.BORDER_HI}; font-size: 12px;'))
         return sep
 
     def _combo(self, items, default_index, callback):
@@ -712,12 +685,9 @@ class CaptureSettingsWidget(QWidget):
         # Try to re-select the previously chosen HWND
         select_idx = 0
         for i, w in enumerate(self._window_list):
-            label = ('★ ' if w['is_game'] else '') + w['display_name']
-            icon = w.get('icon')
-            if icon:
-                self.window_combo.addItem(icon, label)
-            else:
-                self.window_combo.addItem(label)
+            from ui.icons import load_icon
+            label = w['display_name'] + (' (Game)' if w['is_game'] else '')
+            self.window_combo.addItem(load_icon('visuals.png', 16), label)
             if w['hwnd'] == self.current_target_hwnd:
                 select_idx = i
 
@@ -754,7 +724,7 @@ class CaptureSettingsWidget(QWidget):
             QFrame#hwStatusBar {{
                 background-color: {background};
                 border: 1px solid {border};
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
                 padding: 8px 12px;
             }}
         ''')
@@ -768,41 +738,41 @@ class CaptureSettingsWidget(QWidget):
         for combo in self.findChildren(WheelSafeComboBox):
             combo.setStyleSheet(_combo_style())
         if hasattr(self, 'refresh_btn'):
-            self.refresh_btn.setStyleSheet(f'''
+            set_theme_style(self.refresh_btn, lambda: (f'''
                 QPushButton {{
                     background-color: {Colors.SURFACE_2};
                     border: 1px solid {Colors.BORDER_HI};
-                    border-radius: 0px;
+                    border-radius: {Sizes.RADIUS_MD}px;
                     padding: 3px 10px;
                     color: {Colors.TEXT_DIM};
                     font-size: 10px;
                     font-family: {Fonts.DISPLAY};
-                    font-weight: bold;
-                    letter-spacing: 1px;
+                    font-weight: 600;
+                    letter-spacing: 0px;
                     max-height: 24px;
                 }}
                 QPushButton:hover {{
                     border-color: {Colors.ACCENT}; color: {Colors.TEXT};
                 }}
-            ''')
+            '''))
         if hasattr(self, 'hw_status_bar'):
             self._apply_hw_status_style(self._hardware_status_success)
         if hasattr(self, 'hw_status_message'):
-            self.hw_status_message.setStyleSheet(f'''
+            set_theme_style(self.hw_status_message, lambda: (f'''
                 color: {Colors.TEXT}; font-size: 11px;
-                font-family: {Fonts.BODY}; font-weight: bold;
-            ''')
+                font-family: {Fonts.BODY}; font-weight: 600;
+            '''))
         if hasattr(self, 'retry_button'):
-            self.retry_button.setStyleSheet(f'''
+            set_theme_style(self.retry_button, lambda: (f'''
                 QPushButton {{
                     background-color: {Colors.TEXT}; border: none;
                     color: {Colors.ERROR}; font-size: 10px;
-                    font-family: {Fonts.DISPLAY}; font-weight: bold;
-                    letter-spacing: 1px; padding: 4px 16px; border-radius: 0px;
+                    font-family: {Fonts.DISPLAY}; font-weight: 600;
+                    letter-spacing: 0px; padding: 4px 16px; border-radius: {Sizes.RADIUS_MD}px;
                 }}
                 QPushButton:hover {{ background-color: {Colors.SURFACE_3}; }}
                 QPushButton:pressed {{ background-color: {Colors.SURFACE_2}; }}
-            ''')
+            '''))
 
     def _update_bitrate(self):
         if self.current_bitrate_level == 'custom':
@@ -833,7 +803,7 @@ class CaptureSettingsWidget(QWidget):
     def show_hardware_encoding_success(self):
         """Briefly show success, then hide"""
         self._apply_hw_status_style(success=True)
-        self.hw_status_message.setText('✓ Hardware encoding initialized successfully')
+        self.hw_status_message.setText('Hardware encoding initialized successfully')
         self.hw_status_bar.setVisible(True)
         
         # Hide after 3 seconds

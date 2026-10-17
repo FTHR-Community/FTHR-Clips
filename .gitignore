@@ -18,13 +18,6 @@
 # recorded in tools/ffmpeg_manifest.json.
 FTHRcapture/FTHRclips/third_party/ffmpeg/bin/
 
-# Linux: the pinned LGPL FFmpeg the engine is built against and ships with
-# (AUDIT-014). ~57 MB of headers and libraries, fetched and sha256-verified by
-# `python tools/fetch_third_party.py --ffmpeg-linux`. Unlike the Windows side
-# nothing here is tracked: headers and libs must come from the same archive, so
-# splitting them would let them drift apart.
-FTHRcapture_linux/third_party/
-
 # MSVC redistributable pulled in by the Inno Setup installer.
 # Fetch with `python tools/fetch_third_party.py --vcredist`.
 redist/
@@ -65,20 +58,6 @@ FTHRcapture/FTHRPlaybackMixer/x64/
 *.bak
 *.old
 
-# CMake / Linux engine
-FTHRcapture_linux/build/
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-compile_commands.json
-
-# AppImage packaging: `AppDir/fthr-clips.desktop` and `AppDir/fthr-clips.png`
-# are SOURCE and stay tracked. build_linux.sh generates AppRun and the usr/
-# tree into its own build directory; the copies here are stale artefacts.
-AppDir/AppRun
-AppDir/usr/
-*.AppImage
-
 # Inno Setup installer output
 /Output/
 *.iss.bak
@@ -92,7 +71,6 @@ __pycache__/
 *.egg-info/
 .eggs/
 .venv/
-/.venv-linux/
 venv/
 env/
 .pytest_cache/

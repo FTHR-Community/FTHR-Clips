@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from typing import Callable, Sequence
 
 import numpy as np
@@ -21,7 +22,9 @@ import numpy as np
 from PySide6.QtCore import QIODevice, QObject, QTimer, Signal
 from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
 
-from core.audio_manifest import read_manifest_for_media
+from core.audio_manifest import read_manifest_for_media, manifest_path_for
+from core.media_identity import file_identity
+from core.media_process import run_media_process
 from core.ffmpeg_tools import FFmpegUnavailable, get_ffprobe_exe
 from core.playback_mix_model import (
     CANONICAL_CHANNELS,
@@ -160,7 +163,7 @@ class _AudioPullDevice(QIODevice):
 
 
 def _bridge_candidates() -> tuple[Path, ...]:
-    suffix = 'FTHRPlaybackMixer.dll' if sys.platform == 'win32' else 'libFTHRPlaybackMixer.so'
+    suffix = 'FTHRPlaybackMixer.dll'
     candidates: list[Path] = []
     bundle = getattr(sys, '_MEIPASS', None)
     if bundle:
@@ -176,7 +179,6 @@ def _bridge_candidates() -> tuple[Path, ...]:
         root / 'FTHRcapture' / 'FTHRPlaybackMixer' / 'x64' / 'Upgrade' / suffix,
         root / 'FTHRcapture' / 'FTHRPlaybackMixer' / 'x64' / 'Release' / suffix,
         root / 'FTHRcapture' / 'x64' / 'Release' / suffix,
-        root / 'FTHRcapture_linux' / 'build' / suffix,
     )
 
     def _modified(path: Path) -> int:
@@ -196,7 +198,7 @@ def _load_bridge() -> ctypes.CDLL:
         if not path.is_file():
             continue
         try:
-            if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
+            if hasattr(os, 'add_dll_directory'):
                 # The bridge and FFmpeg runtime are either together in the
                 # frozen ``engine`` directory or beside the development engine.
                 for directory in (path.parent,
@@ -303,7 +305,8 @@ class InProcessFFmpegMixer:
             self._handle = None
 
 
-def probe_audio_streams(media_path: str) -> tuple[ProbedAudioStream, ...]:
+def probe_audio_streams(media_path: str, cancelled: threading.Event | None = None
+                        ) -> tuple[ProbedAudioStream, ...]:
     """Read only container metadata once; FFmpeg decode remains in-process."""
 
     try:
@@ -311,17 +314,24 @@ def probe_audio_streams(media_path: str) -> tuple[ProbedAudioStream, ...]:
     except FFmpegUnavailable as error:
         raise PlaybackError(str(error)) from error
     try:
-        result = subprocess.run(
-            [probe, '-v', 'error', '-show_entries',
+        command = [probe, '-v', 'error', '-show_entries',
              'format_tags=comment,fthr_audio_mode:stream=index,codec_type:stream_tags=title,handler_name',
-             '-of', 'json', media_path],
-            capture_output=True, text=True, timeout=4, **_NO_WINDOW)
+             '-of', 'json', media_path]
+        if cancelled is None:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    timeout=4, **_NO_WINDOW)
+            returncode, output = result.returncode, result.stdout
+        else:
+            result = run_media_process(command, cancelled, timeout_seconds=4)
+            if result is None:
+                raise PlaybackError('audio stream inspection cancelled or timed out')
+            returncode, output, _stderr = result
     except (OSError, subprocess.SubprocessError) as error:
         raise PlaybackError(f'could not inspect clip audio streams: {error}') from error
-    if result.returncode != 0:
+    if returncode != 0:
         raise PlaybackError('could not inspect clip audio streams')
     try:
-        raw = json.loads(result.stdout)
+        raw = json.loads(output)
         raw_streams = raw.get('streams', [])
     except (TypeError, json.JSONDecodeError) as error:
         raise PlaybackError('clip stream metadata was not valid JSON') from error
@@ -371,11 +381,66 @@ def probe_audio_streams(media_path: str) -> tuple[ProbedAudioStream, ...]:
     return tuple(streams)
 
 
-def discover_playback_sources(media_path: str) -> tuple[PlaybackSource, ...]:
+_SOURCE_CACHE: OrderedDict[tuple, tuple[PlaybackSource, ...]] = OrderedDict()
+_SOURCE_CACHE_LOCK = threading.Lock()
+_RETIRING_AUDIO_CONTROLLERS = set()
+
+
+def finish_audio_cleanup(media_path: str, timeout: float = 0.5) -> bool:
+    """File mutations must wait for any recently retired decoder of this clip."""
+    identity = os.path.normcase(os.path.abspath(media_path))
+    for controller in tuple(_RETIRING_AUDIO_CONTROLLERS):
+        worker = controller._worker
+        if os.path.normcase(os.path.abspath(worker._media_path)) == identity:
+            worker.join(timeout=timeout)
+            if worker.is_alive():
+                return False
+    return True
+
+
+def _source_identity(media_path):
+    try:
+        media = file_identity(media_path)
+        try:
+            manifest = file_identity(manifest_path_for(media_path))
+        except FileNotFoundError:
+            manifest = None
+        return media, manifest
+    except OSError:
+        return None
+
+
+def discover_playback_sources(media_path: str, cancelled: threading.Event | None = None
+                              ) -> tuple[PlaybackSource, ...]:
     """Combine a valid FTHR sidecar, if any, with actual container streams."""
 
-    return build_playback_sources(read_manifest_for_media(media_path),
-                                  probe_audio_streams(media_path))
+    if cancelled is not None and cancelled.is_set():
+        raise PlaybackError('audio stream inspection cancelled')
+    key = _source_identity(media_path)
+    if key is not None:
+        with _SOURCE_CACHE_LOCK:
+            cached = _SOURCE_CACHE.get(key)
+            if cached is not None:
+                _SOURCE_CACHE.move_to_end(key)
+                return cached
+    streams = (probe_audio_streams(media_path) if cancelled is None
+               else probe_audio_streams(media_path, cancelled))
+    if cancelled is not None and cancelled.is_set():
+        return ()
+    try:
+        manifest = (read_manifest_for_media(media_path) if cancelled is None
+                    else read_manifest_for_media(media_path, cancelled))
+    except InterruptedError as error:
+        raise PlaybackError('audio source validation cancelled') from error
+    sources = build_playback_sources(manifest, streams)
+    if (key is not None and key == _source_identity(media_path)
+            and (cancelled is None or not cancelled.is_set())):
+        with _SOURCE_CACHE_LOCK:
+            _SOURCE_CACHE[key] = sources
+            _SOURCE_CACHE.move_to_end(key)
+            while len(_SOURCE_CACHE) > 128:
+                _SOURCE_CACHE.popitem(last=False)
+    return sources
 
 
 class _DecodeWorker(threading.Thread):
@@ -387,7 +452,8 @@ class _DecodeWorker(threading.Thread):
                  mix_values: Callable[[], tuple[list[float], float]],
                  ready: Callable[[str | None], None],
                  failed: Callable[[str], None], source_failed: Callable[[str], None],
-                 eof: Callable[[], None], pcm_ready: Callable[[], None] = lambda: None):
+                  eof: Callable[[], None], pcm_ready: Callable[[], None] = lambda: None,
+                  finished: Callable[[], None] = lambda: None):
         super().__init__(name='FTHR-audio-decode', daemon=True)
         self._media_path = media_path
         self._sources = tuple(sources)
@@ -399,6 +465,7 @@ class _DecodeWorker(threading.Thread):
         self._source_failed = source_failed
         self._eof = eof
         self._pcm_ready = pcm_ready
+        self._finished = finished
         self._condition = threading.Condition()
         self._playing = False
         self._stopping = False
@@ -553,8 +620,11 @@ class _DecodeWorker(threading.Thread):
             self._ready(str(error))
             self._failed(f'audio playback stopped: {error}')
         finally:
-            if mixer is not None:
-                mixer.close()
+            try:
+                if mixer is not None:
+                    mixer.close()
+            finally:
+                self._finished()
 
 
 class FFmpegPlaybackController(QObject):
@@ -565,6 +635,7 @@ class FFmpegPlaybackController(QObject):
     source_failed = Signal(str)
     reached_eof = Signal()
     pcm_available = Signal()
+    decode_finished = Signal()
 
     def __init__(self, media_path: str, sources: Sequence[PlaybackSource], parent: QObject):
         super().__init__(parent)
@@ -578,6 +649,9 @@ class FFmpegPlaybackController(QObject):
         # backwards: doing so replays the just-heard syllable/sample and is
         # perceived as a deterministic double hit after a timeline seek.
         self._sync_holding = False
+        self._stopping = False
+        self._async_stop = False
+        self.decode_finished.connect(self._finish_async_stop)
         self._output_device, self._output_format, self._encode_for_device = self._select_output_format()
         self._queue = BoundedPCMQueue(self._output_format.bytesPerFrame())
         self._device: _AudioPullDevice | None = None
@@ -589,7 +663,8 @@ class FFmpegPlaybackController(QObject):
         self._worker = _DecodeWorker(
             media_path, self.sources, self._queue, self._encode_for_device, self._mix_values,
             self._worker_ready, self._worker_failed, self.source_failed.emit,
-            self.reached_eof.emit, self.pcm_available.emit)
+            self.reached_eof.emit, self.pcm_available.emit,
+            self.decode_finished.emit)
         # The owner must connect ready/error signals before this thread starts;
         # otherwise a fast bridge open can emit readiness before Qt has any
         # receiver and leave the fallback output permanently muted.
@@ -633,10 +708,12 @@ class FFmpegPlaybackController(QObject):
                     self._master_gain)
 
     def _worker_ready(self, error: str | None) -> None:
-        self.ready_changed.emit(error is None, error or '')
+        if not self._stopping:
+            self.ready_changed.emit(error is None, error or '')
 
     def _worker_failed(self, error: str) -> None:
-        self.audio_failed.emit(error)
+        if not self._stopping:
+            self.audio_failed.emit(error)
 
     def set_master_percent(self, value: int) -> None:
         with self._mix_lock:
@@ -804,6 +881,8 @@ class FFmpegPlaybackController(QObject):
         return self._device
 
     def _keep_sink_running(self) -> None:
+        if getattr(self, '_stopping', False):
+            return
         if self._queue.frames == 0:
             return
         if self._sink is None:
@@ -843,11 +922,32 @@ class FFmpegPlaybackController(QObject):
                                   QAudio.Error.FatalError):
             self.audio_failed.emit('Audio output device stopped unexpectedly.')
 
-    def stop(self) -> None:
+    def stop_async(self) -> None:
+        """Keep the QObject alive until native decode has released its files."""
+        if self._async_stop:
+            return
+        self._async_stop = True
+        self.setParent(None)
+        _RETIRING_AUDIO_CONTROLLERS.add(self)
+        self.stop(wait_for_worker=False)
+        if not self._worker_started or not self._worker.is_alive():
+            self._finish_async_stop()
+
+    def _finish_async_stop(self) -> None:
+        if self._async_stop:
+            self._async_stop = False
+            _RETIRING_AUDIO_CONTROLLERS.discard(self)
+            self.deleteLater()
+
+    def stop(self, *, wait_for_worker=True) -> None:
+        self._stopping = True
         self._sink_timer.stop()
         if self._worker_started:
             self._worker.stop()
-            self._worker.join(timeout=0.5)
+            if wait_for_worker:
+                self._worker.join(timeout=0.5)
+                if self._worker.is_alive():
+                    self.stop_async()
         else:
             self._queue.clear()
         self._release_sink()

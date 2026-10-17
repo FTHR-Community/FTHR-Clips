@@ -17,7 +17,7 @@ from typing import Callable, Iterable
 from core.ffmpeg_tools import get_ffmpeg_exe
 
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -59,10 +59,6 @@ _BACKENDS: tuple[
 
 
 def _platform_backend_keys(platform: str) -> tuple[str, ...]:
-    # Windows replay requires hardware encoding. Linux also exposes
-    # OpenH264, Kvazaar, and AV1 software backends.
-    if platform.startswith('win'):
-        return ('nvenc', 'amf', 'qsv')
     return ('nvenc', 'amf', 'qsv', 'software')
 
 
@@ -94,8 +90,7 @@ def _encoder_works(
         'timeout': timeout,
         'check': False,
     }
-    if sys.platform == 'win32':
-        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
     try:
         return runner(_probe_command(ffmpeg, encoder_name), **kwargs).returncode == 0
     except (OSError, subprocess.SubprocessError):
@@ -125,6 +120,9 @@ def probe_encoder_capabilities(
         codecs: list[str] = []
         codec_names: list[tuple[str, str]] = []
         for codec, encoder_names in codec_candidates:
+            # Windows software replay currently uses the low-latency OpenH264 path.
+            if platform.startswith('win') and key == 'software' and codec != 'h264':
+                continue
             working_name = next((
                 name for name in encoder_names
                 if _encoder_works(

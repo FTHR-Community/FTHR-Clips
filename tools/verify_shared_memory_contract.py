@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Python/Windows/Linux shared-memory layouts and enum values.
+"""Verify Python/Windows shared-memory layouts and enum values.
 
 Model native alignment and compare field order, types, extents, offsets,
 and size with ctypes. Also check retired command slots and mapping version.
@@ -18,7 +18,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'FTHR_UI'))
 
 WIN_HEADER = ROOT / 'FTHRcapture' / 'FTHRclips' / 'include' / 'shared_memory.h'
-LINUX_HEADER = ROOT / 'FTHRcapture_linux' / 'src' / 'shared_memory.h'
 BRIDGE = ROOT / 'FTHR_UI' / 'core' / 'capture_bridge.py'
 
 # C++ scalar -> (size, alignment). Both MSVC x64 and GCC x86-64 use these.
@@ -263,15 +262,6 @@ def main() -> int:
     except Exception as exc:
         rep.fail(f'win32: {exc}')
 
-    print()
-    print('Linux layout (capture_bridge posix branch vs FTHRcapture_linux):')
-    try:
-        lin_cpp = parse_struct(LINUX_HEADER)
-        lin_py = python_fields(load_bridge_struct('linux'))
-        compare(rep, 'linux', lin_cpp, lin_py)
-    except Exception as exc:
-        rep.fail(f'linux: {exc}')
-
     # Enums
     print()
     print('Command / response enums:')
@@ -280,7 +270,7 @@ def main() -> int:
         from core.capture_bridge import CommandType, ResponseType
         py_cmd = {m.name: m.value for m in CommandType}
         py_rsp = {m.name: m.value for m in ResponseType}
-        for header, tag in ((WIN_HEADER, 'win32'), (LINUX_HEADER, 'linux')):
+        for header, tag in ((WIN_HEADER, 'win32'),):
             compare_enums(rep, f'CommandType ({tag})',
                           parse_enum(header, 'CommandType'), py_cmd)
             compare_enums(rep, f'ResponseType ({tag})',

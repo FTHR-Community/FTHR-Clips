@@ -4,6 +4,7 @@
 
 #include "shared_memory.h"
 #include "capture_engine.h"
+#include "capture_config_limits.h"
 #include "hardware_encoder.h"  // DetectNVENC() for pre-init logging
 #include "windows_microphone_audio_provider.h"
 #include <algorithm>
@@ -20,9 +21,17 @@
 
 static uint32_t ParseArgU32(int argc, char* argv[], int index, uint32_t default_val) {
     if (index >= argc) return default_val;
-    int val = std::atoi(argv[index]);
-    if (val < 0) return default_val;
-    return static_cast<uint32_t>(val);
+    const char* raw = argv[index];
+    const auto parsed = raw
+        ? fthr::capture_config_limits::ParseU32(raw)
+        : fthr::capture_config_limits::U32ParseResult{};
+    if (!parsed.valid) {
+        std::cerr << "[Config] Invalid unsigned argument argv[" << index << "]='"
+                  << (raw ? raw : "<null>")
+                  << "' - using default " << default_val << std::endl;
+        return default_val;
+    }
+    return parsed.value;
 }
 
 static double ParseArgDouble(
@@ -104,10 +113,10 @@ static std::string EscapeJson(const std::string& value) {
     return result;
 }
 
-static int ListMicrophones() {
+static int ListMicrophones(bool render = false) {
     std::vector<fthr::WindowsMicrophoneEndpoint> endpoints;
     std::string error;
-    if (!fthr::EnumerateWindowsMicrophoneEndpoints(&endpoints, &error)) {
+    if (!fthr::EnumerateWindowsMicrophoneEndpoints(&endpoints, &error, render)) {
         std::cerr << "{\"schema_version\":1,\"error\":\""
                   << EscapeJson(error) << "\"}" << std::endl;
         return 1;
@@ -176,6 +185,9 @@ static void PrintConfig(const fthr::CaptureConfig& cfg) {
 // Entry point
 
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::strcmp(argv[1], "--list-playback-devices") == 0) {
+        return ListMicrophones(true);
+    }
     if (argc == 2 && std::strcmp(argv[1], "--list-microphones") == 0) {
         return ListMicrophones();
     }
@@ -259,6 +271,8 @@ int main(int argc, char* argv[]) {
     config.separate_audio_enabled = ParseArgU32(argc, argv, 23, 0) != 0;
     config.audio_enabled = (ParseArgU32(argc, argv, 14, 1) != 0);
     config.microphone_endpoint_id = ParseArgUtf8(argc, argv, 15);
+    config.playback_endpoint_id = ParseArgUtf8(argc, argv, 24);
+    config.microphone_mono = ParseArgU32(argc, argv, 25, 0) != 0;
     config.microphone_gain_percent = std::min<uint32_t>(
         ParseArgU32(argc, argv, 16, 100), 200);
     switch (ParseArgU32(argc, argv, 17, 0)) {
@@ -281,7 +295,7 @@ int main(int argc, char* argv[]) {
         config.framerate = 60;
     }
 
-    if (config.buffer_seconds == 0 || config.buffer_seconds > 300) {
+    if (config.buffer_seconds == 0 || config.buffer_seconds > 900) {
         std::cerr << "[Config] Invalid buffer_seconds " << config.buffer_seconds
             << " - clamping to 30" << std::endl;
         config.buffer_seconds = 30;
@@ -302,7 +316,8 @@ int main(int argc, char* argv[]) {
         config.target_height = 0;
     }
 
-    if (config.bitrate_kbps < 500 || config.bitrate_kbps > 60000) {
+    if (!fthr::capture_config_limits::IsValidBitrateKbps(
+            config.bitrate_kbps)) {
         std::cerr << "[Config] Invalid bitrate_kbps " << config.bitrate_kbps
             << " - clamping to 16000" << std::endl;
         config.bitrate_kbps = 16000;
@@ -339,7 +354,8 @@ int main(int argc, char* argv[]) {
     }
     else {
         std::cout << "[NVENC] Not available - " << nvenc_info.error_message << std::endl;
-        std::cout << "[NVENC] Fallback: OpenH264 software encoding" << std::endl;
+        std::cout << "[NVENC] No automatic software fallback; requested hardware backend"
+                  << " must initialize on the selected adapter" << std::endl;
     }
 
     std::cout << "====================================\n" << std::endl;
@@ -406,8 +422,8 @@ int main(int argc, char* argv[]) {
 
     // Populate v2 fields so Python get_active_codec() returns a meaningful string.
     {
-        // Successful public-alpha startup always reports the exact active
-        // hardware encoder. Failed startup never publishes is_initialized.
+        // Report the exact active hardware or explicitly selected software
+        // encoder. The legacy nvenc_active ABI flag means compressed replay is active. Failed startup never publishes is_initialized.
         const std::string codec_name = engine.GetActiveEncoderName();
         strncpy_s(layout->active_codec, sizeof(layout->active_codec),
                   codec_name.c_str(), _TRUNCATE);

@@ -4,7 +4,6 @@ import threading
 import time
 import re
 import subprocess
-import sys
 from collections import deque
 from typing import Optional
 
@@ -52,29 +51,28 @@ class CameraRecorder:
         """Return camera indices with real Windows device names when available."""
         if not _AVAILABLE:
             return []
-        if sys.platform == 'win32':
-            try:
-                from core.ffmpeg_tools import get_ffmpeg_exe
-                ffmpeg = get_ffmpeg_exe()
-                result = subprocess.run(
-                    [ffmpeg, '-hide_banner', '-list_devices', 'true',
-                     '-f', 'dshow', '-i', 'dummy'],
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=12,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                output = (result.stderr or '') + '\n' + (result.stdout or '')
-                names = re.findall(r'"([^"]+)"\s+\(video\)', output)
-                if names:
-                    return [
-                        {'index': index, 'name': name}
-                        for index, name in enumerate(dict.fromkeys(names))
-                    ]
-            except Exception as exc:
-                print(f'[Camera] Named device scan failed: {exc}')
+        try:
+            from core.ffmpeg_tools import get_ffmpeg_exe
+            ffmpeg = get_ffmpeg_exe()
+            result = subprocess.run(
+                [ffmpeg, '-hide_banner', '-list_devices', 'true',
+                 '-f', 'dshow', '-i', 'dummy'],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=12,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            output = (result.stderr or '') + '\n' + (result.stdout or '')
+            names = re.findall(r'"([^"]+)"\s+\(video\)', output)
+            if names:
+                return [
+                    {'index': index, 'name': name}
+                    for index, name in enumerate(dict.fromkeys(names))
+                ]
+        except Exception as exc:
+            print(f'[Camera] Named device scan failed: {exc}')
 
         # Cross-platform fallback: do not invent four entries. Only expose
         # indices that OpenCV can actually open.

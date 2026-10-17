@@ -5,6 +5,7 @@ import pytest
 from core.capture_settings import (
     FPS_VALUES,
     NORMAL_CLIP_VALUES,
+    MAX_CLIP_SECONDS,
     ApplyStatus,
     CaptureConfig,
     CaptureConfigTracker,
@@ -36,25 +37,26 @@ def test_product_limits_have_one_authoritative_policy():
     assert max(FPS_VALUES) == 240
 
     assert validate_normal_clip_length(300) == 300
+    assert validate_normal_clip_length(900) == 900
     assert validate_fps(240) == 240
 
 
 def test_every_exposed_duration_fits_the_native_ring():
-    for normal in NORMAL_CLIP_VALUES:
+    for normal in (*NORMAL_CLIP_VALUES, 301, 600, 899, 900):
         ring = compute_buffer_seconds(normal)
-        assert normal <= ring <= 300
+        assert normal <= ring <= MAX_CLIP_SECONDS
 
 
 def test_python_microphone_history_matches_maximum_replay():
     from core.mic_recorder import KEEP_SECONDS
 
-    assert KEEP_SECONDS >= max(NORMAL_CLIP_VALUES)
+    assert KEEP_SECONDS >= MAX_CLIP_SECONDS
 
 
 @pytest.mark.parametrize(
     ('validator', 'invalid'),
     [
-        (validate_normal_clip_length, 301),
+        (validate_normal_clip_length, 901),
         (validate_fps, 241),
     ],
 )

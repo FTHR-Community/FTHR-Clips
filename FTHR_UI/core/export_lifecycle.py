@@ -159,13 +159,19 @@ class ExportJob:
         # Arbitration with COMPLETED/CANCELLED must happen under the same lock
         # used by _complete_after_commit.  Otherwise a cancel arriving between
         # the terminal check and Event.set() can be lost after publication.
-        with self._state_lock:
-            if self._state in _TERMINAL:
-                return
-            self._cancel_event.set()
+        if not self.request_cancel():
+            return
         process = self.process
         if process is not None and self._poll(process) is None:
             self._terminate_and_reap(process)
+
+    def request_cancel(self) -> bool:
+        """Let the export worker terminate and reap its child off the UI thread."""
+        with self._state_lock:
+            if self._state in _TERMINAL:
+                return False
+            self._cancel_event.set()
+        return True
 
     @staticmethod
     def _poll(process) -> int | None:

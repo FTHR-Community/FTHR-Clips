@@ -46,7 +46,7 @@ class _DraftManager:
 
 
 def _viewer(monkeypatch, qtbot, path: str, metadata_manager=None) -> ClipViewer:
-    monkeypatch.setattr(clip_viewer, 'discover_playback_sources', lambda _path: ())
+    monkeypatch.setattr(clip_viewer, 'discover_playback_sources', lambda _path, cancelled=None: ())
     viewer = ClipViewer(
         path, None, settings_manager=_Settings(),
         metadata_manager=metadata_manager)
@@ -193,7 +193,7 @@ def test_immediate_play_is_deferred_until_preparation_finishes(
 
     assert viewer._play_when_ready is True
     assert viewer.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState
-    assert 'PLAY QUEUED' in viewer._playback_status_lbl.text()
+    assert 'play queued' in viewer._playback_status_lbl.text()
 
     viewer._media_ready = True
     viewer._audio_preparation_ready = True

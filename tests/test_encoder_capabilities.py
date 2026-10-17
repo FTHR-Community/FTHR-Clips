@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import sys
 
 import pytest
 
@@ -91,6 +92,8 @@ def test_settings_bind_device_encoder_codec_preset_and_audio(
         EncoderCapability(
             'qsv', 'Intel Quick Sync', ('h264',),
             (('h264', 'h264_qsv'),), False),
+        EncoderCapability('software', 'Software', ('h264',),
+                          (('h264', 'libopenh264'),), False),
     ))
 
     assert 'Version & Updates' not in page._cat_titles
@@ -98,10 +101,14 @@ def test_settings_bind_device_encoder_codec_preset_and_audio(
     assert page.codec_combo.currentData() == 'hevc'
     assert page.encoder_preset_combo.currentData() == 6
     assert not page.encoder_preset_row.isHidden()
-    assert page.performance_audio_check.text() == 'Enable audio capture'
+    assert page.performance_audio_check.text() == 'Enable audio capture · Medium impact'
     assert page.audio_capture_check.text() == 'Enable audio capture'
-    assert page.performance_capture_card_check.text() == 'Enable capture card'
-    assert page.performance_capture_card_check.isChecked()
+    if sys.platform == 'win32':
+        assert page.capture_card_mode_combo.currentData() == 'all'
+        assert not hasattr(page, 'performance_capture_card_check')
+    else:
+        assert page.performance_capture_card_check.text() == 'Enable capture card'
+        assert page.performance_capture_card_check.isChecked()
     assert page.performance_encoder_preset_combo.currentData() == 6
     assert not page.performance_encoder_preset_row.isHidden()
 
@@ -125,7 +132,24 @@ def test_settings_bind_device_encoder_codec_preset_and_audio(
     assert not page.audio_capture_check.isChecked()
     assert not hasattr(page, 'multiband_check')
     assert not sm.get('audio_capture_enabled')
-    page.performance_capture_card_check.setChecked(False)
+    if sys.platform == 'win32':
+        page.capture_card_mode_combo.setCurrentIndex(page.capture_card_mode_combo.findData('off'))
+    else:
+        page.performance_capture_card_check.setChecked(False)
     assert not sm.get('capture_card_enabled')
+    page.encoder_combo.setCurrentIndex(page.encoder_combo.findData('software'))
+    assert page.encoder_combo.currentData() == 'software'
+    assert [page.codec_combo.itemData(i) for i in range(page.codec_combo.count())] == ['auto', 'h264']
+    assert page.encoder_preset_row.isHidden()
+    page._on_encoder_apply()
+    assert sm.get('encoder_pref') == 'software'
     page.deleteLater()
     app.processEvents()
+
+
+def test_windows_software_is_explicit_and_h264_only():
+    capabilities = probe_encoder_capabilities(
+        'ffmpeg', platform='win32',
+        runner=_runner_for({'libopenh264', 'libkvazaar', 'libsvtav1'}))
+    assert [(item.key, item.codecs) for item in capabilities] == [('software', ('h264',))]
+    assert available_codecs(capabilities, 'software') == ('h264',)

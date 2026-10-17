@@ -1,5 +1,5 @@
 FTHR UPLOAD EXTENSION — TERMS OF SERVICE
-Version: 2026-08-24-v1
+Version: 2026-10-15-v3
 
 The FTHR Upload Extension is optional software that transfers clips to a host
 you select. It is not installed until you enable uploads and accept these Terms
@@ -10,10 +10,19 @@ the right to share it. You may not upload illegal content, malware, material
 that infringes another person's rights, private information without consent, or
 content prohibited by the selected host.
 
-Catbox and Lustful are independent third-party services. Their own terms,
+Catbox and user-selected hosts are independent third-party services. Their terms,
 privacy policies, retention rules, content rules, and availability apply. FTHR
 does not control those services and cannot guarantee that an upload remains
 available or can be deleted.
 
 The extension is provided as-is. You can stop using it at any time by disabling
 uploads. Local capture, editing, and playback remain available without it.
+
+For SFTP and your own server, you are responsible for verifying the operator,
+server identity, access permissions, retention and applicable policies. SFTP
+uploads do not create public sharing links.
+
+Enabling public URL mapping opts new SFTP uploads into web-readable file
+permissions and constructs HTTPS sharing links from your public folder URL.
+Ensure that the URL corresponds to the remote folder and the files are
+authorized for public access. This setting does not configure web hosting.

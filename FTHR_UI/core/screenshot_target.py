@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+
+from .windows_monitor import desktop_monitor_identity
 from typing import Iterable, Sequence
 
 
@@ -48,7 +50,9 @@ def select_qt_screen(
         matched_monitor = None
         for monitor in windows_monitors:
             device_path = os.path.normcase(str(getattr(monitor, 'device_path', '')))
-            if device_path == selected_key:
+            fallback = desktop_monitor_identity(int(getattr(monitor, 'hmonitor', 0)),
+                                                str(getattr(monitor, 'gdi_name', '')))
+            if device_path == selected_key or fallback == selected_key:
                 matched_monitor = monitor
                 target = str(getattr(monitor, 'gdi_name', ''))
                 break
@@ -76,10 +80,3 @@ def select_qt_screen(
     return None
 
 
-def build_grim_command(
-    grim_path: str, output_path: str, selected_output: str = ''
-) -> list[str]:
-    output = selected_output.strip()
-    if not output:
-        raise ValueError('grim requires an explicit selected output')
-    return [grim_path, '-o', output, output_path]

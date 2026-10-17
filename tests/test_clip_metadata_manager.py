@@ -3,7 +3,25 @@ sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.par
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import json
+import pytest
 from pathlib import Path
+
+
+def test_edited_duration_applies_trim_and_deleted_ranges_and_rejects_stale_files(tmp_path, monkeypatch):
+    from core.clip_metadata_manager import ClipMetadataManager
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    clip = tmp_path / 'clip.mp4'
+    clip.write_bytes(b'video')
+    manager = ClipMetadataManager()
+    draft = {'trim_start': .1, 'trim_end': .9,
+             'segments': [[0, .3, False], [.3, .6, True], [.6, 1, False]]}
+    manager.set_editor_draft(str(clip), draft)
+    assert manager.edited_duration(str(clip), 60) == pytest.approx(30)
+    clip.write_bytes(b'replaced video')
+    assert manager.edited_duration(str(clip), 60) == 60
+    draft['segments'] = [[0, .3, False], [.6, 1, False]]
+    manager.set_editor_draft(str(clip), draft)
+    assert manager.edited_duration(str(clip), 60) == 60
 
 
 def test_get_returns_defaults_for_unknown_clip(tmp_path, monkeypatch):
@@ -55,8 +73,8 @@ def test_persists_to_disk(tmp_path, monkeypatch):
     assert mgr2.get('/clips/c.mp4') == {'tag': 'Highlight', 'description': 'Nice play'}
 
 
-def test_atomic_write_uses_temp_file(tmp_path, monkeypatch):
-    """set() must write via temp file + os.replace — no partial writes."""
+def test_atomic_write_uses_transaction(tmp_path, monkeypatch):
+    """A saved entry must be committed and independently readable."""
     monkeypatch.setenv('HOME', str(tmp_path))
     monkeypatch.setenv('USERPROFILE', str(tmp_path))  # Path.home() on Windows
     from importlib import reload
@@ -65,10 +83,9 @@ def test_atomic_write_uses_temp_file(tmp_path, monkeypatch):
     mgr = m.ClipMetadataManager()
     mgr.set('/clips/d.mp4', tag='Test')
 
-    meta_file = Path(tmp_path) / '.fthr' / 'clip_metadata.json'
+    meta_file = Path(tmp_path) / '.fthr' / 'clip_metadata.sqlite3'
     assert meta_file.exists()
-    data = json.loads(meta_file.read_text())
-    assert '/clips/d.mp4' in data
+    assert m.ClipMetadataManager().get('/clips/d.mp4')['tag'] == 'Test'
 
 
 def test_editor_draft_roundtrip_is_bound_to_the_source_file(tmp_path, monkeypatch):
@@ -145,3 +162,48 @@ def test_editor_draft_storage_is_bounded_without_pruning_clip_details(
     assert draft_count == m._EDITOR_DRAFT_LIMIT
     assert mgr._data['old-0.mp4']['tag'] == 'Tag 0'
     assert 'editor_draft' not in mgr._data['old-0.mp4']
+
+
+def test_legacy_import_and_incremental_draft_write(tmp_path, monkeypatch):
+    import sqlite3
+    from core.clip_metadata_manager import ClipMetadataManager
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    folder = tmp_path / '.fthr'
+    folder.mkdir()
+    legacy = folder / 'clip_metadata.json'
+    legacy.write_text(json.dumps({'old.mp4': {'tag': 'Keep', 'description': 'Legacy'}}))
+    backup = legacy.read_bytes()
+    manager = ClipMetadataManager()
+    clip = tmp_path / 'new.mp4'
+    clip.write_bytes(b'media')
+    manager.set_editor_draft(str(clip), {'segments': [[0, 1, False]]})
+    with sqlite3.connect(manager._database) as db:
+        db.execute('CREATE TABLE changes (path TEXT)')
+        db.execute('CREATE TRIGGER changed AFTER UPDATE ON entries BEGIN '
+                   'INSERT INTO changes VALUES (new.path); END')
+    manager.set_editor_draft(str(clip), {'segments': [[0, .5, False]]})
+    with sqlite3.connect(manager._database) as db:
+        assert db.execute('SELECT path FROM changes').fetchall() == [(str(clip),)]
+    restored = ClipMetadataManager()
+    assert restored.get('old.mp4')['tag'] == 'Keep'
+    assert restored.get_editor_draft(str(clip))['segments'] == [[0, .5, False]]
+    assert legacy.read_bytes() == backup
+
+
+def test_failed_transaction_keeps_previous_draft_and_atomic_rename(tmp_path, monkeypatch):
+    from core.clip_metadata_manager import ClipMetadataManager
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    clip = tmp_path / 'clip.mp4'
+    clip.write_bytes(b'media')
+    manager = ClipMetadataManager()
+    manager.set_editor_draft(str(clip), {'value': 1})
+    with pytest.raises(TypeError):
+        manager.set_editor_draft(str(clip), {'unserializable': object()})
+    restored = ClipMetadataManager()
+    assert restored.get_editor_draft(str(clip)) == {'value': 1}
+    destination = tmp_path / 'renamed.mp4'
+    clip.rename(destination)
+    restored.rename_path(str(clip), str(destination))
+    reopened = ClipMetadataManager()
+    assert reopened.get_editor_draft(str(clip)) is None
+    assert reopened.get_editor_draft(str(destination)) == {'value': 1}

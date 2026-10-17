@@ -14,7 +14,7 @@ from typing import Optional
 
 # Default color tokens — mirrors style.py Colors class at its defaults.
 # Keys match the attribute names on Colors exactly.
-DEFAULT_COLORS: dict[str, str] = {
+_LEGACY_COLORS: dict[str, str] = {
     'BG':           '#000000',
     'SURFACE_1':    '#0a0a0a',
     'SURFACE_2':    '#111111',
@@ -40,6 +40,46 @@ DEFAULT_COLORS: dict[str, str] = {
     'WARNING':      '#E8871A',
     'SUCCESS':      '#00aa00',
     'DELETE':       '#cc0000',
+}
+
+# Previous shipped charcoal palette, retained for per-token migration.
+_V2_COLORS: dict[str, str] = {
+    'BG': '#242629', 'SURFACE_1': '#202326', 'SURFACE_2': '#2c2f33',
+    'SURFACE_3': '#35393d', 'SHELL_BG': '#202225',
+    'SHELL_BG_2': '#202326', 'SHELL_DIVIDER': '#45494d',
+    'CARD_BG': '#2c2f33', 'CARD_BG_HI': '#35393d', 'CARD_BORDER': '#45494d',
+    'HAIRLINE': '#35393d', 'BORDER': '#45494d', 'BORDER_HI': '#89938f',
+    'TEXT': '#f3f5f4', 'TEXT_DIM': '#b9bfbe', 'TEXT_MUTED': '#adb5b2',
+    'TEXT_GHOST': '#b9bfbe', 'ACCENT': '#00ffaa', 'ACCENT_DIM': '#62e8bb',
+    'ACCENT_SOFT': '#2a3634', 'ERROR': '#ff8585', 'ERROR_SOFT': '#502b30',
+    'WARNING': '#ffc078', 'SUCCESS': '#00ffaa', 'DELETE': '#9e444d',
+}
+
+# Previous graphite palette, retained for per-token migration.
+_V3_COLORS: dict[str, str] = {
+    'BG': '#14171b', 'SURFACE_1': '#191d22', 'SURFACE_2': '#22272e',
+    'SURFACE_3': '#2c333b', 'SHELL_BG': '#0f1216',
+    'SHELL_BG_2': '#171b20', 'SHELL_DIVIDER': '#2c323a',
+    'CARD_BG': '#1e2329', 'CARD_BG_HI': '#262c34', 'CARD_BORDER': '#303740',
+    'HAIRLINE': '#252b33', 'BORDER': '#353e48', 'BORDER_HI': '#64717e',
+    'TEXT': '#edf0f3', 'TEXT_DIM': '#b4bdc7', 'TEXT_MUTED': '#929eab',
+    'TEXT_GHOST': '#929eab', 'ACCENT': '#63cfb0', 'ACCENT_DIM': '#49b696',
+    'ACCENT_SOFT': '#203731', 'ERROR': '#ef9197', 'ERROR_SOFT': '#3b232a',
+    'WARNING': '#dfb77c', 'SUCCESS': '#63cfb0', 'DELETE': '#b45d68',
+}
+
+# Reference launcher palette: near-black green surfaces and a bright mint accent.
+# Editors, shell controls, library cards, and capture notifications share it.
+DEFAULT_COLORS: dict[str, str] = {
+    'BG': '#070a09', 'SURFACE_1': '#0a0f0d', 'SURFACE_2': '#101512',
+    'SURFACE_3': '#141b17', 'SHELL_BG': '#0a0f0d',
+    'SHELL_BG_2': '#101512', 'SHELL_DIVIDER': '#1b231e',
+    'CARD_BG': '#101512', 'CARD_BG_HI': '#141b17', 'CARD_BORDER': '#1b231e',
+    'HAIRLINE': '#181f1b', 'BORDER': '#242c27', 'BORDER_HI': '#49584f',
+    'TEXT': '#f3f6f4', 'TEXT_DIM': '#a0aba5', 'TEXT_MUTED': '#7e8a83',
+    'TEXT_GHOST': '#7e8a83', 'ACCENT': '#20e3a0', 'ACCENT_DIM': '#16bf87',
+    'ACCENT_SOFT': '#0d2b20', 'ERROR': '#ff795d', 'ERROR_SOFT': '#270b0f',
+    'WARNING': '#e7b56e', 'SUCCESS': '#20e3a0', 'DELETE': '#b84f45',
 }
 
 # Every semantic color consumed by the application is exposed here and in the
@@ -105,6 +145,15 @@ CUSTOMIZABLE_ICONS: dict[str, str] = {
     'maximize.png':         'Maximize Button',
     'shutdown.png':         'Shutdown Button',
     'dropdown.png':         'Dropdown Arrow',
+    'shortcuts.png': 'Shortcuts Tab',
+    'upload.png': 'Upload',
+    'link.png': 'Copy Link',
+    'delete.png': 'Delete',
+    'camera.png': 'Capture Camera',
+    'increase.png': 'Increase',
+    'decrease.png': 'Decrease',
+    'step-back.png': 'Step Backward',
+    'step-forward.png': 'Step Forward',
 }
 
 # Sounds that can be customized (key -> display label)
@@ -122,24 +171,52 @@ SUPPORTED_IMAGE_FORMATS = ('.png', '.jpg', '.jpeg', '.bmp', '.ico', '.svg')
 SUPPORTED_SOUND_FORMATS = ('.mp3', '.wav', '.ogg', '.flac', '.m4a', '.wma', '.aac')
 SUPPORTED_FONT_FORMATS = ('.ttf', '.otf')
 
-# Default icon tint — signature teal, applied to all default (non-imported) icons
-DEFAULT_ICON_TINT = '#00ffaa'
+# Quiet navigation icons let active controls carry the accent.
+DEFAULT_ICON_TINT = DEFAULT_COLORS['TEXT_DIM']
 
 # Default capture card colors
+_LEGACY_CAPTURE_CARD_COLORS = {
+    'CAPTURE_CARD_BG': '#000000', 'CAPTURE_CARD_ACCENT': '#ffffff',
+    'CAPTURE_CARD_TEXT': '#ffffff', 'CAPTURE_CARD_DIVIDER': '#222222',
+    'CAPTURE_CARD_STATS_DIM': '#666666', 'CAPTURE_CARD_PROGRESS_TRACK': '#111111',
+    'CAPTURE_CARD_PROGRESS_FILL': '#ffffff',
+}
+_V2_CAPTURE_CARD_COLORS: dict[str, str] = {
+    'CAPTURE_CARD_BG':             '#202326',
+    'CAPTURE_CARD_ACCENT':         '#00ffaa',
+    'CAPTURE_CARD_TEXT':           '#f3f5f4',
+    'CAPTURE_CARD_DIVIDER':        '#45494d',
+    'CAPTURE_CARD_STATS_DIM':      '#b9bfbe',
+    'CAPTURE_CARD_PROGRESS_TRACK': '#2c2f33',
+    'CAPTURE_CARD_PROGRESS_FILL':  '#00ffaa',
+}
+
+_V3_CAPTURE_CARD_COLORS: dict[str, str] = {
+    'CAPTURE_CARD_BG': _V3_COLORS['SURFACE_1'],
+    'CAPTURE_CARD_ACCENT': _V3_COLORS['ACCENT'],
+    'CAPTURE_CARD_TEXT': _V3_COLORS['TEXT'],
+    'CAPTURE_CARD_DIVIDER': _V3_COLORS['BORDER'],
+    'CAPTURE_CARD_STATS_DIM': _V3_COLORS['TEXT_DIM'],
+    'CAPTURE_CARD_PROGRESS_TRACK': _V3_COLORS['SURFACE_2'],
+    'CAPTURE_CARD_PROGRESS_FILL': _V3_COLORS['ACCENT'],
+}
+
 DEFAULT_CAPTURE_CARD_COLORS: dict[str, str] = {
-    'CAPTURE_CARD_BG':             '#000000',
-    'CAPTURE_CARD_ACCENT':         '#ffffff',
-    'CAPTURE_CARD_TEXT':            '#ffffff',
-    'CAPTURE_CARD_DIVIDER':        '#222222',
-    'CAPTURE_CARD_STATS_DIM':      '#666666',
-    'CAPTURE_CARD_PROGRESS_TRACK': '#111111',
-    'CAPTURE_CARD_PROGRESS_FILL':  '#ffffff',
+    'CAPTURE_CARD_BG': DEFAULT_COLORS['SURFACE_1'],
+    'CAPTURE_CARD_ACCENT': DEFAULT_COLORS['ACCENT'],
+    'CAPTURE_CARD_TEXT': DEFAULT_COLORS['TEXT'],
+    'CAPTURE_CARD_DIVIDER': DEFAULT_COLORS['BORDER'],
+    'CAPTURE_CARD_STATS_DIM': DEFAULT_COLORS['TEXT_DIM'],
+    'CAPTURE_CARD_PROGRESS_TRACK': DEFAULT_COLORS['SURFACE_2'],
+    'CAPTURE_CARD_PROGRESS_FILL': DEFAULT_COLORS['ACCENT'],
 }
 
 DEFAULT_FONTS: dict[str, str] = {
     'display': 'Oswald',
     'body': 'Oswald',
 }
+
+BUILTIN_FONT_FAMILIES = ('Oswald', 'Segoe UI')
 
 
 class ThemeManager:
@@ -175,6 +252,8 @@ class ThemeManager:
 
     def _load(self) -> dict:
         default = {
+            'palette_version': 4,
+            'typography_version': 2,
             'colors': dict(DEFAULT_COLORS),
             'icons': {},   # filename -> custom path (relative to icons_dir)
             'sounds': {},  # key -> custom path (relative to sounds_dir)
@@ -192,28 +271,62 @@ class ThemeManager:
             merged = dict(default)
             if 'colors' in loaded:
                 merged['colors'] = {**DEFAULT_COLORS, **loaded['colors']}
+                if loaded.get('palette_version', 1) < 2:
+                    # Upgrade the old shipped palette, preserving intentional
+                    # overrides and all imported icons/fonts/sounds.
+                    for token, legacy in _LEGACY_COLORS.items():
+                        if merged['colors'].get(token) == legacy:
+                            merged['colors'][token] = DEFAULT_COLORS[token]
+                if loaded.get('palette_version', 1) < 3:
+                    for token, previous in _V2_COLORS.items():
+                        if merged['colors'].get(token) == previous:
+                            merged['colors'][token] = DEFAULT_COLORS[token]
+                if loaded.get('palette_version', 1) < 4:
+                    for token, previous in _V3_COLORS.items():
+                        if merged['colors'].get(token) == previous:
+                            merged['colors'][token] = DEFAULT_COLORS[token]
             if 'icons' in loaded:
                 merged['icons'] = loaded['icons']
             if 'sounds' in loaded:
                 merged['sounds'] = loaded['sounds']
             if 'icon_tints' in loaded:
-                merged['icon_tints'] = loaded['icon_tints']
+                merged['icon_tints'] = dict(loaded['icon_tints'])
+                if (loaded.get('palette_version', 1) < 3
+                        and merged['icon_tints'].get('_global') == '#00ffaa'):
+                    merged['icon_tints']['_global'] = DEFAULT_ICON_TINT
+                if (loaded.get('palette_version', 1) < 4
+                        and merged['icon_tints'].get('_global') == _V3_COLORS['TEXT_DIM']):
+                    merged['icon_tints']['_global'] = DEFAULT_ICON_TINT
             if 'capture_card' in loaded:
                 merged['capture_card'] = {**DEFAULT_CAPTURE_CARD_COLORS,
                                           **loaded['capture_card']}
+                if loaded.get('palette_version', 1) < 2:
+                    for token, legacy in _LEGACY_CAPTURE_CARD_COLORS.items():
+                        if merged['capture_card'].get(token) == legacy:
+                            merged['capture_card'][token] = DEFAULT_CAPTURE_CARD_COLORS[token]
+                if loaded.get('palette_version', 1) < 3:
+                    for token, previous in _V2_CAPTURE_CARD_COLORS.items():
+                        if merged['capture_card'].get(token) == previous:
+                            merged['capture_card'][token] = DEFAULT_CAPTURE_CARD_COLORS[token]
+                if loaded.get('palette_version', 1) < 4:
+                    for token, previous in _V3_CAPTURE_CARD_COLORS.items():
+                        if merged['capture_card'].get(token) == previous:
+                            merged['capture_card'][token] = DEFAULT_CAPTURE_CARD_COLORS[token]
             if 'fonts' in loaded:
                 merged['fonts'] = {**DEFAULT_FONTS, **loaded['fonts']}
             if 'font_files' in loaded:
                 merged['font_files'] = loaded['font_files']
 
-            # System-font menus were retired. Preserve only Oswald and font
-            # families that are backed by an imported theme file; old choices
-            # such as Arial/DejaVu otherwise migrate cleanly to the standard.
+            # Restore Oswald after the briefly shipped Segoe default. Keep
+            # imported fonts and deliberate choices made with this version.
             imported = set(merged['font_files'])
             for role in DEFAULT_FONTS:
-                family = str(merged['fonts'].get(role, 'Oswald'))
-                if family != 'Oswald' and family not in imported:
-                    merged['fonts'][role] = 'Oswald'
+                family = str(merged['fonts'].get(role, DEFAULT_FONTS[role]))
+                if family in imported:
+                    continue
+                if (family not in BUILTIN_FONT_FAMILIES
+                        or (loaded.get('typography_version', 1) < 2 and family == 'Segoe UI')):
+                    merged['fonts'][role] = DEFAULT_FONTS[role]
             return merged
         except Exception as e:
             print(f'[Theme] Load failed: {e}')
@@ -478,6 +591,8 @@ class ThemeManager:
                     dest.write_bytes(data)
 
                 self._data = {
+                    'palette_version': 4,
+                    'typography_version': 2,
                     'colors': {**DEFAULT_COLORS, **config_data.get('colors', {})},
                     'icons': config_data.get('icons', {}),
                     'sounds': config_data.get('sounds', {}),
@@ -490,9 +605,9 @@ class ThemeManager:
                 }
                 imported = set(self._data['font_files'])
                 for role in DEFAULT_FONTS:
-                    family = str(self._data['fonts'].get(role, 'Oswald'))
-                    if family != 'Oswald' and family not in imported:
-                        self._data['fonts'][role] = 'Oswald'
+                    family = str(self._data['fonts'].get(role, DEFAULT_FONTS[role]))
+                    if family not in BUILTIN_FONT_FAMILIES and family not in imported:
+                        self._data['fonts'][role] = DEFAULT_FONTS[role]
                 self.save()
             return True
         except Exception as e:
@@ -527,3 +642,18 @@ class ThemeManager:
         if self._data.get('fonts', {}) != DEFAULT_FONTS:
             return True
         return False
+
+    def reset_all(self) -> None:
+        """Restore every active theme choice, retaining imported files on disk."""
+        self._data = {
+            'palette_version': 4,
+            'typography_version': 2,
+            'colors': dict(DEFAULT_COLORS),
+            'icons': {},
+            'sounds': {},
+            'icon_tints': {'_global': DEFAULT_ICON_TINT},
+            'capture_card': dict(DEFAULT_CAPTURE_CARD_COLORS),
+            'fonts': dict(DEFAULT_FONTS),
+            'font_files': {},
+        }
+        self.save()

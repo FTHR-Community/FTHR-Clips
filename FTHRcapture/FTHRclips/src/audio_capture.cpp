@@ -128,10 +128,13 @@ namespace fthr {
         IMMDevice* device = nullptr;
         if (!device_id_.empty()) {
             hr = enumerator->GetDevice(device_id_.c_str(), &device);
-            if (FAILED(hr)) {
-                std::cerr << "[AudioCapture] Explicit render endpoint unavailable; "
-                    << "no default fallback will be used" << std::endl;
-                return false;
+            DWORD state = 0;
+            if (FAILED(hr) || !device || FAILED(device->GetState(&state))
+                    || !(state & DEVICE_STATE_ACTIVE)) {
+                if (device) { device->Release(); device = nullptr; }
+                std::cerr << "[AudioCapture] Render endpoint unavailable; using Windows default" << std::endl;
+                device_id_.clear();
+                hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
             }
         }
         else {
@@ -237,7 +240,18 @@ namespace fthr {
         no_packet_interval_count_.store(0, std::memory_order_relaxed);
         restart_count_.store(0, std::memory_order_relaxed);
         submitted_frame_count_.store(0, std::memory_order_relaxed);
+        synthetic_silence_frame_count_.store(0, std::memory_order_relaxed);
+        skipped_input_frame_count_.store(0, std::memory_order_relaxed);
+        resampler_correction_count_.store(0, std::memory_order_relaxed);
+        normal_jitter_absorbed_count_.store(0, std::memory_order_relaxed);
+        hard_discontinuity_recovery_count_.store(0, std::memory_order_relaxed);
         max_observed_drift_samples_.store(0, std::memory_order_relaxed);
+        last_swr_compensation_qpc_100ns_.store(0, std::memory_order_relaxed);
+        silence_correction_distribution_.Reset();
+        skip_correction_distribution_.Reset();
+        resampler_correction_distribution_.Reset();
+        correction_events_.Reset();
+        encoder_input_metrics_.Reset();
         submitted_frames_ = 0;
         drift_controller_.Reset();
         initialize_thread_id_ = std::this_thread::get_id();
@@ -402,14 +416,30 @@ namespace fthr {
             };
             const auto fill_silence_until = [this, &next_timeline_100ns,
                                              &device_error](
-                                               uint64_t end_100ns) -> bool {
+                                                uint64_t end_100ns,
+                                                uint64_t packet_qpc_100ns,
+                                                uint32_t input_frames,
+                                                AudioTimelinePacketAdjustment* result_out) -> bool {
                 if (end_100ns == 0 || sample_rate_ == 0) return true;
+                const uint64_t expected_qpc_100ns = next_timeline_100ns;
                 // Reuse the same bounded continuity policy as microphone
-                // capture. A zero-frame synthetic endpoint packet lets the
-                // helper measure the gap without inventing a second clock.
+                // capture. For a real packet, pass its frame count so the
+                // shared helper owns both gap insertion and overlap skipping.
                 const auto adjustment = ReconcileAudioTimelinePacket(
-                    next_timeline_100ns, end_100ns, 0, sample_rate_,
+                    next_timeline_100ns, end_100ns, input_frames,
+                    input_frames > 0 ? input_sample_rate_ : sample_rate_,
                     sample_rate_, kMaxSyntheticAudioGapSeconds);
+                if (result_out) *result_out = adjustment;
+                if (adjustment.normal_jitter_absorbed) {
+                    normal_jitter_absorbed_count_.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+                if (adjustment.classification == AudioTimelineAdjustmentClass::HardGap
+                        || adjustment.classification
+                            == AudioTimelineAdjustmentClass::HardOverlap) {
+                    hard_discontinuity_recovery_count_.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
                 if (adjustment.large_gap) {
                     // The AAC ring has no discontinuity marker. Refuse a
                     // suspend-sized catch-up rather than encoding an
@@ -421,11 +451,30 @@ namespace fthr {
                     device_error = true;
                     return false;
                 }
-                if (adjustment.silence_frames > 0
-                        && !InjectSilence(adjustment.silence_frames,
-                                         next_timeline_100ns)) {
-                    device_error = true;
-                    return false;
+                if (adjustment.silence_frames > 0) {
+                    if (!InjectSilence(adjustment.silence_frames,
+                                       expected_qpc_100ns)) {
+                        device_error = true;
+                        return false;
+                    }
+                    const uint64_t last_swr =
+                        last_swr_compensation_qpc_100ns_.load(
+                            std::memory_order_acquire);
+                    const uint64_t swr_delta = expected_qpc_100ns >= last_swr
+                        ? expected_qpc_100ns - last_swr : last_swr - expected_qpc_100ns;
+                    correction_events_.Record(AudioCorrectionEvent{
+                        AudioCorrectionSource::System,
+                        AudioCorrectionDirection::Insert,
+                        expected_qpc_100ns,
+                        packet_qpc_100ns,
+                        expected_qpc_100ns,
+                        adjustment.silence_frames,
+                        sample_rate_,
+                        0.0,
+                        0,
+                        0.0,
+                        last_swr > 0
+                            && swr_delta <= kAudioCorrectionRecentWindow100ns});
                 }
                 next_timeline_100ns = adjustment.next_timeline_100ns;
                 return true;
@@ -457,7 +506,7 @@ namespace fthr {
                 // gap is real timeline silence, not a missing source.
                 if (next_packet_size == 0) {
                     no_packet_interval_count_.fetch_add(1, std::memory_order_relaxed);
-                    if (!fill_silence_until(CurrentAudioTimeline100ns())) break;
+                    if (!fill_silence_until(CurrentAudioTimeline100ns(), 0, 0, nullptr)) break;
                 }
 
                 while (next_packet_size > 0) {
@@ -509,24 +558,42 @@ namespace fthr {
                                 / input_sample_rate_ : 0;
                         last_packet_end_qpc_100ns_.store(
                             packet_qpc + packet_duration, std::memory_order_release);
-                        if (!fill_silence_until(packet_qpc)) {
+                        const uint64_t expected_skip_qpc = next_timeline_100ns;
+                        AudioTimelinePacketAdjustment adjustment;
+                        if (!fill_silence_until(packet_qpc, packet_qpc, frames,
+                                                &adjustment)) {
                             client->ReleaseBuffer(frames);
                             break;
                         }
 
-                        // A packet that arrived while we were maintaining a
-                        // silent timeline can overlap the filled boundary by
-                        // a few endpoint frames. Discard only that duplicate
-                        // prefix; never rewind encoder PTS or introduce a
-                        // second clock.
-                        uint32_t skip_frames = 0;
-                        if (packet_qpc < next_timeline_100ns && input_sample_rate_ > 0) {
-                            const uint64_t overlap_frames = ((next_timeline_100ns - packet_qpc)
-                                * static_cast<uint64_t>(input_sample_rate_)) / 10'000'000ULL;
-                            skip_frames = static_cast<uint32_t>(std::min<uint64_t>(
-                                overlap_frames, frames));
-                        }
+                        // The shared policy has already classified a small
+                        // overlap as absorbed jitter and only returns a
+                        // prefix skip for a real hard overlap.
+                        const uint32_t skip_frames = adjustment.skip_input_frames;
                         const uint32_t submit_frames = frames - skip_frames;
+                        if (skip_frames > 0) {
+                            skipped_input_frame_count_.fetch_add(
+                                skip_frames, std::memory_order_relaxed);
+                            skip_correction_distribution_.Observe(skip_frames);
+                            const uint64_t last_swr =
+                                last_swr_compensation_qpc_100ns_.load(
+                                    std::memory_order_acquire);
+                            const uint64_t swr_delta = expected_skip_qpc >= last_swr
+                                ? expected_skip_qpc - last_swr : last_swr - expected_skip_qpc;
+                            correction_events_.Record(AudioCorrectionEvent{
+                                AudioCorrectionSource::System,
+                                AudioCorrectionDirection::Skip,
+                                expected_skip_qpc,
+                                packet_qpc,
+                                expected_skip_qpc,
+                                skip_frames,
+                                input_sample_rate_,
+                                0.0,
+                                0,
+                                0.0,
+                                last_swr > 0
+                                    && swr_delta <= kAudioCorrectionRecentWindow100ns});
+                        }
                         if (submit_frames > 0) {
                             const uint64_t submit_qpc = advance_timeline(packet_qpc, skip_frames,
                                 input_sample_rate_);
@@ -544,9 +611,8 @@ namespace fthr {
                                     break;
                                 }
                             }
-                            next_timeline_100ns = advance_timeline(submit_qpc, submit_frames,
-                                input_sample_rate_);
                         }
+                        next_timeline_100ns = adjustment.next_timeline_100ns;
                     }
 
                     client->ReleaseBuffer(frames);
@@ -584,6 +650,9 @@ namespace fthr {
 
                 TeardownWASAPISession();
 
+                // Connection loss switches this session to the Windows default.
+                // Keep the user's preference on disk for the next app launch.
+                device_id_.clear();
                 if (SetupWASAPISession()) {
                     IAudioClient* ac = static_cast<IAudioClient*>(audio_client_);
                     if (SUCCEEDED(ac->Start())) {
@@ -636,9 +705,11 @@ namespace fthr {
         while (remaining > 0) {
             const uint32_t chunk = std::min(remaining, buf_frames);
             if (!SubmitSamples(silence_buf_.data(), chunk, current_qpc)) return false;
+            synthetic_silence_frame_count_.fetch_add(chunk, std::memory_order_relaxed);
             current_qpc += static_cast<uint64_t>(chunk) * ticks_per_frame;
             remaining -= chunk;
         }
+        silence_correction_distribution_.Observe(num_frames);
         return true;
     }
 
@@ -656,6 +727,7 @@ namespace fthr {
                 std::memory_order_relaxed);
         }
         bool encoder_ok = true;
+        encoder_input_metrics_.Observe(interleaved_data, frame_count, channels_);
         if (encoder_ && !encoder_->EncodeSamples(interleaved_data, frame_count * channels_)) {
             encoder_error_count_.fetch_add(1, std::memory_order_relaxed);
             encoder_ok = false;
@@ -681,6 +753,13 @@ namespace fthr {
                     correction.sample_delta, correction.compensation_distance_samples)) {
             std::cerr << "[AudioCapture] Audio drift compensation setup failed" << std::endl;
             return false;
+        }
+        if (correction.sample_delta != 0
+                && correction.compensation_distance_samples > 0) {
+            resampler_correction_count_.fetch_add(1, std::memory_order_relaxed);
+            resampler_correction_distribution_.Observe(correction.sample_delta);
+            last_swr_compensation_qpc_100ns_.store(qpc_100ns,
+                std::memory_order_release);
         }
         const uint8_t* input = interleaved_data;
         if (!input) {

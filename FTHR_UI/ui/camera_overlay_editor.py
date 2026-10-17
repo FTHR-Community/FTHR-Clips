@@ -1,10 +1,9 @@
 """Interactive 16:9 placement previews for camera and image overlays."""
 from __future__ import annotations
 
-from collections import OrderedDict
 import os
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal, QTimer, QEvent
 from PySide6.QtGui import (
     QColor, QFont, QFontDatabase, QImageReader, QPainter, QPen, QPixmap,
 )
@@ -17,12 +16,14 @@ from core.camera_overlay import (
 )
 from core.third_party_keyboard import DEFAULT_KEYBOARD_OVERLAY_RECT
 from ui.style import Colors, Fonts
+from ui.image_memory import ImageLRU, start_image_cache_maintenance
 
 
 _IMAGE_PREVIEW_MAX_PIXELS = 4_000_000
 _IMAGE_PREVIEW_CACHE_LIMIT = 12
-_IMAGE_PREVIEW_CACHE_TOTAL_PIXELS = 16_000_000
-_IMAGE_PREVIEW_CACHE: OrderedDict[tuple[str, int, int], QPixmap] = OrderedDict()
+_IMAGE_PREVIEW_CACHE_TOTAL_PIXELS = 4_000_000
+_IMAGE_PREVIEW_CACHE = ImageLRU(_IMAGE_PREVIEW_CACHE_TOTAL_PIXELS * 4,
+                               max_entries=_IMAGE_PREVIEW_CACHE_LIMIT)
 
 
 def _theme_color_with_alpha(value: str, alpha: int) -> QColor:
@@ -31,45 +32,44 @@ def _theme_color_with_alpha(value: str, alpha: int) -> QColor:
     return color
 
 
-def _cached_overlay_pixmap(path: str) -> QPixmap:
-    """Decode each image version once into a bounded, implicitly-shared preview."""
-
+def _cached_overlay_pixmap(path: str, target_size=None) -> QPixmap:
+    """Decode at a display/DPI tier; export continues to read the source file."""
+    start_image_cache_maintenance()
+    target = target_size or QSize(640, 360)
+    # Small tier steps keep dragging from repeatedly decoding the same image.
+    tier = QSize(max(128, ((target.width() + 127) // 128) * 128),
+                 max(128, ((target.height() + 127) // 128) * 128))
     try:
         resolved = os.path.normcase(os.path.realpath(path))
         stat = os.stat(resolved)
     except OSError:
         return QPixmap()
-    key = (resolved, stat.st_mtime_ns, stat.st_size)
+    identity = (resolved, stat.st_mtime_ns, stat.st_size)
+    key = (*identity, tier.width(), tier.height())
     cached = _IMAGE_PREVIEW_CACHE.get(key)
     if cached is not None:
-        _IMAGE_PREVIEW_CACHE.move_to_end(key)
         return QPixmap(cached)
-
     reader = QImageReader(resolved)
     reader.setAutoTransform(True)
     size = reader.size()
     pixels = max(0, size.width()) * max(0, size.height())
-    if pixels > _IMAGE_PREVIEW_MAX_PIXELS:
-        scale = (_IMAGE_PREVIEW_MAX_PIXELS / pixels) ** 0.5
-        reader.setScaledSize(QSize(
-            max(1, int(size.width() * scale)),
-            max(1, int(size.height() * scale)),
-        ))
+    if pixels:
+        # Cover mode must have enough pixels in both dimensions. Rotation may
+        # swap them, so include the transformed orientation when sizing.
+        rotated = bool(int(reader.transformation().value) & 4)
+        wanted = QSize(tier.height(), tier.width()) if rotated else tier
+        scale = min(1.0, max(wanted.width() / size.width(),
+                            wanted.height() / size.height()),
+                    (_IMAGE_PREVIEW_MAX_PIXELS / pixels) ** .5)
+        reader.setScaledSize(QSize(max(1, int(size.width() * scale)),
+                                  max(1, int(size.height() * scale))))
     image = reader.read()
     pixmap = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
     if not pixmap.isNull():
-        # Remove older versions of the same path immediately instead of
-        # retaining both after an image is edited in place.
         for old_key in tuple(_IMAGE_PREVIEW_CACHE):
-            if old_key[0] == resolved and old_key != key:
-                del _IMAGE_PREVIEW_CACHE[old_key]
+            if old_key[0] == resolved and old_key[:3] != identity:
+                _IMAGE_PREVIEW_CACHE.pop(old_key, None)
         _IMAGE_PREVIEW_CACHE[key] = pixmap
-        _IMAGE_PREVIEW_CACHE.move_to_end(key)
-        while (len(_IMAGE_PREVIEW_CACHE) > _IMAGE_PREVIEW_CACHE_LIMIT
-               or sum(item.width() * item.height()
-                      for item in _IMAGE_PREVIEW_CACHE.values())
-               > _IMAGE_PREVIEW_CACHE_TOTAL_PIXELS):
-            _IMAGE_PREVIEW_CACHE.popitem(last=False)
     return QPixmap(pixmap)
 
 
@@ -363,7 +363,15 @@ class UnifiedOverlayPreview(OverlayPlacementEditor):
         self._camera_enabled = False
         self._keyboard_pixmap = QPixmap()
         self._keyboard_enabled = False
+        self._background_paths = []
         self._image_layers: list[dict] = []
+        self._preview_resize_timer = QTimer(self)
+        self._preview_resize_timer.setSingleShot(True)
+        self._preview_resize_timer.timeout.connect(self._refresh_image_previews)
+        self._idle_image_timer = QTimer(self)
+        self._idle_image_timer.setSingleShot(True)
+        self._idle_image_timer.setInterval(15_000)
+        self._idle_image_timer.timeout.connect(self._release_hidden_previews)
         self._selected_image = -1
         self._gesture_kind = None
         self._gesture_mode = None
@@ -383,6 +391,7 @@ class UnifiedOverlayPreview(OverlayPlacementEditor):
             key = f'image:{index}'
             fallback = layer['rect']
             self._rects[key] = clamp_overlay_rect(rects.get(key), fallback)
+        self._refresh_image_previews()
         self.update()
 
     def set_image_layers(self, layers) -> None:
@@ -399,9 +408,10 @@ class UnifiedOverlayPreview(OverlayPlacementEditor):
         for index, layer in enumerate(layers or []):
             if not isinstance(layer, dict):
                 continue
-            pixmap = _cached_overlay_pixmap(str(layer.get('path', '')))
             rect = clamp_overlay_rect(
                 layer.get('rect'), DEFAULT_IMAGE_OVERLAY_RECT)
+            pixmap = _cached_overlay_pixmap(str(layer.get('path', '')),
+                                            self._image_preview_size(rect))
             key = f'image:{index}'
             retained[key] = rect
             self._image_layers.append({
@@ -416,6 +426,80 @@ class UnifiedOverlayPreview(OverlayPlacementEditor):
             self._selected_image = max(
                 0, min(self._selected_image, len(self._image_layers) - 1))
         self.update()
+
+    def _image_preview_size(self, rect):
+        canvas = self._canvas_rect()
+        ratio = self.devicePixelRatioF()
+        return QSize(max(1, round(canvas.width() * rect['w'] * ratio)),
+                     max(1, round(canvas.height() * rect['h'] * ratio)))
+
+    def _refresh_image_previews(self):
+        if self._background_paths:
+            canvas = self._canvas_rect()
+            ratio = self.devicePixelRatioF()
+            target = QSize(max(1, round(canvas.width() * ratio)),
+                           max(1, round(canvas.height() * ratio)))
+            self._background = QPixmap()
+            for path in self._background_paths:
+                pixmap = _cached_overlay_pixmap(path, target)
+                if not pixmap.isNull():
+                    self._background = pixmap
+                    break
+        for index, layer in enumerate(self._image_layers):
+            rect = self._rects[f'image:{index}']
+            layer['pixmap'] = _cached_overlay_pixmap(
+                str(layer.get('path', '')), self._image_preview_size(rect))
+        self.update()
+
+    def set_background_paths(self, paths):
+        """Keep source paths so a released display image can be reconstructed."""
+        self._background_paths = [str(path) for path in paths if path]
+        self._background = QPixmap()
+        self._refresh_image_previews()
+
+    def set_background(self, pixmap):
+        # Compatibility for callers supplying an already prepared image.
+        self._background_paths = []
+        super().set_background(pixmap)
+
+    def _release_hidden_previews(self):
+        if self.isVisible():
+            return
+        self._preview_resize_timer.stop()
+        paths = {os.path.normcase(os.path.realpath(str(layer.get('path', ''))))
+                 for layer in self._image_layers}
+        paths.update(os.path.normcase(os.path.realpath(path))
+                     for path in self._background_paths)
+        if self._background_paths:
+            self._background = QPixmap()
+        for layer in self._image_layers:
+            layer['pixmap'] = QPixmap()
+        self._camera_pixmap = QPixmap()
+        self._keyboard_pixmap = QPixmap()
+        for key in tuple(_IMAGE_PREVIEW_CACHE):
+            if key[0] in paths:
+                _IMAGE_PREVIEW_CACHE.pop(key, None)
+
+    def resizeEvent(self, event):
+        if hasattr(self, '_preview_resize_timer') and self.isVisible():
+            self._preview_resize_timer.start(0)
+        super().resizeEvent(event)
+
+    def event(self, event):
+        if (event.type() == QEvent.Type.DevicePixelRatioChange
+                and hasattr(self, '_preview_resize_timer') and self.isVisible()):
+            self._preview_resize_timer.start(0)
+        return super().event(event)
+
+    def hideEvent(self, event):
+        self._preview_resize_timer.stop()
+        self._idle_image_timer.start()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        self._idle_image_timer.stop()
+        self._refresh_image_previews()
+        super().showEvent(event)
 
     def set_selected_image(self, index: int) -> None:
         self._selected_image = (
@@ -436,12 +520,16 @@ class UnifiedOverlayPreview(OverlayPlacementEditor):
     def set_camera_pixmap(self, pixmap: QPixmap) -> None:
         self._camera_pixmap = (
             QPixmap(pixmap) if pixmap and not pixmap.isNull() else QPixmap())
-        self.update()
+        self._update_live_region('camera')
 
     def set_keyboard_pixmap(self, pixmap: QPixmap) -> None:
         self._keyboard_pixmap = (
             QPixmap(pixmap) if pixmap and not pixmap.isNull() else QPixmap())
-        self.update()
+        self._update_live_region('keyboard')
+
+    def _update_live_region(self, kind):
+        if kind in self._rects:
+            self.update(self._pixel_rect_for(kind).toAlignedRect().adjusted(-3, -3, 3, 3))
 
     def rects_data(self) -> dict:
         return {key: dict(rect) for key, rect in self._rects.items()}
@@ -517,6 +605,8 @@ class UnifiedOverlayPreview(OverlayPlacementEditor):
                       if self._gesture_kind == 'keyboard'
                       else DEFAULT_IMAGE_OVERLAY_RECT))
             self._rects[self._gesture_kind] = clamp_overlay_rect(rect, default)
+            if self._gesture_kind.startswith('image:'):
+                self._preview_resize_timer.start(0)
             self.update()
             event.accept()
             return
@@ -539,11 +629,16 @@ class UnifiedOverlayPreview(OverlayPlacementEditor):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         self._draw_stage(painter, canvas)
         for index, layer in enumerate(self._image_layers):
-            self._draw_image_layer(
-                painter, index, layer, self._pixel_rect_for(f'image:{index}'))
+            box = self._pixel_rect_for(f'image:{index}')
+            if _event.region().intersects(box.toAlignedRect().adjusted(-3, -3, 3, 3)):
+                self._draw_image_layer(painter, index, layer, box)
         if 'keyboard' in self._rects:
-            self._draw_keyboard(painter, self._pixel_rect_for('keyboard'))
-        self._draw_camera(painter, self._pixel_rect_for('camera'))
+            box = self._pixel_rect_for('keyboard')
+            if _event.region().intersects(box.toAlignedRect().adjusted(-3, -3, 3, 3)):
+                self._draw_keyboard(painter, box)
+        box = self._pixel_rect_for('camera')
+        if _event.region().intersects(box.toAlignedRect().adjusted(-3, -3, 3, 3)):
+            self._draw_camera(painter, box)
         painter.end()
 
     def _draw_image_layer(self, painter: QPainter, index: int,

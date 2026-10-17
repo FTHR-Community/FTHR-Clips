@@ -1,6 +1,6 @@
 # FTHR Clips — line ending and diff behaviour
 #
-# The repo is developed on Windows and built on both Windows and Linux.
+# The repo is developed and built on Windows.
 # Everything is stored LF in the repository. Files that only ever run through
 # a Windows interpreter (.bat/.cmd/.ps1, Inno Setup, MSBuild) are checked out
 # CRLF; shell scripts are forced LF so they stay executable under bash.
@@ -29,7 +29,6 @@
 # POSIX shell — must stay LF or bash chokes on \r
 # ---------------------------------------------------------------------------
 *.sh            text eol=lf
-AppDir/AppRun   text eol=lf
 *.desktop       text eol=lf
 
 # ---------------------------------------------------------------------------
@@ -83,7 +82,6 @@ licenses/*      text eol=lf
 *.obj           binary
 *.zip           binary
 *.docx          binary
-*.AppImage      binary
 
 # ---------------------------------------------------------------------------
 # Git LFS

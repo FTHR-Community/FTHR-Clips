@@ -116,6 +116,7 @@ def test_settings_apply_repaints_existing_scroll_surfaces_and_controls(
         for color in ('#ff55ff', '#125637'):
             theme.set_color('BG', color)
             theme.set_color('SURFACE_2', color)
+            theme.set_color('SURFACE_3', color)
             theme.set_color('ACCENT', '#abcdef')
             combo = page.preset_combo
             selected = combo.currentIndex()
@@ -182,7 +183,7 @@ def test_diagnostic_zip_drag_uses_native_copy_file_url(qtbot, monkeypatch, tmp_p
     button.mouseMoveEvent(event)
     qtbot.mouseRelease(button, Qt.MouseButton.LeftButton)
     assert len(drags) == 1
-    assert 'EXPORT AGAIN' in button.text()
+    assert 'export again' in button.text()
 
 
 @pytest.mark.parametrize('outcome', ['success', 'cancelled', 'failed'])

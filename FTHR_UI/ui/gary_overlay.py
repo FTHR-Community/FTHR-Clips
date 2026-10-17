@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import random
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QGuiApplication, QPainter, QPixmap
@@ -25,6 +26,10 @@ class GaryOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._anchor = anchor
         self._default_image = Path(default_image)
+        self._cat_image = self._default_image.with_name('gatze.png')
+        self._cat_pixmap = QPixmap(str(self._cat_image))
+        self._base_pixmap = QPixmap()
+        self._base_image_path = ''
         self._pixmap = QPixmap()
         self._intensity = 0.0
         self._image_path = ''
@@ -45,10 +50,14 @@ class GaryOverlay(QWidget):
             candidate = self._default_image
             pixmap = QPixmap(str(candidate))
         if pixmap.isNull():
+            self._base_pixmap = QPixmap()
+            self._base_image_path = ''
             self._pixmap = QPixmap()
             self._image_path = ''
             self.hide()
             return False
+        self._base_pixmap = pixmap
+        self._base_image_path = str(candidate)
         self._pixmap = pixmap
         self._image_path = str(candidate)
         self.update()
@@ -56,6 +65,11 @@ class GaryOverlay(QWidget):
 
     def set_intensity(self, value: float) -> None:
         value = max(0.0, min(float(value), 1.0))
+        if self._intensity <= 0.0 and value > 0.0:
+            # Roll once per appearance, retaining the result throughout its fade.
+            use_cat = not self._cat_pixmap.isNull() and random.randrange(10) == 0
+            self._pixmap = self._cat_pixmap if use_cat else self._base_pixmap
+            self._image_path = str(self._cat_image) if use_cat else self._base_image_path
         self._intensity = value
         if value <= 0.0 or self._pixmap.isNull():
             if self.isVisible():

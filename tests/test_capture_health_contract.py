@@ -3,23 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
-import subprocess
 
-import pytest
 
 from core.capture_health import CaptureHealthFlag
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LINUX = ROOT / "FTHRcapture_linux"
 WINDOWS = ROOT / "FTHRcapture" / "FTHRclips"
 
 
 def test_v4_mapping_name_is_used_by_all_producers_and_consumer() -> None:
     sources = (
         ROOT / "FTHR_UI" / "core" / "capture_bridge.py",
-        LINUX / "src" / "main.cpp",
         WINDOWS / "src" / "main.cpp",
     )
     for source in sources:
@@ -37,7 +32,7 @@ def test_both_engines_publish_all_typed_health_fields() -> None:
         "content_luma_mean",
         "content_luma_variance",
     }
-    for main in (LINUX / "src" / "main.cpp", WINDOWS / "src" / "main.cpp"):
+    for main in (WINDOWS / "src" / "main.cpp",):
         text = main.read_text(encoding="utf-8")
         assert all(f"layout->{field}" in text for field in fields)
 
@@ -51,7 +46,6 @@ def test_typed_health_flag_values_match_python_and_both_engines() -> None:
         "CAPTURE_HEALTH_PAUSED": int(CaptureHealthFlag.PAUSED),
     }
     for header in (
-        LINUX / "src" / "shared_memory.h",
         WINDOWS / "include" / "shared_memory.h",
     ):
         compact = "".join(header.read_text(encoding="utf-8").split())
@@ -60,27 +54,10 @@ def test_typed_health_flag_values_match_python_and_both_engines() -> None:
             assert f"{name}=1u<<{bit}" in compact
 
 
-def test_linux_terminal_failure_clears_capture_running_state() -> None:
-    engine = (LINUX / "src" / "capture_engine.cpp").read_text(encoding="utf-8")
-    assert "decision.exhausted" in engine
-    terminal = engine[engine.index("if (decision.exhausted)"):]
-    assert "CAPTURE_HEALTH_BACKEND_FAILED" in terminal
-    assert "running_.store(false)" in terminal
-    assert "ring_->Clear()" in engine
 
 
-def test_native_fake_backend_recovery_policy(tmp_path: Path) -> None:
-    compiler = shutil.which("g++") or shutil.which("c++")
-    if compiler is None:
-        pytest.skip("native C++ compiler not installed")
-    source = LINUX / "tests" / "capture_recovery_test.cpp"
-    output = tmp_path / ("capture_recovery_test.exe" if shutil.which("g++") else "capture_recovery_test")
-    subprocess.run(
-        [compiler, "-std=c++20", "-Wall", "-Wextra", "-Wpedantic",
-         f"-I{LINUX / 'src'}", str(source), "-o", str(output)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    subprocess.run([str(output)], check=True, timeout=10)
+def test_windows_reconfiguration_bit_matches_python():
+    import re
+    text = (WINDOWS / 'include' / 'shared_memory.h').read_text()
+    assert re.search(r'CAPTURE_HEALTH_RECONFIGURE_REQUIRED\s*=\s*1u << 5', text)
+    assert int(CaptureHealthFlag.RECONFIGURE_REQUIRED) == 32

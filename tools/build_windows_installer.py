@@ -80,6 +80,8 @@ def main() -> int:
         parser.error('--require-signed needs --sign-command or FTHR_SIGN_COMMAND')
 
     try:
+        run([sys.executable, 'tools/generate_installer_assets.py'],
+            label='Render current installer artwork')
         run([sys.executable, 'tools/verify_version_consistency.py'],
             label='Version consistency')
         run([sys.executable, 'tools/verify_release_licenses.py', '--tree', '.'],

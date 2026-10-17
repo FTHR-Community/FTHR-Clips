@@ -51,6 +51,7 @@ enum class ReplayStartupError : uint32_t {
     CrossAdapterPathUnavailable,
     ReplayCapacityLimited,
     EncoderInitFailed,
+    CaptureTargetUnavailable,
 };
 
 struct WindowsReplaySelection {
@@ -124,6 +125,12 @@ struct ReplayEncoderDiagnostics {
     uint64_t resources_unmapped = 0;
     uint64_t packets_produced = 0;
     uint64_t slots_recycled = 0;
+    // Backend-neutral aggregate failure evidence.  NVENC-specific slot and
+    // status fields below remain unchanged; other backends populate only
+    // these bounded counters when the corresponding condition is observed.
+    uint64_t backpressure_events = 0;
+    uint64_t backend_errors = 0;
+    uint64_t device_removed_errors = 0;
     uint32_t registered_resources = 0;
     uint32_t pool_capacity = 0;
     uint32_t pending_resources = 0;
@@ -157,8 +164,9 @@ constexpr ReplayEncoderBackend SelectProductionReplayBackend(
 constexpr bool IsProductionReplayBackendEnabled(
     EncoderVendor vendor,
     VideoCodec codec) noexcept {
-    return SelectProductionReplayBackend(vendor, codec)
-        != ReplayEncoderBackend::Software;
+    return (vendor == EncoderVendor::Software && codec == VideoCodec::H264)
+        || SelectProductionReplayBackend(vendor, codec)
+            != ReplayEncoderBackend::Software;
 }
 
 constexpr EncoderVendor EncoderVendorFromPciVendorId(
@@ -172,9 +180,9 @@ constexpr EncoderVendor EncoderVendorFromPciVendorId(
 }
 
 constexpr bool ShouldAllocateRawReplayPool(
-    ReplayEncoderBackend backend,
+    ReplayEncoderBackend,
     bool initialized) noexcept {
-    return !initialized || backend == ReplayEncoderBackend::Software;
+    return !initialized;
 }
 
 constexpr bool IsAutomaticCrossAdapterReplayAllowed() noexcept {
@@ -220,6 +228,14 @@ constexpr WindowsReplaySelection SelectWindowsReplayPolicy(
     result.same_adapter = result.encoder_vendor == capture_vendor
         && capture_vendor != EncoderVendor::Software;
 
+    if (preference == EncoderPreference::Software) {
+        if (requested_codec != VideoCodec::H264) {
+            result.error = ReplayStartupError::RequestedCodecUnsupported;
+            return result;
+        }
+        result.allowed = true;
+        return result;
+    }
     if (result.encoder_vendor == EncoderVendor::Software
         || result.backend == ReplayEncoderBackend::Software) {
         result.error = ReplayStartupError::HardwareEncoderUnavailable;

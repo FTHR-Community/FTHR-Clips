@@ -108,7 +108,7 @@ def check_source(report: Report) -> None:
             'the installer uses the app-style frameless popup shell')
     require(report, source, 'SetupIconFile=FTHR_UI\\assets\\favicon.ico',
             'the installer uses the supplied application favicon')
-    require(report, source, 'Source: "FTHR_UI\\assets\\icons\\close.png"',
+    require(report, source, 'Source: "installer_assets\\polished\\close-current.png"',
             'the popup close control uses the existing application icon')
     require(report, source, 'policies.fthrclips.com',
             'installer links to the hosted Privacy Policy')
@@ -265,6 +265,36 @@ def check_authenticode(report: Report, path: Path, *, microsoft: bool,
             f'ProductVersion={details.get("product_version")!r}')
 
 
+def optional_package_valid(package: Path, plugin_id: str, entrypoint: str) -> bool:
+    """Require the executable and the exact reviewed licence inventory."""
+    license_root = ROOT / 'licenses' / 'optional-uploader'
+    license_paths = (
+        {'payload/' + path.relative_to(ROOT).as_posix()
+         for path in license_root.rglob('*') if path.is_file()}
+        if entrypoint == 'FTHR Uploader.exe' else set())
+    payload_paths = {f'payload/{entrypoint}', *license_paths}
+    with zipfile.ZipFile(package) as archive:
+        manifest = json.loads(archive.read('manifest.json'))
+        expected_names = {
+            'manifest.json', 'TERMS_OF_SERVICE.txt', 'PRIVACY_POLICY.txt',
+            *payload_paths,
+        }
+        entries = manifest.get('files') or []
+        if (manifest.get('plugin_id') != plugin_id
+                or manifest.get('entrypoint') != entrypoint
+                or set(archive.namelist()) != expected_names
+                or len(archive.namelist()) != len(expected_names)
+                or len(entries) != len(payload_paths)
+                or {entry.get('path') for entry in entries} != payload_paths):
+            return False
+        for entry in entries:
+            data = archive.read(entry['path'])
+            if (len(data) != entry.get('size')
+                    or hashlib.sha256(data).hexdigest() != entry.get('sha256')):
+                return False
+    return True
+
+
 def check_bundle(report: Report, bundle: Path, *, require_signed: bool) -> None:
     if not bundle.is_dir():
         report.fail(f'PyInstaller bundle missing: {bundle}')
@@ -292,16 +322,12 @@ def check_bundle(report: Report, bundle: Path, *, require_signed: bool) -> None:
 
     sys.path.insert(0, str(ROOT / 'FTHR_UI'))
     from core.uploader_bundle_manifest import (  # noqa: PLC0415
-        EXPECTED_HARDWARE_BUNDLE_SHA256,
         EXPECTED_UPLOADER_BUNDLE_SHA256,
-        HARDWARE_PLUGIN_ID,
         UPLOADER_PLUGIN_ID,
     )
     optional_packages = (
         ('FTHR-Uploader.fthrplugin', EXPECTED_UPLOADER_BUNDLE_SHA256,
          UPLOADER_PLUGIN_ID, 'FTHR Uploader.exe'),
-        ('FTHR-Hardware-Identity.fthrplugin', EXPECTED_HARDWARE_BUNDLE_SHA256,
-         HARDWARE_PLUGIN_ID, 'FTHR Hardware Identity.exe'),
     )
     package_root = bundle / '_internal' / 'plugin-packages'
     for name, expected_hash, plugin_id, entrypoint in optional_packages:
@@ -313,19 +339,11 @@ def check_bundle(report: Report, bundle: Path, *, require_signed: bool) -> None:
             report.fail(f'{name}: hash does not match the Core release binding')
             continue
         try:
-            with zipfile.ZipFile(package) as archive:
-                manifest = json.loads(archive.read('manifest.json'))
-                names = set(archive.namelist())
-        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+            valid = optional_package_valid(package, plugin_id, entrypoint)
+        except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as exc:
             report.fail(f'{name}: invalid dormant package ({exc})')
             continue
-        expected_names = {
-            'manifest.json', 'TERMS_OF_SERVICE.txt', 'PRIVACY_POLICY.txt',
-            f'payload/{entrypoint}',
-        }
-        if (manifest.get('plugin_id') != plugin_id
-                or manifest.get('entrypoint') != entrypoint
-                or names != expected_names):
+        if not valid:
             report.fail(f'{name}: manifest or exact-content boundary is invalid')
         else:
             report.ok(f'bundle contains verified dormant package {name}')
@@ -333,7 +351,7 @@ def check_bundle(report: Report, bundle: Path, *, require_signed: bool) -> None:
     direct_optional_executables = [
         path for path in bundle.rglob('*')
         if path.is_file()
-        and path.name in {'FTHR Uploader.exe', 'FTHR Hardware Identity.exe'}
+        and path.name == 'FTHR Uploader.exe'
     ]
     if direct_optional_executables:
         report.fail('optional executables were extracted into the Core bundle')

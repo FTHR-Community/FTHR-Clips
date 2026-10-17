@@ -21,6 +21,7 @@ class CaptureHealthFlag(IntFlag):
     BACKEND_FAILED = 1 << 2
     CONTENT_SUSPECT = 1 << 3
     PAUSED = 1 << 4
+    RECONFIGURE_REQUIRED = 1 << 5
 
 
 class CaptureHealthState(Enum):

@@ -1,0 +1,31 @@
+# Additional UI memory audit — 12 October 2026
+
+Status: these recommendations have now been implemented. See `ui-memory-implementation-2026-10-12.md` for the final design, the timeline preview setting, validation and measurement limits.
+
+Original audit scope: additional recommendations after implementing the editor switching audit. The findings below describe the state before the follow-up implementation. They preserve editing, export quality, keyboard navigation, undo and animations. Findings come from source inspection; byte estimates describe image payloads, not measured reductions in process RAM. Qt implicit sharing means two references do not necessarily hold two pixel allocations. GPU allocations and Windows working set also differ from private committed memory.
+
+## Recommended changes, in order
+
+1. **Trim idle UI caches after a grace period.** Keep the reusable editor controls for fast reopening, but clear its timeline pixmaps, scaled thumbnails and painted background after it has been parked for a while. Release the inactive Quick video scene graph as well, then reconstruct its presentation on restore. `main.py:_park_active_editor` currently retains the shell; `clip_viewer.py:LiveVideoPreview.shutdown` releases decoded software frames, but timeline display caches survive until the next load. `quick_video_preview.py:QuickVideoPreview` does not opt out of persistent scene graphs. Preserve session state, playhead and undo; do not apply eviction during export or a restore animation. Measure GPU texture release on Windows rather than assuming hiding a widget releases it. This is the most relevant next step for minimizing/reopening windows.
+
+2. **Give filmstrips a byte budget and expire unused entries.** `clip_viewer.py:_TIMELINE_IMAGE_CACHE` retains eight strips, each up to 120 RGB images of 180×100 pixels. That is approximately 49.4 MiB of raw image data at the maximum, before active pixmaps and display caches. Add a configurable internal byte ceiling (for example 16–24 MiB) and an idle expiry, retaining the current strip preferentially. The 64-entry `_scaled_thumbnails` cache also needs a byte ceiling because entry sizes vary with zoom and window size. Recreate evicted thumbnails asynchronously at the same quality. Tradeoff: revisiting an evicted clip requires regeneration; debounce eviction to avoid repeating expensive work during rapid navigation.
+
+3. **Shrink the hidden library's recent thumbnail cache and widget pool.** `clip_grid.py:_recycle_card` keeps up to 96 recent source thumbnails in addition to materialized cards, while `set_background_paused` stops jobs but retains images and recycled controls. Use a byte budget for recent thumbnails, retain a small spare row of recycled controls, and trim offscreen images after the library has remained hidden. Keep visible cards, selection, scroll position and metadata. Existing disk JPEG caches make regeneration inexpensive, but verify scroll/reopen latency. Do not call a global pixmap-cache clear: unrelated visible controls use it too.
+
+4. **Decode overlay previews for their actual display size.** `camera_overlay_editor.py:_cached_overlay_pixmap` allows four million pixels per preview and sixteen million across the cache: approximately 61 MiB at four bytes per pixel. A small overlay often needs far fewer pixels. Key cached previews by source identity and a small set of display-size/DPI tiers, decode to the requested tier, and expire inactive previews. Fetch a larger tier before enlargement; always keep source files and export inputs unchanged. Account for pixmaps held by live layers: evicting a cache entry alone cannot free pixels still referenced by a widget.
+
+5. **Avoid full-image preview allocation for large screenshots.** `screenshot_editor.py:_setup_ui` loads a full-resolution pixmap; `_save_crop` loads the source again and creates a crop. Use a viewport-sized preview and retain source dimensions and crop coordinates separately. Load original pixels only for saving, on a worker, releasing them after encoding. A 3840×2160 RGBA buffer is about 31.6 MiB; a 7680×4320 buffer is about 126.6 MiB. The exact current duplicate allocation depends on Qt's pixmap sharing/cache. Preserve original-resolution output and verify crop mapping at different DPI settings, letterboxing, and image orientations.
+
+6. **Reduce simultaneous full-window transition buffers.** `shell_transitions.py:SnapshotSlide` still needs outgoing and incoming window captures. The implementation now releases them on completion/interruption and composes them on the GPU, but two 4K RGBA captures still represent approximately 63.3 MiB of CPU image payload while transitioning, with additional compositor resources possible. Explore keeping one outgoing snapshot while animating the live incoming page, retaining full resolution and the current motion. This has greater implementation risk: validate child Quick surfaces, focus, interrupted navigation and clipping before adopting it. Do not simply downsample screenshots or remove the animation.
+
+## Already bounded or addressed
+
+- Library cards are already virtualized; replacing them with virtualization again is not a new saving.
+- Overlay preview caching already has count and pixel limits; its remaining opportunity is sizing and lifetime.
+- Undo is capped at 100 state snapshots and stores editing state rather than full video frames. Reducing undo depth would sacrifice functionality and is not recommended.
+- Software preview shutdown already clears retained frame images. Additional recommendations concern other retained UI resources.
+- New transition surfaces clean up provider images even when destroyed before being shown.
+
+## Verification for a future implementation
+
+Measure private committed bytes, working set and dedicated/shared GPU memory separately after warmup. Repeat 50 clip switches, minimize/restore cycles, long-clip timeline zooming, library scrolling, overlay changes and 8K screenshot cropping. Sample after animations finish and again after idle eviction; compare peak and settled values. Check that memory plateaus across repeated cycles, while edits, undo, position, crop pixels and full-resolution exports remain identical. Report cache bytes alongside process metrics to distinguish retained live resources from allocator high-water marks.

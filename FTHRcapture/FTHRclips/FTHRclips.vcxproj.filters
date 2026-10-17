@@ -57,6 +57,9 @@
     <ClInclude Include="include\ffmpeg_amf_replay_encoder.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\software_replay_encoder.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\ffmpeg_qsv_replay_encoder.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -88,6 +91,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\audio_timeline.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\audio_signal_metrics.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\windows_capture_border_policy.h">
@@ -141,6 +147,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\ffmpeg_amf_replay_encoder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\software_replay_encoder.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\ffmpeg_qsv_replay_encoder.cpp">

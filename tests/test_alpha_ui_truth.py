@@ -28,7 +28,7 @@ def test_dead_splash_control_is_not_exposed():
     assert 'Enable startup splash screen' not in MAIN_SOURCE
 
 
-def test_root_favicon_loads_for_window_and_tray():
+def test_root_favicon_loads_for_window_and_tray(qapp):
     pytest.importorskip('PySide6.QtGui')
     from main import _load_icon
 
@@ -86,10 +86,11 @@ def test_rapid_settings_tabs_debounce_audio_device_open():
     fake = SimpleNamespace(
         stack=SimpleNamespace(
             count=lambda: 6,
-            setCurrentIndex=lambda idx: calls.append(('page', idx))),
+            setCurrentIndex=lambda idx, **_kwargs: calls.append(('page', idx))),
         _audio_preview_timer=timer,
         _category_switch_timer=category_timer,
         _pending_category_index=0,
+        _ensure_category=lambda _index: None,
         _background_ui_paused=False,
         mic_level_meter=meter,
         isVisible=lambda: True,
@@ -117,13 +118,14 @@ def test_rapid_settings_tabs_only_apply_the_latest_page():
     fake = SimpleNamespace(
         stack=SimpleNamespace(
             count=lambda: 6,
-            setCurrentIndex=lambda idx: calls.append(('page', idx))),
+            setCurrentIndex=lambda idx, **_kwargs: calls.append(('page', idx))),
         _category_switch_timer=SimpleNamespace(
             start=lambda: calls.append('category-start')),
         _audio_preview_timer=SimpleNamespace(
             stop=lambda: calls.append('audio-stop'),
             start=lambda: calls.append('audio-start')),
         _pending_category_index=0,
+        _ensure_category=lambda _index: None,
         _background_ui_paused=False,
         isVisible=lambda: True,
         _start_encoder_probe=lambda: calls.append('encoder-probe'),
@@ -327,12 +329,10 @@ def test_game_detection_defers_geometry_restart_until_recording_closes(
     assert restarts == [{}]
 
 
-def test_active_game_crop_is_part_of_requested_encoder_config(monkeypatch):
+def test_legacy_game_crop_is_ignored_on_windows_and_retained_on_linux(monkeypatch):
     pytest.importorskip('PySide6.QtCore')
     import main
 
-    monkeypatch.setattr(
-        main, 'normalize_monitor_device_path', lambda value: value)
     values = {
         'capture_monitor': 'DISPLAY-PATH',
         'target_hwnd': 55,
@@ -364,9 +364,13 @@ def test_active_game_crop_is_part_of_requested_encoder_config(monkeypatch):
 
     config = main.MainWindow._requested_capture_config(fake)
 
-    assert config.crop_enabled
-    assert (config.crop_x, config.crop_y, config.crop_w, config.crop_h) == (
-        0.1, 0.2, 0.7, 0.6)
+    if main.sys.platform == 'win32':
+        assert not config.crop_enabled
+        assert (config.crop_x, config.crop_y, config.crop_w, config.crop_h) == (0, 0, 1, 1)
+    else:
+        assert config.crop_enabled
+        assert (config.crop_x, config.crop_y, config.crop_w, config.crop_h) == (
+            0.1, 0.2, 0.7, 0.6)
 
 
 def test_engine_launch_hard_disables_multiband_and_forwards_encoder_selection():
@@ -376,17 +380,6 @@ def test_engine_launch_hard_disables_multiband_and_forwards_encoder_selection():
     assert 'encoder_pref_int' in body
 
 
-def test_startup_limitations_never_open_modal_dialogs():
-    hotkey_warning = _method_source('_warn_input_group', '_warn_no_engine')
-    compositor_warning = _method_source(
-        '_show_compositor_warning', '_on_game_appeared')
-
-    assert 'QMessageBox' not in hotkey_warning
-    assert '.exec()' not in hotkey_warning
-    assert 'self.push_error(' in hotkey_warning
-    assert 'QMessageBox' not in compositor_warning
-    assert '.exec()' not in compositor_warning
-    assert 'self.push_error(' in compositor_warning
 
 
 def test_capture_health_does_not_fill_the_error_bar():
@@ -443,10 +436,6 @@ def test_manual_recording_success_uses_the_capture_card():
     assert "'MANUAL RECORDING SAVED'" not in body
 
 
-def test_windows_never_schedules_linux_compositor_warning():
-    body = _method_source('_setup_hotkeys', '_on_hotkey_save_clip')
-    assert "sys.platform != 'win32'" in body
-    assert 'self._show_compositor_warning' in body
 
 
 def test_named_notification_sounds_have_named_runtime_routes():

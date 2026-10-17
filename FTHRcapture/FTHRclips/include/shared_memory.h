@@ -69,6 +69,7 @@ namespace fthr {
         CAPTURE_HEALTH_BACKEND_FAILED  = 1u << 2,
         CAPTURE_HEALTH_CONTENT_SUSPECT = 1u << 3,
         CAPTURE_HEALTH_PAUSED          = 1u << 4,
+        CAPTURE_HEALTH_RECONFIGURE_REQUIRED = 1u << 5,
     };
 
 

@@ -96,7 +96,7 @@ def walk_files() -> list[str]:
     # authoritative check is the tracked/staged mode — this is the fallback.
     skip_dirs = {'.git', '__pycache__', '.pytest_cache', '.ruff_cache',
                  'build', 'dist', 'Output', 'redist', '.vs', 'node_modules',
-                 'x64'}
+                 'x64', 'plugin-packages'}
     skip_prefixes = ('FTHRcapture/FTHRclips/third_party/ffmpeg/bin/',
                      'FTHRcapture_linux/build/')
     out = []

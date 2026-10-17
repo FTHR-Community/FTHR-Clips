@@ -9,6 +9,11 @@
 #pragma comment(lib, "gdi32.lib")
 
 static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
+    if (message == WM_APP + 1) {
+        // Let the foreground test process hand focus to the other test window.
+        // A background process cannot reliably call SetForegroundWindow itself.
+        return SetForegroundWindow(reinterpret_cast<HWND>(w));
+    }
     if (message == WM_PAINT) {
         PAINTSTRUCT ps{};
         HDC dc = BeginPaint(hwnd, &ps);
@@ -75,29 +80,39 @@ int wmain(int argc, wchar_t** argv) {
     config.monitor_device_path = argv[1];
     config.encoder_preference = fthr::EncoderPreference::Nvidia;
     config.buffer_seconds = 32;
-    config.audio_enabled = false;
+    config.audio_enabled = true;
     fthr::CaptureEngine engine;
     int result = 0;
     if (!engine.Initialize(config)) result = 4;
     if (!result) Pump(source, 3000);
     for (int cycle = 1; !result && cycle <= 3; ++cycle) {
-        SetForegroundWindow(other);
+        const auto generation = engine.GetCaptureGeneration();
+        SendMessageW(source, WM_APP + 1, reinterpret_cast<WPARAM>(other), 0);
+        Pump(source, 250); // Allow the last in-flight foreground frame to finish.
+        const auto paused_frames = engine.GetFrameCount();
         Pump(source, 4000);  // Longer than the native watchdog's stall limit.
         auto flags = engine.GetCaptureHealthFlags();
         if (GetForegroundWindow() != other
             || !(flags & fthr::CAPTURE_HEALTH_PAUSED)
+            || engine.GetFrameCount() != paused_frames
+            || engine.GetCaptureGeneration() != generation
             || (flags & fthr::CAPTURE_HEALTH_BACKEND_FAILED)) {
-            std::cerr << "FOCUS pause failed flags=" << flags << std::endl;
+            std::cerr << "FOCUS pause failed flags=" << flags
+                      << " expected_foreground=" << other
+                      << " actual_foreground=" << GetForegroundWindow()
+                      << " frames_before=" << paused_frames
+                      << " frames_after=" << engine.GetFrameCount()
+                      << " generation_before=" << generation
+                      << " generation_after=" << engine.GetCaptureGeneration() << std::endl;
             result = 5;
             break;
         }
-        const auto before = engine.GetFrameCount();
-        const auto generation = engine.GetCaptureGeneration();
-        SetForegroundWindow(source);
+        const auto background_frames = engine.GetFrameCount();
+        SendMessageW(other, WM_APP + 1, reinterpret_cast<WPARAM>(source), 0);
         Pump(source, 1200);
-        if (GetForegroundWindow() != source || engine.GetFrameCount() <= before
-            || engine.GetCaptureGeneration() <= generation) {
-            std::cerr << "FOCUS resume failed" << std::endl;
+        if (GetForegroundWindow() != source || engine.GetFrameCount() <= background_frames
+            || engine.GetCaptureGeneration() != generation) {
+            std::cerr << "FOCUS replay-preserving resume failed" << std::endl;
             result = 6;
             break;
         }

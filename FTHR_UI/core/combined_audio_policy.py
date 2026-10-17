@@ -73,6 +73,37 @@ def select_combined_audio_streams(
     return tuple(stream.audio_index for stream in ordered)
 
 
+def build_combined_audio_filter(audio_indexes: Iterable[int]) -> str:
+    """Build the production filter used for a combined native audio track.
+
+    Native audio streams can have different first presentation timestamps.  A
+    multi-input ``amix`` otherwise starts each input at its first decoded
+    sample and silently erases that offset.  Normalize each input with
+    ``aresample=first_pts=0`` first; this preserves the stream's shared
+    timeline while keeping the existing limiter and mix policy unchanged.
+
+    The single-input path intentionally remains ``anull`` for compatibility.
+    """
+    indexes = tuple(audio_indexes)
+    if not indexes:
+        raise ValueError('at least one audio stream is required')
+    audio_inputs = ''.join(f'[0:a:{index}]' for index in indexes)
+    if len(indexes) == 1:
+        return f'{audio_inputs}anull[aout]'
+
+    normalized_labels = tuple(f'audio_input_{position}'
+                              for position in range(len(indexes)))
+    normalized = ';'.join(
+        f'[0:a:{index}]aresample=first_pts=0:async=0[{label}]'
+        for index, label in zip(indexes, normalized_labels, strict=True))
+    mix_inputs = ''.join(f'[{label}]' for label in normalized_labels)
+    mix = (
+        f'{mix_inputs}amix=inputs={len(indexes)}:normalize=0:'
+        'duration=longest:dropout_transition=0,'
+        'alimiter=limit=0.98:level=disabled[aout]')
+    return f'{normalized};{mix}'
+
+
 def descriptors_from_ffprobe_streams(
     streams: Iterable[dict[str, Any]],
 ) -> tuple[AudioStreamDescriptor, ...]:

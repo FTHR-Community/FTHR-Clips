@@ -380,10 +380,9 @@ def sound(notes: list[tuple[float, float]], gap: float = 0.025) -> bytes:
 
 
 def generated_files() -> dict[Path, bytes]:
-    logo = draw_mark(512).png()
+    draw_mark(512).png()
     files = {
         ROOT / '.github' / 'social_preview.png': social_preview().png(),
-        ROOT / 'AppDir' / 'fthr-clips.png': logo,
         ROOT / 'installer_assets' / 'wizard_banner.bmp':
             installer_banner(164, 314).bmp(),
         ROOT / 'installer_assets' / 'wizard_small.bmp':

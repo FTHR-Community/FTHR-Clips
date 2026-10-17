@@ -11,25 +11,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from fthr_upload_api import (
-    DEFAULT_BASE_URL,
-    FthrUploadClient,
-    clear_credentials,
-    load_credentials,
-    save_credentials,
-)
-from hardware_identity_client import derive_hardware_id
 from upload_runtime import UploadRuntime
 
 
 PLUGIN_ID = 'com.fthrclips.uploader'
-PLUGIN_VERSION = '1.1.0'
-TERMS_VERSION = '2026-08-24-v1'
-PRIVACY_VERSION = '2026-08-24-v1'
+PLUGIN_VERSION = '1.4.0'
+TERMS_VERSION = '2026-10-15-v3'
+PRIVACY_VERSION = '2026-10-15-v3'
 CATBOX_LEGAL_VERSION = 'catbox-legal-2021-03-06'
-LUSTFUL_LEGAL_VERSION = 'lustful-legal-2026-07-27'
-HARDWARE_POLICY_VERSION = 'lustful-2026-07-27-hwid-v1'
-_NETWORK_ACTIONS = {'register', 'login', 'test_connection', 'upload'}
+_NETWORK_ACTIONS = {'test_connection', 'upload'}
 _CUSTOM_PROVIDER = 'custom'
 
 
@@ -79,8 +69,6 @@ def _provider(settings: dict[str, Any], request: dict[str, Any]) -> str:
     config = request.get('config') if isinstance(request.get('config'), dict) else {}
     provider = str(config.get(
         'upload_provider', settings.get('upload_provider', 'catbox'))).lower()
-    if provider == 'fthr':
-        return 'lustful'
     if provider in {'own_server', 'your_server'}:
         return _CUSTOM_PROVIDER
     return provider
@@ -94,16 +82,9 @@ def _require_provider_consent(
         if settings.get('catbox_legal_accepted_version') != CATBOX_LEGAL_VERSION:
             raise PermissionError('Accept Catbox’s legal policies in FTHR Clips first.')
         return
-    if provider == _CUSTOM_PROVIDER:
+    if provider in {_CUSTOM_PROVIDER, 'sftp'}:
         return
-    if provider != 'lustful':
-        raise ValueError('Only Catbox, Lustful, and your server are supported.')
-    if settings.get('lustful_legal_accepted_version') != LUSTFUL_LEGAL_VERSION:
-        raise PermissionError('Accept Lustful’s Terms and Privacy Policy first.')
-    if settings.get('lustful_hardware_policy_accepted_version') != HARDWARE_POLICY_VERSION:
-        raise PermissionError('Install Hardware Identity after accepting Lustful’s policies.')
-    if not isinstance(request.get('hardware_identity'), dict):
-        raise PermissionError('The separate Hardware Identity capability is unavailable.')
+    raise ValueError('Unsupported upload provider.')
 
 
 def _validated_clip_path(request: dict[str, Any]) -> str:
@@ -119,61 +100,27 @@ def _validated_clip_path(request: dict[str, Any]) -> str:
     return str(target)
 
 
-def _hardware_provider(request: dict[str, Any]):
-    config = request.get('hardware_identity')
-    if not isinstance(config, dict):
-        return None
-    return lambda: derive_hardware_id(config)
 
 
-def _account_action(
-        mode: str,
-        account_id: str,
-        settings: dict[str, Any],
-        request: dict[str, Any]) -> dict[str, Any]:
-    account_id = account_id.strip()
-    if not account_id:
-        raise ValueError('Account ID is required.')
-    hardware_id = derive_hardware_id(dict(request['hardware_identity']))
-    client = FthrUploadClient(
-        api_key=str(settings.get('lustful_api_key', '')),
-        base_url=DEFAULT_BASE_URL,
-    )
-    if mode == 'login':
-        data = client.verify(account_id, hardware_id)
-    elif mode == 'register':
-        # Keep registration conflicts as errors. Verifying identity here would
-        # turn account creation into an implicit login attempt.
-        data = client.register(account_id, hardware_id)
-    else:
-        raise ValueError(f'Unsupported account action: {mode}')
-    role = str(data.get('role', 'user'))
-    save_credentials(account_id, hardware_id, role)
-    return {
-        **data,
-        'account_id': account_id,
-        'role': role,
-        'mode': mode,
-    }
 
 
 def _perform(request: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     action = str(request.get('action', '')).strip()
-    if action == 'account_status':
-        return {'ok': True, 'credentials': load_credentials()}
-    if action == 'logout':
-        clear_credentials()
-        return {'ok': True, 'message': 'Logged out locally.'}
-    provider = 'lustful' if action in {'register', 'login'} else _provider(settings, request)
+    if action in {'sftp_save', 'sftp_forget'}:
+        from sftp_provider import configuration, forget_password, save_password
+        config = dict(request.get('config') or {})
+        configuration(config)
+        if action == 'sftp_forget':
+            forget_password(config)
+        elif config.get('sftp_password'):
+            save_password(config, config['sftp_password'])
+        return {'ok': True, 'message': 'SFTP credentials updated.'}
+    provider = _provider(settings, request)
     _require_provider_consent(provider, settings, request)
-    if action in {'register', 'login'}:
-        data = _account_action(
-            action, str(request.get('account_id', '')), settings, request)
-        return {'ok': True, 'data': data}
     runtime_settings = dict(settings)
     if isinstance(request.get('config'), dict):
         runtime_settings.update(request['config'])
-    runtime = UploadRuntime(runtime_settings, _hardware_provider(request))
+    runtime = UploadRuntime(runtime_settings)
     if action == 'test_connection':
         ok, message = runtime.test_connection()
         return {'ok': ok, 'message': message}

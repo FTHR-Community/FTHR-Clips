@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'FTHR_UI'))
 
 pytest.importorskip('PySide6.QtCore')
-from PySide6.QtCore import QTimer, QEventLoop, QElapsedTimer
+from PySide6.QtCore import QTimer, QEventLoop, QElapsedTimer, Qt
 
 from core.capture_bridge import CaptureBridge, SharedMemoryLayout, ResponseType
 from core.save_state import SaveStateMachine, EngineEvent, OutcomeKind
@@ -35,10 +35,12 @@ def _a_path():
 
 
 def _run_loop_for(ms: int):
-    """Spin a real event loop for `ms`, counting 10 ms ticks."""
+    """Spin a real event loop for `ms`, counting 30 ms ticks."""
     ticks = [0]
     counter = QTimer()
-    counter.setInterval(10)
+    # Stay above Windows' usual 15.6 ms clock resolution.
+    counter.setInterval(30)
+    counter.setTimerType(Qt.TimerType.PreciseTimer)
     counter.timeout.connect(lambda: ticks.__setitem__(0, ticks[0] + 1))
     counter.start()
 
@@ -52,7 +54,7 @@ def _run_loop_for(ms: int):
 def test_save_submit_does_not_stall_the_event_loop(qapp):
     """Submit against a silent engine, then let the loop run for ~600 ms.
 
-    A 10 ms timer should fire ~60 times. The old blocking save_clip() would
+    A 30 ms timer should fire ~20 times. The old blocking save_clip() would
     have eaten a full second of that window before the loop even started.
     """
     bridge = SilentEngineBridge()
@@ -67,7 +69,7 @@ def test_save_submit_does_not_stall_the_event_loop(qapp):
         f'it must return immediately (AUDIT-011)')
 
     ticks = _run_loop_for(600)
-    assert ticks >= 40, (
+    assert ticks >= 14, (
         f'event loop only ticked {ticks} times in 600 ms — something on the '
         f'save path is blocking it')
 
@@ -108,7 +110,7 @@ def test_poller_keeps_the_loop_responsive_while_engine_is_silent(qapp):
     ticks = _run_loop_for(1300)
     save_timer.stop()
 
-    assert ticks >= 90, (
+    assert ticks >= 30, (
         f'event loop only ticked {ticks} times in 1300 ms — the save poller '
         f'is blocking')
     # The ack timeout fired from the timer, on schedule, without a sleep.

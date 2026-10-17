@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""Fetch manifest-pinned FFmpeg and the Microsoft VC++ redistributable.
+"""Fetch verified Windows FFmpeg and Microsoft VC++ runtime build inputs.
 
---ffmpeg installs the Windows runtime; --ffmpeg-linux installs matching Linux
-headers and libraries; --vcredist fetches the Windows prerequisite. --all
-selects this platform's inputs. Verify FFmpeg files against manifest hashes
-and reject mismatches before packaging.
+Use --ffmpeg, --vcredist, or --all. Reject manifest hash mismatches before packaging.
 """
 
 from __future__ import annotations
@@ -16,8 +13,8 @@ import os
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -26,12 +23,6 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / 'tools' / 'ffmpeg_manifest.json'
 FFMPEG_DIR = ROOT / 'FTHRcapture' / 'FTHRclips' / 'third_party' / 'ffmpeg'
 REDIST_DIR = ROOT / 'redist'
-
-# AUDIT-014: the Linux engine must NOT link the distribution's FFmpeg, which is
-# a GPL build on every mainstream distro. This is the LGPL runtime it is built
-# against and shipped with instead.
-MANIFEST_LINUX = ROOT / 'tools' / 'ffmpeg_manifest_linux.json'
-FFMPEG_LINUX_DIR = ROOT / 'FTHRcapture_linux' / 'third_party' / 'ffmpeg'
 
 VCREDIST_URL = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
 VCREDIST_METADATA = REDIST_DIR / 'vc_redist.x64.json'
@@ -59,6 +50,26 @@ def _download(url: str, dest: Path) -> None:
                 print(f'\r  {pct:3d}%  {done / 1e6:.1f} / {total / 1e6:.1f} MB',
                       end='', flush=True)
         print()
+
+
+def _verify_download(path: Path, asset: dict[str, object]) -> None:
+    """Verify a downloaded asset's exact byte count and SHA-256."""
+    expected_size = int(asset['size_bytes'])
+    expected_hash = str(asset['sha256']).lower()
+    if not path.is_file():
+        raise RuntimeError(f'downloaded asset is missing: {path}')
+    actual_size = path.stat().st_size
+    if actual_size != expected_size:
+        raise RuntimeError(
+            f'{path.name} size mismatch: expected {expected_size}, got {actual_size}')
+    actual_hash = _sha256(path)
+    if actual_hash != expected_hash:
+        raise RuntimeError(
+            f'{path.name} sha256 mismatch: expected {expected_hash}, got {actual_hash}')
+
+
+
+
 
 
 def _windows_powershell() -> str:
@@ -148,37 +159,8 @@ def _verify_vcredist(path: Path) -> dict[str, str]:
     return details
 
 
-def _ensure_linux_ffmpeg_aliases(
-    lib_dir: Path, soname_map: dict[str, str]
-) -> None:
-    """Restore and verify FFmpeg development and SONAME aliases after extraction.
 
-    Missing aliases can select system libraries or break runtime loading.
-    Prefer symlinks, then hard links, then byte copies for portability.
-    """
-    for versioned_name, soname in soname_map.items():
-        source = lib_dir / versioned_name
-        source_digest = _sha256(source)
-        linker_name = soname.split('.so.', 1)[0] + '.so'
-        for alias_name in (soname, linker_name):
-            alias = lib_dir / alias_name
-            same_file = alias.is_file() and os.path.samefile(alias, source)
-            if same_file or (alias.is_file() and _sha256(alias) == source_digest):
-                continue
-            alias.unlink(missing_ok=True)
-            try:
-                alias.symlink_to(source.name)
-            except OSError:
-                try:
-                    os.link(source, alias)
-                except OSError:
-                    shutil.copy2(source, alias)
-            same_file = alias.is_file() and os.path.samefile(alias, source)
-            if not same_file and (
-                not alias.is_file() or _sha256(alias) != source_digest
-            ):
-                raise RuntimeError(
-                    f'could not materialize FFmpeg library alias: {alias_name}')
+
 
 
 def fetch_ffmpeg(force: bool) -> int:
@@ -263,89 +245,6 @@ def fetch_ffmpeg(force: bool) -> int:
     return 0
 
 
-def fetch_ffmpeg_linux(force: bool) -> int:
-    """Install the pinned Linux FFmpeg headers and runtime from one archive.
-
-    Compile-time and bundled libraries must agree on the ABI.
-    """
-    manifest = json.loads(MANIFEST_LINUX.read_text(encoding='utf-8'))
-    src = manifest['source']
-    expected = manifest['shipped_files_sha256']
-    lib_dir = FFMPEG_LINUX_DIR / 'lib'
-
-    if lib_dir.is_dir() and not force:
-        have = {p.name: p for p in lib_dir.iterdir() if p.is_file()}
-        if set(expected) <= set(have):
-            bad = [n for n, d in expected.items() if _sha256(have[n]) != d]
-            if not bad:
-                _ensure_linux_ffmpeg_aliases(lib_dir, manifest['soname_map'])
-                print(f'LGPL FFmpeg {manifest["version"]} already present and verified.')
-                return 0
-            print(f'  present but {len(bad)} file(s) failed sha256: {bad}')
-
-    print(f'FFmpeg {manifest["version"]} ({manifest["license"]}) '
-          f'from {src["project"]} — Linux')
-
-    with tempfile.TemporaryDirectory() as td:
-        archive = Path(td) / src['asset']
-        _download(src['url'], archive)
-
-        digest = _sha256(archive)
-        if digest != src['sha256']:
-            print('ERROR: archive sha256 mismatch\n'
-                  f'  expected {src["sha256"]}\n'
-                  f'  got      {digest}\n'
-                  'This is NOT the build the licence paperwork describes. '
-                  'Refusing to install it.', file=sys.stderr)
-            return 1
-        print('  archive sha256 OK')
-
-        staged = Path(td) / 'staged'
-        with tarfile.open(archive) as tf:
-            members = [m for m in tf.getmembers() if m.isfile() or m.issym()]
-            root_prefix = members[0].name.split('/', 1)[0] + '/'
-            for m in members:
-                rel = m.name[len(root_prefix):] if m.name.startswith(root_prefix) else m.name
-                if not rel or rel.startswith(('doc/', 'man/', 'presets/')):
-                    continue
-                m2 = tf.getmember(m.name)
-                m2.name = rel
-                # filter='data' refuses absolute paths and traversal (py3.12+).
-                try:
-                    tf.extract(m2, staged, filter='data')
-                except TypeError:            # older tarfile without `filter`
-                    tf.extract(m2, staged)
-
-        staged_lib = staged / 'lib'
-        missing = [n for n in expected if not (staged_lib / n).is_file()]
-        if missing:
-            print(f'ERROR: archive is missing expected libraries: {missing}',
-                  file=sys.stderr)
-            return 1
-        bad = [n for n, d in expected.items() if _sha256(staged_lib / n) != d]
-        if bad:
-            print(f'ERROR: per-file sha256 mismatch: {bad}', file=sys.stderr)
-            return 1
-        print(f'  all {len(expected)} libraries verified against the manifest')
-
-        if FFMPEG_LINUX_DIR.exists():
-            shutil.rmtree(FFMPEG_LINUX_DIR)
-        FFMPEG_LINUX_DIR.mkdir(parents=True)
-        for sub in ('lib', 'include', 'bin'):
-            if (staged / sub).exists():
-                shutil.copytree(staged / sub, FFMPEG_LINUX_DIR / sub,
-                                symlinks=True)
-        for lic in ('LICENSE.txt', 'LICENSE'):
-            if (staged / lic).is_file():
-                shutil.copy2(staged / lic, FFMPEG_LINUX_DIR / 'LICENSE.txt')
-                break
-
-        _ensure_linux_ffmpeg_aliases(lib_dir, manifest['soname_map'])
-
-    print(f'LGPL FFmpeg installed into {FFMPEG_LINUX_DIR.relative_to(ROOT)}')
-    print(f'  build the engine with: '
-          f'-DFTHR_FFMPEG_ROOT={FFMPEG_LINUX_DIR.relative_to(ROOT)}')
-    return 0
 
 
 def fetch_vcredist(force: bool) -> int:
@@ -383,8 +282,6 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--ffmpeg', action='store_true',
                     help='Windows LGPL FFmpeg runtime')
-    ap.add_argument('--ffmpeg-linux', action='store_true',
-                    help='Linux LGPL FFmpeg (headers + libs) — AUDIT-014')
     ap.add_argument('--vcredist', action='store_true')
     ap.add_argument('--all', action='store_true',
                     help='everything for the current platform')
@@ -392,19 +289,14 @@ def main() -> int:
                     help='re-download even if the files are already present')
     args = ap.parse_args()
 
-    if not (args.ffmpeg or args.ffmpeg_linux or args.vcredist or args.all):
+    if not (args.ffmpeg or args.vcredist or args.all):
         ap.print_help()
         return 2
 
-    # all is platform-aware: fetching the Windows runtime on Linux (or the
-    # reverse) downloads 150 MB nobody can use.
-    on_windows = sys.platform == 'win32'
     rc = 0
-    if args.ffmpeg or (args.all and on_windows):
+    if args.ffmpeg or args.all:
         rc |= fetch_ffmpeg(args.force)
-    if args.ffmpeg_linux or (args.all and not on_windows):
-        rc |= fetch_ffmpeg_linux(args.force)
-    if args.vcredist or (args.all and on_windows):
+    if args.vcredist or args.all:
         rc |= fetch_vcredist(args.force)
     return rc
 
