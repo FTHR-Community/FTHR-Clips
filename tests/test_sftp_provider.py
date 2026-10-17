@@ -380,6 +380,81 @@ def test_vault_password_is_scoped_and_never_returned(monkeypatch):
     assert not values
 
 
+def _fake_secret_service(monkeypatch, *, available, store=None):
+    """Install a stand-in keyring.backends.SecretService; never touches D-Bus."""
+    import types
+
+    class Keyring:
+        def set_password(self, service, username, password):
+            store[service, username] = password
+
+        def get_password(self, service, username):
+            return store.get((service, username))
+
+        def delete_password(self, service, username):
+            store.pop((service, username))
+
+    class _Probe:
+        def __get__(self, _instance, _owner):
+            if not available:
+                raise RuntimeError('The Secret Service daemon is neither running nor '
+                                   'activatable through D-Bus')
+            return 5
+
+    Keyring.priority = _Probe()
+    module = types.ModuleType('keyring.backends.SecretService')
+    module.Keyring = Keyring
+    monkeypatch.setitem(sys.modules, 'keyring.backends.SecretService', module)
+    monkeypatch.setattr(sftp.sys, 'platform', 'linux')
+    return Keyring
+
+
+_VAULT_CONFIG = {
+    'sftp_host': 'example.com', 'sftp_port': 22, 'sftp_username': 'user',
+    'sftp_fingerprint': 'SHA256:' + base64.b64encode(b'x' * 32).decode().rstrip('='),
+}
+
+
+def test_linux_vault_uses_secret_service_backend(monkeypatch):
+    store = {}
+    keyring_class = _fake_secret_service(monkeypatch, available=True, store=store)
+    assert isinstance(sftp._vault(), keyring_class)
+    sftp.save_password(_VAULT_CONFIG, 'secret')
+    assert list(store.values()) == ['secret']
+    assert sftp._password(_VAULT_CONFIG) == 'secret'
+    sftp.forget_password(_VAULT_CONFIG)
+    assert not store
+
+
+def test_linux_vault_without_secret_service_explains_and_saves_nothing(monkeypatch):
+    store = {}
+    _fake_secret_service(monkeypatch, available=False, store=store)
+    for action in (
+            lambda: sftp.save_password(_VAULT_CONFIG, 'secret'),
+            lambda: sftp._password(_VAULT_CONFIG),
+            lambda: sftp.forget_password(_VAULT_CONFIG)):
+        with pytest.raises(sftp.SftpError, match='Secret Service keyring'):
+            action()
+    with pytest.raises(sftp.SftpError, match='none is running') as raised:
+        uploader_service._perform({'action': 'sftp_save', 'config': {
+            **_VAULT_CONFIG, 'sftp_password': 'hunter2'}}, {})
+    assert 'hunter2' not in str(raised.value)
+    assert not store
+
+
+def test_linux_vault_never_falls_back_to_another_backend(monkeypatch):
+    monkeypatch.setattr(sftp.sys, 'platform', 'linux')
+    monkeypatch.setitem(sys.modules, 'keyring.backends.SecretService', None)
+    with pytest.raises(sftp.SftpError, match='Secret Service keyring'):
+        sftp._vault()
+
+
+def test_unsupported_platform_vault_is_refused(monkeypatch):
+    monkeypatch.setattr(sftp.sys, 'platform', 'darwin')
+    with pytest.raises(sftp.SftpError, match='not supported'):
+        sftp._vault()
+
+
 def test_core_never_persists_password(tmp_path, monkeypatch):
     from core import upload_manager
     from test_uploader_plugin_boundary import _CoreSettings
