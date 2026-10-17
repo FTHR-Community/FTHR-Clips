@@ -42,7 +42,9 @@ def _run_apprun(tmp_path: Path, env: dict[str, str]) -> str:
 
 
 def test_wayland_session_defaults_to_the_wayland_plugin(tmp_path):
-    assert _run_apprun(tmp_path, {'WAYLAND_DISPLAY': 'wayland-0', 'DISPLAY': ':0'}) == 'wayland'
+    # xcb second: Qt falls back to XWayland if the Wayland plugin cannot load.
+    assert _run_apprun(
+        tmp_path, {'WAYLAND_DISPLAY': 'wayland-0', 'DISPLAY': ':0'}) == 'wayland;xcb'
 
 
 def test_x11_session_defaults_to_xcb(tmp_path):
