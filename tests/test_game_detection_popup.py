@@ -5,6 +5,24 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'FTHR_UI'))
 
 import main as app_main  # noqa: E402
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_real_window_enumeration(monkeypatch):
+    """Keep GameDetectionPopup's deferred window refresh off the real desktop.
+
+    The popup queues _refresh_running_windows with QTimer.singleShot(0). Left
+    alone it shells out to hyprctl/xdotool on Linux, and in the tests that
+    patch sys.platform to 'win32' it reaches ctypes.windll and raises
+    AttributeError inside that timer slot. PySide6 6.11 keeps such a slot
+    error pending across the rest of QApplication.processEvents(); the next
+    Python virtual override it dispatches (IconButton/_ToggleSwitch
+    paintEvent) then segfaults in Shiboken::BindingManager::getOverride.
+    """
+    from ui import capture_settings_widget
+    monkeypatch.setattr(capture_settings_widget, '_enumerate_capturable_windows',
+                        lambda: [])
 
 
 class _Settings:
