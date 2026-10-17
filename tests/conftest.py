@@ -46,6 +46,9 @@ def _isolate_linux_desktop_hotkeys(monkeypatch, tmp_path):
     if sys.platform == 'win32':
         return
     monkeypatch.delenv('HYPRLAND_INSTANCE_SIGNATURE', raising=False)
+    # The hotkey socket lives under $XDG_RUNTIME_DIR/fthr; keep it private
+    # to the test so a running FTHR keeps its socket.
+    monkeypatch.setenv('XDG_RUNTIME_DIR', str(tmp_path / 'xdg-runtime'))
     hypr = tmp_path / 'hypr'
     for name in ('core.hotkey_manager', 'FTHR_UI.core.hotkey_manager'):
         module = sys.modules.get(name)
@@ -58,6 +61,3 @@ def _isolate_linux_desktop_hotkeys(monkeypatch, tmp_path):
         monkeypatch.setattr(module, '_HYPR_LUA_CONF', hypr / 'hyprland.lua')
         monkeypatch.setattr(
             module, '_HYPR_CUSTOM_LUA', hypr / 'custom' / 'keybinds.lua')
-        monkeypatch.setattr(
-            module.linux_runtime, 'hotkey_socket_path',
-            lambda create_dir=True: str(tmp_path / 'hotkey.sock'))
