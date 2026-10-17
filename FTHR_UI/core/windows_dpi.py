@@ -28,6 +28,9 @@ def _hwnd(value: Any) -> int:
 
 def dpi_for_window(window_or_hwnd: Any) -> int:
     """Return effective per-window DPI, or the 96-DPI baseline off Windows."""
+    if sys.platform != 'win32':
+        # Also avoids winId(), which would force a native window on Linux.
+        return BASE_DPI
     hwnd = _hwnd(window_or_hwnd)
     if not hwnd:
         return BASE_DPI
@@ -73,6 +76,8 @@ def dpi_awareness_snapshot(window: Any = None) -> dict[str, Any]:
         'window_dpi': BASE_DPI,
         'awareness_context_comparison': 'unavailable:not_windows',
     }
+    if sys.platform != 'win32':
+        return result
     try:
         user32 = ctypes.windll.user32
         get_thread = user32.GetThreadDpiAwarenessContext

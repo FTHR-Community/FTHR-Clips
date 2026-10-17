@@ -253,33 +253,45 @@ def _cpu_model() -> str:
     model = platform.processor().strip()
     if model:
         return model
-    return os.environ.get('PROCESSOR_IDENTIFIER', '').strip() or 'unavailable'
+    if sys.platform == 'win32':
+        return os.environ.get('PROCESSOR_IDENTIFIER', '').strip() or 'unavailable'
+    try:
+        for line in Path('/proc/cpuinfo').read_text(
+                encoding='utf-8', errors='replace').splitlines():
+            if line.lower().startswith('model name'):
+                return line.partition(':')[2].strip()
+    except OSError:
+        # CPU identity is optional support context; preserve the explicit
+        # unavailable value when procfs cannot be read.
+        pass
+    return 'unavailable'
 
 
 def _memory_snapshot() -> dict[str, int | str]:
-    class MemoryStatus(ctypes.Structure):
-        _fields_ = [
-            ('length', ctypes.c_ulong), ('memory_load', ctypes.c_ulong),
-            ('total_physical', ctypes.c_ulonglong),
-            ('available_physical', ctypes.c_ulonglong),
-            ('total_page_file', ctypes.c_ulonglong),
-            ('available_page_file', ctypes.c_ulonglong),
-            ('total_virtual', ctypes.c_ulonglong),
-            ('available_virtual', ctypes.c_ulonglong),
-            ('available_extended_virtual', ctypes.c_ulonglong),
-        ]
-    status = MemoryStatus()
-    status.length = ctypes.sizeof(status)
-    try:
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return {
-                'total_physical_bytes': int(status.total_physical),
-                'available_physical_bytes': int(status.available_physical),
-            }
-    except (AttributeError, OSError):
-        # Older/non-Windows runtimes may not expose this ctypes API; the
-        # portable sysconf probe below remains available.
-        pass
+    if sys.platform == 'win32':
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ('length', ctypes.c_ulong), ('memory_load', ctypes.c_ulong),
+                ('total_physical', ctypes.c_ulonglong),
+                ('available_physical', ctypes.c_ulonglong),
+                ('total_page_file', ctypes.c_ulonglong),
+                ('available_page_file', ctypes.c_ulonglong),
+                ('total_virtual', ctypes.c_ulonglong),
+                ('available_virtual', ctypes.c_ulonglong),
+                ('available_extended_virtual', ctypes.c_ulonglong),
+            ]
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(status)
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return {
+                    'total_physical_bytes': int(status.total_physical),
+                    'available_physical_bytes': int(status.available_physical),
+                }
+        except (AttributeError, OSError):
+            # Older/non-Windows runtimes may not expose this ctypes API; the
+            # portable sysconf probe below remains available.
+            pass
     try:
         page_size = os.sysconf('SC_PAGE_SIZE')
         return {
@@ -302,6 +314,8 @@ def _windows_version() -> dict[str, Any]:
         'edition': 'unavailable',
         'architecture': platform.machine() or platform.architecture()[0],
     }
+    if sys.platform != 'win32':
+        return result
     try:
         import winreg
         path = r'SOFTWARE\Microsoft\Windows NT\CurrentVersion'
@@ -404,37 +418,38 @@ def collect_hardware_snapshot(
 
 def process_memory_bytes() -> int | str:
     """Best-effort resident/private working set for bounded library snapshots."""
-    class ProcessMemoryCounters(ctypes.Structure):
-        _fields_ = [
-            ('cb', ctypes.c_ulong), ('page_fault_count', ctypes.c_ulong),
-            ('peak_working_set_size', ctypes.c_size_t),
-            ('working_set_size', ctypes.c_size_t),
-            ('quota_peak_paged_pool_usage', ctypes.c_size_t),
-            ('quota_paged_pool_usage', ctypes.c_size_t),
-            ('quota_peak_non_paged_pool_usage', ctypes.c_size_t),
-            ('quota_non_paged_pool_usage', ctypes.c_size_t),
-            ('pagefile_usage', ctypes.c_size_t),
-            ('peak_pagefile_usage', ctypes.c_size_t),
-        ]
-    counters = ProcessMemoryCounters()
-    counters.cb = ctypes.sizeof(counters)
-    try:
-        kernel32 = ctypes.windll.kernel32
-        psapi = ctypes.windll.psapi
-        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-        psapi.GetProcessMemoryInfo.argtypes = [
-            ctypes.c_void_p, ctypes.POINTER(ProcessMemoryCounters),
-            ctypes.c_ulong,
-        ]
-        psapi.GetProcessMemoryInfo.restype = ctypes.c_int
-        handle = kernel32.GetCurrentProcess()
-        if psapi.GetProcessMemoryInfo(
-                handle, ctypes.byref(counters), counters.cb):
-            return int(counters.working_set_size)
-    except (AttributeError, OSError):
-        # psapi is unavailable outside a compatible Windows runtime; the
-        # portable resource fallback below still provides best effort.
-        pass
+    if sys.platform == 'win32':
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ('cb', ctypes.c_ulong), ('page_fault_count', ctypes.c_ulong),
+                ('peak_working_set_size', ctypes.c_size_t),
+                ('working_set_size', ctypes.c_size_t),
+                ('quota_peak_paged_pool_usage', ctypes.c_size_t),
+                ('quota_paged_pool_usage', ctypes.c_size_t),
+                ('quota_peak_non_paged_pool_usage', ctypes.c_size_t),
+                ('quota_non_paged_pool_usage', ctypes.c_size_t),
+                ('pagefile_usage', ctypes.c_size_t),
+                ('peak_pagefile_usage', ctypes.c_size_t),
+            ]
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        try:
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            psapi.GetProcessMemoryInfo.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(ProcessMemoryCounters),
+                ctypes.c_ulong,
+            ]
+            psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+            handle = kernel32.GetCurrentProcess()
+            if psapi.GetProcessMemoryInfo(
+                    handle, ctypes.byref(counters), counters.cb):
+                return int(counters.working_set_size)
+        except (AttributeError, OSError):
+            # psapi is unavailable outside a compatible Windows runtime; the
+            # portable resource fallback below still provides best effort.
+            pass
     try:
         import resource
         value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
