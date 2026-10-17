@@ -4,6 +4,11 @@
   Qt's warnings and fatal errors are written to `~/.fthr/logs/fthr.log` and
   native crash tracebacks to `~/.fthr/logs/fthr-crash.log`, and on Wayland the AppImage falls back to XWayland
   when Qt's Wayland plugin cannot load instead of exiting (#77).
+- KDE Plasma and GNOME identify FTHR Clips to the desktop portal even when the
+  AppImage is started from a terminal or a file manager: the app registers the
+  `fthr-clips` id with xdg-desktop-portal 1.19+ and installs its desktop entry
+  before Qt starts, so global shortcuts are not filed under Konsole or
+  Dolphin.
 
 # FTHR Clips 1.1.3-alpha
 

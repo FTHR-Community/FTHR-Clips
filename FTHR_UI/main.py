@@ -12217,6 +12217,11 @@ def main():
 
     diagnostic_session = start_diagnostic_session(APP_VERSION)
     diagnostic_session.collect_hardware_async()
+    if HotkeyManager.uses_portal_shortcuts():
+        # QApplication registers its app id with the host portal as it
+        # starts, which xdg-desktop-portal refuses until fthr-clips.desktop
+        # exists; install it first so the very first launch is identified too.
+        linux_runtime.ensure_desktop_entry()
     configure_qt_for_linux_ui()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)

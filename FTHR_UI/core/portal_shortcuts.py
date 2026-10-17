@@ -27,6 +27,7 @@ PORTAL_PATH = '/org/freedesktop/portal/desktop'
 SHORTCUTS_IFACE = 'org.freedesktop.portal.GlobalShortcuts'
 REQUEST_IFACE = 'org.freedesktop.portal.Request'
 SESSION_IFACE = 'org.freedesktop.portal.Session'
+REGISTRY_IFACE = 'org.freedesktop.host.portal.Registry'
 
 # Response codes from org.freedesktop.portal.Request.Response.
 RESPONSE_OK = 0
@@ -114,6 +115,28 @@ def parse_bound_shortcuts(shortcuts: Any) -> dict[str, str]:
     return bound
 
 
+def register_app_id(router, app_id: str) -> str:
+    """Tie this D-Bus connection to ``app_id`` (xdg-desktop-portal 1.19+).
+
+    Without it the portal derives the app id from the systemd scope we were
+    started in, so a launch from a terminal or a file manager is attributed to
+    Konsole or Dolphin and the shortcuts end up under the wrong application.
+    Registration is per connection, must precede every portal call on it, and
+    succeeds only once a matching ``<app_id>.desktop`` is installed. Returns
+    an empty string on success, otherwise the reason.
+    """
+    from jeepney import DBusAddress, MessageType, new_method_call
+    registry = DBusAddress(PORTAL_PATH, bus_name=PORTAL_BUS_NAME, interface=REGISTRY_IFACE)
+    try:
+        reply = router.send_and_get_reply(
+            new_method_call(registry, 'Register', 'sa{sv}', (app_id, {})), timeout=3)
+    except (OSError, TimeoutError) as exc:
+        return str(exc) or type(exc).__name__
+    if reply.header.message_type == MessageType.error:
+        return str(reply.body[0]) if reply.body else 'Register failed'
+    return ''
+
+
 def is_available() -> bool:
     """True when a GlobalShortcuts portal backend answers on the session bus."""
     global _availability
@@ -150,8 +173,11 @@ class PortalShortcuts(QObject):
     session_ready = Signal()         # CreateSession succeeded; binds go through now
     failed = Signal(str)             # human-readable reason
 
-    def __init__(self, parent: QObject | None = None):
+    def __init__(self, parent: QObject | None = None, app_id: str = ''):
         super().__init__(parent)
+        # Registered with the host portal before any other call; empty when
+        # no matching desktop entry exists (registration would be refused).
+        self._app_id = app_id
         self._jobs: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
         self._running = False
@@ -223,6 +249,12 @@ class PortalShortcuts(QObject):
         try:
             with open_dbus_router() as router:
                 me = router.unique_name
+                if self._app_id:
+                    reason = register_app_id(router, self._app_id)
+                    if reason:
+                        print(f'[Portal] App id {self._app_id!r} not registered: {reason}')
+                    else:
+                        print(f'[Portal] Registered app id {self._app_id!r}')
                 response_rule = MatchRule(
                     type='signal', interface=REQUEST_IFACE, member='Response')
                 # No sender= here: the local filter compares against the

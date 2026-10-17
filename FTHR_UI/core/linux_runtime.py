@@ -195,9 +195,10 @@ def launch_command() -> str | None:
 def ensure_desktop_entry() -> bool:
     """Install ~/.local/share/applications/fthr-clips.desktop if none exists.
 
-    xdg-desktop-portal derives our app id from the systemd scope AppRun puts
-    us in (app-fthr\\x2dclips-<pid>.scope) and rejects the id unless a
-    matching .desktop file is installed. Returns True when an entry exists.
+    xdg-desktop-portal accepts an app id (registered over
+    org.freedesktop.host.portal.Registry, or derived from a desktop
+    launcher's app-fthr\\x2dclips-<pid>.scope) only when a matching .desktop
+    file is installed. Returns True when an entry exists.
     """
     if sys.platform == 'win32':
         return False
