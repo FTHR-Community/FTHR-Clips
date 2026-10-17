@@ -333,6 +333,11 @@ class CaptureBridge:
     def resume_recording(self) -> bool:
         if not self.is_connected():
             return False
+        if sys.platform != 'win32':
+            # ui_string still holds the last SAVE_CLIP path. The Linux engine
+            # reads START_RECORDING with a path as a manual-recording request
+            # (which it refuses), so a resume must carry an empty string.
+            self._layout.ui_string = b''
         self._layout.ui_command = CommandType.START_RECORDING
         return True
 

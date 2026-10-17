@@ -429,3 +429,25 @@ def test_linux_connect_before_engine_ready_returns_false_without_buffererror():
         assert bridge._initialize_linux() is False   # and stays retryable
     finally:
         os.unlink(path)
+
+
+def test_linux_resume_does_not_resend_the_last_clip_path():
+    if sys.platform == 'win32':
+        pytest.skip('Linux engine treats a START_RECORDING path as manual recording')
+    layout, buf = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+    assert bridge.save_clip('/tmp/clip.mp4', 30)
+    layout.ui_command = CommandType.NONE
+    assert bridge.resume_recording()
+    assert layout.ui_command == CommandType.START_RECORDING
+    assert layout.ui_string == b''
+
+
+def test_linux_never_requests_manual_recording():
+    if sys.platform == 'win32':
+        pytest.skip('Linux engine has no continuous recorder')
+    layout, buf = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+    assert bridge.start_manual_recording('/tmp/rec.mp4') is False
+    assert bridge.stop_manual_recording() is False
+    assert layout.ui_command == CommandType.NONE
