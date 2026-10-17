@@ -292,18 +292,23 @@ python FTHR_UI/main.py
 The UI spawns the engine itself.
 
 Global hotkeys on Linux come from the XDG GlobalShortcuts portal, which only
-grants a session to a process it can tie to a `.desktop` file. Packaged builds
-handle that themselves (AppRun starts inside `app-fthr\x2dclips-<pid>.scope`
-and the app installs `fthr-clips.desktop` on first run). A source run has
-neither, so the portal answers "An app id is required" and the app falls back
-to the socket instructions. To test the portal path from source, install a
-desktop entry once and start inside a matching scope:
+grants a session to a process it can tie to a `.desktop` file. The app installs
+`fthr-clips.desktop` on first run (packaged builds only) before Qt starts, and
+registers the id `fthr-clips` with `org.freedesktop.host.portal.Registry`
+(xdg-desktop-portal 1.19+) on its portal connection, so a launch from a
+terminal or a file manager is identified as FTHR Clips rather than the
+launching app. A source run installs no entry; to test the portal path from
+source, install one once:
 
 ```bash
 printf '[Desktop Entry]\nType=Application\nName=FTHR Clips\nExec=/bin/true\nNoDisplay=true\n' \
     > ~/.local/share/applications/fthr-clips.desktop
-systemd-run --user --scope --quiet --unit="app-fthr\\x2dclips-$$" python FTHR_UI/main.py
+python FTHR_UI/main.py
 ```
+
+With an older xdg-desktop-portal the id still comes from the systemd scope;
+start inside a matching one with
+`systemd-run --user --scope --unit="app-fthr\\x2dclips-$$" python FTHR_UI/main.py`.
 
 To run the engine standalone for diagnostics (positional argv):
 

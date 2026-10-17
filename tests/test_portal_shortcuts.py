@@ -366,3 +366,77 @@ def test_hyprland_keeps_socket_path_unless_forced(tmp_path, monkeypatch):
 
     monkeypatch.setenv('FTHR_FORCE_PORTAL_SHORTCUTS', '1')
     assert hotkeys.HotkeyManager._hyprland_prefers_socket() is False
+
+
+# Host app registration (org.freedesktop.host.portal.Registry)
+
+class _FakeRouter:
+    def __init__(self, reply=None, exc=None):
+        self.sent = []
+        self._reply = reply
+        self._exc = exc
+
+    def send_and_get_reply(self, msg, timeout=None):
+        self.sent.append(msg)
+        if self._exc is not None:
+            raise self._exc
+        return self._reply
+
+
+def _reply(message_type, body=()):
+    return SimpleNamespace(header=SimpleNamespace(message_type=message_type), body=body)
+
+
+def test_register_app_id_calls_the_host_registry():
+    jeepney = pytest.importorskip('jeepney')
+    router = _FakeRouter(_reply(jeepney.MessageType.method_return))
+
+    assert portal.register_app_id(router, 'fthr-clips') == ''
+
+    (msg,) = router.sent
+    fields = msg.header.fields
+    assert fields[jeepney.HeaderFields.interface] == 'org.freedesktop.host.portal.Registry'
+    assert fields[jeepney.HeaderFields.member] == 'Register'
+    assert fields[jeepney.HeaderFields.destination] == portal.PORTAL_BUS_NAME
+    assert msg.body == ('fthr-clips', {})
+
+
+def test_register_app_id_reports_refusal_and_timeout():
+    jeepney = pytest.importorskip('jeepney')
+    refused = _FakeRouter(_reply(
+        jeepney.MessageType.error,
+        ("Could not register app ID: App info not found for 'fthr-clips'",)))
+    assert 'App info not found' in portal.register_app_id(refused, 'fthr-clips')
+
+    assert portal.register_app_id(
+        _FakeRouter(exc=TimeoutError()), 'fthr-clips') == 'TimeoutError'
+
+
+@pytest.mark.parametrize('has_entry, app_id', [(True, 'fthr-clips'), (False, '')])
+def test_portal_client_registers_only_with_a_desktop_entry(
+        tmp_path, monkeypatch, has_entry, app_id):
+    # xdg-desktop-portal refuses an id without a matching .desktop file, and
+    # a refused Register is harmless but noisy; skip it when there is none.
+    if sys.platform == 'win32':
+        pytest.skip('Linux portal path')
+    monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
+    monkeypatch.setattr(portal, 'is_available', lambda: True)
+    monkeypatch.setattr(hotkeys.linux_runtime, 'ensure_desktop_entry', lambda: has_entry)
+    monkeypatch.setattr(hotkeys.HotkeyManager, '_hyprland_prefers_socket',
+                        staticmethod(lambda: False))
+    created = []
+
+    class _Client(_FakePortal):
+        def __init__(self, owner, app_id=''):
+            super().__init__()
+            created.append(app_id)
+            signal = SimpleNamespace(connect=lambda slot: None)
+            self.activated = self.bound = self.session_ready = self.failed = signal
+
+        def start(self):
+            return True
+
+    monkeypatch.setattr(portal, 'PortalShortcuts', _Client)
+
+    assert hotkeys.HotkeyManager()._ensure_portal() is True
+    assert created == [app_id]

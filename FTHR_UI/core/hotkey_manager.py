@@ -697,8 +697,9 @@ class HotkeyManager(QObject):
             return False
         # The portal ties shortcuts to a desktop identity; give packaged
         # builds one the first time they run.
-        linux_runtime.ensure_desktop_entry()
-        portal = portal_shortcuts.PortalShortcuts(self)
+        has_entry = linux_runtime.ensure_desktop_entry()
+        portal = portal_shortcuts.PortalShortcuts(
+            self, app_id=linux_runtime.DESKTOP_ID if has_entry else '')
         portal.activated.connect(self._on_portal_activated)
         portal.bound.connect(self._on_portal_bound)
         portal.session_ready.connect(
@@ -709,6 +710,11 @@ class HotkeyManager(QObject):
             return False
         self._portal = portal
         return True
+
+    @staticmethod
+    def uses_portal_shortcuts() -> bool:
+        """Linux desktops where hotkeys go through the GlobalShortcuts portal."""
+        return sys.platform != 'win32' and not HotkeyManager._hyprland_prefers_socket()
 
     @staticmethod
     def _hyprland_prefers_socket() -> bool:
