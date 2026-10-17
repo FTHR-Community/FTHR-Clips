@@ -2848,7 +2848,50 @@ class HotkeyPopup(_PopupPanel):
         for label_text, action_key in actions:
             self.actions_layout.addWidget(self._create_action_row(label_text, action_key))
         self.actions_scroll.setFixedHeight(min(540, len(actions) * 86))
+        self._add_linux_hotkey_notes()
         self.adjustSize()
+
+    def _add_linux_hotkey_notes(self):
+        """Explain who owns the keys on Linux, once per popup."""
+        if sys.platform == 'win32' or getattr(self, '_linux_notes_added', False):
+            return
+        self._linux_notes_added = True
+        layout = self.layout()
+        if getattr(self.hotkey_manager, 'portal_active', False):
+            # The desktop owns these keys: pressing a key above only states a
+            # preference, and the compositor's answer is written back.
+            note = QLabel(
+                'Your desktop manages these shortcuts. If it keeps a '
+                'different key, change it in the desktop shortcut settings.')
+            note.setWordWrap(True)
+            note.setStyleSheet(
+                f'color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px; '
+                'padding-top: 6px;')
+            layout.addWidget(note)
+            desktop_btn = QPushButton('EDIT IN DESKTOP SETTINGS')
+            desktop_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            desktop_btn.setStyleSheet(_clear_button_qss())
+            desktop_btn.clicked.connect(
+                self.hotkey_manager.open_desktop_shortcut_settings)
+            layout.addWidget(desktop_btn, 0, Qt.AlignmentFlag.AlignLeft)
+            self.hotkey_manager.desktop_bindings_changed.connect(
+                self._refresh_binding_values)
+            return
+        instructions = self.hotkey_manager.setup_instructions(detect_compositor())
+        if not instructions:
+            return
+        instructions_label = QLabel(instructions)
+        instructions_label.setWordWrap(True)
+        instructions_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        instructions_label.setStyleSheet(
+            f'color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px; '
+            'font-family: monospace; padding-top: 6px;')
+        layout.addWidget(instructions_label)
+
+    def _refresh_binding_values(self, *_args):
+        for button in self._binding_buttons:
+            button.refresh_value()
 
     def _create_action_row(self, label_text: str, action_key: str) -> QFrame:
         frame = QFrame()
@@ -4068,13 +4111,18 @@ class MainWindow(QMainWindow):
         if not getattr(self, '_window_screen_signals_connected', False):
             self._window_screen_signals_connected = True
             QTimer.singleShot(0, self._connect_window_screen_signals)
-        pass
+        if sys.platform != 'win32':
+            # Compositor-driven resize for the frameless window. Idempotent:
+            # reuses the filter on repeated shows and catches a first show
+            # where the native window did not exist yet.
+            install_resize_filter(self.windowHandle())
         if not getattr(self, '_native_style_applied', False):
             self._native_style_applied = True
             # Defer SetWindowPos(SWP_FRAMECHANGED) to after the event loop starts.
             # Calling it synchronously inside showEvent sends WM_NCCALCSIZE back
             # into nativeEvent while Qt is mid-show, causing a crash.
-            QTimer.singleShot(0, self._apply_native_style)
+            if sys.platform == 'win32':
+                QTimer.singleShot(0, self._apply_native_style)
             # Pre-realize the settings page so the first time the user clicks
             # the gear button it doesn't pay for layout, font resolution, and
             # stylesheet compilation. The page is already constructed; we just
@@ -4506,6 +4554,27 @@ class MainWindow(QMainWindow):
         )
         self.hotkey_manager.register_all()
         print("Hotkeys registered.")
+
+        # Warn if key features are limited on the current compositor.
+        if sys.platform != 'win32':
+            from core.compositor import has_xtools
+            if detect_compositor() not in ('hyprland', 'x11') and not has_xtools():
+                QTimer.singleShot(2000, self._show_compositor_warning)
+
+    def _show_compositor_warning(self):
+        comp = detect_compositor()
+        comp_name = {
+            'kwin':            'KDE Plasma',
+            'gnome':           'GNOME',
+            'wayland-unknown': 'your Wayland compositor',
+        }.get(comp, comp)
+        self.push_error(
+            'LIMITED FEATURE SUPPORT',
+            f'FTHR Clips is running on {comp_name}. Game detection and focus '
+            'monitoring need xdotool; install it with your package manager. '
+            'Hotkeys remain available through the desktop or the FTHR socket.',
+            level='warning',
+        )
 
 
     def _on_hotkey_save_clip(self):
@@ -6529,6 +6598,9 @@ class MainWindow(QMainWindow):
         try:
             folder = ensure_storage_directory(
                 recording_directory_from(self.settings_manager))
+            if sys.platform != 'win32':
+                self._open_folder_linux(folder)
+                return
             os.startfile(str(folder))
         except OSError as error:
             self.push_error(
@@ -7104,11 +7176,21 @@ class MainWindow(QMainWindow):
             self._set_status('SAVED', status_active_qss())
         QTimer.singleShot(2000, self._update_status)
 
+    def _open_folder_linux(self, folder) -> None:
+        opener = linux_tools.path('xdg-open')
+        if not opener:
+            print(f'[UI] {linux_tools.missing_message("xdg-open")}')
+            return
+        subprocess.Popen([opener, str(folder)])
+
     def _open_clips_folder(self):
         """Open the configured FTHR clips folder in the platform file manager."""
         try:
             folder = ensure_storage_directory(
                 clips_directory_from(self.settings_manager))
+            if sys.platform != 'win32':
+                self._open_folder_linux(folder)
+                return
             os.startfile(str(folder))  # os.startfile exists on Windows only
         except OSError as error:
             if isinstance(error, StoragePathError):
@@ -10182,7 +10264,8 @@ class _SettingsPage(QWidget):
         layout.addWidget(_flat_section_header('System'))
         layout.addSpacing(12)
         self.autostart_check = QCheckBox('Autostart with Windows')
-        pass
+        if sys.platform != 'win32':
+            self.autostart_check.setVisible(False)
         layout.addWidget(self.autostart_check)
         self._init_autostart_checkbox()
         self.autostart_check.stateChanged.connect(self._on_autostart_changed)
