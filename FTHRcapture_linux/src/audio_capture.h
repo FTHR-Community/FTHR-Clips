@@ -32,6 +32,12 @@ public:
     // explicit device name is unusable.
     bool Start(const std::string& device_name = "",
                uint32_t keep_seconds = kMaxSeconds);
+    // Captures the monitor of PulseAudio sink `sink` (the 2.0 playback
+    // device, argv[24]) without following default-sink changes. An empty
+    // name, or a sink the server does not know, captures the default
+    // output monitor and follows it, as Start("") does.
+    bool StartForSink(const std::string& sink,
+                      uint32_t keep_seconds = kMaxSeconds);
     void Stop();
 
     bool IsRunning() const { return running_.load(); }

@@ -32,10 +32,10 @@ bool CaptureEngine::Initialize(const CaptureConfig& cfg) {
         if (cfg.multiband_enabled && !cfg.audio_categories.empty()) {
             multi_audio_.Start(cfg.audio_categories);
         } else {
-            audio_.Start("", cfg.buffer_seconds);
+            audio_.StartForSink(cfg.playback_sink, cfg.buffer_seconds);
             if (!audio_.IsStreamOpen()) {
                 std::cerr << "FTHR_STARTUP_WARNING: DESKTOP_AUDIO_UNAVAILABLE: "
-                          << "Default output monitor could not be opened; "
+                          << "Output monitor could not be opened; "
                           << "audio will attach when it becomes available." << std::endl;
             }
         }
@@ -521,7 +521,7 @@ void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
         if (cfg_.multiband_enabled && !cfg_.audio_categories.empty()) {
             multi_audio_.Start(cfg_.audio_categories);
         } else {
-            audio_.Start("", cfg_.buffer_seconds);
+            audio_.StartForSink(cfg_.playback_sink, cfg_.buffer_seconds);
             if (!audio_.IsStreamOpen()) {
                 // No startup warning here: the UI already received one, and
                 // the capture thread keeps retrying.

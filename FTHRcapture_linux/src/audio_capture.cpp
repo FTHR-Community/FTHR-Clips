@@ -237,7 +237,9 @@ bool AudioCapture::Start(const std::string& device_name, uint32_t keep_seconds) 
         pending_source_.clear();
     }
     if (stream_) {
-        std::cout << "[Audio] Capturing default output monitor: "
+        std::cout << "[Audio] Capturing "
+                  << (follow_default_ ? "default output monitor: "
+                                      : "output monitor: ")
                   << source_name << std::endl;
     }
     running_.store(true);
@@ -245,6 +247,21 @@ bool AudioCapture::Start(const std::string& device_name, uint32_t keep_seconds) 
     if (follow_default_)
         watcher_ = std::thread(&AudioCapture::WatchDefaultOutput, this);
     return true;
+}
+
+bool AudioCapture::StartForSink(const std::string& sink, uint32_t keep_seconds) {
+    if (sink.empty()) return Start("", keep_seconds);
+    // Ask the server for the sink's monitor rather than appending
+    // ".monitor": that also tells a missing sink apart.
+    const std::string monitor = resolve_sink_monitor(sink);
+    if (monitor.empty()) {
+        std::cerr << "[Audio] Playback device '" << sink << "' not found;"
+                  << " capturing the default output monitor instead" << std::endl;
+        return Start("", keep_seconds);
+    }
+    std::cout << "[Audio] Playback device '" << sink << "' -> " << monitor
+              << std::endl;
+    return Start(monitor, keep_seconds);
 }
 
 void AudioCapture::Stop() {
