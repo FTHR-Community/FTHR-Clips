@@ -1,6 +1,8 @@
 import ctypes
 import sys
 
+import pytest
+
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'FTHR_UI'))
 
 import core.capture_bridge as capture_bridge_module
@@ -75,6 +77,8 @@ def test_get_status_returns_stable_python_numeric_types():
     assert type(status['content_luma_mean']) is float
 
 
+@pytest.mark.skipif(sys.platform != 'win32',
+                    reason='the Linux engine writes the failure reason there')
 def test_windows_save_error_is_not_exposed_as_capture_failure():
     layout, buf = _make_fake_layout()
     bridge = _FakeBridge(layout)
@@ -174,6 +178,8 @@ def test_shutdown_does_not_clear_a_replacement_singleton():
         CaptureBridge._instance = previous
 
 
+@pytest.mark.skipif(sys.platform != 'win32',
+                    reason='kernel32 mapping path; Linux maps /dev/shm')
 def test_windows_initialize_and_shutdown_serialize_mapping_lifetime(monkeypatch):
     import threading
     from types import SimpleNamespace
@@ -371,3 +377,77 @@ def _a_path() -> str:
 def _encode_engine_string(text: str):
     """engine_string is wchar on Windows and raw bytes on Linux."""
     return text if sys.platform == 'win32' else text.encode('utf-8')
+
+
+def test_get_status_exposes_failure_detail_only_with_backend_failed():
+    from core.capture_health import CaptureHealthFlag
+
+    layout, buf = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+    layout.engine_string = _encode_engine_string(
+        "Screen sharing was declined in the desktop's dialog.")
+
+    # engine_string also carries save results; it is only a capture failure
+    # detail while the engine publishes BACKEND_FAILED alongside it.
+    layout.capture_health_flags = CaptureHealthFlag.ACTIVE
+    assert bridge.get_status()['capture_failure_detail'] == ''
+
+    layout.capture_health_flags = CaptureHealthFlag.BACKEND_FAILED
+    # Only the Linux engine writes the reason there; on Windows the string
+    # still holds the last save error, so the bridge reports nothing.
+    expected = ('' if sys.platform == 'win32'
+                else "Screen sharing was declined in the desktop's dialog.")
+    assert bridge.get_status()['capture_failure_detail'] == expected
+
+
+def test_linux_connect_before_engine_ready_returns_false_without_buffererror():
+    import os
+    import uuid
+
+    if not sys.platform.startswith('linux') or not os.path.isdir('/dev/shm'):
+        pytest.skip('POSIX shared memory in /dev/shm is Linux-only')
+
+    # A private segment shaped like the engine's, still marked uninitialised:
+    # the window between the engine creating the mapping and finishing
+    # startup, which the UI's connect loop polls through.
+    name = f'FTHR_SharedMemory_test_{uuid.uuid4().hex}'
+    path = f'/dev/shm/{name}'
+    with open(path, 'wb') as handle:
+        handle.write(b'\0' * ctypes.sizeof(SharedMemoryLayout))
+    try:
+        # Bypass the process-wide singleton so no real bridge state leaks.
+        bridge = object.__new__(CaptureBridge)
+        bridge._initialized = False
+        bridge._linux_mmap = None
+        bridge._layout = None
+        bridge._logged_read_errors = set()
+        bridge.SHARED_MEM_NAME = name
+
+        assert bridge._initialize_linux() is False   # used to raise BufferError
+        assert bridge._layout is None
+        assert bridge._linux_mmap is None
+        assert bridge._initialize_linux() is False   # and stays retryable
+    finally:
+        os.unlink(path)
+
+
+def test_linux_resume_does_not_resend_the_last_clip_path():
+    if sys.platform == 'win32':
+        pytest.skip('Linux engine treats a START_RECORDING path as manual recording')
+    layout, buf = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+    assert bridge.save_clip('/tmp/clip.mp4', 30)
+    layout.ui_command = CommandType.NONE
+    assert bridge.resume_recording()
+    assert layout.ui_command == CommandType.START_RECORDING
+    assert layout.ui_string == b''
+
+
+def test_linux_never_requests_manual_recording():
+    if sys.platform == 'win32':
+        pytest.skip('Linux engine has no continuous recorder')
+    layout, buf = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+    assert bridge.start_manual_recording('/tmp/rec.mp4') is False
+    assert bridge.stop_manual_recording() is False
+    assert layout.ui_command == CommandType.NONE

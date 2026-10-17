@@ -1,28 +1,112 @@
 """Detect foreground game windows using platform-specific APIs.
 
 Windows filters launchers, browsers, and tools, consults Game Bar, and
-requires stable candidates.
+requires stable candidates. Linux uses compositor-specific enumeration.
 """
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wintypes
+import json
 import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import subprocess
 import threading
 import time
 from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
+from core.compositor import detect_compositor
+from core import linux_tools
 
 
+def _enumerate_via_hyprctl() -> list:
+    """List windows on Hyprland via hyprctl clients -j."""
+    try:
+        hyprctl = linux_tools.require('hyprctl')
+        r = subprocess.run([hyprctl, 'clients', '-j'],
+                           capture_output=True, timeout=2)
+        clients = json.loads(r.stdout.decode(errors='replace'))
+        windows = []
+        for c in clients:
+            title = c.get('title') or c.get('class') or ''
+            if not title:
+                continue
+            hwnd    = int(c.get('address', '0x0'), 16) & 0xFFFFFFFF
+            is_game = bool(c.get('fullscreen')) or c.get('fullscreenMode', 0) > 0
+            windows.append({'hwnd': hwnd, 'display_name': title,
+                            'title': title, 'is_game': is_game})
+        return windows
+    except Exception:
+        # Missing hyprctl, a timeout or malformed JSON: no windows this poll.
+        return []
 
 
+def _enumerate_via_xdotool() -> list:
+    """List visible windows via xdotool + xprop. Works for XWayland and X11.
+    Covers Steam/Proton games and most Linux native games."""
+    # xprop supplies the fullscreen state that marks a window as a game;
+    # without it every window would be reported as a non-game.
+    if not (linux_tools.available('xdotool') and linux_tools.available('xprop')):
+        return []
+    try:
+        r = subprocess.run(
+            [linux_tools.require('xdotool'), 'search', '--all',
+             '--onlyvisible', '--maxdepth', '2', ''],
+            capture_output=True, timeout=3)
+        if r.returncode != 0:
+            return []
+        wids = [w.strip() for w in r.stdout.decode().splitlines() if w.strip()]
+    except Exception:
+        # xdotool vanished or hung past its timeout: no windows this poll.
+        return []
+
+    windows = []
+    for wid in wids[:50]:  # cap to avoid slow scans
+        try:
+            r_name = subprocess.run([linux_tools.require('xdotool'),
+                                     'getwindowname', wid],
+                                    capture_output=True, timeout=1)
+            title = r_name.stdout.decode().strip()
+            if not title:
+                continue
+
+            is_game = False
+            xprop = linux_tools.path('xprop')
+            r_prop = subprocess.run([xprop, '-id', wid, '_NET_WM_STATE'],
+                                    capture_output=True, timeout=1)
+            if r_prop.returncode == 0:
+                is_game = '_NET_WM_STATE_FULLSCREEN' in r_prop.stdout.decode()
+
+            windows.append({
+                'hwnd':         int(wid) & 0xFFFFFFFF,
+                'display_name': title,
+                'title':        title,
+                'is_game':      is_game,
+            })
+        # Window enumeration is an optional Linux integration; fail closed if
+        # a compositor returns malformed data or is unavailable mid-poll.
+        except Exception:
+            continue
+    return windows
 
 
+def _enumerate_linux_windows() -> list:
+    """Pick the right backend for the current compositor."""
+    comp = detect_compositor()
+    if comp == 'hyprland':
+        return _enumerate_via_hyprctl()
+    return _enumerate_via_xdotool()
+
+
+def _linux_enumeration_available() -> bool:
+    """True when the compositor's window enumeration tools are installed."""
+    if detect_compositor() == 'hyprland':
+        return linux_tools.available('hyprctl')
+    return linux_tools.available('xdotool') and linux_tools.available('xprop')
 
 
 class GameDetector(QObject):

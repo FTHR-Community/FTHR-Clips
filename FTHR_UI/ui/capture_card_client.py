@@ -21,6 +21,7 @@ else:
     _LAUNCH_CMD = [sys.executable, str(_PROCESS_SCRIPT)]
 
 # Prevent a console window from flashing when the helper starts on Windows.
+# This flag is not used on Linux.
 _CREATE_NO_WINDOW = 0x08000000
 _NO_WINDOW = {'creationflags': _CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
 
@@ -43,7 +44,11 @@ class CaptureCardClient:
             # Python child otherwise decodes redirected stdin with the Windows
             # locale (e.g. cp1252), corrupting names such as KovaaK’s.
             env['PYTHONIOENCODING'] = 'utf-8'
+            # Force XWayland only on Linux. Windows must retain its native Qt
             # platform plugin; setting xcb there makes the card process exit.
+            if sys.platform != 'win32' and os.environ.get('WAYLAND_DISPLAY'):
+                env['QT_QPA_PLATFORM'] = 'xcb'
+                env['DISPLAY'] = os.environ.get('DISPLAY', ':0')
             monitor = self._sm.get('notification_monitor', 'auto') if self._sm else 'auto'
             env['FTHR_CARD_SCREEN_NAME'] = monitor
             env['FTHR_CARD_VISUALS_ENABLED'] = (

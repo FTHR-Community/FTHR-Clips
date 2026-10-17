@@ -90,7 +90,8 @@ def _encoder_works(
         'timeout': timeout,
         'check': False,
     }
-    kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    if sys.platform == 'win32':
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
     try:
         return runner(_probe_command(ffmpeg, encoder_name), **kwargs).returncode == 0
     except (OSError, subprocess.SubprocessError):

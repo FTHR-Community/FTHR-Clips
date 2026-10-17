@@ -62,7 +62,7 @@ class CameraRecorder:
                 encoding='utf-8',
                 errors='replace',
                 timeout=12,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
             )
             output = (result.stderr or '') + '\n' + (result.stdout or '')
             names = re.findall(r'"([^"]+)"\s+\(video\)', output)

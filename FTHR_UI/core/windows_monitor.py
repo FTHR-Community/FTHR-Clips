@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import re
+import sys
 from ctypes import wintypes
 from dataclasses import dataclass
 from enum import Enum
@@ -200,7 +201,8 @@ class _MonitorInfoExW(ctypes.Structure):
 
 
 def _enumerate_monitor_snapshot() -> dict[str, tuple[int, int, int, int, int, bool]]:
-
+    if sys.platform != 'win32':
+        return {}
     user32 = ctypes.WinDLL('user32', use_last_error=True)
     callback_type = ctypes.WINFUNCTYPE(
         wintypes.BOOL,
@@ -272,7 +274,8 @@ def _active_monitor_children(
 
 def enumerate_windows_monitor_records() -> list[DisplayDeviceRecord]:
     """Enumerate active display targets and their stable interface paths."""
-
+    if sys.platform != 'win32':
+        return []
     enum_display_devices = ctypes.WinDLL('user32', use_last_error=True).EnumDisplayDevicesW
     enum_display_devices.argtypes = [
         wintypes.LPCWSTR,

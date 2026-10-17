@@ -130,6 +130,8 @@ class _BitmapInfo(ctypes.Structure):
 
 
 def _window_process_path(hwnd: int) -> str:
+    if sys.platform != 'win32':
+        return ''
     try:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
@@ -164,7 +166,8 @@ def enumerate_keyboard_windows() -> list[dict]:
     users rename their window.  Known keyboard visualizers are sorted first
     and marked with ``is_keyboard_candidate`` for the UI.
     """
-
+    if sys.platform != 'win32':
+        return []
     user32 = ctypes.windll.user32
     current_pid = ctypes.windll.kernel32.GetCurrentProcessId()
     results: list[dict] = []
@@ -225,6 +228,8 @@ def capture_window(hwnd: int):
     PrintWindow supports occluded sources; BitBlt is the fallback for visible
     visualizers that reject PrintWindow.
     """
+    if sys.platform != 'win32':
+        return None
     try:
         import numpy as np
 
@@ -417,7 +422,7 @@ class ThirdPartyKeyboardCapture:
             hwnd = max(0, int(config.get('hwnd', 0) or 0))
         except (TypeError, ValueError):
             hwnd = 0
-        if not enabled or not hwnd:
+        if sys.platform != 'win32' or not enabled or not hwnd:
             self.stop()
             return
         if self.hwnd == hwnd and self.is_running():
@@ -543,6 +548,8 @@ class ThirdPartyKeyboardCapture:
 
         Decode on demand to avoid expanding a full replay window of JPEGs in memory.
         """
+        if sys.platform != 'win32':
+            return
         try:
             import cv2
             import numpy as np
@@ -600,6 +607,8 @@ class ThirdPartyKeyboardCapture:
                           intensity=DEFAULT_KEYBOARD_INTENSITY,
                           output_fps: int = 30):
         """Yield target-sized RGBA frames keyed with the live-preview math."""
+        if sys.platform != 'win32':
+            return
         try:
             import cv2
 
@@ -634,6 +643,8 @@ class ThirdPartyKeyboardCapture:
         finalizer uses :meth:`iter_segment_rgba` directly so it does not need
         this lossy staging pass.
         """
+        if sys.platform != 'win32':
+            return False
         try:
             import cv2
 

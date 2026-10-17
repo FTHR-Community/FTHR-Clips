@@ -32,7 +32,9 @@ _BACKGROUND_NO_WINDOW = {
 # Windows playback path is Media Foundation; it delivers every source frame in
 # the same smoke clip and reaches a stable handle/memory plateau. Keep an
 # explicit environment override available for backend diagnostics.
-os.environ.setdefault('QT_MEDIA_BACKEND', 'windows')
+# Linux has no Media Foundation backend; Qt keeps its FFmpeg plugin there.
+if sys.platform == 'win32':
+    os.environ.setdefault('QT_MEDIA_BACKEND', 'windows')
 
 
 # File logging - all output also goes to ~/.fthr/logs/fthr.log
@@ -90,6 +92,10 @@ def _setup_file_logging():
         # Structured logging uses the same file; print() still works
         from core import diagnostics
         diagnostics.configure(log_file=log_file)
+        if sys.platform != 'win32':
+            # Native crashes (Qt, drivers) leave a Python stack here (#79).
+            from core import crash_logging
+            crash_logging.enable_fault_handler(log_dir / 'fthr-crash.log')
     except Exception as e:
         # Log setup failed - report on stderr before redirection
         print(f'[Startup] File logging unavailable: {type(e).__name__}: {e}',
@@ -112,6 +118,19 @@ from PySide6.QtCore import (QUrl,
     QPropertyAnimation, QEasingCurve, Slot,
 )
 from PySide6.QtGui import QDesktopServices, QImage, QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, QColor, QIcon, QBrush, QPalette, QAction
+
+if sys.platform != 'win32':
+    # Route Qt warnings and fatals into the log next to the fault handler.
+    from core import crash_logging
+    crash_logging.install_qt_message_handler()
+    from core import linux_runtime, linux_tools
+    from core.compositor import detect_compositor
+    from core.x11_monitor import (
+        X11MonitorError,
+        is_native_x11_session,
+        resolve_x11_capture_target,
+    )
+    from ui.frameless_window_linux import install_resize_filter
 
 from version import __version__ as APP_VERSION, APP_NAME
 from core.capture_bridge import CaptureBridge
@@ -1712,77 +1731,91 @@ class SourcePopup(_PopupPanel):
         # Monitor selector (desktop mode only)
         self.monitor_combo = _DropdownCombo()
         set_theme_style(self.monitor_combo, lambda: (_COMBO_STYLE))
-        monitor_choices = enumerate_windows_monitors()
-        screens_by_name = {
-            screen.name().lower(): screen for screen in QApplication.screens()
-        }
-        for choice in monitor_choices:
-            screen = screens_by_name.get(choice.gdi_name.lower())
-            details = ''
-            if screen is not None:
+        if sys.platform != 'win32':
+            # The Linux engine captures one output by its compositor/xrandr
+            # name, which is what QScreen.name() reports; '' is the default.
+            self._monitor_selection_result = None
+            self.monitor_combo.addItem('First Screen (Default)', userData='')
+            for screen in QApplication.screens():
                 geometry = screen.availableGeometry()
-                details = (
-                    f'  ({geometry.width()}×{geometry.height()} '
-                    f'@ {int(screen.refreshRate())}Hz)'
+                self.monitor_combo.addItem(
+                    f'{screen.name()}  ({geometry.width()}×{geometry.height()} '
+                    f'@ {int(screen.refreshRate())}Hz)',
+                    userData=screen.name(),
                 )
-            primary = ' · Primary' if choice.primary else ''
-            self.monitor_combo.addItem(
-                f'{choice.friendly_name}{details}{primary}',
-                userData=choice.device_path,
-            )
+            saved_mon = str(self.cur_monitor or '')
+        else:
+            monitor_choices = enumerate_windows_monitors()
+            screens_by_name = {
+                screen.name().lower(): screen for screen in QApplication.screens()
+            }
+            for choice in monitor_choices:
+                screen = screens_by_name.get(choice.gdi_name.lower())
+                details = ''
+                if screen is not None:
+                    geometry = screen.availableGeometry()
+                    details = (
+                        f'  ({geometry.width()}×{geometry.height()} '
+                        f'@ {int(screen.refreshRate())}Hz)'
+                    )
+                primary = ' · Primary' if choice.primary else ''
+                self.monitor_combo.addItem(
+                    f'{choice.friendly_name}{details}{primary}',
+                    userData=choice.device_path,
+                )
 
-        stored_mon = str(self.cur_monitor or '')
-        selection = resolve_monitor_selection(stored_mon, monitor_choices)
-        self._monitor_selection_result = selection
-        saved_mon = selection.path
-        if selection.persist_required and selection.path:
-            previous_value = self.sm.get('capture_monitor', stored_mon)
-            self.sm.set('capture_monitor', selection.path)
-            if not self.sm.save_settings():
-                # Do not leave an in-memory path that was not committed to
-                # settings.  Startup will independently fail closed if the
-                # same persistence operation cannot be completed.
-                self.sm.set('capture_monitor', previous_value)
-                saved_mon = str(previous_value or '')
-                self._monitor_selection_result = MonitorSelectionResult(
-                    state=MonitorSelectionState.PERSIST_FAILED,
-                    code='MONITOR_PERSIST_FAILED',
-                    reason='could not persist resolved monitor path',
-                    previous_state=selection.previous_state,
-                    previous_path=selection.previous_path,
-                )
+            stored_mon = str(self.cur_monitor or '')
+            selection = resolve_monitor_selection(stored_mon, monitor_choices)
+            self._monitor_selection_result = selection
+            saved_mon = selection.path
+            if selection.persist_required and selection.path:
+                previous_value = self.sm.get('capture_monitor', stored_mon)
+                self.sm.set('capture_monitor', selection.path)
+                if not self.sm.save_settings():
+                    # Do not leave an in-memory path that was not committed to
+                    # settings.  Startup will independently fail closed if the
+                    # same persistence operation cannot be completed.
+                    self.sm.set('capture_monitor', previous_value)
+                    saved_mon = str(previous_value or '')
+                    self._monitor_selection_result = MonitorSelectionResult(
+                        state=MonitorSelectionState.PERSIST_FAILED,
+                        code='MONITOR_PERSIST_FAILED',
+                        reason='could not persist resolved monitor path',
+                        previous_state=selection.previous_state,
+                        previous_path=selection.previous_path,
+                    )
+                    emit_event(
+                        'capture', 'monitor_selection_failed', state='FAILED',
+                        error='MONITOR_PERSIST_FAILED',
+                        monitor_selection=self._monitor_selection_result.as_dict())
+            if self._monitor_selection_result.path:
                 emit_event(
-                    'capture', 'monitor_selection_failed', state='FAILED',
-                    error='MONITOR_PERSIST_FAILED',
-                    monitor_selection=self._monitor_selection_result.as_dict())
-        if self._monitor_selection_result.path:
-            emit_event(
-                'capture', self._monitor_selection_result.code.lower(),
-                **self._monitor_selection_result.as_dict())
-        if not saved_mon and stored_mon:
-            if is_monitor_selection_sentinel(stored_mon):
-                # Diagnostic sentinels are not monitor identities. Keep
-                # the unresolved state visible without putting the marker
-                # into combo userData or the in-memory selection.
-                self.monitor_combo.addItem(
-                    'Monitor selection requires recovery', userData='')
-            elif is_monitor_capture_identity(stored_mon):
-                # A stale canonical path may remain visible as a bounded
-                # diagnostic-only row; it is still rejected by startup
-                # unless the resolver can recover it.
-                saved_mon = stored_mon
-                self.monitor_combo.addItem(
-                    'Unavailable monitor (saved)', userData=stored_mon)
-            else:
-                # Legacy/non-canonical values are never exposed as a
-                # selectable monitor identity when migration is ambiguous.
-                self.monitor_combo.addItem(
-                    'Monitor selection requires recovery', userData='')
-        if saved_mon != self.cur_monitor:
-            self.cur_monitor = saved_mon
-        if not monitor_choices:
-            self.monitor_combo.addItem('No active Windows monitor found', userData='')
-            self.monitor_combo.setEnabled(False)
+                    'capture', self._monitor_selection_result.code.lower(),
+                    **self._monitor_selection_result.as_dict())
+            if not saved_mon and stored_mon:
+                if is_monitor_selection_sentinel(stored_mon):
+                    # Diagnostic sentinels are not monitor identities. Keep
+                    # the unresolved state visible without putting the marker
+                    # into combo userData or the in-memory selection.
+                    self.monitor_combo.addItem(
+                        'Monitor selection requires recovery', userData='')
+                elif is_monitor_capture_identity(stored_mon):
+                    # A stale canonical path may remain visible as a bounded
+                    # diagnostic-only row; it is still rejected by startup
+                    # unless the resolver can recover it.
+                    saved_mon = stored_mon
+                    self.monitor_combo.addItem(
+                        'Unavailable monitor (saved)', userData=stored_mon)
+                else:
+                    # Legacy/non-canonical values are never exposed as a
+                    # selectable monitor identity when migration is ambiguous.
+                    self.monitor_combo.addItem(
+                        'Monitor selection requires recovery', userData='')
+            if saved_mon != self.cur_monitor:
+                self.cur_monitor = saved_mon
+            if not monitor_choices:
+                self.monitor_combo.addItem('No active Windows monitor found', userData='')
+                self.monitor_combo.setEnabled(False)
         idx = self.monitor_combo.findData(saved_mon)
         if idx >= 0:
             self.monitor_combo.setCurrentIndex(idx)
@@ -2798,9 +2831,13 @@ class HotkeyPopup(_PopupPanel):
             ('SCREENSHOT', 'save_screenshot'),
             ('CONFIRM GAME', 'confirm_game_detection'),
             ('DISMISS GAME', 'dismiss_game_detection'),
-            ('START RECORDING', 'start_recording'),
-            ('STOP RECORDING', 'stop_recording'),
         ]
+        if sys.platform == 'win32':
+            # The Linux engine has no manual recorder yet.
+            actions.extend([
+                ('START RECORDING', 'start_recording'),
+                ('STOP RECORDING', 'stop_recording'),
+            ])
         from core.hotkey_manager import custom_clip_seconds
         custom_actions = sorted(
             (custom_clip_seconds(action), action)
@@ -2811,7 +2848,50 @@ class HotkeyPopup(_PopupPanel):
         for label_text, action_key in actions:
             self.actions_layout.addWidget(self._create_action_row(label_text, action_key))
         self.actions_scroll.setFixedHeight(min(540, len(actions) * 86))
+        self._add_linux_hotkey_notes()
         self.adjustSize()
+
+    def _add_linux_hotkey_notes(self):
+        """Explain who owns the keys on Linux, once per popup."""
+        if sys.platform == 'win32' or getattr(self, '_linux_notes_added', False):
+            return
+        self._linux_notes_added = True
+        layout = self.layout()
+        if getattr(self.hotkey_manager, 'portal_active', False):
+            # The desktop owns these keys: pressing a key above only states a
+            # preference, and the compositor's answer is written back.
+            note = QLabel(
+                'Your desktop manages these shortcuts. If it keeps a '
+                'different key, change it in the desktop shortcut settings.')
+            note.setWordWrap(True)
+            note.setStyleSheet(
+                f'color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px; '
+                'padding-top: 6px;')
+            layout.addWidget(note)
+            desktop_btn = QPushButton('EDIT IN DESKTOP SETTINGS')
+            desktop_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            desktop_btn.setStyleSheet(_clear_button_qss())
+            desktop_btn.clicked.connect(
+                self.hotkey_manager.open_desktop_shortcut_settings)
+            layout.addWidget(desktop_btn, 0, Qt.AlignmentFlag.AlignLeft)
+            self.hotkey_manager.desktop_bindings_changed.connect(
+                self._refresh_binding_values)
+            return
+        instructions = self.hotkey_manager.setup_instructions(detect_compositor())
+        if not instructions:
+            return
+        instructions_label = QLabel(instructions)
+        instructions_label.setWordWrap(True)
+        instructions_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        instructions_label.setStyleSheet(
+            f'color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px; '
+            'font-family: monospace; padding-top: 6px;')
+        layout.addWidget(instructions_label)
+
+    def _refresh_binding_values(self, *_args):
+        for button in self._binding_buttons:
+            button.refresh_value()
 
     def _create_action_row(self, label_text: str, action_key: str) -> QFrame:
         frame = QFrame()
@@ -3202,6 +3282,7 @@ class MainWindow(QMainWindow):
         self._engine_process_generation = None
         self._recoverable_error_incidents = {}
         self._error_recovery_tracker = RecoveryTracker()
+        self._engine_connect_thread: threading.Thread | None = None
         self._engine_startup_output = None
         self.bridge         = CaptureBridge()
         self._engine_profile = 'clips'
@@ -3220,7 +3301,18 @@ class MainWindow(QMainWindow):
         self._capture_health_snapshot = None
         self._capture_health_log = get_logger('capture.health')
 
-        if getattr(sys, 'frozen', False):
+        if sys.platform != 'win32':
+            _env_engine = os.environ.get('FTHR_ENGINE', '')
+            if getattr(sys, 'frozen', False):
+                # In frozen PyInstaller build the engine is in _internal/ (_MEIPASS)
+                possible_paths = [Path(sys._MEIPASS) / 'FTHRclips']
+            else:
+                linux_root = Path(__file__).parent.parent / 'FTHRcapture_linux'
+                possible_paths = [
+                    *([Path(_env_engine)] if _env_engine else []),
+                    linux_root / 'build' / 'FTHRclips',
+                ]
+        elif getattr(sys, 'frozen', False):
             possible_paths = [Path(sys._MEIPASS) / 'engine' / 'FTHRClips.exe']
         else:
             project_root   = Path(__file__).parent.parent / 'FTHRcapture'
@@ -3566,7 +3658,7 @@ class MainWindow(QMainWindow):
     def _on_close_to_tray_changed(self, enabled: bool) -> None:
         """Keep the Windows title-bar affordance aligned with close behavior."""
         if hasattr(self, 'power_btn'):
-            self.power_btn.setVisible(bool(enabled))
+            self.power_btn.setVisible(sys.platform == 'win32' and bool(enabled))
 
     def _on_error_notifications_changed(self, enabled: bool) -> None:
         """Apply the bottom-bar preference immediately, including open errors."""
@@ -3713,7 +3805,10 @@ class MainWindow(QMainWindow):
             'Start a manual recording while replay capture stays active')
         set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(False)))
         self.record_btn.clicked.connect(self._toggle_manual_recording)
-        pass
+        if sys.platform != 'win32':
+            self.record_btn.setEnabled(False)
+            self.record_btn.setToolTip(
+                'Manual recording currently requires the Windows capture engine')
         mc.insertWidget(0, self.record_btn, 1)
 
         self.hotkey_popup = HotkeyPopup(self.hotkey_manager, self)
@@ -4016,13 +4111,18 @@ class MainWindow(QMainWindow):
         if not getattr(self, '_window_screen_signals_connected', False):
             self._window_screen_signals_connected = True
             QTimer.singleShot(0, self._connect_window_screen_signals)
-        pass
+        if sys.platform != 'win32':
+            # Compositor-driven resize for the frameless window. Idempotent:
+            # reuses the filter on repeated shows and catches a first show
+            # where the native window did not exist yet.
+            install_resize_filter(self.windowHandle())
         if not getattr(self, '_native_style_applied', False):
             self._native_style_applied = True
             # Defer SetWindowPos(SWP_FRAMECHANGED) to after the event loop starts.
             # Calling it synchronously inside showEvent sends WM_NCCALCSIZE back
             # into nativeEvent while Qt is mid-show, causing a crash.
-            QTimer.singleShot(0, self._apply_native_style)
+            if sys.platform == 'win32':
+                QTimer.singleShot(0, self._apply_native_style)
             # Pre-realize the settings page so the first time the user clicks
             # the gear button it doesn't pay for layout, font resolution, and
             # stylesheet compilation. The page is already constructed; we just
@@ -4413,7 +4513,11 @@ class MainWindow(QMainWindow):
                       ' Re-download the latest release.')
         else:
             detail = ('FTHRcapture binary not found. Build it:'
-                      ' msbuild FTHRcapture/FTHRcapture.sln -p:Configuration=Release -p:Platform=x64')
+                      ' msbuild FTHRcapture/FTHRcapture.sln -p:Configuration=Release -p:Platform=x64'
+                      if sys.platform == 'win32' else
+                      'FTHRcapture binary not found. Build it:'
+                      ' cd FTHRcapture_linux && bash build_linux.sh'
+                      ' (or point FTHR_ENGINE at a built FTHRclips)')
         self.push_error(
             'ENGINE NOT FOUND',
             detail,
@@ -4450,6 +4554,27 @@ class MainWindow(QMainWindow):
         )
         self.hotkey_manager.register_all()
         print("Hotkeys registered.")
+
+        # Warn if key features are limited on the current compositor.
+        if sys.platform != 'win32':
+            from core.compositor import has_xtools
+            if detect_compositor() not in ('hyprland', 'x11') and not has_xtools():
+                QTimer.singleShot(2000, self._show_compositor_warning)
+
+    def _show_compositor_warning(self):
+        comp = detect_compositor()
+        comp_name = {
+            'kwin':            'KDE Plasma',
+            'gnome':           'GNOME',
+            'wayland-unknown': 'your Wayland compositor',
+        }.get(comp, comp)
+        self.push_error(
+            'LIMITED FEATURE SUPPORT',
+            f'FTHR Clips is running on {comp_name}. Game detection and focus '
+            'monitoring need xdotool; install it with your package manager. '
+            'Hotkeys remain available through the desktop or the FTHR socket.',
+            level='warning',
+        )
 
 
     def _on_hotkey_save_clip(self):
@@ -5103,42 +5228,51 @@ class MainWindow(QMainWindow):
                 bitrate = BITRATE_PRESETS[resolution].get(
                     quality, BITRATE_PRESETS[resolution]['high'])
         monitor = str(self.settings_manager.get('capture_monitor', '') or '')
-        current_choices = enumerate_windows_monitors()
-        selection = resolve_monitor_selection(monitor, current_choices)
-        if not selection.path:
-            # This failure is deliberately raised before CaptureConfig is
-            # handed to start_engine, so no unresolved value can reach the
-            # native process.  The event preserves stale/not-configured/
-            # ambiguous/no-display semantics for field diagnostics.
-            emit_event(
-                'capture', 'monitor_selection_failed', state='FAILED',
-                error=getattr(DiagnosticError, selection.code,
-                              selection.code),
-                monitor_selection=selection.as_dict())
-            raise MonitorSelectionError(selection)
-        if selection.persist_required:
-            previous_value = self.settings_manager.get(
-                'capture_monitor', monitor)
-            self.settings_manager.set('capture_monitor', selection.path)
-            if self.settings_manager.save_settings() is False:
-                self.settings_manager.set('capture_monitor', previous_value)
-                failed = MonitorSelectionResult(
-                    state=MonitorSelectionState.PERSIST_FAILED,
-                    code='MONITOR_PERSIST_FAILED',
-                    reason='could not persist resolved monitor path',
-                    previous_state=selection.previous_state,
-                    previous_path=selection.previous_path,
-                )
+        if sys.platform != 'win32':
+            # The Linux engine takes an output name (QScreen/xrandr) or '' for
+            # its default output. Windows device paths, desktop identities
+            # and diagnostic sentinels copied from a Windows settings file
+            # mean nothing there, so they fall back to the default output.
+            if (is_monitor_capture_identity(monitor)
+                    or is_monitor_selection_sentinel(monitor)):
+                monitor = ''
+        else:
+            current_choices = enumerate_windows_monitors()
+            selection = resolve_monitor_selection(monitor, current_choices)
+            if not selection.path:
+                # This failure is deliberately raised before CaptureConfig is
+                # handed to start_engine, so no unresolved value can reach the
+                # native process.  The event preserves stale/not-configured/
+                # ambiguous/no-display semantics for field diagnostics.
                 emit_event(
                     'capture', 'monitor_selection_failed', state='FAILED',
-                    error=getattr(DiagnosticError, failed.code,
-                                  failed.code),
-                    monitor_selection=failed.as_dict())
-                raise MonitorSelectionError(failed)
-        emit_event(
-            'capture', selection.code.lower(),
-            **selection.as_dict())
-        monitor = selection.path
+                    error=getattr(DiagnosticError, selection.code,
+                                  selection.code),
+                    monitor_selection=selection.as_dict())
+                raise MonitorSelectionError(selection)
+            if selection.persist_required:
+                previous_value = self.settings_manager.get(
+                    'capture_monitor', monitor)
+                self.settings_manager.set('capture_monitor', selection.path)
+                if self.settings_manager.save_settings() is False:
+                    self.settings_manager.set('capture_monitor', previous_value)
+                    failed = MonitorSelectionResult(
+                        state=MonitorSelectionState.PERSIST_FAILED,
+                        code='MONITOR_PERSIST_FAILED',
+                        reason='could not persist resolved monitor path',
+                        previous_state=selection.previous_state,
+                        previous_path=selection.previous_path,
+                    )
+                    emit_event(
+                        'capture', 'monitor_selection_failed', state='FAILED',
+                        error=getattr(DiagnosticError, failed.code,
+                                      failed.code),
+                        monitor_selection=failed.as_dict())
+                    raise MonitorSelectionError(failed)
+            emit_event(
+                'capture', selection.code.lower(),
+                **selection.as_dict())
+            monitor = selection.path
         crop = None
         getattr(self, '_active_game_window', None)
         try:
@@ -5182,8 +5316,15 @@ class MainWindow(QMainWindow):
 
     def _apply_active_audio_state(self, config: CaptureConfig) -> None:
         # Windows captures microphones natively; Python recording is for Linux.
-        MicRecorder().stop()
-        return
+        if sys.platform == 'win32':
+            MicRecorder().stop()
+            return
+        recorder = MicRecorder()
+        if config.audio_enabled:
+            if not recorder.is_running():
+                self._start_mic_recorder()
+        else:
+            recorder.stop()
 
     # Engine lifecycle
 
@@ -5413,27 +5554,54 @@ class MainWindow(QMainWindow):
         target_hwnd     = self.settings_manager.get('target_hwnd',     0)
         capture_monitor = launch_config.monitor
         engine_monitor_arg = capture_monitor
-        pass
-        try:
-            engine_monitor_arg = validate_engine_monitor_argument(
-                engine_monitor_arg)
-        except MonitorSelectionError as monitor_error:
-            selection = monitor_error.result
-            detail = (f'{selection.reason}. Capture was not started; a '
-                      'canonical Windows monitor device path is required.')
-            self._capture_config.fail(detail)
-            self._restart_pending = False
-            self._set_capture_apply_state(False)
-            self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
-            emit_event(
-                'engine', 'start_failed', state='FAILED',
-                error=getattr(DiagnosticError, selection.code,
-                              selection.code),
-                monitor_selection=selection.as_dict(),
-                detail=detail, api_call='native_process_argument_guard')
-            self.push_error('CAPTURE FAILED',
-                            f'{selection.code}: {detail}', level='error')
-            return False
+        if sys.platform != 'win32':
+            # validate_engine_monitor_argument() accepts only Windows device
+            # paths. The Linux engine takes an output name: Wayland uses the
+            # QScreen name as is; native X11 resolves it through xrandr.
+            if is_native_x11_session():
+                xrandr = linux_tools.path('xrandr')
+                if not xrandr:
+                    detail = linux_tools.missing_message('xrandr')
+                    self._capture_config.fail(detail)
+                    self._restart_pending = False
+                    self._set_capture_apply_state(False)
+                    self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+                    self.push_error('X11 MONITOR UNAVAILABLE', detail, level='error')
+                    return False
+                try:
+                    x11_target = resolve_x11_capture_target(
+                        capture_monitor, xrandr)
+                except X11MonitorError as error:
+                    detail = str(error)
+                    self._capture_config.fail(detail)
+                    self._restart_pending = False
+                    self._set_capture_apply_state(False)
+                    self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+                    self.push_error('X11 MONITOR UNAVAILABLE', detail, level='error')
+                    return False
+                engine_monitor_arg = x11_target.engine_argument
+                capture_monitor = x11_target.output.name
+        else:
+            try:
+                engine_monitor_arg = validate_engine_monitor_argument(
+                    engine_monitor_arg)
+            except MonitorSelectionError as monitor_error:
+                selection = monitor_error.result
+                detail = (f'{selection.reason}. Capture was not started; a '
+                          'canonical Windows monitor device path is required.')
+                self._capture_config.fail(detail)
+                self._restart_pending = False
+                self._set_capture_apply_state(False)
+                self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+                emit_event(
+                    'engine', 'start_failed', state='FAILED',
+                    error=getattr(DiagnosticError, selection.code,
+                                  selection.code),
+                    monitor_selection=selection.as_dict(),
+                    detail=detail, api_call='native_process_argument_guard')
+                self.push_error('CAPTURE FAILED',
+                                f'{selection.code}: {detail}', level='error')
+                return False
         # target_hwnd comes from user-editable settings.json — never trust it.
         try:
             target_hwnd = int(target_hwnd)
@@ -5480,7 +5648,11 @@ class MainWindow(QMainWindow):
                 else Path.home() / '.fthr' / 'logs' / 'engine.log')
             self._engine_startup_output = EngineLogCapture(
                 engine_log_path, self._diagnostics)
-            engine_environment = os.environ.copy()
+            engine_environment = (
+                os.environ.copy() if sys.platform == 'win32'
+                # Host library path for the engine and the VA-API driver it
+                # loads, not PyInstaller's _internal.
+                else linux_runtime.child_process_environment())
             if self._diagnostics is not None:
                 engine_environment['FTHR_DIAGNOSTIC_SESSION_ID'] = (
                     self._diagnostics.session_id)
@@ -5771,8 +5943,9 @@ class MainWindow(QMainWindow):
                             'The recording quality profile could not connect to capture.')
                 self._ui_call.emit(_on_failed)
 
-            threading.Thread(target=_poll_connect, daemon=True,
-                             name='fthr-engine-connect').start()
+            self._engine_connect_thread = threading.Thread(
+                target=_poll_connect, daemon=True, name='fthr-engine-connect')
+            self._engine_connect_thread.start()
             return True
         except Exception as e:
             print(f"Engine start error: {e}")
@@ -5958,7 +6131,32 @@ class MainWindow(QMainWindow):
     # Microphone recorder
 
     def _start_mic_recorder(self):
-        return
+        if sys.platform == 'win32':
+            # Native WASAPI capture starts with the engine so microphone and
+            # video share one generation-local QPC timeline. Do not create a
+            # second PortAudio ring that could later post-mix stale audio.
+            return
+        if not MicRecorder.is_available():
+            print('[Mic] sounddevice not installed — mic-in-clips disabled')
+            self.push_error(
+                'MIC NOT FOUND',
+                'No recording device detected. Check audio settings or permissions.',
+                level='warning',
+                actions=[('OPEN AUDIO SETTINGS', self._toggle_settings_page)],
+            )
+            return
+        device_index = self._resolved_mic_device_index()
+        gain = float(self.settings_manager.get('mic_volume', 100)) / 100.0
+        if MicRecorder().start(device_index, gain=gain):
+            print(f'[Mic] Recorder started (device={device_index}, gain={gain:.2f})')
+        else:
+            print('[Mic] Recorder failed to start — clips will have no mic audio')
+            self.push_error(
+                'MIC NOT FOUND',
+                'Microphone failed to start. Clips will have no mic audio.',
+                level='warning',
+                actions=[('OPEN AUDIO SETTINGS', self._toggle_settings_page)],
+            )
 
     def _resolved_mic_device_index(self):
         """Translate the saved mic_device_name into a sounddevice index, or None."""
@@ -5969,11 +6167,26 @@ class MainWindow(QMainWindow):
             return None
         try:
             import sounddevice as _sd
+            if sys.platform.startswith('linux'):
+                matches = [
+                    i for i, dev in enumerate(_sd.query_devices())
+                    if dev.get('max_input_channels', 0) > 0
+                    and dev.get('name') == name
+                ]
+                if len(matches) == 1:
+                    return matches[0]
+                if len(matches) > 1:
+                    print('[Mic] Saved microphone name is ambiguous; using system default')
+                else:
+                    print('[Mic] Saved microphone name was not found; using system default')
+                return None
             for i, dev in enumerate(_sd.query_devices()):
                 if dev.get('max_input_channels', 0) > 0 and dev.get('name') == name:
                     return i
-        except Exception:
-            # Device enumeration is optional; no match means mic capture stays off.
+        except Exception as e:
+            # Device enumeration is optional; a missing match uses system default.
+            if sys.platform.startswith('linux'):
+                print(f'[Mic] Device lookup failed; using system default: {e}')
             pass
         return None
 
@@ -6012,9 +6225,12 @@ class MainWindow(QMainWindow):
             recorder_running = (MicRecorder.is_available()
                                  and MicRecorder().is_running())
             if restart_recorder or not recorder_running:
-                if recorder_running and self._gary_recorder_active:
-                    MicRecorder().stop()
-                self._start_gary_mic_recorder()
+                if sys.platform == 'win32':
+                    if recorder_running and self._gary_recorder_active:
+                        MicRecorder().stop()
+                    self._start_gary_mic_recorder()
+                elif not recorder_running:
+                    self._start_mic_recorder()
         else:
             self._gary_current_intensity = 0.0
             self._gary_overlay.set_intensity(0.0)
@@ -6075,7 +6291,10 @@ class MainWindow(QMainWindow):
             self._stop_manual_recording()
 
     def _start_manual_recording(self):
-        pass
+        if sys.platform != 'win32':
+            # The Linux engine has no continuous recorder; never ask it for a
+            # recording it cannot write.
+            return
         if self._save_state.is_busy():
             self.push_error(
                 'WAIT FOR CLIP SAVE',
@@ -6429,6 +6648,9 @@ class MainWindow(QMainWindow):
         try:
             folder = ensure_storage_directory(
                 recording_directory_from(self.settings_manager))
+            if sys.platform != 'win32':
+                self._open_folder_linux(folder)
+                return
             os.startfile(str(folder))
         except OSError as error:
             self.push_error(
@@ -6535,7 +6757,7 @@ class MainWindow(QMainWindow):
         # bridge the failure is indistinguishable from a write error, and the
         # user got told to check disk space while the real cause was a deep
         # folder (a long game name under a long user profile path is enough).
-        if len(str(output_path)) > 255:
+        if sys.platform == 'win32' and len(str(output_path)) > 255:
             self.capture_card.show_error()
             self.push_error(
                 'CLIP PATH TOO LONG',
@@ -7004,11 +7226,21 @@ class MainWindow(QMainWindow):
             self._set_status('SAVED', status_active_qss())
         QTimer.singleShot(2000, self._update_status)
 
+    def _open_folder_linux(self, folder) -> None:
+        opener = linux_tools.path('xdg-open')
+        if not opener:
+            print(f'[UI] {linux_tools.missing_message("xdg-open")}')
+            return
+        subprocess.Popen([opener, str(folder)])
+
     def _open_clips_folder(self):
         """Open the configured FTHR clips folder in the platform file manager."""
         try:
             folder = ensure_storage_directory(
                 clips_directory_from(self.settings_manager))
+            if sys.platform != 'win32':
+                self._open_folder_linux(folder)
+                return
             os.startfile(str(folder))  # os.startfile exists on Windows only
         except OSError as error:
             if isinstance(error, StoragePathError):
@@ -7134,19 +7366,34 @@ class MainWindow(QMainWindow):
             audio_mode if audio_mode is not None
             else self.settings_manager.get(
                 'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED))
-        if audio_mode == AUDIO_CAPTURE_MODE_COMBINED:
-            self._spawn_mux_thread(
-                target=self._combine_native_audio_worker,
-                args=(clip_path, duration_seconds, mic_end_time,
-                      clip_ready, crop_profile),
-            )
-        else:
-            # Separated Windows clips are already published as distinct
-            # native audio streams with a matching FTHR manifest. The
-            # normal route selector sends visual-only work to finalize.
-            if clip_ready is not None:
-                clip_ready.set()
-        return
+        if sys.platform == 'win32':
+            if audio_mode == AUDIO_CAPTURE_MODE_COMBINED:
+                self._spawn_mux_thread(
+                    target=self._combine_native_audio_worker,
+                    args=(clip_path, duration_seconds, mic_end_time,
+                          clip_ready, crop_profile),
+                )
+            else:
+                # Separated Windows clips are already published as distinct
+                # native audio streams with a matching FTHR manifest. The
+                # normal route selector sends visual-only work to finalize.
+                if clip_ready is not None:
+                    clip_ready.set()
+            return
+
+        if not MicRecorder.is_available() or not MicRecorder().is_running():
+            self._record_finalization_warning(
+                clip_path, 'Microphone capture stopped before finalization; '
+                'the base clip was retained.')
+            self._complete_clip_finalization(clip_path, duration_seconds)
+            return
+
+        self._spawn_mux_thread(
+            target=self._mic_mux_worker,
+            args=(clip_path, duration_seconds, mic_end_time, clip_ready,
+                  crop_profile,
+                  audio_mode == AUDIO_CAPTURE_MODE_SEPARATED),
+        )
 
 
     def _spawn_mux_thread(self, target, args):
@@ -8247,6 +8494,15 @@ class MainWindow(QMainWindow):
 
     # UI state
 
+    def _connect_worker_active(self) -> bool:
+        # The connect worker calls initialize() on the singleton bridge; the
+        # status poll must not shut that bridge down underneath it. On Linux
+        # a crashed engine leaves its /dev/shm segment behind, so the poll's
+        # reconnect would otherwise race the worker for the same mapping.
+        thread = getattr(self, '_engine_connect_thread', None)
+        is_alive = getattr(thread, 'is_alive', None)
+        return bool(callable(is_alive) and is_alive())
+
     def _update_status(self):
         # Detect an engine crash. The shared-memory mapping outlives the
         # process (is_initialized stays true), so is_connected() keeps lying
@@ -8328,6 +8584,7 @@ class MainWindow(QMainWindow):
             # with is_initialized still true, so initialize() would happily
             # "reconnect" to a corpse.
             if (self.engine_process is not None
+                    and not MainWindow._connect_worker_active(self)
                     and self._reconnect_counter % 3 == 1
                     and getattr(self, '_engine_handshake_generation', None)
                     != getattr(self, '_engine_gen', 0)):
@@ -10073,7 +10330,8 @@ class _SettingsPage(QWidget):
         layout.addWidget(_flat_section_header('System'))
         layout.addSpacing(12)
         self.autostart_check = QCheckBox('Autostart with Windows')
-        pass
+        if sys.platform != 'win32':
+            self.autostart_check.setVisible(False)
         layout.addWidget(self.autostart_check)
         self._init_autostart_checkbox()
         self.autostart_check.stateChanged.connect(self._on_autostart_changed)
@@ -12388,13 +12646,29 @@ class _SettingsPage(QWidget):
         endpoint_id = data.get('endpoint_id') if isinstance(data, dict) else None
         display_name = data.get('display_name') if isinstance(data, dict) else None
         self.sm.set('mic_device_id', endpoint_id)
-        self.sm.set('mic_device_name', display_name if endpoint_id else None)
+        legacy_linux_selection = (
+            sys.platform.startswith('linux') and isinstance(data, dict)
+            and data.get('legacy_index') is not None
+        )
+        self.sm.set(
+            'mic_device_name',
+            display_name if endpoint_id or legacy_linux_selection else None)
         self.sm.set('mic_volume', self.mic_vol_slider.value())
         self.sm.set('mic_loopback', self.mic_loopback_check.isChecked())
         self.sm.save_settings()
         # Linux still owns its temporary legacy recorder. Windows applies the
         # requested endpoint/input gain only on the next engine generation.
-        return
+        if sys.platform == 'win32':
+            return
+        try:
+            from core.mic_recorder import MicRecorder
+            if MicRecorder.is_available():
+                rec = MicRecorder()
+                rec.set_gain(self.mic_vol_slider.value() / 100.0)
+                rec.start(self._selected_mic_index(),
+                          gain=self.mic_vol_slider.value() / 100.0)
+        except Exception as e:
+            print(f'[Mic] settings push failed: {e}')
 
     def _selected_mic_index(self):
         data = self.mic_combo.currentData() if self.mic_combo.count() else None
@@ -12441,6 +12715,23 @@ class _SettingsPage(QWidget):
 
     def _on_mic_device_changed(self, _idx: int):
         idx = self._selected_mic_index()
+        if sys.platform.startswith('linux'):
+            # Tear down every old reader before MicRecorder replaces its stream.
+            # The meter can share the recorder only after the new stream is live.
+            self.mic_level_meter.stop()
+            loopback_enabled = self.mic_loopback_check.isChecked()
+            if loopback_enabled:
+                self._stop_loopback()
+            self._save_audio_settings()
+            if (self.isVisible() and self.stack.currentIndex() == 2
+                    and not getattr(self, '_background_ui_paused', False)):
+                self.mic_level_meter.set_gain(
+                    self.mic_vol_slider.value() / 100.0)
+                self.mic_level_meter.start(idx)
+            if loopback_enabled:
+                self._start_loopback(idx)
+            return
+
         # Restart meter on the new device
         self.mic_level_meter.stop()
         if (self.isVisible() and self.stack.currentIndex() == 2
@@ -12452,7 +12743,11 @@ class _SettingsPage(QWidget):
             self._stop_loopback()
             self._start_loopback(idx)
         self._save_audio_settings()
-        self.audio_capture_changed.emit(True)
+        if sys.platform == 'win32':
+            # Explicit/default microphone changes intentionally create a new
+            # capture generation. A running native source is never silently
+            # rebound to another endpoint or clock domain.
+            self.audio_capture_changed.emit(True)
 
     def _start_loopback(self, device_index):
         self._stop_loopback()
@@ -13711,17 +14006,22 @@ def _prewarm_heavy_modules():
     except Exception as e:
         print(f'[Prewarm] ffmpeg unavailable: {e}')
 
-    try:
-        from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-        # Pays the one-time cost of MediaFoundation init on Windows.
-        _warm_player = QMediaPlayer()
-        _warm_audio  = QAudioOutput()
-        _warm_player.setAudioOutput(_warm_audio)
-    except Exception as e:
-        print(f'[Prewarm] Qt multimedia init failed: {e}')
+    if sys.platform == 'win32':
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+            # Pays the one-time cost of MediaFoundation init on Windows.
+            _warm_player = QMediaPlayer()
+            _warm_audio  = QAudioOutput()
+            _warm_player.setAudioOutput(_warm_audio)
+        except Exception as e:
+            print(f'[Prewarm] Qt multimedia init failed: {e}')
 
 
 def main():
+    if sys.platform != 'win32':
+        # Children (engine, ffmpeg, grim, hyprctl) must see the host's
+        # library path, not PyInstaller's _internal; see linux_runtime.
+        linux_runtime.restore_library_search_path_for_children()
     # When the frozen Windows exe is relaunched as the capture-card subprocess,
     # route into the card process instead of the main application.
     if '--card-process' in sys.argv:
@@ -13733,7 +14033,8 @@ def main():
     print(f'Main.py successfully initiated background={background_start}')
 
     # Log resolved helper paths so missing tools and PATH overrides are diagnosable.
-    pass
+    if sys.platform != 'win32':
+        print(linux_tools.report())
 
     # A second instance is destructive, not just redundant: two capture
     # engines fight over NVENC and over the single-writer shared-memory
@@ -13745,7 +14046,8 @@ def main():
         print('[FTHR] Another instance is already running — exiting.')
         configure_qt_style()
         _app = QApplication(sys.argv)
-        pass
+        if sys.platform != 'win32':
+            _app.setDesktopFileName('fthr-clips')
         from core.instance_activation import request_existing_instance_activation
         if request_existing_instance_activation():
             print('[Lifecycle] ExistingInstanceActivated')
@@ -13765,10 +14067,17 @@ def main():
 
     diagnostic_session = start_diagnostic_session(APP_VERSION)
     diagnostic_session.collect_hardware_async()
+    if HotkeyManager.uses_portal_shortcuts():
+        # QApplication registers its app id with the host portal as it
+        # starts, which xdg-desktop-portal refuses until fthr-clips.desktop
+        # exists; install it first so the very first launch is identified too.
+        linux_runtime.ensure_desktop_entry()
     configure_qt_style()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    pass
+    if sys.platform != 'win32':
+        # Match the installed desktop entry for Wayland taskbar/icon grouping.
+        app.setDesktopFileName('fthr-clips')
     app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)
     app_icon = _load_icon('favicon.ico', 32)

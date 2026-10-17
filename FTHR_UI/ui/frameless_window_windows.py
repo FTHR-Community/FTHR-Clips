@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 from typing import Any
 
 from PySide6.QtCore import QPoint, QRect
@@ -190,6 +191,9 @@ def native_hit_test(
 
 def apply_native_resize_style(window: QWidget) -> bool:
     """Add a thick frame while retaining Qt's frameless visual surface."""
+    if sys.platform != 'win32':
+        # Linux frameless move/resize lives in ui.frameless_window_linux.
+        return False
     try:
         hwnd = int(window.winId())
         user32 = ctypes.windll.user32

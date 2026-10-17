@@ -530,7 +530,7 @@ def _minimum_video_kbps(width: int, height: int, fps: float) -> int:
 
 
 def _no_window() -> dict:
-    return {'creationflags': subprocess.CREATE_NO_WINDOW}
+    return {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
 
 
 __all__ = [

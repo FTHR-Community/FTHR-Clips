@@ -6,6 +6,7 @@ and capture source (desktop / window) selector.
 
 from ui.style import set_theme_style
 import ctypes
+import sys
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
                               QPushButton, QFrame, QSizePolicy)
 from PySide6.QtCore import Qt, QSize, Signal
@@ -16,9 +17,12 @@ import ctypes.wintypes as wintypes
 
 
 # Window enumeration — Windows only.
+# Returns empty list on Linux: the Linux engine only supports full-desktop
 # capture via wlr-screencopy; per-window targeting is not available.
 
 def _get_exe_info(exe_path: str, size: int = 16) -> 'tuple[str | None, QIcon | None]':
+    if sys.platform != 'win32':
+        return None, None
     name = None
     try:
         class _SHFILEINFOW(ctypes.Structure):
@@ -46,6 +50,8 @@ def _get_exe_info(exe_path: str, size: int = 16) -> 'tuple[str | None, QIcon | N
 
 
 def _get_hwnd_exe_path(hwnd: int) -> 'str | None':
+    if sys.platform != 'win32':
+        return None
     try:
         kernel32 = ctypes.windll.kernel32
         pid       = ctypes.c_ulong(0)
@@ -76,7 +82,9 @@ def _enumerate_capturable_windows():
     Records contain hwnd, title, display_name, is_game, and icon (QIcon or None).
     is_game is a borderless/fullscreen heuristic.
     """
-
+    if sys.platform != 'win32':
+        from core.game_detector import _enumerate_linux_windows
+        return _enumerate_linux_windows()
 
     user32 = ctypes.windll.user32
     GWL_STYLE    = -16

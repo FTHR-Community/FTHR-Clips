@@ -12,6 +12,7 @@ addopts = "-q --strict-markers"
 # QT_QPA_PLATFORM=offscreen is set in tests/conftest.py rather than here, so it
 # works without the pytest-env plugin.
 markers = [
+    "linux_only: needs a Linux capture backend (skipped elsewhere)",
 ]
 filterwarnings = ["error::DeprecationWarning:core.*"]
 
