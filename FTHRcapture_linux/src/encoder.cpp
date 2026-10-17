@@ -74,7 +74,7 @@ bool ApplyPreset(AVCodecContext* ctx, const char* codec_name, int p) {
         av_opt_set(ctx->priv_data, "preset", kKvz[p - 1], 0);
     } else if (strstr(codec_name, "libx26")) {
         // Retained for distro FFmpeg builds that still ship x264/x265. FTHR
-        // never selects these itself (see BuildCodecList) — this branch only
+        // never selects these itself (see EncoderCandidates) — this branch only
         // matters if a downstream packager re-adds them deliberately.
         static const char* kX26x[] = {
             "ultrafast","superfast","veryfast","fast","medium","slow","veryslow"};
@@ -180,15 +180,18 @@ bool Encoder::TryOpen(const char* codec_name, const EncoderConfig& cfg) {
 
 // Build priority list for Open()
 
-static void BuildCodecList(
-    CodecPref codec_pref,
-    EncoderPref encoder_pref,
-    std::vector<const char*>& out) {
+std::vector<const char*> EncoderCandidates(CodecPref codec_pref,
+                                           EncoderPref encoder_pref) {
+    std::vector<const char*> out;
     auto codec_allowed = [&](CodecPref codec) {
         return codec_pref == CodecPref::Auto || codec_pref == codec;
     };
+    // Software stays allowed under a hardware preference: a stale setting, a
+    // missing vendor runtime or a driver update must not leave the user with
+    // no replay buffer at all.
     auto backend_allowed = [&](EncoderPref backend) {
-        return encoder_pref == EncoderPref::Auto || encoder_pref == backend;
+        return encoder_pref == EncoderPref::Auto || encoder_pref == backend ||
+               backend == EncoderPref::Software;
     };
     auto add_backend = [&](EncoderPref backend) {
         if (!backend_allowed(backend)) return;
@@ -227,13 +230,14 @@ static void BuildCodecList(
     add_backend(EncoderPref::Amd);
     add_backend(EncoderPref::Intel);
     add_backend(EncoderPref::Software);
+    return out;
 }
 
 // Open — try codecs in priority order
 
 bool Encoder::Open(const EncoderConfig& cfg, std::string& codec_used_out) {
-    std::vector<const char*> candidates;
-    BuildCodecList(cfg.codec_pref, cfg.encoder_pref, candidates);
+    const std::vector<const char*> candidates =
+        EncoderCandidates(cfg.codec_pref, cfg.encoder_pref);
 
     for (const char* name : candidates) {
         std::cout << "[Encoder] Trying codec: " << name << std::endl;

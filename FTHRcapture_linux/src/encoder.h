@@ -100,4 +100,10 @@ private:
 // before avcodec_open2. Returns false if codec_name is unrecognised.
 bool ApplyPreset(AVCodecContext* ctx, const char* codec_name, int preset_1_7);
 
+// Encoders Open tries, in order. A hardware preference narrows the hardware
+// candidates to that vendor; the LGPL software encoders always follow, so a
+// missing driver costs speed rather than the replay buffer.
+std::vector<const char*> EncoderCandidates(CodecPref codec_pref,
+                                           EncoderPref encoder_pref);
+
 } // namespace fthr

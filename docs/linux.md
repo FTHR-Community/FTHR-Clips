@@ -188,6 +188,9 @@ ls -l /dev/dri/renderD*
 ```
 
 If VA-API initialization fails, the application falls back to software encoding.
+This also applies when an encoder vendor is chosen in Settings: NVIDIA, AMD or
+Intel limits which hardware encoders are tried, and the software encoder is
+still used if none of them opens.
 That fallback keeps recording available but does not qualify hardware encoding.
 The current Linux qualification does not claim NVIDIA NVENC or Intel hardware
 encoding.

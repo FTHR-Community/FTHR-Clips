@@ -534,6 +534,26 @@ if(BUILD_TESTING)
     add_test(NAME linux_encoder_timestamps
         COMMAND fthr_linux_encoder_timestamp_test)
 
+    add_executable(fthr_linux_encoder_candidates_test
+        tests/linux_encoder_candidates_test.cpp
+        src/encoder.cpp)
+    target_include_directories(fthr_linux_encoder_candidates_test PRIVATE src)
+    target_include_directories(fthr_linux_encoder_candidates_test SYSTEM PRIVATE
+        ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(fthr_linux_encoder_candidates_test PRIVATE
+        $<$<BOOL:${FTHR_FFMPEG_BUNDLED}>:${FTHR_FFMPEG_LINK_LIBRARIES}>
+        $<$<NOT:$<BOOL:${FTHR_FFMPEG_BUNDLED}>>:PkgConfig::FFMPEG>
+        pthread ${CMAKE_DL_LIBS})
+    target_compile_options(fthr_linux_encoder_candidates_test PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_link_options(fthr_linux_encoder_candidates_test PRIVATE
+        "-Wl,--disable-new-dtags")
+    set_target_properties(fthr_linux_encoder_candidates_test PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN/../third_party/ffmpeg/lib")
+    add_test(NAME linux_encoder_candidates
+        COMMAND fthr_linux_encoder_candidates_test)
+
     add_executable(fthr_linux_encoder_resize_test
         tests/linux_encoder_resize_test.cpp
         src/encoder.cpp)

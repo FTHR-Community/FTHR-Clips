@@ -1,3 +1,10 @@
+# Unreleased (Linux)
+
+- Choosing NVIDIA, AMD or Intel as the encoder no longer ends capture when
+  that vendor's encoder cannot open (for example NVENC without the CUDA
+  libraries, or Intel without a oneVPL runtime); the software encoder for the
+  chosen codec is used instead, as it already was for Auto.
+
 # FTHR Clips 1.1.3-alpha
 
 Linux hardening release before the UI overhaul. Windows artifacts are unchanged apart from shared test and packaging fixes.

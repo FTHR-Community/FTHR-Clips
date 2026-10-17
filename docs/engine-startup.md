@@ -37,6 +37,10 @@ Windows also validates output dimensions and crop geometry.
 An encoder preference doesn't guarantee availability. Windows public-alpha
 startup requires a supported hardware backend on the capture adapter. It
 doesn't silently switch to raw replay or another adapter.
+On Linux a hardware preference (1–3) limits the hardware encoders to that
+vendor, and the LGPL software encoders for the chosen codec are still tried
+afterwards; preference 0 tries every hardware backend first. The encoder
+actually opened is reported back to the UI.
 
 Microphone capture is native on Windows and handled by Python on Linux.
 Completed clips pass through UI finalization to produce the chosen audio layout.
