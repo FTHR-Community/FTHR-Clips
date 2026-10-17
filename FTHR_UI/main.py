@@ -3658,7 +3658,7 @@ class MainWindow(QMainWindow):
     def _on_close_to_tray_changed(self, enabled: bool) -> None:
         """Keep the Windows title-bar affordance aligned with close behavior."""
         if hasattr(self, 'power_btn'):
-            self.power_btn.setVisible(bool(enabled))
+            self.power_btn.setVisible(sys.platform == 'win32' and bool(enabled))
 
     def _on_error_notifications_changed(self, enabled: bool) -> None:
         """Apply the bottom-bar preference immediately, including open errors."""
@@ -8435,7 +8435,8 @@ class MainWindow(QMainWindow):
         # a crashed engine leaves its /dev/shm segment behind, so the poll's
         # reconnect would otherwise race the worker for the same mapping.
         thread = getattr(self, '_engine_connect_thread', None)
-        return thread is not None and thread.is_alive()
+        is_alive = getattr(thread, 'is_alive', None)
+        return bool(callable(is_alive) and is_alive())
 
     def _update_status(self):
         # Detect an engine crash. The shared-memory mapping outlives the
@@ -8518,7 +8519,7 @@ class MainWindow(QMainWindow):
             # with is_initialized still true, so initialize() would happily
             # "reconnect" to a corpse.
             if (self.engine_process is not None
-                    and not self._connect_worker_active()
+                    and not MainWindow._connect_worker_active(self)
                     and self._reconnect_counter % 3 == 1
                     and getattr(self, '_engine_handshake_generation', None)
                     != getattr(self, '_engine_gen', 0)):
