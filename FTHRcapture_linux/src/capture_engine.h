@@ -46,6 +46,11 @@ struct CaptureConfig {
     CodecPref codec_pref = CodecPref::Auto;
     EncoderPref encoder_pref = EncoderPref::Auto;
     int       preset     = 4;
+    // PulseAudio sink whose monitor is captured; empty follows the default
+    // output (argv[24]).
+    std::string playback_sink;
+    // Upper bound on the encoded video ring, 0 = time-bounded only (argv[6]).
+    uint64_t  max_buffer_bytes = 0;
 };
 
 class CaptureEngine {
@@ -61,6 +66,8 @@ public:
     bool SaveClip(const std::string& path, uint32_t duration_sec,
                   SharedMemoryLayout* shm, std::string* error_message);
 
+    // True while a compressed replay encoder is open (any backend, software
+    // included); published as SharedMemoryLayout::nvenc_active.
     bool     IsNvencActive()  const { return nvenc_active_.load(); }
     bool     IsCapturing()    const { return running_.load(); }
     void SetPaused(bool p) { paused_.store(p); }
@@ -98,6 +105,7 @@ private:
         FailedForGood,    // only user action can help (declined portal dialog)
     };
 
+    static EncodedRingBuffer* MakeRing(const CaptureConfig& cfg, bool log);
     void CaptureLoop();
     // transient_out is set when the generation could not start for a reason
     // worth waiting out (compositor unreachable, output absent).

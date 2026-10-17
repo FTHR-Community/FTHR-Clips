@@ -1,4 +1,5 @@
 #pragma once
+#include "encoder_policy.h"
 #include "ring_buffer.h"
 #include <functional>
 #include <deque>
@@ -15,11 +16,6 @@ extern "C" {
 }
 
 namespace fthr {
-
-enum class CodecPref : uint32_t { Auto = 0, H264 = 1, HEVC = 2, AV1 = 3 };
-enum class EncoderPref : uint32_t {
-    Auto = 0, Nvidia = 1, Amd = 2, Intel = 3, Software = 4
-};
 
 struct EncoderConfig {
     uint32_t  src_width;
@@ -38,7 +34,8 @@ public:
     Encoder() = default;
     ~Encoder() { Close(); }
 
-    // Opens a hardware or software encoder. Returns the codec name used.
+    // Opens the first encoder EncoderCandidates() allows that initializes.
+    // Returns the codec name used.
     bool Open(const EncoderConfig& cfg, std::string& codec_used_out);
     void Close();
 

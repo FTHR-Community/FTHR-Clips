@@ -1,5 +1,7 @@
 #include "capture_engine.h"
 #include "shared_memory.h"
+#include "audio_devices.h"
+#include "engine_args.h"
 #include <algorithm>
 #include <chrono>
 #include <iostream>
@@ -14,54 +16,111 @@
 static volatile bool g_quit = false;
 static void on_signal(int) { g_quit = true; }
 
-// Argv parsing helpers
+// ui_string as written by the UI, bounded even if it lacks a terminator.
+static std::string read_ui_string(const fthr::SharedMemoryLayout* layout) {
+    const char* begin = layout->ui_string;
+    const void* nul = std::memchr(begin, '\0', sizeof(layout->ui_string));
+    const size_t n = nul ? static_cast<size_t>(static_cast<const char*>(nul) - begin)
+                         : sizeof(layout->ui_string);
+    return std::string(begin, n);
+}
 
-static uint32_t arg_u32(char** argv, int idx, uint32_t def) {
-    if (!argv[idx] || argv[idx][0] == '\0') return def;
-    long v = strtol(argv[idx], nullptr, 10);
-    return (v < 0) ? def : static_cast<uint32_t>(v);
+// START_RECORDING with an empty ui_string resumes after a focus pause. With
+// a path it is the 2.0 manual (continuous) recording request, which this
+// engine has no recorder for: refuse it with the response reserved for
+// recording failures, so the save state machine never consumes it, and leave
+// the pause state alone.
+static void HandleStartRecording(fthr::SharedMemoryLayout* layout,
+                                 fthr::CaptureEngine& engine) {
+    if (read_ui_string(layout).empty()) {
+        engine.SetPaused(false);
+        layout->engine_response =
+            static_cast<uint32_t>(fthr::ResponseType::RECORDING_STARTED);
+        return;
+    }
+    layout->ui_string[0] = '\0';
+    std::cerr << "[FTHR] START_RECORDING with a path refused: manual recording"
+                 " is not supported on Linux" << std::endl;
+    fthr::set_engine_string(layout,
+        "Manual recording is not available on Linux yet. "
+        "Save replay clips instead.");
+    layout->engine_response =
+        static_cast<uint32_t>(fthr::ResponseType::MANUAL_RECORDING_ERROR);
+}
+
+static int ListPlaybackDevices() {
+    std::vector<fthr::AudioEndpoint> sinks;
+    std::string error;
+    if (!fthr::EnumeratePlaybackSinks(&sinks, &error)) {
+        std::cerr << fthr::FormatEndpointListError(error) << std::endl;
+        return 1;
+    }
+    std::cout << fthr::FormatEndpointListJson(sinks) << std::endl;
+    return 0;
+}
+
+static int ListMicrophones() {
+    // The Linux engine does not capture a microphone; the UI records it
+    // itself. An empty inventory is the honest answer.
+    std::cout << fthr::FormatEndpointListJson({}) << std::endl;
+    return 0;
 }
 
 
 int main(int argc, char* argv[]) {
+    // `--` modes never touch shared memory or start capture.
+    const fthr::CliDecision cli = fthr::ClassifyCommandLine(argc, argv);
+    switch (cli.mode) {
+    case fthr::CliMode::ListPlaybackDevices: return ListPlaybackDevices();
+    case fthr::CliMode::ListMicrophones:     return ListMicrophones();
+    case fthr::CliMode::UsageError:
+        std::cerr << "FTHRclips: " << cli.message << "\n"
+                  << "usage: FTHRclips [positional startup arguments]"
+                     " (see docs/engine-startup.md)\n"
+                  << "       FTHRclips --list-playback-devices\n"
+                  << "       FTHRclips --list-microphones" << std::endl;
+        return 2;
+    case fthr::CliMode::Engine:
+        break;
+    }
+
     // Keep positional arguments aligned with the UI and Windows engine.
     // See docs/engine-startup.md for platform differences and reserved slots.
+    const fthr::EngineArgs args = fthr::ParseEngineArgs(argc, argv);
+    for (const auto& warning : args.warnings)
+        std::cerr << "[Config] " << warning << std::endl;
 
     fthr::CaptureConfig cfg{};
-    cfg.fps            = (argc > 1) ? arg_u32(argv, 1, 60)     : 60;
-    cfg.buffer_seconds = (argc > 2) ? arg_u32(argv, 2, 30)     : 30;
-    cfg.target_width   = (argc > 3) ? arg_u32(argv, 3, 0)      : 0;
-    cfg.target_height  = (argc > 4) ? arg_u32(argv, 4, 0)      : 0;
-    cfg.bitrate_kbps   = (argc > 5) ? arg_u32(argv, 5, 16000)  : 16000;
-    // argv[6] = max_buffer_mb — ignored
-    // argv[7] = capture_mode  — ignored (always desktop)
-    // argv[8] = target_hwnd   — ignored
-    cfg.scaling_mode   = (argc > 9) ? arg_u32(argv, 9, 0)      : 0;
-    cfg.target_output  = (argc > 10 && argv[10] && argv[10][0]) ? argv[10] : "";
-    cfg.codec_pref = static_cast<fthr::CodecPref>(
-        (argc > 11) ? arg_u32(argv, 11, 0) : 0);
-    cfg.preset     = (argc > 12) ? static_cast<int>(arg_u32(argv, 12, 4)) : 4;
-    if (cfg.preset < 1) cfg.preset = 1;
-    if (cfg.preset > 7) cfg.preset = 7;
+    cfg.fps            = args.fps;
+    cfg.buffer_seconds = args.buffer_seconds;
+    cfg.target_width   = args.target_width;
+    cfg.target_height  = args.target_height;
+    cfg.bitrate_kbps   = args.bitrate_kbps;
+    cfg.scaling_mode   = args.scaling_mode;
+    cfg.target_output  = args.target_output;
+    cfg.codec_pref     = args.codec_pref;
+    cfg.preset         = args.preset;
     cfg.multiband_enabled = false;
-    cfg.separate_audio_enabled = (argc > 23) && (arg_u32(argv, 23, 0) != 0);
-    cfg.audio_enabled = !((argc > 14) && (arg_u32(argv, 14, 1) == 0));
-    cfg.encoder_pref = static_cast<fthr::EncoderPref>(
-        (argc > 17) ? std::min<uint32_t>(arg_u32(argv, 17, 0), 4) : 0);
-
-    if (cfg.fps            < 1)     cfg.fps            = 1;
-    if (cfg.fps            > 360)   cfg.fps            = 360;
-    if (cfg.buffer_seconds < 1)     cfg.buffer_seconds = 1;
-    if (cfg.buffer_seconds > 300)   cfg.buffer_seconds = 300;
-    if (cfg.bitrate_kbps   < 500)   cfg.bitrate_kbps   = 500;
-    if (cfg.bitrate_kbps   > 60000) cfg.bitrate_kbps   = 60000;
+    cfg.separate_audio_enabled = args.separate_audio_enabled;
+    cfg.audio_enabled  = args.audio_enabled;
+    cfg.encoder_pref   = args.encoder_pref;
+    cfg.playback_sink  = args.playback_endpoint_id;
+    cfg.max_buffer_bytes =
+        static_cast<uint64_t>(args.max_buffer_mb) * 1024u * 1024u;
 
     std::cout << "[FTHR] Linux capture engine starting" << std::endl;
     std::cout << "[FTHR] fps=" << cfg.fps
               << " buffer=" << cfg.buffer_seconds << "s"
               << " enc=" << cfg.target_width << "x" << cfg.target_height
               << " bitrate=" << cfg.bitrate_kbps << "kbps"
-              << " scaling=" << cfg.scaling_mode << std::endl;
+              << " scaling=" << cfg.scaling_mode
+              << " encoder_pref=" << static_cast<uint32_t>(cfg.encoder_pref)
+              << " playback="
+              << (cfg.playback_sink.empty() ? "<default>" : cfg.playback_sink)
+              << std::endl;
+    if (args.microphone_mono)
+        std::cout << "[FTHR] microphone_mono ignored: the Linux engine does not"
+                     " capture a microphone" << std::endl;
 
     // Shared memory
     fthr::SharedMemory shm;
@@ -129,6 +188,12 @@ int main(int argc, char* argv[]) {
 
             switch (cmd) {
             case fthr::CommandType::SAVE_CLIP: {
+                // Take the path, then consume ui_string: the UI's resume
+                // request (START_RECORDING) does not clear it, and a stale
+                // clip path there would read as a manual-recording request.
+                const std::string out_path = read_ui_string(layout);
+                layout->ui_string[0] = '\0';
+
                 // Clear the previous save detail before queueing this request so a later
                 // success cannot carry stale error text.
                 fthr::set_engine_string(layout, "");
@@ -138,7 +203,6 @@ int main(int argc, char* argv[]) {
                 layout->engine_response =
                     static_cast<uint32_t>(fthr::ResponseType::SAVE_STARTED);
 
-                std::string out_path(layout->ui_string);
                 uint32_t duration_sec = layout->ui_param1;
                 if (duration_sec == 0) duration_sec = cfg.buffer_seconds;
 
@@ -217,9 +281,7 @@ int main(int argc, char* argv[]) {
                 break;
 
             case fthr::CommandType::START_RECORDING:
-                engine.SetPaused(false);
-                layout->engine_response =
-                    static_cast<uint32_t>(fthr::ResponseType::RECORDING_STARTED);
+                HandleStartRecording(layout, engine);
                 break;
 
             case fthr::CommandType::SHUTDOWN:
@@ -242,10 +304,12 @@ int main(int argc, char* argv[]) {
         // no consumer on Linux, so they never hold a publication back.
         const auto pending = static_cast<fthr::ResponseType>(
             layout->engine_response);
+        // MANUAL_RECORDING_ERROR carries its message in engine_string too.
         const bool save_result_pending =
             pending == fthr::ResponseType::SAVE_STARTED ||
             pending == fthr::ResponseType::CLIP_SAVED ||
-            pending == fthr::ResponseType::ERROR_OCCURRED;
+            pending == fthr::ResponseType::ERROR_OCCURRED ||
+            pending == fthr::ResponseType::MANUAL_RECORDING_ERROR;
         if ((health_flags & fthr::CAPTURE_HEALTH_BACKEND_FAILED) &&
                 !failure_reason_published) {
             // Payload first: the UI reads engine_string as soon as it sees

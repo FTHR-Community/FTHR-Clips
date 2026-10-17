@@ -18,24 +18,54 @@ namespace fthr {
 CaptureEngine::CaptureEngine() = default;
 CaptureEngine::~CaptureEngine() { Shutdown(); }
 
+// Encoded video ring: buffer_seconds plus a small margin, and the argv[6]
+// byte budget now that a buffer may be 15 minutes at up to 200 Mbps
+// (~22 GB unbounded). Desktop audio stays time-bounded: float32 stereo at
+// 48 kHz is ~375 KiB/s, ~340 MiB at 900 s, whatever the bitrate, and must
+// cover the whole video window or the clip starts silent.
+EncodedRingBuffer* CaptureEngine::MakeRing(const CaptureConfig& cfg, bool log) {
+    const size_t ring_ms = (static_cast<size_t>(cfg.buffer_seconds) + 5) * 1000;
+    if (log) {
+        const uint64_t expected_bytes =
+            static_cast<uint64_t>(cfg.bitrate_kbps) * 1000 / 8 * (ring_ms / 1000);
+        if (cfg.max_buffer_bytes == 0) {
+            std::cout << "[Ring] No byte budget; ~" << (expected_bytes >> 20)
+                      << " MiB expected for " << cfg.buffer_seconds << " s at "
+                      << cfg.bitrate_kbps << " kbps" << std::endl;
+        } else {
+            std::cout << "[Ring] Byte budget " << (cfg.max_buffer_bytes >> 20)
+                      << " MiB; ~" << (expected_bytes >> 20) << " MiB expected for "
+                      << cfg.buffer_seconds << " s at " << cfg.bitrate_kbps
+                      << " kbps" << std::endl;
+            if (expected_bytes > cfg.max_buffer_bytes) {
+                const uint64_t covered_s = cfg.max_buffer_bytes /
+                    (static_cast<uint64_t>(cfg.bitrate_kbps) * 1000 / 8);
+                std::cerr << "[Ring] The budget covers only ~" << covered_s
+                          << " s at this bitrate; older history will be dropped"
+                          << std::endl;
+            }
+        }
+    }
+    return new EncodedRingBuffer(ring_ms, cfg.fps,
+                                 static_cast<size_t>(cfg.max_buffer_bytes));
+}
+
 // CaptureEngine::Initialize
 
 bool CaptureEngine::Initialize(const CaptureConfig& cfg) {
     cfg_ = cfg;
 
-    // Allocate ring buffer (buffer_seconds + small margin)
-    size_t ring_ms = (static_cast<size_t>(cfg.buffer_seconds) + 5) * 1000;
-    ring_ = new EncodedRingBuffer(ring_ms, cfg.fps);
+    ring_ = MakeRing(cfg_, true);
 
     // Start audio capture (loopback via PulseAudio monitor)
     if (cfg.audio_enabled) {
         if (cfg.multiband_enabled && !cfg.audio_categories.empty()) {
             multi_audio_.Start(cfg.audio_categories);
         } else {
-            audio_.Start("", cfg.buffer_seconds);
+            audio_.StartForSink(cfg.playback_sink, cfg.buffer_seconds);
             if (!audio_.IsStreamOpen()) {
                 std::cerr << "FTHR_STARTUP_WARNING: DESKTOP_AUDIO_UNAVAILABLE: "
-                          << "Default output monitor could not be opened; "
+                          << "Output monitor could not be opened; "
                           << "audio will attach when it becomes available." << std::endl;
             }
         }
@@ -227,7 +257,10 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration(
             backend_.reset();
             return GenerationEnd::Failed;
         }
-        nvenc_active_.store(codec_used.find("nvenc") != std::string::npos);
+        // Legacy ABI name: nvenc_active means "a compressed replay encoder
+        // is open", hardware or an explicitly chosen software encoder. The
+        // 2.0 UI reads the codec name to tell the two apart.
+        nvenc_active_.store(true);
         ++encoder_generation_;
         encoder_.SetGeneration(encoder_generation_);
         {
@@ -511,14 +544,13 @@ void CaptureEngine::Reconfigure(uint32_t codec_pref, int preset) {
     if (cfg_.preset < 1) cfg_.preset = 1;
     if (cfg_.preset > 7) cfg_.preset = 7;
     // Re-allocate ring (Shutdown() freed it)
-    size_t ring_ms = (static_cast<size_t>(cfg_.buffer_seconds) + 5) * 1000;
-    ring_ = new EncodedRingBuffer(ring_ms, cfg_.fps);
+    ring_ = MakeRing(cfg_, false);
     // Restart audio (Shutdown() stopped it)
     if (cfg_.audio_enabled) {
         if (cfg_.multiband_enabled && !cfg_.audio_categories.empty()) {
             multi_audio_.Start(cfg_.audio_categories);
         } else {
-            audio_.Start("", cfg_.buffer_seconds);
+            audio_.StartForSink(cfg_.playback_sink, cfg_.buffer_seconds);
             if (!audio_.IsStreamOpen()) {
                 // No startup warning here: the UI already received one, and
                 // the capture thread keeps retrying.
