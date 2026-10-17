@@ -2,18 +2,54 @@
 
 #include "replay_interval.h"
 
+#include <iostream>
+
 namespace fthr {
+
+void EncodedRingBuffer::PopFrontLocked() {
+    bytes_ -= packets_.front().data.size();
+    if (packets_.front().is_keyframe) --keyframes_;
+    packets_.pop_front();
+}
 
 void EncodedRingBuffer::Push(EncodedPacket packet) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        bytes_ += packet.data.size();
+        if (packet.is_keyframe) ++keyframes_;
         packets_.push_back(std::move(packet));
         while (packets_.size() > 1) {
             const int64_t span_ms =
                 (packets_.back().wall_time_ns - packets_.front().wall_time_ns)
                 / 1'000'000;
             if (span_ms <= static_cast<int64_t>(max_duration_ms_)) break;
-            packets_.pop_front();
+            PopFrontLocked();
+        }
+        // Byte budget: drop the oldest GOP while a newer keyframe remains, so
+        // the front stays decodable and the current GOP is never touched.
+        // Leading packets without a keyframe (left by the time trim above)
+        // go with the first GOP.
+        bool trimmed = false;
+        while (max_bytes_ != 0 && bytes_ > max_bytes_ &&
+               keyframes_ > (packets_.front().is_keyframe ? 1u : 0u) &&
+               packets_.size() > 1) {
+            PopFrontLocked();
+            while (!packets_.empty() && !packets_.front().is_keyframe)
+                PopFrontLocked();
+            trimmed = true;
+        }
+        if (trimmed) {
+            ++budget_trims_;
+            if (!budget_logged_) {
+                budget_logged_ = true;
+                const int64_t span_ms =
+                    (packets_.back().wall_time_ns - packets_.front().wall_time_ns)
+                    / 1'000'000;
+                std::cerr << "[Ring] Byte budget of " << (max_bytes_ >> 20)
+                          << " MiB reached; dropping the oldest video, "
+                          << span_ms / 1000 << " s of replay history kept"
+                          << std::endl;
+            }
         }
         latest_wall_time_ns_.store(
             packets_.back().wall_time_ns, std::memory_order_release);
@@ -77,9 +113,29 @@ size_t EncodedRingBuffer::PacketCount() const {
     return packets_.size();
 }
 
+size_t EncodedRingBuffer::ByteCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return bytes_;
+}
+
+int64_t EncodedRingBuffer::SpanNs() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (packets_.empty()) return 0;
+    return packets_.back().wall_time_ns - packets_.front().wall_time_ns;
+}
+
+uint64_t EncodedRingBuffer::BudgetTrimCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return budget_trims_;
+}
+
 void EncodedRingBuffer::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     packets_.clear();
+    bytes_ = 0;
+    keyframes_ = 0;
+    budget_trims_ = 0;
+    budget_logged_ = false;
     latest_wall_time_ns_.store(0, std::memory_order_release);
 }
 

@@ -105,6 +105,7 @@ private:
         FailedForGood,    // only user action can help (declined portal dialog)
     };
 
+    static EncodedRingBuffer* MakeRing(const CaptureConfig& cfg, bool log);
     void CaptureLoop();
     // transient_out is set when the generation could not start for a reason
     // worth waiting out (compositor unreachable, output absent).
