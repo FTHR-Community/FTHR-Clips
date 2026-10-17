@@ -10,9 +10,9 @@ identified below retain their respective licences.
 
 Full licence texts live in [`licenses/`](licenses/), and are installed
 alongside the application (Windows: `licenses\` in the install directory;
-the `licenses/` directory).
+Linux: `licenses/` inside the AppImage).
 
-Last verified: **2026-08-24**.
+Last verified: **2026-10-17**.
 
 ---
 
@@ -93,6 +93,26 @@ remain fully available.
 > outside the scope of the LGPL fix — but it is worth a deliberate decision
 > before a large public release.
 
+### FFmpeg (Linux engine and AppImage)
+
+| | |
+|---|---|
+| **Version** | `n8.1.2-34-g9b6c8969e0` (release branch 8.1) |
+| **Source** | [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), release `autobuild-2026-07-31-14-10`, asset `ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-lgpl-shared-8.1.tar.xz` |
+| **SHA-256 (archive)** | `c882a80f06617149...` — full value, and the hash of every shipped library, recorded in [`tools/ffmpeg_manifest_linux.json`](tools/ffmpeg_manifest_linux.json) |
+| **Licence** | **LGPL v3 or later** (`--enable-version3`, no `--enable-gpl`, no `--enable-nonfree`) — self-reported by the binaries as `LGPL version 3 or later` |
+| **Linkage** | Dynamic. The native capture engine (`FTHRclips`) and `libFTHRPlaybackMixer.so` link the shared libraries through an `$ORIGIN` RPATH; the Python UI shells out to the bundled `ffmpeg` and `ffprobe`, which use the same libraries. |
+| **Used for** | The same roles as the Windows build: encoding and muxing in the capture engine; audio mix, watermark, webcam overlay, clip export and share in the UI. |
+| **Shipped files** | `libavcodec.so.62`, `libavdevice.so.62`, `libavfilter.so.11`, `libavformat.so.62`, `libavutil.so.60`, `libswresample.so.6`, `libswscale.so.9` (seven libraries, hash-pinned), and the `ffmpeg` and `ffprobe` command-line tools (RPATH `$ORIGIN/../lib:$ORIGIN`, verified by banner, configure flags, NEEDED and RPATH rather than by hash) |
+| **Source route** | The binaries are the unmodified upstream build apart from the RPATH of the two command-line tools, which `tools/fetch_third_party.py --ffmpeg-linux` rewrites with `patchelf`. The corresponding source is FFmpeg tag `n8.1.2` plus the build scripts in the BtbN release named above; the exact asset is reproduced with `python tools/fetch_third_party.py --ffmpeg-linux`. |
+| **Licence text** | [`licenses/FFmpeg-LICENSE.txt`](licenses/FFmpeg-LICENSE.txt) |
+
+The configuration is the Windows build's LGPL configuration (see above): no
+GPL encoders, software H.264 through `libopenh264`, H.265 through `libkvazaar`,
+AV1 through `libsvtav1`. The distribution's own FFmpeg (a GPL build on Ubuntu)
+is never bundled; the licence gate refuses an AppDir that contains it, or an
+`ffmpeg`/`ffprobe` that links it or carries a non-`$ORIGIN` RPATH.
+
 ### Qt 6
 
 | | |
@@ -101,7 +121,8 @@ remain fully available.
 | **Source** | [Qt 6.11.1 source](https://download.qt.io/official_releases/qt/6.11/6.11.1/single/qt-everywhere-src-6.11.1.tar.xz) |
 | **Licence** | LGPL-3.0-only option selected |
 | **Linkage** | Dynamic (shared libraries bundled by PyInstaller) |
-| **Used for** | Entire GUI, multimedia playback |
+| **Used for** | Entire GUI, multimedia playback. Qt Quick and Qt QML render the editor's GPU video preview and snapshots (`FTHR_UI/ui/qml/`). |
+| **Modules** | The bundled set is fixed per platform in [`tools/qt_runtime_manifest.json`](tools/qt_runtime_manifest.json). Since 2.0.0-alpha it includes the Qt Quick/QML runtime: `Qml`, `QmlCore`, `QmlMeta`, `QmlModels`, `QmlWorkerScript`, `Quick`, `QuickWidgets` and `MultimediaQuick`, plus only the `QtQml`, `QtQml.Models`, `QtQml.WorkerScript`, `QtQuick` and `QtMultimedia` QML import directories. All are part of Qt's LGPL-3.0 offering; the GPL-only Qt Quick add-ons (Quick 3D, Quick Timeline, Virtual Keyboard) are refused by the licence gate. |
 | **Licence/source notice** | [`licenses/Qt6-LICENSE.txt`](licenses/Qt6-LICENSE.txt), [`licenses/Qt6-SOURCE.txt`](licenses/Qt6-SOURCE.txt), [`licenses/Qt6-THIRD-PARTY-NOTICES.txt`](licenses/Qt6-THIRD-PARTY-NOTICES.txt) |
 
 ### FFmpeg bundled inside Qt Multimedia
@@ -156,14 +177,22 @@ conflict.
 | **Version** | 0.5.5 · **Licence** MIT |
 | **Used for** | Microphone capture |
 | **Licence text** | [`licenses/sounddevice-LICENSE.txt`](licenses/sounddevice-LICENSE.txt) |
-| **Note** | Wraps **PortAudio** (MIT).  |
+| **Note** | Wraps **PortAudio** (MIT). On Linux `libportaudio.so.2` is bundled explicitly by `FTHR_linux.spec`. |
+
+### jeepney
+
+| | |
+|---|---|
+| **Version** | 0.9.0 · **Licence** MIT |
+| **Used for** | Linux only: D-Bus client for the XDG GlobalShortcuts portal (`core/portal_shortcuts.py`). Pure Python, no native code. |
+| **Licence text** | [`licenses/jeepney-LICENSE.txt`](licenses/jeepney-LICENSE.txt) |
 
 ### keyboard
 
 | | |
 |---|---|
 | **Version** | 0.13.5 · **Licence** MIT |
-| **Used for** | Global hotkeys (the only hotkey path on Windows) |
+| **Used for** | Windows only: named as a hidden import by `FTHR.spec`. It is installed only on Windows (environment marker) and is not part of the Linux AppImage. |
 | **Licence text** | [`licenses/keyboard-LICENSE.txt`](licenses/keyboard-LICENSE.txt) |
 
 ### cffi and pycparser
@@ -175,6 +204,40 @@ conflict.
 | **Used for** | Transitive runtime dependencies of python-sounddevice |
 | **Licence texts** | [`licenses/cffi-LICENSE.txt`](licenses/cffi-LICENSE.txt), [`licenses/pycparser-LICENSE.txt`](licenses/pycparser-LICENSE.txt) |
 
+### Optional uploader package dependencies
+
+The optional SFTP uploader is not part of Core. It ships as a sealed, dormant
+`.fthrplugin` package (`FTHR-Uploader.fthrplugin` on Windows,
+`FTHR-Uploader-linux.fthrplugin` inside the AppImage) and is installed only
+after the user's explicit in-app consent. Its frozen executable contains the
+packages below, pinned in
+[`requirements-uploader.txt`](requirements-uploader.txt). Each package carries
+its full licence text inside the plugin under
+`payload/licenses/optional-uploader/`; the same files are in
+[`licenses/optional-uploader/`](licenses/optional-uploader/).
+
+| Package | Version | Licence | Platforms |
+|---|---|---|---|
+| paramiko | 4.0.0 | LGPL-2.1-or-later | both |
+| bcrypt | 5.0.0 | Apache-2.0 | both |
+| cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | both |
+| PyNaCl (bundles libsodium, ISC) | 1.6.2 | Apache-2.0 | both |
+| invoke | 3.0.3 | BSD-2-Clause | both |
+| keyring | 25.7.0 | MIT | both |
+| jaraco.classes, jaraco.context, jaraco.functools | 3.4.0, 6.1.2, 4.6.0 | MIT | both |
+| more-itertools | 11.1.0 | MIT | both |
+| cffi, pycparser | 2.0.0, 3.0 | MIT-0, BSD-3-Clause | both |
+| pywin32-ctypes | 0.2.3 | BSD-3-Clause | Windows |
+| SecretStorage | 3.5.0 | BSD-3-Clause | Linux (bundled for keyring's Secret Service backend) |
+| jeepney | 0.9.0 | MIT | Linux (D-Bus client used by SecretStorage) |
+
+SecretStorage and jeepney are bundled for the Linux uploader, but saving an
+SFTP password through the Secret Service is not wired up on Linux yet; the
+uploader currently stores saved passwords only in Windows Credential Manager.
+
+paramiko is used unmodified as a separate library inside the plugin
+executable; its LGPL source is the published paramiko 4.0.0 release.
+
 ### NVIDIA Video Codec SDK header
 
 | | |
@@ -185,6 +248,26 @@ conflict.
 | **Linkage** | **None at build time.** NVENC is resolved at runtime via `LoadLibraryA("nvEncodeAPI64.dll")` against the user's installed driver. The header is source-only and the NVIDIA runtime is **not** redistributed. |
 | **Licence text** | [`licenses/NVIDIA-NVENC-SDK-LICENSE.txt`](licenses/NVIDIA-NVENC-SDK-LICENSE.txt) |
 
+### Wayland protocol definitions and generated bindings
+
+| | |
+|---|---|
+| **Files** | `FTHRcapture_linux/protocols/*.xml` and generated client bindings compiled into the Linux engine |
+| **Copyright** | The wlroots, Chromium OS, and Wayland contributors named in the source notices |
+| **Licence** | MIT-style permissive grants stated in the protocol sources |
+| **Used for** | Linux compositor capture and related Wayland protocol integration |
+| **Licence notices** | [`licenses/Wayland-Protocols-NOTICES.txt`](licenses/Wayland-Protocols-NOTICES.txt) |
+
+### PipeWire and D-Bus headers (Linux engine)
+
+| | |
+|---|---|
+| **Files** | System headers `pipewire-0.3/`, `spa-0.2/` and `dbus-1.0/` read at build time only; nothing from either project is copied into this repository or the AppImage |
+| **Copyright** | PipeWire: Wim Taymans and contributors. D-Bus: Red Hat, Inc. and contributors |
+| **Licence** | PipeWire headers: MIT. libdbus: dual AFL-2.1 / GPL-2.0-or-later, used under the AFL-2.1 option |
+| **Linkage** | **None at build time.** The engine resolves `libpipewire-0.3.so.0` and `libdbus-1.so.3` with `dlopen()`/`dlsym()` on the user's system when the ScreenCast portal capture backend is needed, and reports that backend as unavailable otherwise. The libraries are **not** redistributed. |
+| **Used for** | `org.freedesktop.portal.ScreenCast` session setup over the session bus and PipeWire video stream capture on compositors without a capture protocol |
+
 ### Microsoft Visual C++ Redistributable
 
 | | |
@@ -193,12 +276,37 @@ conflict.
 | **Licence** | Microsoft Visual Studio redistributable terms |
 | **Note** | Redistributed unmodified as permitted for VC++ runtime redistribution. |
 
+### AppImage type-2 runtime
+
+| | |
+|---|---|
+| **Version** | `20251108`, upstream commit `dd6cebedcbddde9c82f89b011e8e1d40b6e43868` |
+| **Source** | [AppImage/type2-runtime](https://github.com/AppImage/type2-runtime/releases/tag/20251108), asset `runtime-x86_64` |
+| **SHA-256** | `2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d` |
+| **Usage** | Embedded by the pinned Linux AppImage build as its type-2 runtime; it is not loaded by the FTHR application process. |
+| **Licence** | MIT for the runtime project, with statically linked musl, libfuse, squashfuse, libzstd, and zlib components listed in the upstream notice. |
+| **Licence text** | [`licenses/AppImage-type2-runtime-LICENSE.txt`](licenses/AppImage-type2-runtime-LICENSE.txt) |
+
+The runtime is fetched by the manifest-pinned build step and supplied to
+`appimagetool` explicitly with `--runtime-file`. Its URL, release tag, commit,
+size, and hash are recorded in
+[`tools/appimage_tool_manifest.json`](tools/appimage_tool_manifest.json).
+
+### AppImage packaging tool (build-only)
+
+`appimagetool` itself is a build-time dependency and is not part of the
+distributed AppImage. The build uses AppImage/appimagetool `1.9.1`, commit
+`8c8c91f762b412a19f4e8d2c4b35afb98f2d7c81`, and verifies its size and SHA-256
+from the same manifest before executing it.
+
+---
+
 ## Project assets
 
 ### FTHR-generated media
 
-The shipped logos, icons, installer artwork, repository social preview, and
-four PCM WAV notification sounds are reproducibly generated from code in
+The shipped logos, PNG icons, legacy installer bitmaps, the AppImage icon, and
+the PCM WAV notification sounds are reproducibly generated from code in
 `tools/generate_release_assets.py`. The generator uses no external creative
 input, font, image, sound sample, or icon library. These outputs are FTHR
 project material under MIT; the notice and exact file list are in
@@ -228,6 +336,32 @@ by the release asset script. It uses the project's MIT asset terms; see
 | **Verification** | Repository and pinned upstream files have SHA-256 `eb7d46f856dd57f18a8c03d033c57802692bf127f01dbd95ba8984338e6b5135` |
 | **Licence text** | `licenses/Oswald-OFL-1.1.txt` |
 
+### Oswald Regular and SemiBold
+
+`Oswald-Regular.ttf` and `Oswald-SemiBold.ttf` come unmodified from the same
+pinned `googlefonts/OswaldFont` revision as Oswald Bold, under the same SIL
+Open Font License 1.1 (`licenses/Oswald-OFL-1.1.txt`).
+
+### Interface SVG icons and installer artwork
+
+The SVG interface icons in `FTHR_UI/assets/icons/` are project-supplied source
+artwork under the project's GPL-3.0-only licence. The polished Windows
+installer artwork in `installer_assets/polished/` is generated by
+`tools/generate_installer_assets.py` from those icons and Oswald, also under
+GPL-3.0-only; it is used only by the Windows installer.
+
+### User-provided images
+
+`preview_desktop.png`, the brand ICO files and the Gary Mode cat image
+`gatze.png` were supplied by the workspace owner; see
+`licenses/FTHR-USER-PROVIDED-ASSETS.txt`.
+
+### Ko-fi cup symbol
+
+`FTHR_UI/assets/icons/kofi_symbol.png` is Ko-fi's brand asset, used only on
+the donation button under Ko-fi's promotional permission. It is not covered by
+FTHR's licence; see `licenses/KO-FI-BRAND-ASSETS.txt`.
+
 The authoritative per-file paths, hashes, origins, usage, and platform mappings
 are in `tools/release_asset_manifest.json`.
 
@@ -239,9 +373,15 @@ Listed so future audits do not have to re-derive it:
 
 - **`imageio-ffmpeg`** — *removed* on 2026-08-05. Its bundled binary is a
   gyan.dev build with `--enable-gpl --enable-libx264 --enable-libx265`
-  (GPLv3). It is now excluded in the Windows PyInstaller spec and removed from
+  (GPLv3). It is now excluded in both PyInstaller specs and removed from
   `requirements.txt`. See `FTHR_UI/core/ffmpeg_tools.py`.
+- **System FFmpeg on Linux** — if the bundled binary is absent, FTHR falls back
+  to `ffmpeg` on `PATH`. That copy belongs to the user's distribution and is not
+  redistributed by this project.
 - **Development tooling** — pytest, ruff, PyInstaller, Inno Setup, MSVC.
+- **PipeWire and libdbus runtime libraries** — loaded from the user's system
+  with `dlopen()` by the Linux engine when the ScreenCast portal backend runs;
+  never bundled. See the headers entry above.
 
 ---
 
@@ -255,6 +395,7 @@ files described here. Run it before every release:
 ```bash
 python tools/verify_release_licenses.py --tree .
 python tools/verify_release_licenses.py --windows-dist dist/FTHRClips
+python tools/verify_release_licenses.py --appdir build_output/AppDir
 ```
 
 **This is a technical verification, not legal advice.**

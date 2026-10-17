@@ -204,15 +204,22 @@ import json as _json
 _REVIEWED_QT = _json.loads((ROOT / 'tools' / 'qt_runtime_manifest.json').read_text())
 _APPROVED_QT_DLLS = {f'qt6{module.lower()}.dll'
                      for module in _REVIEWED_QT['approved_runtime_qt_modules']['windows']}
+# Destination of the PySide6 wheel's QML import tree as PyInstaller's Qt hooks
+# lay it out ('PySide6/qml/' for the Windows wheel). The filter must be
+# anchored here: the application's own scenes live under ui/qml/ and a bare
+# '/qml/' match drops VideoPreview.qml, Snapshot.qml and color.frag.qsb.
+from PyInstaller.utils.hooks.qt import pyside6_library_info as _pyside6_info  # noqa: E402
+_QT_QML_DEST = (Path(_pyside6_info.qt_rel_dir) / 'qml').as_posix().casefold() + '/'
+_KEPT_QML_DIRS = ('qtqml', 'qtqml/models', 'qtqml/workerscript',
+                  'qtquick', 'qtmultimedia')
 
 
 def _keep_reviewed_qt_runtime(entry):
     dest = str(entry[0]).replace('\\', '/').casefold()
     name = dest.rsplit('/', 1)[-1]
-    if '/qml/' in dest:
-        qml_parent = dest.split('/qml/', 1)[1].rsplit('/', 1)[0]
-        if qml_parent not in ('qtqml', 'qtqml/models', 'qtqml/workerscript',
-                              'qtquick', 'qtmultimedia'):
+    if dest.startswith(_QT_QML_DEST):
+        qml_parent = dest[len(_QT_QML_DEST):].rpartition('/')[0]
+        if qml_parent not in _KEPT_QML_DIRS:
             return False
     # Qt on supported Windows versions resolves the operating system ICU.
     # Never collect unrelated ICU copies which happen to be on PATH: a newer

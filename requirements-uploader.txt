@@ -12,3 +12,7 @@ jaraco.context==6.1.2
 jaraco.functools==4.6.0
 more-itertools==11.1.0
 pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
+# keyring's Secret Service backend on Linux (D-Bus, pure Python). Bundled for
+# the Linux uploader; saved SFTP passwords are not wired up on Linux yet.
+SecretStorage==3.5.0 ; sys_platform == 'linux'
+jeepney==0.9.0 ; sys_platform == 'linux'

@@ -7,13 +7,19 @@ on:
   pull_request:
     branches: [main, master, linux, linux-2.0]
 
-# Keep CI read-only and free of secrets; release verification scans untrusted changes.
+# No secrets are used anywhere in this workflow, and none should ever be added.
+# The release-verification job exists partly to catch a credential that made it
+# into the tree; giving that job access to credentials would be self-defeating.
 permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   # Python — the UI and its tests, on both platforms that ship a build.
@@ -38,6 +44,7 @@ jobs:
           cache-dependency-path: |
             requirements-alpha.txt
             requirements-dev.txt
+            requirements-uploader.txt
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -52,9 +59,11 @@ jobs:
       - name: Install pinned dependencies
         # The alpha lock is the ONLY install path. If it does not resolve on a
         # supported interpreter, that is a release bug, not a CI inconvenience.
+        # The uploader set is installed too: tests/test_sftp_provider.py
+        # imports paramiko from the optional uploader sources.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-alpha.txt -r requirements-dev.txt
+          python -m pip install -r requirements-alpha.txt -r requirements-dev.txt -r requirements-uploader.txt
 
       - name: Assert the environment matches the lock
         # Catches a transitive dependency that resolved to something other than
@@ -103,11 +112,10 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           if [ "${{ runner.os }}" = "Linux" ]; then
+            # Every Linux test runs here; test_capture_backend_detection uses
+            # the engine built in "Prepare Linux test artifacts" (FFmpeg on
+            # LD_LIBRARY_PATH). Only Windows-only suites are left out.
             python -m pytest tests/ -v --tb=short \
-              --ignore=tests/test_linux_appimage_report.py \
-              --ignore=tests/test_linux_runtime.py \
-              --ignore=tests/test_linux_tools.py \
-              --ignore=tests/test_capture_backend_detection.py \
               --ignore=tests/test_windows_monitor.py \
               --ignore=tests/test_windows_native_hotkeys.py \
               --ignore=tests/test_windows_autostart.py \
@@ -214,6 +222,7 @@ jobs:
           cache-dependency-path: |
             requirements-alpha.txt
             requirements-dev.txt
+            requirements-uploader.txt
 
       - uses: microsoft/setup-msbuild@v2
 
@@ -239,6 +248,7 @@ jobs:
           }
 
       - name: Build (Release | x64)
+        shell: pwsh
         run: >
           msbuild FTHRcapture\FTHRcapture.sln
           -p:Configuration=Release
@@ -263,18 +273,23 @@ jobs:
           "engine OK, x64"
 
       - name: Install pinned bundle dependencies
+        # requirements-uploader.txt is what the sealed uploader executable is
+        # frozen from. Without it PyInstaller silently builds a package that
+        # fails at runtime with "No module named 'paramiko'".
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-alpha.txt -r requirements-dev.txt
+          python -m pip install -r requirements-alpha.txt -r requirements-dev.txt -r requirements-uploader.txt
           python -m pip check
 
       - name: Build sealed optional upload packages
         run: python tools/build_optional_uploaders.py
 
       - name: Test built optional upload packages
+        # The python matrix has no sealed package, so the frozen-executable
+        # tests (including a real SFTP round trip) run here, after the build.
         run: >
-          python -m pytest tests/test_uploader_plugin_boundary.py
-          -k "test_built_" --tb=short
+          python -m pytest tests/test_uploader_plugin_boundary.py tests/test_sftp_provider.py
+          -k "test_built_ or test_frozen_" --tb=short
 
       - name: Build and verify the Windows bundle
         shell: pwsh
@@ -391,6 +406,7 @@ jobs:
           cache-dependency-path: |
             requirements-alpha.txt
             requirements-dev.txt
+            requirements-uploader.txt
 
       - name: Install packaging dependencies
         run: |
@@ -405,7 +421,7 @@ jobs:
             libxext-dev libxfixes-dev libwayland-dev wayland-protocols libwayland-bin \
             libpipewire-0.3-dev libdbus-1-dev
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-alpha.txt -r requirements-dev.txt
+          python -m pip install -r requirements-alpha.txt -r requirements-dev.txt -r requirements-uploader.txt
           python -m pip check
 
       - name: Build AppImage
@@ -421,7 +437,9 @@ jobs:
           python tools/verify_linux_glibc.py \
             --manifest tools/linux_release_baseline.json \
             --target build_output/AppDir \
-            --target "${image[0]}"
+            --target "${image[0]}" \
+            --target build/optional-uploader-linux/dist/FTHR-Uploader \
+            --target build/optional-uploader-linux/payload-elf
       - name: Upload verified Linux AppImage
         uses: actions/upload-artifact@v4
         with:

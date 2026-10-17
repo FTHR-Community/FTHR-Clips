@@ -638,6 +638,31 @@ def check_asset_artifact(root: Path, rep: Report, platform: str,
     else:
         rep.ok(f'{platform} artifact contains exactly {len(expected)} '
                'approved asset files')
+# Scenes and the precompiled shader the editor loads from beside
+# ui/quick_*.py at runtime. Without them the GPU preview silently falls back to
+# the CPU path and snapshots fail, so a bundle that lacks them is broken.
+QML_SCENE_FILES = ('VideoPreview.qml', 'Snapshot.qml', 'color.frag.qsb')
+QML_SCENE_ARTIFACT_DIR = '_internal/ui/qml'
+QML_SCENE_SOURCE_DIR = 'FTHR_UI/ui/qml'
+
+
+def check_qml_scenes(root: Path, rep: Report, platform: str,
+                     manifest_root: Path | None = None) -> None:
+    """Require the application's QML scenes, byte-identical to the source."""
+    print(f'\n-- Application QML scenes in {platform} artifact --')
+    source_root = manifest_root or _repo_root()
+    for name in QML_SCENE_FILES:
+        rel = f'{QML_SCENE_ARTIFACT_DIR}/{name}'
+        shipped = root / rel
+        source = source_root / QML_SCENE_SOURCE_DIR / name
+        if not shipped.is_file():
+            rep.fail(f'{platform} artifact: application QML file missing: {rel}')
+        elif source.is_file() and _file_sha256(source) != _file_sha256(shipped):
+            rep.fail(f'{platform} artifact: {rel} differs from {QML_SCENE_SOURCE_DIR}/{name}')
+        else:
+            rep.ok(f'{platform} artifact: {rel}')
+
+
 def check_linux_manifest(root, rep) -> None:
     """The Linux FFmpeg provenance manifest (AUDIT-014)."""
     print('\n-- Linux FFmpeg provenance manifest --')
@@ -926,6 +951,7 @@ def main() -> int:
                     check_qt_artifact(cand, rep, platform, manifest_root=root)
                     check_asset_artifact(
                         cand, rep, platform, manifest_root=root)
+                    check_qml_scenes(cand, rep, platform, manifest_root=root)
 
     if args.windows_dist:
         d = args.windows_dist.resolve()
@@ -935,6 +961,7 @@ def main() -> int:
         check_qt_artifact(d, rep, 'windows', manifest_root=_repo_root())
         check_asset_artifact(
             d, rep, 'windows', manifest_root=_repo_root())
+        check_qml_scenes(d, rep, 'windows', manifest_root=_repo_root())
 
     if args.appdir:
         d = args.appdir.resolve()
@@ -943,6 +970,7 @@ def main() -> int:
         scan_dir(d, rep, 'appdir')
         check_qt_artifact(d, rep, 'linux', manifest_root=_repo_root())
         check_asset_artifact(d, rep, 'linux', manifest_root=_repo_root())
+        check_qml_scenes(d, rep, 'linux', manifest_root=_repo_root())
         # AUDIT-014: the artifact is where it actually matters. A GPL library
         # the engine never loads is still a GPL library being distributed, and
         # PyInstaller collects the system FFmpeg through cv2 and Qt.

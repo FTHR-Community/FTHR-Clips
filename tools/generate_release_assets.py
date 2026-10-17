@@ -381,8 +381,10 @@ def sound(notes: list[tuple[float, float]], gap: float = 0.025) -> bytes:
 
 def generated_files() -> dict[Path, bytes]:
     logo = draw_mark(512).png()
+    # The repository social preview (social_preview()) is no longer committed:
+    # upstream removed .github/social_preview.png in 2.0.0-alpha. Regenerate it
+    # by hand if the GitHub repository card needs it again.
     files = {
-        ROOT / '.github' / 'social_preview.png': social_preview().png(),
         ROOT / 'AppDir' / 'fthr-clips.png': logo,
         ROOT / 'installer_assets' / 'wizard_banner.bmp':
             installer_banner(164, 314).bmp(),

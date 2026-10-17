@@ -155,6 +155,7 @@ a = Analysis(
         (str(ASSETS_DIR / 'fthr_logo.png'),  'assets'),
         (str(ASSETS_DIR / 'preview_desktop.png'), 'assets'),
         (str(ASSETS_DIR / 'gary.png'), 'assets'),
+        (str(ASSETS_DIR / 'gatze.png'), 'assets'),
         (str(PLUGIN_BUNDLE), 'plugin-packages'),
         # Licence paperwork must travel INSIDE the bundle (AUDIT-005), so a
         # portable copy is as complete as an installed one.
@@ -170,11 +171,21 @@ a = Analysis(
         *_asset_tree(ASSETS_DIR / 'fonts',   'assets/fonts'),
         *_asset_tree(ASSETS_DIR / 'icons',   'assets/icons'),
         *_asset_tree(ASSETS_DIR / 'sounds',  'assets/sounds'),
+        # The capture card runs this file in a child interpreter, and the
+        # editor loads its QML scenes and precompiled shader (color.frag.qsb)
+        # from beside ui/quick_*.py at runtime.
+        (str(UI_DIR / 'ui' / 'capture_card_process.py'), 'ui'),
+        *_asset_tree(UI_DIR / 'ui' / 'qml', 'ui/qml'),
     ],
     hiddenimports=[
         'PySide6.QtDBus',
         'PySide6.QtMultimedia',
         'PySide6.QtMultimediaWidgets',
+        # The 2.0 editor renders previews and snapshots in QQuickWidget scenes.
+        'PySide6.QtQuick',
+        'PySide6.QtQuickWidgets',
+        'PySide6.QtQml',
+        'PySide6.QtNetwork',
         'sounddevice',
         'numpy',
         'cv2',
@@ -202,6 +213,7 @@ a = Analysis(
         'core.ffmpeg_playback',
         'core.game_detector',
         'core.hotkey_manager',
+        'core.instance_activation',
         'core.mic_recorder',
         'core.presets_manager',
         'core.settings_manager',
@@ -214,8 +226,9 @@ a = Analysis(
         # Exclude imageio_ffmpeg; use the project-pinned FFmpeg runtime beside
         # the engine. See core/ffmpeg_tools.py.
         'imageio_ffmpeg',
-        # Qt modules we don't use (Widgets-only app)
-        'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtWebEngine',
+        # Qt modules we don't use. Quick/QML power the editor's video preview
+        # and snapshots, so they are filtered below rather than excluded.
+        'PySide6.QtWebEngine',
         'PySide6.QtWebEngineCore', 'PySide6.QtBluetooth', 'PySide6.QtPositioning',
         'PySide6.QtSensors', 'PySide6.QtLocation', 'PySide6.Qt3D',
         'PySide6.QtPdf', 'PySide6.QtPdfWidgets', 'PySide6.QtNfc',
@@ -236,10 +249,22 @@ a = Analysis(
     noarchive=False,
 )
 
-# QtGui's generic hook also sees the optional Virtual Keyboard plugin. It is a
-# GPL-only Qt module and drags in unused QML/Quick libraries. Excludes stop
+# Qt hooks collect every optional QML module and its libraries. Excludes stop
 # Python imports but not hook-added binaries, so filter the actual artifact
-# TOCs as a second, deterministic boundary.
+# TOCs as a second, deterministic boundary: keep the QML runtime the
+# application's QtQuick and QtMultimedia scenes import, and only the Qt
+# libraries reviewed in tools/qt_runtime_manifest.json. The Virtual Keyboard
+# is a GPL-only Qt module and never ships.
+import json as _json  # noqa: E402
+_REVIEWED_QT = _json.loads(
+    (ROOT / 'tools' / 'qt_runtime_manifest.json').read_text(encoding='utf-8'))
+_APPROVED_QT_SONAMES = {
+    f'libqt6{module.lower()}.so'
+    for module in _REVIEWED_QT['approved_runtime_qt_modules']['linux']}
+# Destination of the wheel's QML import tree, e.g. pyside6/qt/qml/.
+_QT_QML_DEST = (_QT6_PLUGIN_DEST.parent / 'qml').as_posix().casefold() + '/'
+_KEPT_QML_DIRS = ('qtqml', 'qtqml/models', 'qtqml/workerscript',
+                  'qtquick', 'qtmultimedia')
 # The compiler runtime stays on the host. PyInstaller puts _internal first on
 # LD_LIBRARY_PATH, so a bundled libstdc++/libgcc_s built on the Ubuntu 22.04
 # baseline shadows the host's newer copy for every library the process or its
@@ -255,6 +280,17 @@ def _keep_reviewed_qt_runtime(entry):
     dest = str(entry[0]).replace('\\', '/').casefold()
     name = dest.rsplit('/', 1)[-1]
     forbidden_prefixes = ('libqt6virtualkeyboard',)
+    # QML debugger/profiler plugins are development tooling, and
+    # libqmldbg_quick3dprofiler links the GPL-only Quick 3D.
+    if '/plugins/qmltooling/' in dest:
+        return False
+    if dest.startswith(_QT_QML_DEST):
+        qml_parent = dest[len(_QT_QML_DEST):].rpartition('/')[0]
+        if qml_parent not in _KEPT_QML_DIRS:
+            return False
+    if name.startswith('libqt6') and '.so' in name:
+        if name.split('.so', 1)[0] + '.so' not in _APPROVED_QT_SONAMES:
+            return False
     return (name not in _SKIPPED_QT_PLUGINS
             and name not in _HOST_TOOLCHAIN_LIBS
             and 'virtualkeyboard' not in dest

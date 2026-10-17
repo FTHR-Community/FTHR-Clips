@@ -18,7 +18,10 @@
     "Gui",
     "Widgets",
     "Multimedia",
-    "MultimediaWidgets"
+    "MultimediaWidgets",
+    "Qml",
+    "Quick",
+    "QuickWidgets"
   ],
   "approved_runtime_qt_modules": {
     "windows": [
@@ -31,7 +34,15 @@
       "OpenGLWidgets",
       "Pdf",
       "Svg",
-      "Widgets"
+      "Widgets",
+      "Qml",
+      "QmlCore",
+      "QmlMeta",
+      "QmlModels",
+      "QmlWorkerScript",
+      "Quick",
+      "QuickWidgets",
+      "MultimediaQuick"
     ],
     "linux": [
       "Concurrent",
@@ -41,16 +52,19 @@
       "EglFsKmsSupport",
       "Gui",
       "Multimedia",
+      "MultimediaQuick",
       "MultimediaWidgets",
       "Network",
       "OpenGL",
       "OpenGLWidgets",
       "Pdf",
       "Qml",
+      "QmlCore",
       "QmlMeta",
       "QmlModels",
       "QmlWorkerScript",
       "Quick",
+      "QuickWidgets",
       "Svg",
       "WaylandClient",
       "WaylandEglClientHwIntegration",
@@ -95,6 +109,8 @@
   ],
   "official_sources": {
     "qt": "https://download.qt.io/official_releases/qt/6.11/6.11.1/single/qt-everywhere-src-6.11.1.tar.xz",
-    "qt_for_python": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.1-src/pyside-setup-everywhere-src-6.11.1.tar.xz"
+    "qt_for_python": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.1-src/pyside-setup-everywhere-src-6.11.1.tar.xz",
+    "qml_license": "https://doc.qt.io/qt-6/qtqml-index.html#licenses-and-attributions",
+    "quick_license": "https://doc.qt.io/qt-6/qtquick-index.html#licenses-and-attributions"
   }
 }

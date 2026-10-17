@@ -68,7 +68,8 @@ def _source_tree(tmp_path: Path) -> Path:
             'shiboken6==6.11.1',
         )),
     )
-    for name in ('requirements.in', 'FTHR.spec'):
+    for name in ('requirements.in', 'FTHR.spec', 'FTHR_linux.spec',
+                 'build_linux.sh'):
         _write(root / name, 'PySide6\n')
     return root
 
@@ -144,5 +145,37 @@ def test_artifact_rejects_gpl_only_qt_module(tmp_path, module):
     assert any('GPL-only' in failure for failure in rep.failures)
 
 
+def test_linux_artifact_requires_xcb_and_wayland_plugins(tmp_path):
+    manifest_root = _manifest_root(tmp_path / 'source')
+    artifact = tmp_path / 'artifact'
+    _license_files(artifact)
+    _write(artifact / 'PySide6' / 'QtCore.so')
+    for module in ('Core', 'Gui', 'Widgets', 'Multimedia',
+                   'MultimediaWidgets'):
+        _write(artifact / 'PySide6' / 'Qt' / 'lib' /
+               f'libQt6{module}.so.6')
+    rep = vrl.Report()
+    vrl.check_qt_artifact(artifact, rep, 'linux', manifest_root=manifest_root)
+    assert any('libqxcb.so missing' in failure for failure in rep.failures)
+    assert any('Wayland Qt platform plugin missing' in failure
+               for failure in rep.failures)
 
 
+def test_linux_artifact_accepts_every_reviewed_runtime_module(tmp_path):
+    manifest_root = _manifest_root(tmp_path / 'source')
+    artifact = tmp_path / 'artifact'
+    _license_files(artifact)
+    _write(artifact / 'PySide6' / 'QtCore.so')
+    data = json.loads(REAL_MANIFEST.read_text(encoding='utf-8'))
+    for module in data['approved_runtime_qt_modules']['linux']:
+        _write(artifact / 'PySide6' / 'Qt' / 'lib' /
+               f'libQt6{module}.so.6')
+    _write(artifact / 'PySide6' / 'Qt' / 'plugins' / 'platforms' /
+           'libqxcb.so')
+    _write(artifact / 'PySide6' / 'Qt' / 'plugins' / 'platforms' /
+           'libqwayland.so')
+
+    rep = vrl.Report()
+    vrl.check_qt_artifact(artifact, rep, 'linux', manifest_root=manifest_root)
+
+    assert not rep.failures, rep.failures
