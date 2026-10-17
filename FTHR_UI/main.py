@@ -86,6 +86,8 @@ def _setup_file_logging():
         # Structured logging uses the same file; print() still works
         from core import diagnostics
         diagnostics.configure(log_file=log_file)
+        from core import crash_logging
+        crash_logging.enable_fault_handler(log_dir / 'fthr-crash.log')
     except Exception as e:
         # Log setup failed - report on stderr before redirection
         print(f'[Startup] File logging unavailable: {type(e).__name__}: {e}',
@@ -109,6 +111,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, QColor, QIcon, QBrush, QPolygonF, QPalette, QAction
 
+from core import crash_logging
+crash_logging.install_qt_message_handler()
 from version import __version__ as APP_VERSION, APP_NAME
 from core import linux_tools
 from core.capture_bridge import CaptureBridge
