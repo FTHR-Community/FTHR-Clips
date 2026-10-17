@@ -228,8 +228,12 @@ its full licence text inside the plugin under
 | more-itertools | 11.1.0 | MIT | both |
 | cffi, pycparser | 2.0.0, 3.0 | MIT-0, BSD-3-Clause | both |
 | pywin32-ctypes | 0.2.3 | BSD-3-Clause | Windows |
-| SecretStorage | 3.5.0 | BSD-3-Clause | Linux (keyring's Secret Service backend) |
+| SecretStorage | 3.5.0 | BSD-3-Clause | Linux (bundled for keyring's Secret Service backend) |
 | jeepney | 0.9.0 | MIT | Linux (D-Bus client used by SecretStorage) |
+
+SecretStorage and jeepney are bundled for the Linux uploader, but saving an
+SFTP password through the Secret Service is not wired up on Linux yet; the
+uploader currently stores saved passwords only in Windows Credential Manager.
 
 paramiko is used unmodified as a separate library inside the plugin
 executable; its LGPL source is the published paramiko 4.0.0 release.

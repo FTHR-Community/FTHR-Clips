@@ -273,6 +273,10 @@ not automatic: enable it in Settings and complete the required consent and
 provider terms first. The uploader remains a separate subprocess from the main
 application and only receives approved clip paths through the existing boundary.
 
+Saving an SFTP password is not available on Linux yet. The bundle already
+contains keyring's Secret Service backend (SecretStorage), but the uploader
+only stores passwords in Windows Credential Manager so far.
+
 Catbox and custom-server providers do not require the separate hardware-identity
 component. Lustful hardware-bound account and upload flows remain unavailable on
 Linux until a Linux hardware-identity component is implemented and qualified.
