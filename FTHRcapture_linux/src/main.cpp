@@ -16,6 +16,38 @@
 static volatile bool g_quit = false;
 static void on_signal(int) { g_quit = true; }
 
+// ui_string as written by the UI, bounded even if it lacks a terminator.
+static std::string read_ui_string(const fthr::SharedMemoryLayout* layout) {
+    const char* begin = layout->ui_string;
+    const void* nul = std::memchr(begin, '\0', sizeof(layout->ui_string));
+    const size_t n = nul ? static_cast<size_t>(static_cast<const char*>(nul) - begin)
+                         : sizeof(layout->ui_string);
+    return std::string(begin, n);
+}
+
+// START_RECORDING with an empty ui_string resumes after a focus pause. With
+// a path it is the 2.0 manual (continuous) recording request, which this
+// engine has no recorder for: refuse it with the response reserved for
+// recording failures, so the save state machine never consumes it, and leave
+// the pause state alone.
+static void HandleStartRecording(fthr::SharedMemoryLayout* layout,
+                                 fthr::CaptureEngine& engine) {
+    if (read_ui_string(layout).empty()) {
+        engine.SetPaused(false);
+        layout->engine_response =
+            static_cast<uint32_t>(fthr::ResponseType::RECORDING_STARTED);
+        return;
+    }
+    layout->ui_string[0] = '\0';
+    std::cerr << "[FTHR] START_RECORDING with a path refused: manual recording"
+                 " is not supported on Linux" << std::endl;
+    fthr::set_engine_string(layout,
+        "Manual recording is not available on Linux yet. "
+        "Save replay clips instead.");
+    layout->engine_response =
+        static_cast<uint32_t>(fthr::ResponseType::MANUAL_RECORDING_ERROR);
+}
+
 static int ListPlaybackDevices() {
     std::vector<fthr::AudioEndpoint> sinks;
     std::string error;
@@ -156,6 +188,12 @@ int main(int argc, char* argv[]) {
 
             switch (cmd) {
             case fthr::CommandType::SAVE_CLIP: {
+                // Take the path, then consume ui_string: the UI's resume
+                // request (START_RECORDING) does not clear it, and a stale
+                // clip path there would read as a manual-recording request.
+                const std::string out_path = read_ui_string(layout);
+                layout->ui_string[0] = '\0';
+
                 // Clear the previous save detail before queueing this request so a later
                 // success cannot carry stale error text.
                 fthr::set_engine_string(layout, "");
@@ -165,7 +203,6 @@ int main(int argc, char* argv[]) {
                 layout->engine_response =
                     static_cast<uint32_t>(fthr::ResponseType::SAVE_STARTED);
 
-                std::string out_path(layout->ui_string);
                 uint32_t duration_sec = layout->ui_param1;
                 if (duration_sec == 0) duration_sec = cfg.buffer_seconds;
 
@@ -244,9 +281,7 @@ int main(int argc, char* argv[]) {
                 break;
 
             case fthr::CommandType::START_RECORDING:
-                engine.SetPaused(false);
-                layout->engine_response =
-                    static_cast<uint32_t>(fthr::ResponseType::RECORDING_STARTED);
+                HandleStartRecording(layout, engine);
                 break;
 
             case fthr::CommandType::SHUTDOWN:
@@ -269,10 +304,12 @@ int main(int argc, char* argv[]) {
         // no consumer on Linux, so they never hold a publication back.
         const auto pending = static_cast<fthr::ResponseType>(
             layout->engine_response);
+        // MANUAL_RECORDING_ERROR carries its message in engine_string too.
         const bool save_result_pending =
             pending == fthr::ResponseType::SAVE_STARTED ||
             pending == fthr::ResponseType::CLIP_SAVED ||
-            pending == fthr::ResponseType::ERROR_OCCURRED;
+            pending == fthr::ResponseType::ERROR_OCCURRED ||
+            pending == fthr::ResponseType::MANUAL_RECORDING_ERROR;
         if ((health_flags & fthr::CAPTURE_HEALTH_BACKEND_FAILED) &&
                 !failure_reason_published) {
             // Payload first: the UI reads engine_string as soon as it sees
