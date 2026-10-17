@@ -23,7 +23,14 @@ def _stub(main, calls):
         _capture_settings_applying=False,
         _engine_connect_thread=None,
         _set_status=lambda *a, **k: None,
+        # 2.0 status-poll collaborators that this test does not exercise.
+        _capture_pending_text=lambda: 'APPLYING SETTINGS',
+        _advance_recoverable_errors=lambda **_k: None,
+        _schedule_owned_hardware_check=lambda *_a: None,
     )
+    stub._owns_engine_attempt = (
+        lambda _generation, process, bridge:
+        stub.engine_process is process and stub.bridge is bridge)
     stub._connect_worker_active = main.MainWindow._connect_worker_active.__get__(stub)
     stub._update_status = main.MainWindow._update_status.__get__(stub)
     return stub, FakeBridge

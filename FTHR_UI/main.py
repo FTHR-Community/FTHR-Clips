@@ -1731,77 +1731,91 @@ class SourcePopup(_PopupPanel):
         # Monitor selector (desktop mode only)
         self.monitor_combo = _DropdownCombo()
         set_theme_style(self.monitor_combo, lambda: (_COMBO_STYLE))
-        monitor_choices = enumerate_windows_monitors()
-        screens_by_name = {
-            screen.name().lower(): screen for screen in QApplication.screens()
-        }
-        for choice in monitor_choices:
-            screen = screens_by_name.get(choice.gdi_name.lower())
-            details = ''
-            if screen is not None:
+        if sys.platform != 'win32':
+            # The Linux engine captures one output by its compositor/xrandr
+            # name, which is what QScreen.name() reports; '' is the default.
+            self._monitor_selection_result = None
+            self.monitor_combo.addItem('First Screen (Default)', userData='')
+            for screen in QApplication.screens():
                 geometry = screen.availableGeometry()
-                details = (
-                    f'  ({geometry.width()}×{geometry.height()} '
-                    f'@ {int(screen.refreshRate())}Hz)'
+                self.monitor_combo.addItem(
+                    f'{screen.name()}  ({geometry.width()}×{geometry.height()} '
+                    f'@ {int(screen.refreshRate())}Hz)',
+                    userData=screen.name(),
                 )
-            primary = ' · Primary' if choice.primary else ''
-            self.monitor_combo.addItem(
-                f'{choice.friendly_name}{details}{primary}',
-                userData=choice.device_path,
-            )
+            saved_mon = str(self.cur_monitor or '')
+        else:
+            monitor_choices = enumerate_windows_monitors()
+            screens_by_name = {
+                screen.name().lower(): screen for screen in QApplication.screens()
+            }
+            for choice in monitor_choices:
+                screen = screens_by_name.get(choice.gdi_name.lower())
+                details = ''
+                if screen is not None:
+                    geometry = screen.availableGeometry()
+                    details = (
+                        f'  ({geometry.width()}×{geometry.height()} '
+                        f'@ {int(screen.refreshRate())}Hz)'
+                    )
+                primary = ' · Primary' if choice.primary else ''
+                self.monitor_combo.addItem(
+                    f'{choice.friendly_name}{details}{primary}',
+                    userData=choice.device_path,
+                )
 
-        stored_mon = str(self.cur_monitor or '')
-        selection = resolve_monitor_selection(stored_mon, monitor_choices)
-        self._monitor_selection_result = selection
-        saved_mon = selection.path
-        if selection.persist_required and selection.path:
-            previous_value = self.sm.get('capture_monitor', stored_mon)
-            self.sm.set('capture_monitor', selection.path)
-            if not self.sm.save_settings():
-                # Do not leave an in-memory path that was not committed to
-                # settings.  Startup will independently fail closed if the
-                # same persistence operation cannot be completed.
-                self.sm.set('capture_monitor', previous_value)
-                saved_mon = str(previous_value or '')
-                self._monitor_selection_result = MonitorSelectionResult(
-                    state=MonitorSelectionState.PERSIST_FAILED,
-                    code='MONITOR_PERSIST_FAILED',
-                    reason='could not persist resolved monitor path',
-                    previous_state=selection.previous_state,
-                    previous_path=selection.previous_path,
-                )
+            stored_mon = str(self.cur_monitor or '')
+            selection = resolve_monitor_selection(stored_mon, monitor_choices)
+            self._monitor_selection_result = selection
+            saved_mon = selection.path
+            if selection.persist_required and selection.path:
+                previous_value = self.sm.get('capture_monitor', stored_mon)
+                self.sm.set('capture_monitor', selection.path)
+                if not self.sm.save_settings():
+                    # Do not leave an in-memory path that was not committed to
+                    # settings.  Startup will independently fail closed if the
+                    # same persistence operation cannot be completed.
+                    self.sm.set('capture_monitor', previous_value)
+                    saved_mon = str(previous_value or '')
+                    self._monitor_selection_result = MonitorSelectionResult(
+                        state=MonitorSelectionState.PERSIST_FAILED,
+                        code='MONITOR_PERSIST_FAILED',
+                        reason='could not persist resolved monitor path',
+                        previous_state=selection.previous_state,
+                        previous_path=selection.previous_path,
+                    )
+                    emit_event(
+                        'capture', 'monitor_selection_failed', state='FAILED',
+                        error='MONITOR_PERSIST_FAILED',
+                        monitor_selection=self._monitor_selection_result.as_dict())
+            if self._monitor_selection_result.path:
                 emit_event(
-                    'capture', 'monitor_selection_failed', state='FAILED',
-                    error='MONITOR_PERSIST_FAILED',
-                    monitor_selection=self._monitor_selection_result.as_dict())
-        if self._monitor_selection_result.path:
-            emit_event(
-                'capture', self._monitor_selection_result.code.lower(),
-                **self._monitor_selection_result.as_dict())
-        if not saved_mon and stored_mon:
-            if is_monitor_selection_sentinel(stored_mon):
-                # Diagnostic sentinels are not monitor identities. Keep
-                # the unresolved state visible without putting the marker
-                # into combo userData or the in-memory selection.
-                self.monitor_combo.addItem(
-                    'Monitor selection requires recovery', userData='')
-            elif is_monitor_capture_identity(stored_mon):
-                # A stale canonical path may remain visible as a bounded
-                # diagnostic-only row; it is still rejected by startup
-                # unless the resolver can recover it.
-                saved_mon = stored_mon
-                self.monitor_combo.addItem(
-                    'Unavailable monitor (saved)', userData=stored_mon)
-            else:
-                # Legacy/non-canonical values are never exposed as a
-                # selectable monitor identity when migration is ambiguous.
-                self.monitor_combo.addItem(
-                    'Monitor selection requires recovery', userData='')
-        if saved_mon != self.cur_monitor:
-            self.cur_monitor = saved_mon
-        if not monitor_choices:
-            self.monitor_combo.addItem('No active Windows monitor found', userData='')
-            self.monitor_combo.setEnabled(False)
+                    'capture', self._monitor_selection_result.code.lower(),
+                    **self._monitor_selection_result.as_dict())
+            if not saved_mon and stored_mon:
+                if is_monitor_selection_sentinel(stored_mon):
+                    # Diagnostic sentinels are not monitor identities. Keep
+                    # the unresolved state visible without putting the marker
+                    # into combo userData or the in-memory selection.
+                    self.monitor_combo.addItem(
+                        'Monitor selection requires recovery', userData='')
+                elif is_monitor_capture_identity(stored_mon):
+                    # A stale canonical path may remain visible as a bounded
+                    # diagnostic-only row; it is still rejected by startup
+                    # unless the resolver can recover it.
+                    saved_mon = stored_mon
+                    self.monitor_combo.addItem(
+                        'Unavailable monitor (saved)', userData=stored_mon)
+                else:
+                    # Legacy/non-canonical values are never exposed as a
+                    # selectable monitor identity when migration is ambiguous.
+                    self.monitor_combo.addItem(
+                        'Monitor selection requires recovery', userData='')
+            if saved_mon != self.cur_monitor:
+                self.cur_monitor = saved_mon
+            if not monitor_choices:
+                self.monitor_combo.addItem('No active Windows monitor found', userData='')
+                self.monitor_combo.setEnabled(False)
         idx = self.monitor_combo.findData(saved_mon)
         if idx >= 0:
             self.monitor_combo.setCurrentIndex(idx)
@@ -3221,6 +3235,7 @@ class MainWindow(QMainWindow):
         self._engine_process_generation = None
         self._recoverable_error_incidents = {}
         self._error_recovery_tracker = RecoveryTracker()
+        self._engine_connect_thread: threading.Thread | None = None
         self._engine_startup_output = None
         self.bridge         = CaptureBridge()
         self._engine_profile = 'clips'
@@ -3239,7 +3254,18 @@ class MainWindow(QMainWindow):
         self._capture_health_snapshot = None
         self._capture_health_log = get_logger('capture.health')
 
-        if getattr(sys, 'frozen', False):
+        if sys.platform != 'win32':
+            _env_engine = os.environ.get('FTHR_ENGINE', '')
+            if getattr(sys, 'frozen', False):
+                # In frozen PyInstaller build the engine is in _internal/ (_MEIPASS)
+                possible_paths = [Path(sys._MEIPASS) / 'FTHRclips']
+            else:
+                linux_root = Path(__file__).parent.parent / 'FTHRcapture_linux'
+                possible_paths = [
+                    *([Path(_env_engine)] if _env_engine else []),
+                    linux_root / 'build' / 'FTHRclips',
+                ]
+        elif getattr(sys, 'frozen', False):
             possible_paths = [Path(sys._MEIPASS) / 'engine' / 'FTHRClips.exe']
         else:
             project_root   = Path(__file__).parent.parent / 'FTHRcapture'
@@ -4432,7 +4458,11 @@ class MainWindow(QMainWindow):
                       ' Re-download the latest release.')
         else:
             detail = ('FTHRcapture binary not found. Build it:'
-                      ' msbuild FTHRcapture/FTHRcapture.sln -p:Configuration=Release -p:Platform=x64')
+                      ' msbuild FTHRcapture/FTHRcapture.sln -p:Configuration=Release -p:Platform=x64'
+                      if sys.platform == 'win32' else
+                      'FTHRcapture binary not found. Build it:'
+                      ' cd FTHRcapture_linux && bash build_linux.sh'
+                      ' (or point FTHR_ENGINE at a built FTHRclips)')
         self.push_error(
             'ENGINE NOT FOUND',
             detail,
@@ -5122,42 +5152,51 @@ class MainWindow(QMainWindow):
                 bitrate = BITRATE_PRESETS[resolution].get(
                     quality, BITRATE_PRESETS[resolution]['high'])
         monitor = str(self.settings_manager.get('capture_monitor', '') or '')
-        current_choices = enumerate_windows_monitors()
-        selection = resolve_monitor_selection(monitor, current_choices)
-        if not selection.path:
-            # This failure is deliberately raised before CaptureConfig is
-            # handed to start_engine, so no unresolved value can reach the
-            # native process.  The event preserves stale/not-configured/
-            # ambiguous/no-display semantics for field diagnostics.
-            emit_event(
-                'capture', 'monitor_selection_failed', state='FAILED',
-                error=getattr(DiagnosticError, selection.code,
-                              selection.code),
-                monitor_selection=selection.as_dict())
-            raise MonitorSelectionError(selection)
-        if selection.persist_required:
-            previous_value = self.settings_manager.get(
-                'capture_monitor', monitor)
-            self.settings_manager.set('capture_monitor', selection.path)
-            if self.settings_manager.save_settings() is False:
-                self.settings_manager.set('capture_monitor', previous_value)
-                failed = MonitorSelectionResult(
-                    state=MonitorSelectionState.PERSIST_FAILED,
-                    code='MONITOR_PERSIST_FAILED',
-                    reason='could not persist resolved monitor path',
-                    previous_state=selection.previous_state,
-                    previous_path=selection.previous_path,
-                )
+        if sys.platform != 'win32':
+            # The Linux engine takes an output name (QScreen/xrandr) or '' for
+            # its default output. Windows device paths, desktop identities
+            # and diagnostic sentinels copied from a Windows settings file
+            # mean nothing there, so they fall back to the default output.
+            if (is_monitor_capture_identity(monitor)
+                    or is_monitor_selection_sentinel(monitor)):
+                monitor = ''
+        else:
+            current_choices = enumerate_windows_monitors()
+            selection = resolve_monitor_selection(monitor, current_choices)
+            if not selection.path:
+                # This failure is deliberately raised before CaptureConfig is
+                # handed to start_engine, so no unresolved value can reach the
+                # native process.  The event preserves stale/not-configured/
+                # ambiguous/no-display semantics for field diagnostics.
                 emit_event(
                     'capture', 'monitor_selection_failed', state='FAILED',
-                    error=getattr(DiagnosticError, failed.code,
-                                  failed.code),
-                    monitor_selection=failed.as_dict())
-                raise MonitorSelectionError(failed)
-        emit_event(
-            'capture', selection.code.lower(),
-            **selection.as_dict())
-        monitor = selection.path
+                    error=getattr(DiagnosticError, selection.code,
+                                  selection.code),
+                    monitor_selection=selection.as_dict())
+                raise MonitorSelectionError(selection)
+            if selection.persist_required:
+                previous_value = self.settings_manager.get(
+                    'capture_monitor', monitor)
+                self.settings_manager.set('capture_monitor', selection.path)
+                if self.settings_manager.save_settings() is False:
+                    self.settings_manager.set('capture_monitor', previous_value)
+                    failed = MonitorSelectionResult(
+                        state=MonitorSelectionState.PERSIST_FAILED,
+                        code='MONITOR_PERSIST_FAILED',
+                        reason='could not persist resolved monitor path',
+                        previous_state=selection.previous_state,
+                        previous_path=selection.previous_path,
+                    )
+                    emit_event(
+                        'capture', 'monitor_selection_failed', state='FAILED',
+                        error=getattr(DiagnosticError, failed.code,
+                                      failed.code),
+                        monitor_selection=failed.as_dict())
+                    raise MonitorSelectionError(failed)
+            emit_event(
+                'capture', selection.code.lower(),
+                **selection.as_dict())
+            monitor = selection.path
         crop = None
         getattr(self, '_active_game_window', None)
         try:
@@ -5432,27 +5471,54 @@ class MainWindow(QMainWindow):
         target_hwnd     = self.settings_manager.get('target_hwnd',     0)
         capture_monitor = launch_config.monitor
         engine_monitor_arg = capture_monitor
-        pass
-        try:
-            engine_monitor_arg = validate_engine_monitor_argument(
-                engine_monitor_arg)
-        except MonitorSelectionError as monitor_error:
-            selection = monitor_error.result
-            detail = (f'{selection.reason}. Capture was not started; a '
-                      'canonical Windows monitor device path is required.')
-            self._capture_config.fail(detail)
-            self._restart_pending = False
-            self._set_capture_apply_state(False)
-            self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
-            emit_event(
-                'engine', 'start_failed', state='FAILED',
-                error=getattr(DiagnosticError, selection.code,
-                              selection.code),
-                monitor_selection=selection.as_dict(),
-                detail=detail, api_call='native_process_argument_guard')
-            self.push_error('CAPTURE FAILED',
-                            f'{selection.code}: {detail}', level='error')
-            return False
+        if sys.platform != 'win32':
+            # validate_engine_monitor_argument() accepts only Windows device
+            # paths. The Linux engine takes an output name: Wayland uses the
+            # QScreen name as is; native X11 resolves it through xrandr.
+            if is_native_x11_session():
+                xrandr = linux_tools.path('xrandr')
+                if not xrandr:
+                    detail = linux_tools.missing_message('xrandr')
+                    self._capture_config.fail(detail)
+                    self._restart_pending = False
+                    self._set_capture_apply_state(False)
+                    self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+                    self.push_error('X11 MONITOR UNAVAILABLE', detail, level='error')
+                    return False
+                try:
+                    x11_target = resolve_x11_capture_target(
+                        capture_monitor, xrandr)
+                except X11MonitorError as error:
+                    detail = str(error)
+                    self._capture_config.fail(detail)
+                    self._restart_pending = False
+                    self._set_capture_apply_state(False)
+                    self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+                    self.push_error('X11 MONITOR UNAVAILABLE', detail, level='error')
+                    return False
+                engine_monitor_arg = x11_target.engine_argument
+                capture_monitor = x11_target.output.name
+        else:
+            try:
+                engine_monitor_arg = validate_engine_monitor_argument(
+                    engine_monitor_arg)
+            except MonitorSelectionError as monitor_error:
+                selection = monitor_error.result
+                detail = (f'{selection.reason}. Capture was not started; a '
+                          'canonical Windows monitor device path is required.')
+                self._capture_config.fail(detail)
+                self._restart_pending = False
+                self._set_capture_apply_state(False)
+                self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+                emit_event(
+                    'engine', 'start_failed', state='FAILED',
+                    error=getattr(DiagnosticError, selection.code,
+                                  selection.code),
+                    monitor_selection=selection.as_dict(),
+                    detail=detail, api_call='native_process_argument_guard')
+                self.push_error('CAPTURE FAILED',
+                                f'{selection.code}: {detail}', level='error')
+                return False
         # target_hwnd comes from user-editable settings.json — never trust it.
         try:
             target_hwnd = int(target_hwnd)
@@ -5499,7 +5565,11 @@ class MainWindow(QMainWindow):
                 else Path.home() / '.fthr' / 'logs' / 'engine.log')
             self._engine_startup_output = EngineLogCapture(
                 engine_log_path, self._diagnostics)
-            engine_environment = os.environ.copy()
+            engine_environment = (
+                os.environ.copy() if sys.platform == 'win32'
+                # Host library path for the engine and the VA-API driver it
+                # loads, not PyInstaller's _internal.
+                else linux_runtime.child_process_environment())
             if self._diagnostics is not None:
                 engine_environment['FTHR_DIAGNOSTIC_SESSION_ID'] = (
                     self._diagnostics.session_id)
@@ -5790,8 +5860,9 @@ class MainWindow(QMainWindow):
                             'The recording quality profile could not connect to capture.')
                 self._ui_call.emit(_on_failed)
 
-            threading.Thread(target=_poll_connect, daemon=True,
-                             name='fthr-engine-connect').start()
+            self._engine_connect_thread = threading.Thread(
+                target=_poll_connect, daemon=True, name='fthr-engine-connect')
+            self._engine_connect_thread.start()
             return True
         except Exception as e:
             print(f"Engine start error: {e}")
@@ -6554,7 +6625,7 @@ class MainWindow(QMainWindow):
         # bridge the failure is indistinguishable from a write error, and the
         # user got told to check disk space while the real cause was a deep
         # folder (a long game name under a long user profile path is enough).
-        if len(str(output_path)) > 255:
+        if sys.platform == 'win32' and len(str(output_path)) > 255:
             self.capture_card.show_error()
             self.push_error(
                 'CLIP PATH TOO LONG',
@@ -8266,6 +8337,14 @@ class MainWindow(QMainWindow):
 
     # UI state
 
+    def _connect_worker_active(self) -> bool:
+        # The connect worker calls initialize() on the singleton bridge; the
+        # status poll must not shut that bridge down underneath it. On Linux
+        # a crashed engine leaves its /dev/shm segment behind, so the poll's
+        # reconnect would otherwise race the worker for the same mapping.
+        thread = getattr(self, '_engine_connect_thread', None)
+        return thread is not None and thread.is_alive()
+
     def _update_status(self):
         # Detect an engine crash. The shared-memory mapping outlives the
         # process (is_initialized stays true), so is_connected() keeps lying
@@ -8347,6 +8426,7 @@ class MainWindow(QMainWindow):
             # with is_initialized still true, so initialize() would happily
             # "reconnect" to a corpse.
             if (self.engine_process is not None
+                    and not self._connect_worker_active()
                     and self._reconnect_counter % 3 == 1
                     and getattr(self, '_engine_handshake_generation', None)
                     != getattr(self, '_engine_gen', 0)):
