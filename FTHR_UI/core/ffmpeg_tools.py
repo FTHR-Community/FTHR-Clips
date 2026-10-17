@@ -14,8 +14,8 @@ from typing import Optional
 # Suppress the console window ffmpeg would otherwise flash on Windows.
 _NO_WINDOW = {'creationflags': 0x08000000} if sys.platform == 'win32' else {}
 
-_EXE_NAME = 'ffmpeg.exe'
-_PROBE_NAME = 'ffprobe.exe'
+_EXE_NAME = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+_PROBE_NAME = 'ffprobe.exe' if sys.platform == 'win32' else 'ffprobe'
 
 # Full-quality export uses this bitrate ceiling when OpenH264 must re-encode.
 # OpenH264 doesn't support CRF or lossless encoding.
@@ -47,10 +47,17 @@ def _candidate_paths() -> list[Path]:
         out.append(Path(meipass) / 'engine' / _EXE_NAME)
         out.append(Path(meipass) / _EXE_NAME)
 
+    if sys.platform != 'win32':
+        # Linux PyInstaller/AppImage layout: the engine, FFmpeg libraries and
+        # CLI tools sit beside the executable or in its engine/ directory.
+        out.append(Path(sys.executable).parent / _EXE_NAME)
+        out.append(Path(sys.executable).parent / 'engine' / _EXE_NAME)
 
     # Development runtime beside the native engine; parents[2] is the repo root.
     root = here.parents[2]
     out.append(root / 'FTHRcapture' / 'FTHRclips' / 'third_party' / 'ffmpeg' / 'bin' / _EXE_NAME)
+    if sys.platform != 'win32':
+        out.append(root / 'FTHRcapture_linux' / 'third_party' / 'ffmpeg' / 'bin' / _EXE_NAME)
 
     return out
 
