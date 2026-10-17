@@ -97,6 +97,25 @@ if(BUILD_TESTING)
     add_test(NAME linux_encoder_candidates
         COMMAND fthr_linux_encoder_candidates_test)
 
+    add_executable(fthr_linux_engine_args_test
+        tests/linux_engine_args_test.cpp
+        src/engine_args.cpp)
+    target_include_directories(fthr_linux_engine_args_test PRIVATE
+        src
+        ../FTHRcapture_common)
+    target_compile_options(fthr_linux_engine_args_test PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME linux_engine_args COMMAND fthr_linux_engine_args_test)
+
+    add_executable(fthr_linux_audio_endpoint_json_test
+        tests/linux_audio_endpoint_json_test.cpp
+        src/audio_devices.cpp)
+    target_include_directories(fthr_linux_audio_endpoint_json_test PRIVATE src)
+    target_compile_options(fthr_linux_audio_endpoint_json_test PRIVATE
+        -Wall -Wextra -Wpedantic -UNDEBUG)
+    add_test(NAME linux_audio_endpoint_json
+        COMMAND fthr_linux_audio_endpoint_json_test)
+
     add_executable(fthr_x11_capture_target_test
         tests/x11_capture_target_test.cpp
         src/x11_capture_target.cpp)
@@ -344,6 +363,8 @@ add_custom_command(
 
 set(FTHR_ENGINE_SOURCES
     src/main.cpp
+    src/engine_args.cpp
+    src/audio_devices.cpp
     src/shared_memory.cpp
     src/capture_engine.cpp
     src/backend_wlr.cpp

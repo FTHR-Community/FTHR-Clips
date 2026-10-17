@@ -1,5 +1,7 @@
 #include "capture_engine.h"
 #include "shared_memory.h"
+#include "audio_devices.h"
+#include "engine_args.h"
 #include <algorithm>
 #include <chrono>
 #include <iostream>
@@ -14,54 +16,79 @@
 static volatile bool g_quit = false;
 static void on_signal(int) { g_quit = true; }
 
-// Argv parsing helpers
+static int ListPlaybackDevices() {
+    std::vector<fthr::AudioEndpoint> sinks;
+    std::string error;
+    if (!fthr::EnumeratePlaybackSinks(&sinks, &error)) {
+        std::cerr << fthr::FormatEndpointListError(error) << std::endl;
+        return 1;
+    }
+    std::cout << fthr::FormatEndpointListJson(sinks) << std::endl;
+    return 0;
+}
 
-static uint32_t arg_u32(char** argv, int idx, uint32_t def) {
-    if (!argv[idx] || argv[idx][0] == '\0') return def;
-    long v = strtol(argv[idx], nullptr, 10);
-    return (v < 0) ? def : static_cast<uint32_t>(v);
+static int ListMicrophones() {
+    // The Linux engine does not capture a microphone; the UI records it
+    // itself. An empty inventory is the honest answer.
+    std::cout << fthr::FormatEndpointListJson({}) << std::endl;
+    return 0;
 }
 
 
 int main(int argc, char* argv[]) {
+    // `--` modes never touch shared memory or start capture.
+    const fthr::CliDecision cli = fthr::ClassifyCommandLine(argc, argv);
+    switch (cli.mode) {
+    case fthr::CliMode::ListPlaybackDevices: return ListPlaybackDevices();
+    case fthr::CliMode::ListMicrophones:     return ListMicrophones();
+    case fthr::CliMode::UsageError:
+        std::cerr << "FTHRclips: " << cli.message << "\n"
+                  << "usage: FTHRclips [positional startup arguments]"
+                     " (see docs/engine-startup.md)\n"
+                  << "       FTHRclips --list-playback-devices\n"
+                  << "       FTHRclips --list-microphones" << std::endl;
+        return 2;
+    case fthr::CliMode::Engine:
+        break;
+    }
+
     // Keep positional arguments aligned with the UI and Windows engine.
     // See docs/engine-startup.md for platform differences and reserved slots.
+    const fthr::EngineArgs args = fthr::ParseEngineArgs(argc, argv);
+    for (const auto& warning : args.warnings)
+        std::cerr << "[Config] " << warning << std::endl;
 
     fthr::CaptureConfig cfg{};
-    cfg.fps            = (argc > 1) ? arg_u32(argv, 1, 60)     : 60;
-    cfg.buffer_seconds = (argc > 2) ? arg_u32(argv, 2, 30)     : 30;
-    cfg.target_width   = (argc > 3) ? arg_u32(argv, 3, 0)      : 0;
-    cfg.target_height  = (argc > 4) ? arg_u32(argv, 4, 0)      : 0;
-    cfg.bitrate_kbps   = (argc > 5) ? arg_u32(argv, 5, 16000)  : 16000;
-    // argv[6] = max_buffer_mb — ignored
-    // argv[7] = capture_mode  — ignored (always desktop)
-    // argv[8] = target_hwnd   — ignored
-    cfg.scaling_mode   = (argc > 9) ? arg_u32(argv, 9, 0)      : 0;
-    cfg.target_output  = (argc > 10 && argv[10] && argv[10][0]) ? argv[10] : "";
-    cfg.codec_pref = static_cast<fthr::CodecPref>(
-        (argc > 11) ? arg_u32(argv, 11, 0) : 0);
-    cfg.preset     = (argc > 12) ? static_cast<int>(arg_u32(argv, 12, 4)) : 4;
-    if (cfg.preset < 1) cfg.preset = 1;
-    if (cfg.preset > 7) cfg.preset = 7;
+    cfg.fps            = args.fps;
+    cfg.buffer_seconds = args.buffer_seconds;
+    cfg.target_width   = args.target_width;
+    cfg.target_height  = args.target_height;
+    cfg.bitrate_kbps   = args.bitrate_kbps;
+    cfg.scaling_mode   = args.scaling_mode;
+    cfg.target_output  = args.target_output;
+    cfg.codec_pref     = args.codec_pref;
+    cfg.preset         = args.preset;
     cfg.multiband_enabled = false;
-    cfg.separate_audio_enabled = (argc > 23) && (arg_u32(argv, 23, 0) != 0);
-    cfg.audio_enabled = !((argc > 14) && (arg_u32(argv, 14, 1) == 0));
-    cfg.encoder_pref = static_cast<fthr::EncoderPref>(
-        (argc > 17) ? std::min<uint32_t>(arg_u32(argv, 17, 0), 4) : 0);
-
-    if (cfg.fps            < 1)     cfg.fps            = 1;
-    if (cfg.fps            > 360)   cfg.fps            = 360;
-    if (cfg.buffer_seconds < 1)     cfg.buffer_seconds = 1;
-    if (cfg.buffer_seconds > 300)   cfg.buffer_seconds = 300;
-    if (cfg.bitrate_kbps   < 500)   cfg.bitrate_kbps   = 500;
-    if (cfg.bitrate_kbps   > 60000) cfg.bitrate_kbps   = 60000;
+    cfg.separate_audio_enabled = args.separate_audio_enabled;
+    cfg.audio_enabled  = args.audio_enabled;
+    cfg.encoder_pref   = args.encoder_pref;
+    cfg.playback_sink  = args.playback_endpoint_id;
+    cfg.max_buffer_bytes =
+        static_cast<uint64_t>(args.max_buffer_mb) * 1024u * 1024u;
 
     std::cout << "[FTHR] Linux capture engine starting" << std::endl;
     std::cout << "[FTHR] fps=" << cfg.fps
               << " buffer=" << cfg.buffer_seconds << "s"
               << " enc=" << cfg.target_width << "x" << cfg.target_height
               << " bitrate=" << cfg.bitrate_kbps << "kbps"
-              << " scaling=" << cfg.scaling_mode << std::endl;
+              << " scaling=" << cfg.scaling_mode
+              << " encoder_pref=" << static_cast<uint32_t>(cfg.encoder_pref)
+              << " playback="
+              << (cfg.playback_sink.empty() ? "<default>" : cfg.playback_sink)
+              << std::endl;
+    if (args.microphone_mono)
+        std::cout << "[FTHR] microphone_mono ignored: the Linux engine does not"
+                     " capture a microphone" << std::endl;
 
     // Shared memory
     fthr::SharedMemory shm;

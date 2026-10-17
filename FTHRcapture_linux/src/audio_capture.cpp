@@ -1,5 +1,6 @@
 #include "audio_capture.h"
 #include "audio_timing.h"
+#include "audio_devices.h"
 #include <pulse/simple.h>
 #include <pulse/error.h>
 #include <pulse/pulseaudio.h>
@@ -60,46 +61,114 @@ static bool iterate_until(pa_mainloop* loop, pa_context* context,
     return done();
 }
 
-static std::string resolve_default_sink_monitor() {
+// Runs body(loop, context) on a freshly connected context and tears it down
+// again. False when the server cannot be reached within the timeout.
+static bool with_pa_context(
+    const std::function<void(pa_mainloop*, pa_context*)>& body) {
     pa_mainloop* loop = pa_mainloop_new();
-    if (!loop) return {};
+    if (!loop) return false;
     pa_context* context = pa_context_new(pa_mainloop_get_api(loop), "FTHRclips");
     if (!context) {
         pa_mainloop_free(loop);
-        return {};
+        return false;
     }
-
-    std::string result;
-    MonitorResolver resolver;
-    if (pa_context_connect(context, nullptr, PA_CONTEXT_NOAUTOSPAWN, nullptr) >= 0
+    const bool ready =
+        pa_context_connect(context, nullptr, PA_CONTEXT_NOAUTOSPAWN, nullptr) >= 0
         && iterate_until(loop, context, [context] {
             return pa_context_get_state(context) == PA_CONTEXT_READY;
-        }, std::chrono::seconds(2))) {
-        pa_operation* server_op = pa_context_get_server_info(
-            context, server_info_cb, &resolver);
-        if (server_op && iterate_until(loop, context, [&resolver] {
-                return resolver.server_done;
-            }, std::chrono::seconds(2))) {
-            pa_operation_unref(server_op);
-            server_op = nullptr;
-            if (!resolver.default_sink.empty()) {
-                pa_operation* sink_op = pa_context_get_sink_info_by_name(
-                    context, resolver.default_sink.c_str(), sink_info_cb, &resolver);
-                if (sink_op && iterate_until(loop, context, [&resolver] {
-                        return resolver.sink_done;
-                    }, std::chrono::seconds(2))) {
-                    result = resolver.monitor_source;
-                }
-                if (sink_op) pa_operation_unref(sink_op);
-            }
-        }
-        if (server_op) pa_operation_unref(server_op);
-    }
-
+        }, std::chrono::seconds(2));
+    if (ready) body(loop, context);
     pa_context_disconnect(context);
     pa_context_unref(context);
     pa_mainloop_free(loop);
+    return ready;
+}
+
+// Waits for op to finish (done() true) and releases it. False on timeout or
+// a failed context.
+static bool run_operation(pa_mainloop* loop, pa_context* context,
+                          pa_operation* op, const std::function<bool()>& done) {
+    if (!op) return false;
+    const bool ok = iterate_until(loop, context, done, std::chrono::seconds(2));
+    pa_operation_unref(op);
+    return ok;
+}
+
+// Monitor source of `sink`, or of the default sink when `sink` is empty.
+// Empty when the server is unreachable or the sink does not exist.
+static std::string resolve_sink_monitor(const std::string& sink) {
+    std::string result;
+    with_pa_context([&](pa_mainloop* loop, pa_context* context) {
+        MonitorResolver resolver;
+        resolver.default_sink = sink;
+        if (sink.empty()) {
+            if (!run_operation(loop, context,
+                    pa_context_get_server_info(context, server_info_cb, &resolver),
+                    [&resolver] { return resolver.server_done; }))
+                return;
+        }
+        if (resolver.default_sink.empty()) return;
+        if (run_operation(loop, context,
+                pa_context_get_sink_info_by_name(
+                    context, resolver.default_sink.c_str(), sink_info_cb, &resolver),
+                [&resolver] { return resolver.sink_done; }))
+            result = resolver.monitor_source;
+    });
     return result;
+}
+
+static std::string resolve_default_sink_monitor() {
+    return resolve_sink_monitor({});
+}
+
+struct SinkLister {
+    std::vector<AudioEndpoint> sinks;
+    bool done{false};
+};
+
+static void sink_list_cb(pa_context*, const pa_sink_info* info, int eol,
+                         void* userdata) {
+    auto* state = static_cast<SinkLister*>(userdata);
+    if (eol != 0) {
+        state->done = true;
+        return;
+    }
+    if (!info || !info->name || !info->name[0]) return;
+    AudioEndpoint endpoint;
+    endpoint.endpoint_id = info->name;
+    endpoint.display_name = (info->description && info->description[0])
+        ? info->description : info->name;
+    state->sinks.push_back(std::move(endpoint));
+}
+
+bool EnumeratePlaybackSinks(std::vector<AudioEndpoint>* endpoints,
+                            std::string* error) {
+    bool listed = false;
+    SinkLister lister;
+    MonitorResolver server;
+    const bool connected = with_pa_context([&](pa_mainloop* loop, pa_context* context) {
+        // The default sink is informational: a server that does not report
+        // one still lists its sinks.
+        run_operation(loop, context,
+            pa_context_get_server_info(context, server_info_cb, &server),
+            [&server] { return server.server_done; });
+        listed = run_operation(loop, context,
+            pa_context_get_sink_info_list(context, sink_list_cb, &lister),
+            [&lister] { return lister.done; });
+    });
+    if (!connected) {
+        if (error) *error = "PulseAudio server unreachable";
+        return false;
+    }
+    if (!listed) {
+        if (error) *error = "PulseAudio did not list its sinks in time";
+        return false;
+    }
+    for (auto& sink : lister.sinks)
+        sink.is_default = !server.default_sink.empty() &&
+                          sink.endpoint_id == server.default_sink;
+    if (endpoints) *endpoints = std::move(lister.sinks);
+    return true;
 }
 
 // Start / Stop

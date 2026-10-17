@@ -46,6 +46,11 @@ struct CaptureConfig {
     CodecPref codec_pref = CodecPref::Auto;
     EncoderPref encoder_pref = EncoderPref::Auto;
     int       preset     = 4;
+    // PulseAudio sink whose monitor is captured; empty follows the default
+    // output (argv[24]).
+    std::string playback_sink;
+    // Upper bound on the encoded video ring, 0 = time-bounded only (argv[6]).
+    uint64_t  max_buffer_bytes = 0;
 };
 
 class CaptureEngine {
