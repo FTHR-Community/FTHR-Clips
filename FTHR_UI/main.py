@@ -19,6 +19,22 @@ from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime
 _NO_WINDOW = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
+
+
+def _playback_device_labels() -> tuple[str, str, str]:
+    """(default entry, fallback name, hint) for the playback-device picker.
+
+    On Linux the engine captures the monitor of a PulseAudio sink and uses the
+    default output's monitor when the chosen sink is missing at startup.
+    """
+    if sys.platform == 'win32':
+        return ('Windows default', 'Windows default',
+                'If this device disconnects, capture switches to the Windows default.')
+    return ('System default', 'the default output',
+            'If this device is missing when capture starts, the default output is '
+            'captured instead.')
+
+
 _BACKGROUND_NO_WINDOW = {
     'creationflags': (
         subprocess.CREATE_NO_WINDOW
@@ -5304,7 +5320,9 @@ class MainWindow(QMainWindow):
                                     == AUDIO_CAPTURE_MODE_SEPARATED),
             microphone_endpoint_id=str(
                 self.settings_manager.get('mic_device_id') or ''),
-            playback_endpoint_id=str(self.settings_manager.get('playback_device_id') or '') if sys.platform == 'win32' else '',
+            # argv[24]: a Windows endpoint ID, or on Linux a PulseAudio sink
+            # name from `--list-playback-devices` (empty = default output).
+            playback_endpoint_id=str(self.settings_manager.get('playback_device_id') or ''),
             microphone_mono=bool(self.settings_manager.get('mic_downmix_mono', False)) if sys.platform == 'win32' else False,
             normal_clip_seconds=self.clip_duration,
             crop_enabled=crop_enabled,
@@ -11424,7 +11442,7 @@ class _SettingsPage(QWidget):
         self.playback_combo.setMinimumWidth(0)
         self.playback_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         set_theme_style(self.playback_combo, combo_qss)
-        self.playback_combo.addItem('Windows default', '')
+        self.playback_combo.addItem(_playback_device_labels()[0], '')
         self.playback_combo.currentIndexChanged.connect(self._on_playback_device_changed)
         playback_row.addWidget(self.playback_combo, 1)
         refresh_playback = QPushButton('Refresh')
@@ -11434,7 +11452,7 @@ class _SettingsPage(QWidget):
         playback_row.addWidget(refresh_playback)
         outer.addLayout(playback_row)
         outer.addSpacing(Sizes.SPACE_3)
-        hint = QLabel('If this device disconnects, capture switches to the Windows default.')
+        hint = QLabel(_playback_device_labels()[2])
         hint.setWordWrap(True)
         outer.addWidget(hint)
         outer.addSpacing(12)
@@ -12266,10 +12284,14 @@ class _SettingsPage(QWidget):
             try:
                 from core.windows_microphone_devices import parse_microphone_inventory
                 if engine:
+                    # The Linux engine lists PulseAudio sinks in the same schema;
+                    # it needs the host library path, not the bundle's.
                     completed = subprocess.run(
                         [str(engine), '--list-playback-devices'], capture_output=True,
                         text=True, encoding='utf-8', timeout=5,
-                        creationflags=subprocess.CREATE_NO_WINDOW)
+                        **({'creationflags': subprocess.CREATE_NO_WINDOW}
+                           if sys.platform == 'win32'
+                           else {'env': linux_runtime.child_process_environment()}))
                     if completed.returncode == 0:
                         result = [endpoint for endpoint in parse_microphone_inventory(completed.stdout)
                                   if endpoint.is_active]
@@ -12284,13 +12306,15 @@ class _SettingsPage(QWidget):
         self.playback_combo.blockSignals(True)
         try:
             self.playback_combo.clear()
-            self.playback_combo.addItem('Windows default', '')
+            default_label, fallback_name, _hint = _playback_device_labels()
+            self.playback_combo.addItem(default_label, '')
             for endpoint in endpoints:
                 self.playback_combo.addItem(endpoint.display_name, endpoint.endpoint_id)
             index = self.playback_combo.findData(saved)
             if saved and index < 0:
                 name = self.sm.get('playback_device_name', 'Selected device')
-                self.playback_combo.addItem(f'{name} (unavailable; using Windows default)', saved)
+                self.playback_combo.addItem(
+                    f'{name} (unavailable; using {fallback_name})', saved)
                 index = self.playback_combo.count() - 1
             self.playback_combo.setCurrentIndex(max(0, index))
         finally:
