@@ -112,11 +112,10 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           if [ "${{ runner.os }}" = "Linux" ]; then
+            # Every Linux test runs here; test_capture_backend_detection uses
+            # the engine built in "Prepare Linux test artifacts" (FFmpeg on
+            # LD_LIBRARY_PATH). Only Windows-only suites are left out.
             python -m pytest tests/ -v --tb=short \
-              --ignore=tests/test_linux_appimage_report.py \
-              --ignore=tests/test_linux_runtime.py \
-              --ignore=tests/test_linux_tools.py \
-              --ignore=tests/test_capture_backend_detection.py \
               --ignore=tests/test_windows_monitor.py \
               --ignore=tests/test_windows_native_hotkeys.py \
               --ignore=tests/test_windows_autostart.py \

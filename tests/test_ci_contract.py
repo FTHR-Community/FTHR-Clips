@@ -113,3 +113,13 @@ def test_release_ci_runs_response_and_exception_contracts() -> None:
 
     assert "verify_engine_response_contract.py" in release_job
     assert "verify_exception_handling.py" in release_job
+
+
+def test_linux_python_job_runs_every_linux_test() -> None:
+    workflow = _workflow()
+    tests_step = workflow[workflow.index("      - name: Tests") :]
+    linux_branch = tests_step[: tests_step.index("          else")]
+
+    for name in ("test_linux_appimage_report", "test_linux_runtime",
+                 "test_linux_tools", "test_capture_backend_detection"):
+        assert f"--ignore=tests/{name}.py" not in linux_branch
