@@ -95,10 +95,12 @@ static bool run_operation(pa_mainloop* loop, pa_context* context,
 }
 
 // Monitor source of `sink`, or of the default sink when `sink` is empty.
-// Empty when the server is unreachable or the sink does not exist.
-static std::string resolve_sink_monitor(const std::string& sink) {
+// Empty when the server is unreachable or the sink does not exist;
+// `reached` (optional) tells the two apart.
+static std::string resolve_sink_monitor(const std::string& sink,
+                                        bool* reached = nullptr) {
     std::string result;
-    with_pa_context([&](pa_mainloop* loop, pa_context* context) {
+    const bool connected = with_pa_context([&](pa_mainloop* loop, pa_context* context) {
         MonitorResolver resolver;
         resolver.default_sink = sink;
         if (sink.empty()) {
@@ -114,6 +116,7 @@ static std::string resolve_sink_monitor(const std::string& sink) {
                 [&resolver] { return resolver.sink_done; }))
             result = resolver.monitor_source;
     });
+    if (reached) *reached = connected;
     return result;
 }
 
@@ -124,12 +127,15 @@ static std::string resolve_default_sink_monitor() {
 struct SinkLister {
     std::vector<AudioEndpoint> sinks;
     bool done{false};
+    bool failed{false};
 };
 
 static void sink_list_cb(pa_context*, const pa_sink_info* info, int eol,
                          void* userdata) {
     auto* state = static_cast<SinkLister*>(userdata);
     if (eol != 0) {
+        // eol < 0 is a server-side error: the list is incomplete.
+        state->failed = eol < 0;
         state->done = true;
         return;
     }
@@ -154,14 +160,14 @@ bool EnumeratePlaybackSinks(std::vector<AudioEndpoint>* endpoints,
             [&server] { return server.server_done; });
         listed = run_operation(loop, context,
             pa_context_get_sink_info_list(context, sink_list_cb, &lister),
-            [&lister] { return lister.done; });
+            [&lister] { return lister.done; }) && !lister.failed;
     });
     if (!connected) {
         if (error) *error = "PulseAudio server unreachable";
         return false;
     }
     if (!listed) {
-        if (error) *error = "PulseAudio did not list its sinks in time";
+        if (error) *error = "PulseAudio did not list its sinks";
         return false;
     }
     for (auto& sink : lister.sinks)
@@ -253,7 +259,16 @@ bool AudioCapture::StartForSink(const std::string& sink, uint32_t keep_seconds) 
     if (sink.empty()) return Start("", keep_seconds);
     // Ask the server for the sink's monitor rather than appending
     // ".monitor": that also tells a missing sink apart.
-    const std::string monitor = resolve_sink_monitor(sink);
+    bool reached = false;
+    const std::string monitor = resolve_sink_monitor(sink, &reached);
+    if (monitor.empty() && !reached) {
+        // The server is not up yet (pipewire-pulse still starting): keep the
+        // user's choice and let the capture loop retry its monitor rather
+        // than settling on the default for the whole session.
+        std::cerr << "[Audio] PulseAudio unreachable; will keep trying playback"
+                  << " device '" << sink << "'" << std::endl;
+        return Start(sink + ".monitor", keep_seconds);
+    }
     if (monitor.empty()) {
         std::cerr << "[Audio] Playback device '" << sink << "' not found;"
                   << " capturing the default output monitor instead" << std::endl;
