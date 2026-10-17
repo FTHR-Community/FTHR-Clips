@@ -234,7 +234,6 @@ class SaveStateMachine:
                                     OutcomeKind.ACCEPTED)
 
         if event is EngineEvent.CLIP_SAVED:
-            # NOTE the missing SAVE_STARTED case: on Linux the engine runs
             # SaveClip synchronously and overwrites SAVE_STARTED with
             # CLIP_SAVED before we ever poll. WAITING_FOR_ACK -> COMPLETED
             # directly is the normal fast path, not an anomaly (AUDIT-015).

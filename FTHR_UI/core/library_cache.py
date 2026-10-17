@@ -22,34 +22,35 @@ def _prune_thumbnail_cache_unlocked(
     """Remove oldest complete cache generations until both limits hold."""
 
     root = Path(cache_dir)
+    groups: dict[str, list[Path]] = {}
+    sizes: dict[str, int] = {}
+    newest: dict[str, float] = {}
     try:
         root.mkdir(parents=True, exist_ok=True)
-        paths = [path for path in root.iterdir()
-                 if path.is_file() and '.tmp-' not in path.name]
+        # DirEntry retains the directory enumeration's metadata on Windows.
+        # Path.is_file() followed by Path.stat() reopened every cache entry,
+        # producing thousands of filesystem calls during library startup.
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if '.tmp-' in entry.name:
+                    continue
+                try:
+                    if not entry.is_file():
+                        continue
+                    info = entry.stat()
+                except OSError:
+                    # Concurrent cache eviction may remove this entry during enumeration.
+                    continue
+                path = Path(entry.path)
+                key = path.stem.split('.meta-', 1)[0]
+                groups.setdefault(key, []).append(path)
+                sizes[key] = sizes.get(key, 0) + int(info.st_size)
+                newest[key] = max(newest.get(key, 0), float(info.st_mtime_ns))
     # Cache maintenance is best-effort and must not fail library discovery.
     except OSError:
         # Cache pressure must never turn a media card into a hard failure.
         return {'entries': 0, 'bytes': 0, 'removed_entries': 0,
                 'removed_bytes': 0}
-
-    groups: dict[str, list[Path]] = {}
-    for path in paths:
-        groups.setdefault(path.stem.split('.meta-', 1)[0], []).append(path)
-    sizes: dict[str, int] = {}
-    newest: dict[str, float] = {}
-    for key, group in groups.items():
-        total = 0
-        latest = 0.0
-        for path in group:
-            try:
-                info = path.stat()
-            # A cache file can disappear during concurrent eviction/writing.
-            except OSError:
-                continue
-            total += int(info.st_size)
-            latest = max(latest, float(info.st_mtime_ns))
-        sizes[key] = total
-        newest[key] = latest
 
     bytes_total = sum(sizes.values())
     removed_entries = 0

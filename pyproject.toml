@@ -1,7 +1,7 @@
 # Tooling configuration only.
 #
 # FTHR Clips is NOT distributed as a Python package — it ships as a PyInstaller
-# bundle (Windows installer / Linux AppImage). There is deliberately no
+# bundle (Windows installer). There is deliberately no
 # [project] table and no build-system: adding one would imply `pip install .`
 # is a supported path, which it is not.
 
@@ -9,11 +9,9 @@
 minversion = "9.0"
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
-pythonpath = [".", "FTHR_UI"]
 # QT_QPA_PLATFORM=offscreen is set in tests/conftest.py rather than here, so it
 # works without the pytest-env plugin.
 markers = [
-    "linux_only: needs a Linux capture backend (skipped elsewhere)",
 ]
 filterwarnings = ["error::DeprecationWarning:core.*"]
 
@@ -22,8 +20,9 @@ line-length = 100
 target-version = "py312"   # lowest interpreter CI exercises
 exclude = [
     "build", "dist", "dist_old_gpl_*",
-    "FTHRcapture", "FTHRcapture_linux",
-    "AppDir", "Output", "redist",
+    ".ui-port", ".ux-backup", ".shortcut-backup",
+    "FTHRcapture",
+    "Output", "redist",
 ]
 
 [tool.ruff.lint]

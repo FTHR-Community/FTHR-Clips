@@ -31,7 +31,7 @@ def test_close_to_tray_and_explicit_exit_have_separate_paths():
 
 
 def test_capture_status_is_top_level_and_not_duplicated_inside_popups():
-    assert 'tb.addWidget(self.status_label)' in MAIN_SOURCE
+    assert 'mc.addWidget(self.status_label)' in MAIN_SOURCE
     assert "self._set_status('APPLYING SETTINGS', status_idle_qss())" in MAIN_SOURCE
     assert 'apply_state_lbl' not in MAIN_SOURCE
 

@@ -1,5 +1,4 @@
-import sys, os
-import pytest
+﻿import sys, os
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'FTHR_UI'))
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
@@ -18,7 +17,8 @@ def test_oversized_catbox_upload_requires_compression_confirmation(
         'upload_provider': 'catbox',
     }.get(key, default)
     manager = UploadManager(sm)
-    manager.set('upload_provider', 'catbox')
+    manager.set("upload_provider", "catbox")
+    manager.set("upload_auto_compress", False)
     manager.is_enabled = lambda: True
     clip = tmp_path / 'large.mp4'
     with clip.open('wb') as stream:
@@ -39,12 +39,12 @@ def test_oversized_upload_auto_compresses_without_confirmation(qapp, tmp_path):
 
     sm = MagicMock()
     manager = UploadManager(sm)
-    manager.set('upload_provider', 'lustful')
+    manager.set('upload_provider', 'catbox')
     manager.set('upload_auto_compress', True)
     manager.is_enabled = lambda: True
     clip = tmp_path / 'large.mp4'
     with clip.open('wb') as stream:
-        stream.truncate(101 * 1024 * 1024)
+        stream.truncate(201 * 1024 * 1024)
     requested = []
     manager.compression_required.connect(
         lambda path, provider, limit: requested.append(
@@ -225,17 +225,3 @@ def test_failed_finalization_never_uploads(qapp, tmp_path):
         assert uploaded == []
     finally:
         um.stop()
-
-
-@pytest.mark.skipif(sys.platform == 'win32',
-                    reason='POSIX permission bits do not apply on NTFS')
-def test_atomic_json_writes_owner_only(tmp_path):
-    import stat
-    from core import upload_manager
-
-    target = tmp_path / 'settings.json'
-    target.write_text('{}')
-    os.chmod(target, 0o644)  # an older build's file
-    upload_manager._atomic_json(target, {'catbox_userhash': 'secret'})
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
-    assert not (tmp_path / 'settings.json.tmp').exists()

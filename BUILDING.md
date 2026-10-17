@@ -1,9 +1,9 @@
 # Building FTHR Clips
 
-Two native engines and one Python frontend. The Windows and Linux builds are
-independent — neither artifact contains the other's engine.
+A native Windows capture engine and a Python frontend. This project builds
+for Windows 10 and later (64-bit).
 
-- [Common setup](#common-setup) · [Windows](#windows) · [Linux](#linux)
+- [Common setup](#common-setup) · [Windows](#windows)
 - Current physical gaps and limits: [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)
 
 ---
@@ -31,7 +31,7 @@ from.
 **Python 3.14 is the alpha build interpreter** — the shipped Windows bundle
 contains `python314.dll` and `cpython-314` bytecode, so building on anything else
 produces a different artifact from the one that was tested. CI also exercises
-3.12, which is the floor, and is what the Linux verification ran on.
+3.12, which is the supported development floor.
 
 ### Third-party binaries
 
@@ -51,7 +51,7 @@ On Windows, the separately mutable Microsoft VC++ permalink is verified by a
 valid Microsoft Authenticode signature and its exact SHA-256/version is
 recorded locally before it can enter an installer.
 
-### Verify before releasing — either platform
+### Verify before releasing — Windows
 
 ```bash
 python tools/verify_release_licenses.py --tree .
@@ -84,7 +84,7 @@ python tools/generate_release_assets.py
 ## Windows
 
 Produces a Windows-only installer bundling `FTHRcapture/` (DXGI engine). All
-Linux files are excluded.
+Only Windows files are packaged.
 
 ### Prerequisites
 
@@ -123,9 +123,9 @@ Output: `dist\FTHRClips\`. The spec generates the Windows VERSIONINFO resource
 from `FTHR_UI/version.py`, so the `.exe` reports its version in Explorer →
 Properties → Details.
 
-The first command independently freezes and seals the optional uploader and
-Lustful Hardware Identity packages, then binds both archive hashes into Core.
-`FTHR.spec` refuses to build if either dormant package is missing. The normal
+The first command freezes and seals the optional uploader package, then binds
+its archive hash into Core.
+`FTHR.spec` refuses to build if the dormant package is missing. The normal
 installer build entrypoint runs this command automatically.
 
 Optional size reduction:
@@ -147,7 +147,7 @@ python tools/build_windows_installer.py
 
 It verifies the Microsoft VC++ redistributable, the bundle licence manifest,
 and the Windows lifecycle contract before invoking Inno Setup. Output:
-`Output\FTHRClips-Setup-1.1.0-alpha-x64.exe` for the current version.
+`Output\FTHRClips-Setup-2.0.0-alpha-x64.exe` for the current version.
 
 The frameless, app-style setup starts with a required Privacy Policy checkbox
 linking to `https://policies.fthrclips.com`, then presents the application and
@@ -196,233 +196,7 @@ reviewed bundle boundary.
 
 ---
 
-## Linux
 
-### 1. System packages
-
-pip cannot supply these.
-
-```bash
-# Debian / Ubuntu
-sudo apt install build-essential cmake pkg-config \
-  libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev libavdevice-dev \
-  libswscale-dev libswresample-dev \
-  libwayland-dev wayland-protocols libwayland-bin \
-  libpipewire-0.3-dev libdbus-1-dev \
-  libpulse-dev libportaudio2 \
-  libegl1 libxcb-cursor0 libxkbcommon-x11-0
-
-# Arch
-sudo pacman -S base-devel cmake pkgconf ffmpeg wayland wayland-protocols \
-  pipewire dbus libpulse portaudio
-
-# Fedora
-sudo dnf install gcc-c++ cmake pkgconf ffmpeg-devel wayland-devel \
-  wayland-protocols-devel pipewire-devel dbus-devel pulseaudio-libs-devel portaudio
-```
-
-The PipeWire and D-Bus packages only supply headers: the engine loads
-`libpipewire-0.3.so.0` and `libdbus-1.so.3` with `dlopen` when the ScreenCast
-portal backend is needed, so neither is linked or bundled and a system without
-them still runs the other backends. `-DFTHR_PORTAL_BACKEND=OFF` compiles the
-engine without that backend.
-
-`libportaudio2` is easy to miss: `sounddevice` imports fine without it and then
-fails at runtime with `OSError: PortAudio library not found`. `pip install
-sounddevice` does not fix it — the missing piece is the system library.
-
-Optional helpers, each enabling one feature: `hyprctl` (Hyprland binds),
-`xdotool` + `xprop` (X11 window and game detection), `grim` (Wayland
-screenshots), `openbsd-netcat` (hotkey socket client on desktops without a
-GlobalShortcuts portal backend), `xdg-utils` (open clips folder). Check what
-you have:
-
-```bash
-bash tools/linux_system_report.sh
-```
-
-### 2. Build the capture engine
-
-Use CMake 3.21 or newer (the pinned-library lookup uses `find_library(NO_CACHE)`).
-
-First install the pinned LGPL FFmpeg the engine is built against (AUDIT-014):
-
-```bash
-python tools/fetch_third_party.py --ffmpeg-linux
-```
-
-```bash
-cmake -S FTHRcapture_linux -B FTHRcapture_linux/build       -DCMAKE_BUILD_TYPE=Release       -DFTHR_FFMPEG_ROOT="$PWD/FTHRcapture_linux/third_party/ffmpeg"
-cmake --build FTHRcapture_linux/build --parallel
-ctest --test-dir FTHRcapture_linux/build --output-on-failure
-ldd FTHRcapture_linux/build/FTHRclips | grep 'not found'   # must print nothing
-```
-
-Output: `FTHRcapture_linux/build/FTHRclips`.
-
-A **Release build without `-DFTHR_FFMPEG_ROOT` is refused**, on purpose: the
-distribution's FFmpeg is a GPL build and linking it silently is what AUDIT-014
-recorded. A Debug/RelWithDebInfo build may use the system FFmpeg and says so
-loudly — never package one.
-
-Notes on the build:
-
-- `wayland-scanner` reads the XML definitions from
-  `FTHRcapture_linux/protocols/` and writes generated bindings under the CMake
-  build directory. The source checkout can remain read-only and a build cannot
-  rewrite tracked bindings when scanner versions differ.
-- The engine carries an `$ORIGIN`-relative `RPATH` (DT_RPATH, not RUNPATH) so
-  it loads the bundled FFmpeg wherever the bundle is mounted, and so transitive
-  dependencies inherit the search path. No absolute build-host path is baked in.
-- `target_compile_options` used to append `-O2` *after* the `-O3 -DNDEBUG` that
-  `CMAKE_BUILD_TYPE=Release` contributes, silently downgrading Release builds.
-  The redundant `-O2` was removed; `-Wall -Wextra` stayed.
-- The binary is not stripped; `FTHR_linux.spec` strips it when bundling.
-- The build baseline is Ubuntu 22.04. A newer `wayland-scanner` (for example
-  1.22 on Ubuntu 24.04) may print two XML DTD validation warnings about the
-  `deprecated-since` attribute. The generated bindings still compile;
-  compiler/linker warnings are not expected.
-
-### 3. Run from source
-
-```bash
-python FTHR_UI/main.py
-```
-
-The UI spawns the engine itself.
-
-Global hotkeys on Linux come from the XDG GlobalShortcuts portal, which only
-grants a session to a process it can tie to a `.desktop` file. The app installs
-`fthr-clips.desktop` on first run (packaged builds only) before Qt starts, and
-registers the id `fthr-clips` with `org.freedesktop.host.portal.Registry`
-(xdg-desktop-portal 1.19+) on its portal connection, so a launch from a
-terminal or a file manager is identified as FTHR Clips rather than the
-launching app. A source run installs no entry; to test the portal path from
-source, install one once:
-
-```bash
-printf '[Desktop Entry]\nType=Application\nName=FTHR Clips\nExec=/bin/true\nNoDisplay=true\n' \
-    > ~/.local/share/applications/fthr-clips.desktop
-python FTHR_UI/main.py
-```
-
-With an older xdg-desktop-portal the id still comes from the systemd scope;
-start inside a matching one with
-`systemd-run --user --scope --unit="app-fthr\\x2dclips-$$" python FTHR_UI/main.py`.
-
-To run the engine standalone for diagnostics (positional argv):
-
-```
-FTHRclips <fps> <buffer_s> <w> <h> <bitrate_kbps> <_> <_> <_> <scaling>
-          <output> <codec_pref> <preset> <multiband> <audio_enabled>
-```
-
-```bash
-FTHRcapture_linux/build/FTHRclips 30 10 1280 720 6000 0 0 0 0 "" 0 4 0 1
-```
-
-The engine tries `wlr-screencopy`, then `ext-image-copy-capture`, then the
-`org.freedesktop.portal.ScreenCast` portal with PipeWire (KDE Plasma/KWin
-sessions advertise neither protocol). The portal shows the desktop's screen
-picker the first time and stores the restore token in
-`~/.fthr/portal_screencast_token`; later starts show no picker. The picker
-appears once per app identity, so a standalone engine started from a terminal
-and the packaged app are asked separately. A declined picker ends the engine
-with `CAPTURE_HEALTH_BACKEND_FAILED` and the reason in `engine_string` instead
-of retrying.
-
-`FTHR_X11_CAPTURE` defaults to ON and builds the process-isolated x11grab
-backend, which is used for native X11 sessions and never under XWayland.
-`-DFTHR_X11_CAPTURE=OFF` removes it. `-DFTHR_PORTAL_BACKEND=OFF` removes the
-portal backend. A session that no compiled backend supports fails clearly after
-bounded recovery.
-
-`FTHR_CAPTURE_BACKEND` forces one backend and disables the fallback order:
-`wlr`, `ext`, `portal` or `x11`. A forced backend that cannot start fails
-capture with that backend's reason instead of trying another; an unknown value
-is logged and ignored.
-
-```bash
-FTHR_CAPTURE_BACKEND=ext FTHRcapture_linux/build/FTHRclips 30 10 1280 720 6000 0 0 0 0 "" 0 4 0 1
-```
-
-When capture is interrupted, the engine retries the backend that last
-delivered frames, keeps the replay history when only the capture backend had to
-restart, and waits for a stalled compositor or a missing output every two
-seconds.
-
-### 4. Audio
-
-The engine resolves the PulseAudio default **sink**, then opens that sink's
-`monitor_source_name` (PipeWire's PulseAudio compatibility layer works). It
-never treats the default microphone/source as desktop audio. Resolution/open is
-performed synchronously; failure emits a structured startup warning and capture
-continues video-only.
-
-On some distributions your user must be in the `audio` group:
-
-```bash
-sudo usermod -aG audio "$USER"   # then log out and back in
-```
-
-### 5. AppImage
-
-```bash
-bash build_linux.sh
-```
-
-`build_linux.sh` runs these steps in order:
-
-1. Dependency checks (tools, headers, Python modules).
-2. Fetch the pinned LGPL FFmpeg if it is not already installed.
-3. CMake configure and build of the engine and the playback mixer.
-4. `ctest` for the native tests.
-5. Linkage check: the engine and mixer need only libraries in the pinned tree
-   and the engine must carry an RPATH.
-6. Build the optional uploader bundle.
-7. PyInstaller bundle.
-8. Strip unused libraries.
-9. Remove the GPL FFmpeg copies collected from the system.
-10. Restore wheel libraries damaged by stripping (ELF repair) and smoke-test
-    the bundle.
-11. Assemble `build_output/AppDir`.
-12. Licence gate (`verify_release_licenses.py --appdir`).
-13. Fetch the pinned `appimagetool` and pack the AppImage.
-14. glibc gate (`verify_linux_glibc.py`) on the AppDir and the AppImage.
-
-The filename carries the version from `FTHR_UI/version.py`.
-
-#### Build baseline
-
-The release AppImage is built by the `linux-appimage-package` CI job on
-ubuntu-22.04 with a GLIBC 2.35 ceiling, so it runs on distributions at least
-that new. A local `build_linux.sh` on a newer glibc host fails the glibc gate
-by design and is for engine and bundle debugging only; do not publish its
-output.
-
-#### The licence gate (AUDIT-014)
-
-`build_linux.sh` runs `tools/verify_release_licenses.py --appdir` before packing
-and refuses to build if a GPL FFmpeg made it into the bundle. As of 2026-08-06
-that gate passes, because the Linux build no longer uses the distribution's
-FFmpeg at all:
-
-* `tools/fetch_third_party.py --ffmpeg-linux` installs a pinned **LGPL** FFmpeg
-  (BtbN `n8.1.2-34-g9b6c8969e0`, LGPLv3, glibc 2.28 baseline) into
-  `FTHRcapture_linux/third_party/ffmpeg`, verifying the archive and all seven
-  libraries against `tools/ffmpeg_manifest_linux.json`.
-* CMake **refuses a Release build** without `-DFTHR_FFMPEG_ROOT` rather than
-  silently linking `/usr/lib`.
-* The engine carries an `$ORIGIN` RPATH, so it loads the bundled libraries even
-  where a system FFmpeg exists.
-* The gate hash-verifies every shipped library and checks the licence of the
-  FFmpeg copies that arrive inside the PySide6 Qt runtime and OpenCV wheels.
-
-If it does fail, it is telling you something real. Do not add exceptions to it.
-
-### Build state
-
-The state of the current build is whatever the `linux-appimage-package` CI job
-reports for the commit; [`docs/linux.md`](docs/linux.md) describes what the
-packaged app does. Open platform gaps are recorded in
-[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
+The location screen includes an optional desktop shortcut checkbox, unchecked
+by default. The installer uses a dark green surface, Oswald headings, and
+three numbered steps; body copy and folder paths use Segoe UI.

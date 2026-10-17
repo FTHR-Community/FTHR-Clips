@@ -13,7 +13,6 @@ import verify_shared_memory_contract as vsmc  # noqa: E402
 
 
 WIN_HEADER = ROOT / 'FTHRcapture' / 'FTHRclips' / 'include' / 'shared_memory.h'
-LINUX_HEADER = ROOT / 'FTHRcapture_linux' / 'src' / 'shared_memory.h'
 
 
 # The contract itself
@@ -24,7 +23,6 @@ def test_contract_verifier_passes_on_current_tree():
 
 @pytest.mark.parametrize('platform,header', [
     ('win32', WIN_HEADER),
-    ('linux', LINUX_HEADER),
 ])
 def test_field_order_and_offsets_match(platform, header):
     cpp = vsmc.parse_struct(header)
@@ -39,7 +37,7 @@ def test_field_order_and_offsets_match(platform, header):
     assert cpp_align == py_align
 
 
-@pytest.mark.parametrize('header', [WIN_HEADER, LINUX_HEADER])
+@pytest.mark.parametrize('header', [WIN_HEADER])
 def test_enums_match(header):
     from core.capture_bridge import CommandType, ResponseType
 

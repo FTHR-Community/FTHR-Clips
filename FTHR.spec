@@ -11,7 +11,6 @@ ASSETS_DIR = UI_DIR / 'assets'
 PLUGIN_DIR = ROOT / 'plugin-packages'
 OPTIONAL_PLUGIN_BUNDLES = [
     PLUGIN_DIR / 'FTHR-Uploader.fthrplugin',
-    PLUGIN_DIR / 'FTHR-Hardware-Identity.fthrplugin',
 ]
 
 
@@ -106,6 +105,7 @@ a = Analysis(
         (str(ASSETS_DIR / 'fthr_logo.png'),   'assets'),
         (str(ASSETS_DIR / 'preview_desktop.png'), 'assets'),
         (str(ASSETS_DIR / 'gary.png'), 'assets'),
+        (str(ASSETS_DIR / 'gatze.png'), 'assets'),
         *[(str(bundle), 'plugin-packages') for bundle in OPTIONAL_PLUGIN_BUNDLES],
         # Licence paperwork must travel INSIDE the bundle (AUDIT-005), so a
         # portable copy is as complete as an installed one.
@@ -114,9 +114,10 @@ a = Analysis(
         (str(ROOT / 'licenses'), 'licenses'),
         (str(ROOT / 'tools' / 'release_asset_manifest.json'), 'licenses'),
         *_asset_files(ASSETS_DIR / 'fonts', 'assets/fonts', {'.ttf'}),
-        *_asset_files(ASSETS_DIR / 'icons', 'assets/icons', {'.ico', '.png'}),
+        *_asset_files(ASSETS_DIR / 'icons', 'assets/icons', {'.ico', '.png', '.svg'}),
         *_asset_files(ASSETS_DIR / 'sounds', 'assets/sounds', {'.wav'}),
         (str(UI_DIR / 'ui' / 'capture_card_process.py'), 'ui'),
+        (str(UI_DIR / 'ui' / 'qml'), 'ui/qml'),
     ],
     hiddenimports=[
         # stdlib networking — urllib.request imports http at runtime
@@ -129,11 +130,16 @@ a = Analysis(
         'urllib.parse',
         'PySide6.QtMultimedia',
         'PySide6.QtMultimediaWidgets',
+        'PySide6.QtQuick',
+        'PySide6.QtQuickWidgets',
+        'PySide6.QtQml',
         'PySide6.QtNetwork',
         'sounddevice',
         'numpy',
         'cv2',
-        'core.portal_shortcuts',
+        'keyboard',
+        'keyboard.mouse',
+        'keyboard._mouse_event',
         # UI submodules
         'ui.capture_card',
         'ui.capture_card_client',
@@ -168,10 +174,8 @@ a = Analysis(
         # Exclude imageio_ffmpeg; use the project-pinned FFmpeg runtime beside
         # the engine. See core/ffmpeg_tools.py.
         'imageio_ffmpeg',
-        # Qt modules unused on Windows (no Wayland, no QML)
-        # QtDBus is only used by the Wayland screenshot portal path (Linux).
-        'PySide6.QtDBus',
-        'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtWebEngine',
+        # Qt modules unused on Windows. Quick/QML power video and snapshots.
+        'PySide6.QtWebEngine',
         'PySide6.QtWebEngineCore', 'PySide6.QtBluetooth', 'PySide6.QtPositioning',
         'PySide6.QtSensors', 'PySide6.QtLocation', 'PySide6.Qt3D',
         'PySide6.QtPdf', 'PySide6.QtPdfWidgets', 'PySide6.QtNfc',
@@ -194,20 +198,31 @@ a = Analysis(
     noarchive=False,
 )
 
-# QtGui hooks collect Virtual Keyboard and its QML/Quick dependencies even
-# when Python modules are excluded. Filter the binary TOCs before COLLECT
-# to keep unused modules out of the bundle.
+# Qt hooks collect optional QML modules. Keep the dynamically linked runtime
+# needed by the application's QtQuick and QtMultimedia QML files.
+import json as _json
+_REVIEWED_QT = _json.loads((ROOT / 'tools' / 'qt_runtime_manifest.json').read_text())
+_APPROVED_QT_DLLS = {f'qt6{module.lower()}.dll'
+                     for module in _REVIEWED_QT['approved_runtime_qt_modules']['windows']}
+
+
 def _keep_reviewed_qt_runtime(entry):
     dest = str(entry[0]).replace('\\', '/').casefold()
     name = dest.rsplit('/', 1)[-1]
-    forbidden_prefixes = ('qt6qml', 'qt6quick', 'qt6virtualkeyboard')
+    if '/qml/' in dest:
+        qml_parent = dest.split('/qml/', 1)[1].rsplit('/', 1)[0]
+        if qml_parent not in ('qtqml', 'qtqml/models', 'qtqml/workerscript',
+                              'qtquick', 'qtmultimedia'):
+            return False
     # Qt on supported Windows versions resolves the operating system ICU.
     # Never collect unrelated ICU copies which happen to be on PATH: a newer
     # Poppler/Codex ICU beside Qt6Core makes QtWidgets fail during import.
     foreign_icu = (name == 'icuuc.dll'
                    or name.startswith(('icudt', 'icuin')))
     return ('virtualkeyboard' not in dest
-            and not name.startswith(forbidden_prefixes)
+            and '/qml/qtquick3d/' not in dest
+            and '/qml/qtquick/timeline/' not in dest
+            and not (name.startswith('qt6') and name.endswith('.dll') and name not in _APPROVED_QT_DLLS)
             and not foreign_icu)
 
 
@@ -231,6 +246,10 @@ exe = EXE(
     console=False,
     icon=str(ASSETS_DIR / 'fthr_logo.ico'),
     version=str(_VER_FILE),
+    # Keep the packaged process in the same per-monitor-v2 coordinate model
+    # that Qt selects for development launches. Runtime code only queries the
+    # effective context; it does not install a competing DPI-awareness mode.
+    manifest=str(ASSETS_DIR / 'fthr_windows.manifest'),
 )
 
 coll = COLLECT(

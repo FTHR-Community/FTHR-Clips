@@ -1,112 +1,28 @@
 """Detect foreground game windows using platform-specific APIs.
 
 Windows filters launchers, browsers, and tools, consults Game Bar, and
-requires stable candidates. Linux uses compositor-specific enumeration.
+requires stable candidates.
 """
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wintypes
-import json
 import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-import ntpath
-import subprocess
-import sys
 import threading
 import time
 from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
-from core.compositor import detect_compositor
-from core import linux_tools
 
 
-def _enumerate_via_hyprctl() -> list:
-    """List windows on Hyprland via hyprctl clients -j."""
-    try:
-        hyprctl = linux_tools.require('hyprctl')
-        r = subprocess.run([hyprctl, 'clients', '-j'],
-                           capture_output=True, timeout=2)
-        clients = json.loads(r.stdout.decode(errors='replace'))
-        windows = []
-        for c in clients:
-            title = c.get('title') or c.get('class') or ''
-            if not title:
-                continue
-            hwnd    = int(c.get('address', '0x0'), 16) & 0xFFFFFFFF
-            is_game = bool(c.get('fullscreen')) or c.get('fullscreenMode', 0) > 0
-            windows.append({'hwnd': hwnd, 'display_name': title,
-                            'title': title, 'is_game': is_game})
-        return windows
-    except Exception:
-        return []
 
 
-def _enumerate_via_xdotool() -> list:
-    """List visible windows via xdotool + xprop. Works for XWayland and X11.
-    Covers Steam/Proton games and most Linux native games."""
-    # xprop supplies the fullscreen state that marks a window as a game;
-    # without it every window would be reported as a non-game.
-    if not (linux_tools.available('xdotool') and linux_tools.available('xprop')):
-        return []
-    try:
-        r = subprocess.run(
-            [linux_tools.require('xdotool'), 'search', '--all',
-             '--onlyvisible', '--maxdepth', '2', ''],
-            capture_output=True, timeout=3)
-        if r.returncode != 0:
-            return []
-        wids = [w.strip() for w in r.stdout.decode().splitlines() if w.strip()]
-    except Exception:
-        return []
-
-    windows = []
-    for wid in wids[:50]:  # cap to avoid slow scans
-        try:
-            r_name = subprocess.run([linux_tools.require('xdotool'),
-                                     'getwindowname', wid],
-                                    capture_output=True, timeout=1)
-            title = r_name.stdout.decode().strip()
-            if not title:
-                continue
-
-            is_game = False
-            xprop = linux_tools.path('xprop')
-            r_prop = subprocess.run([xprop, '-id', wid, '_NET_WM_STATE'],
-                                    capture_output=True, timeout=1)
-            if r_prop.returncode == 0:
-                is_game = '_NET_WM_STATE_FULLSCREEN' in r_prop.stdout.decode()
-
-            windows.append({
-                'hwnd':         int(wid) & 0xFFFFFFFF,
-                'display_name': title,
-                'title':        title,
-                'is_game':      is_game,
-            })
-        # Window enumeration is an optional Linux integration; fail closed if
-        # a compositor returns malformed data or is unavailable mid-poll.
-        except Exception:
-            continue
-    return windows
 
 
-def _enumerate_linux_windows() -> list:
-    """Pick the right backend for the current compositor."""
-    comp = detect_compositor()
-    if comp == 'hyprland':
-        return _enumerate_via_hyprctl()
-    return _enumerate_via_xdotool()
-
-
-def _linux_enumeration_available() -> bool:
-    """True when the compositor's window enumeration tools are installed."""
-    if detect_compositor() == 'hyprland':
-        return linux_tools.available('hyprctl')
-    return linux_tools.available('xdotool') and linux_tools.available('xprop')
 
 
 class GameDetector(QObject):
@@ -117,18 +33,13 @@ class GameDetector(QObject):
     def __init__(self, enumerate_fn=None, parent=None):
         super().__init__(parent)
         if enumerate_fn is None:
-            if sys.platform == 'win32':
-                from ui.capture_settings_widget import _enumerate_capturable_windows
-                enumerate_fn = _enumerate_capturable_windows
-            else:
-                enumerate_fn = _enumerate_linux_windows
-        self._default_linux_enumeration = enumerate_fn is _enumerate_linux_windows
+            from ui.capture_settings_widget import _enumerate_capturable_windows
+            enumerate_fn = _enumerate_capturable_windows
         self._enumerate = enumerate_fn
         self._known: dict[int, dict] = {}   # hwnd → window dict
         self._poll_running = False          # skip ticks while worker is busy
         self._timer = QTimer(self)
         self._timer.setInterval(3000)
-        # Enumeration shells out to xdotool/xprop on X11 (dozens of blocking
         # subprocess calls) — never run that on the Qt main thread. The worker
         # thread enumerates; results come back via queued signal.
         self._timer.timeout.connect(self._start_poll)
@@ -140,24 +51,6 @@ class GameDetector(QObject):
 
     def stop(self):
         self._timer.stop()
-
-    @property
-    def available(self) -> bool:
-        if self._default_linux_enumeration:
-            return _linux_enumeration_available()
-        return True
-
-    def set_enabled(self, enabled: bool) -> bool:
-        """Match ForegroundGameDetector so the UI toggle works on Linux."""
-        if not enabled:
-            self.stop()
-            return True
-        if not self.available:
-            self.stop()
-            return False
-        if not self._timer.isActive():
-            self.start()
-        return True
 
     def _start_poll(self):
         if self._poll_running:
@@ -218,52 +111,51 @@ class _MONITORINFO(ctypes.Structure):
 
 _USER32 = None
 _KERNEL32 = None
-if sys.platform == 'win32':
-    try:
-        _USER32 = ctypes.WinDLL('user32', use_last_error=True)
-        _KERNEL32 = ctypes.WinDLL('kernel32', use_last_error=True)
+try:
+    _USER32 = ctypes.WinDLL('user32', use_last_error=True)
+    _KERNEL32 = ctypes.WinDLL('kernel32', use_last_error=True)
 
-        _USER32.GetForegroundWindow.restype = wintypes.HWND
-        _USER32.IsWindow.argtypes = (wintypes.HWND,)
-        _USER32.IsWindow.restype = wintypes.BOOL
-        _USER32.IsWindowVisible.argtypes = (wintypes.HWND,)
-        _USER32.IsWindowVisible.restype = wintypes.BOOL
-        _USER32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
-        _USER32.GetWindowTextLengthW.restype = ctypes.c_int
-        _USER32.GetWindowTextW.argtypes = (
-            wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
-        _USER32.GetWindowTextW.restype = ctypes.c_int
-        _USER32.GetClassNameW.argtypes = (
-            wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
-        _USER32.GetClassNameW.restype = ctypes.c_int
-        _USER32.GetWindowThreadProcessId.argtypes = (
-            wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
-        _USER32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        _USER32.GetWindowRect.argtypes = (
-            wintypes.HWND, ctypes.POINTER(wintypes.RECT))
-        _USER32.GetWindowRect.restype = wintypes.BOOL
-        _USER32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
-        _USER32.GetWindowLongW.restype = ctypes.c_long
-        _USER32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
-        _USER32.MonitorFromWindow.restype = wintypes.HMONITOR
-        _USER32.GetMonitorInfoW.argtypes = (
-            wintypes.HMONITOR, ctypes.POINTER(_MONITORINFO))
-        _USER32.GetMonitorInfoW.restype = wintypes.BOOL
+    _USER32.GetForegroundWindow.restype = wintypes.HWND
+    _USER32.IsWindow.argtypes = (wintypes.HWND,)
+    _USER32.IsWindow.restype = wintypes.BOOL
+    _USER32.IsWindowVisible.argtypes = (wintypes.HWND,)
+    _USER32.IsWindowVisible.restype = wintypes.BOOL
+    _USER32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
+    _USER32.GetWindowTextLengthW.restype = ctypes.c_int
+    _USER32.GetWindowTextW.argtypes = (
+        wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    _USER32.GetWindowTextW.restype = ctypes.c_int
+    _USER32.GetClassNameW.argtypes = (
+        wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    _USER32.GetClassNameW.restype = ctypes.c_int
+    _USER32.GetWindowThreadProcessId.argtypes = (
+        wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    _USER32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    _USER32.GetWindowRect.argtypes = (
+        wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+    _USER32.GetWindowRect.restype = wintypes.BOOL
+    _USER32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+    _USER32.GetWindowLongW.restype = ctypes.c_long
+    _USER32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
+    _USER32.MonitorFromWindow.restype = wintypes.HMONITOR
+    _USER32.GetMonitorInfoW.argtypes = (
+        wintypes.HMONITOR, ctypes.POINTER(_MONITORINFO))
+    _USER32.GetMonitorInfoW.restype = wintypes.BOOL
 
-        _KERNEL32.OpenProcess.argtypes = (
-            wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        _KERNEL32.OpenProcess.restype = wintypes.HANDLE
-        _KERNEL32.QueryFullProcessImageNameW.argtypes = (
-            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
-            ctypes.POINTER(wintypes.DWORD))
-        _KERNEL32.QueryFullProcessImageNameW.restype = wintypes.BOOL
-        _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
-        _KERNEL32.CloseHandle.restype = wintypes.BOOL
-    # The Win32 DLLs are optional outside Windows; leave them disabled when
-    # their symbols cannot be configured so the cross-platform detector loads.
-    except Exception:
-        _USER32 = None
-        _KERNEL32 = None
+    _KERNEL32.OpenProcess.argtypes = (
+        wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _KERNEL32.OpenProcess.restype = wintypes.HANDLE
+    _KERNEL32.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD))
+    _KERNEL32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _KERNEL32.CloseHandle.restype = wintypes.BOOL
+# The Win32 DLLs are optional outside Windows; leave them disabled when
+# their symbols cannot be configured so the cross-platform detector loads.
+except Exception:
+    _USER32 = None
+    _KERNEL32 = None
 
 
 @dataclass(frozen=True)
@@ -437,7 +329,7 @@ def normalise_custom_game_rules(rules: object) -> tuple[dict[str, object], ...]:
         folder_path = str(raw_rule.get('folder_path', '') or '').strip()
         exe_name = str(raw_rule.get('exe_name', '') or '').strip()
         if not exe_name and exe_path:
-            exe_name = ntpath.basename(exe_path) or Path(exe_path).name
+            exe_name = Path(exe_path).name
         if not title and not exe_path and not folder_path and not exe_name:
             continue
 
@@ -475,8 +367,8 @@ def matching_custom_game_rule(
         if rule_title and rule_title not in title:
             continue
         if rule_path and rule_path != path:
-            # A Java runtime may move while the title remains the stable identity.
-            if not (rule_title and rule_title in title and rule_exe_name and rule_exe_name == exe_name):
+            # A title-qualified rule can survive a runtime directory update.
+            if not (rule_title and rule_exe_name and rule_exe_name == exe_name):
                 continue
         elif rule_folder:
             folder_prefix = rule_folder.rstrip('/\\') + os.sep
@@ -511,6 +403,8 @@ def is_probable_game(window: Optional[GameWindow],
     """Apply conservative, deterministic game heuristics to a window."""
     if window is None or not window.hwnd or not window.pid:
         return False
+    if is_user_configured_game(window, custom_game_rules):
+        return True
     if window.width < 640 or window.height < 360:
         return False
     if is_user_configured_game(window, custom_game_rules):
@@ -612,8 +506,6 @@ _GENERIC_GAME_PARENT_NAMES = {
 def _refresh_windows_game_database_if_needed():
     """Cache executables already classified as games by Windows Game Bar."""
     global _GAME_DATABASE_LOADED_AT, _GAME_DATABASE_PATHS, _GAME_DATABASE_PARENTS
-    if sys.platform != 'win32':
-        return
     now = time.monotonic()
     if now - _GAME_DATABASE_LOADED_AT < _GAME_DATABASE_TTL_SECONDS:
         return
@@ -699,8 +591,15 @@ def get_foreground_window(own_pid: Optional[int] = None) -> Optional[GameWindow]
     """Read the current foreground window using fast Win32 calls only."""
     if _USER32 is None:
         return None
+    return get_window_info(int(_USER32.GetForegroundWindow() or 0), own_pid)
+
+
+def get_window_info(hwnd: int, own_pid: Optional[int] = None) -> Optional[GameWindow]:
+    """Inspect a running capture window without changing foreground focus."""
+    if _USER32 is None:
+        return None
     try:
-        hwnd = int(_USER32.GetForegroundWindow() or 0)
+        hwnd = int(hwnd or 0)
         if not hwnd or not _USER32.IsWindowVisible(hwnd):
             return None
         title = _window_text(hwnd)
@@ -769,6 +668,7 @@ class ForegroundGameDetector(QObject):
         stable_polls: int = 2,
         window_provider: WindowProvider = get_foreground_window,
         custom_game_rules: object = (),
+        blacklist_rules: object = (),
     ):
         super().__init__(parent)
         self.interval_seconds = max(0.2, float(interval_seconds))
@@ -780,6 +680,7 @@ class ForegroundGameDetector(QObject):
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._custom_game_rules = normalise_custom_game_rules(custom_game_rules)
+        self._blacklist_rules = normalise_custom_game_rules(blacklist_rules)
         self._observed_identity: Optional[tuple[int, int]] = None
         self._observed_capture_signature: tuple | None = None
         self._observed_count = 0
@@ -831,6 +732,10 @@ class ForegroundGameDetector(QObject):
         with self._lock:
             self._custom_game_rules = normalise_custom_game_rules(rules)
 
+    def set_blacklist_rules(self, rules: object):
+        with self._lock:
+            self._blacklist_rules = normalise_custom_game_rules(rules)
+
     def _reset_observation_locked(self):
         self._observed_identity = None
         self._observed_capture_signature = None
@@ -847,7 +752,8 @@ class ForegroundGameDetector(QObject):
                 window = self._window_provider(self._own_pid)
                 with self._lock:
                     rules = self._custom_game_rules
-                if not is_probable_game(window, rules):
+                    blocked = self._blacklist_rules
+                if (window is not None and matching_custom_game_rule(window, blocked)) or not is_probable_game(window, rules):
                     window = None
                 self._observe(window)
             # Detection is a best-effort background service; one bad poll
@@ -917,6 +823,7 @@ __all__ = [
     'GameDetector',
     'GameWindow',
     'get_foreground_window',
+    'get_window_info',
     'is_capture_window_valid',
     'is_probable_game',
     'matching_custom_game_rule',

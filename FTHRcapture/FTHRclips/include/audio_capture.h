@@ -123,6 +123,42 @@ namespace fthr {
         uint64_t GetRestartCount() const {
             return restart_count_.load(std::memory_order_relaxed);
         }
+        uint64_t GetSyntheticSilenceFrameCount() const {
+            return synthetic_silence_frame_count_.load(std::memory_order_relaxed);
+        }
+        uint64_t GetSkippedInputFrameCount() const {
+            return skipped_input_frame_count_.load(std::memory_order_relaxed);
+        }
+        uint64_t GetResamplerCorrectionCount() const {
+            return resampler_correction_count_.load(std::memory_order_relaxed);
+        }
+        uint64_t GetNormalJitterAbsorbedCount() const {
+            return normal_jitter_absorbed_count_.load(std::memory_order_relaxed);
+        }
+        uint64_t GetHardDiscontinuityRecoveryCount() const {
+            return hard_discontinuity_recovery_count_.load(std::memory_order_relaxed);
+        }
+        AudioCorrectionDistributionSnapshot GetSilenceCorrectionDistribution() const {
+            return silence_correction_distribution_.Snapshot();
+        }
+        AudioCorrectionDistributionSnapshot GetSkipCorrectionDistribution() const {
+            return skip_correction_distribution_.Snapshot();
+        }
+        AudioCorrectionDistributionSnapshot GetResamplerCorrectionDistribution() const {
+            return resampler_correction_distribution_.Snapshot();
+        }
+        AudioCorrectionEventSnapshot GetCorrectionEvents() const {
+            return correction_events_.Snapshot();
+        }
+        AudioSignalMetricsSnapshot GetNativeInputSignalMetrics() const {
+            return format_converter_.GetInputSignalMetrics();
+        }
+        AudioSignalMetricsSnapshot GetCanonicalOutputSignalMetrics() const {
+            return format_converter_.GetOutputSignalMetrics();
+        }
+        AudioSignalMetricsSnapshot GetEncoderInputSignalMetrics() const {
+            return encoder_input_metrics_.Snapshot();
+        }
         uint64_t GetSubmittedFrameCount() const {
             return submitted_frame_count_.load(std::memory_order_relaxed);
         }
@@ -198,7 +234,17 @@ namespace fthr {
         std::atomic<uint64_t> no_packet_interval_count_{ 0 };
         std::atomic<uint64_t> restart_count_{ 0 };
         std::atomic<uint64_t> submitted_frame_count_{ 0 };
+        std::atomic<uint64_t> synthetic_silence_frame_count_{ 0 };
+        std::atomic<uint64_t> skipped_input_frame_count_{ 0 };
+        std::atomic<uint64_t> resampler_correction_count_{ 0 };
+        std::atomic<uint64_t> normal_jitter_absorbed_count_{ 0 };
+        std::atomic<uint64_t> hard_discontinuity_recovery_count_{ 0 };
         std::atomic<int64_t> max_observed_drift_samples_{ 0 };
+        std::atomic<uint64_t> last_swr_compensation_qpc_100ns_{ 0 };
+        AudioCorrectionDistribution silence_correction_distribution_;
+        AudioCorrectionDistribution skip_correction_distribution_;
+        AudioCorrectionDistribution resampler_correction_distribution_;
+        AudioCorrectionEventRing correction_events_;
 
         // Stored from the last Initialize() call so recovery can re-open the same
         // device (or fall back to default if empty).
@@ -210,6 +256,7 @@ namespace fthr {
         std::vector<float> silence_buf_;
         std::vector<uint8_t> native_silence_buf_;
         std::vector<float> converted_samples_;
+        AudioSignalMetrics encoder_input_metrics_;
         AudioFormatConverter format_converter_;
         AudioDriftController drift_controller_{ kCanonicalAudioSampleRate };
         int64_t submitted_frames_ = 0;

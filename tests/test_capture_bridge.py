@@ -1,9 +1,11 @@
-﻿import ctypes
+import ctypes
 import sys
 
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'FTHR_UI'))
 
+import core.capture_bridge as capture_bridge_module
 from core.capture_bridge import CaptureBridge, SharedMemoryLayout, CommandType, ResponseType
+from core.capture_health import CaptureHealthFlag
 
 
 def _make_fake_layout():
@@ -71,6 +73,14 @@ def test_get_status_returns_stable_python_numeric_types():
     assert type(status['frames_captured']) is int
     assert type(status['capture_generation']) is int
     assert type(status['content_luma_mean']) is float
+
+
+def test_windows_save_error_is_not_exposed_as_capture_failure():
+    layout, buf = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+    layout.engine_string = _encode_engine_string('Save was declined')
+    layout.capture_health_flags = int(CaptureHealthFlag.BACKEND_FAILED)
+    assert bridge.get_status()['capture_failure_detail'] == ''
 
 
 def test_set_encoder_config_clamps_preset():
@@ -145,6 +155,88 @@ def test_bridge_has_no_second_response_consumer():
     auto-consuming poller are gone and must not come back."""
     assert not hasattr(CaptureBridge, 'wait_for_clip_completion')
     assert not hasattr(CaptureBridge, 'poll_async_result')
+
+
+
+
+def test_shutdown_does_not_clear_a_replacement_singleton():
+    previous = CaptureBridge._instance
+    try:
+        CaptureBridge._instance = None
+        bridge = CaptureBridge()
+        replacement = object()
+        CaptureBridge._instance = replacement
+
+        bridge.shutdown()
+
+        assert CaptureBridge._instance is replacement
+    finally:
+        CaptureBridge._instance = previous
+
+
+def test_windows_initialize_and_shutdown_serialize_mapping_lifetime(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    previous = CaptureBridge._instance
+    entered_map = threading.Event()
+    release_map = threading.Event()
+    shutdown_finished = threading.Event()
+    unmaps = []
+    mapping = (ctypes.c_byte * ctypes.sizeof(SharedMemoryLayout))()
+    layout = SharedMemoryLayout.from_buffer(mapping)
+    layout.is_initialized = True
+    pointer = ctypes.addressof(mapping)
+
+    def open_mapping(*_args):
+        return 42
+
+    def map_view(*_args):
+        entered_map.set()
+        assert release_map.wait(2)
+        return pointer
+
+    def unmap_view(value):
+        unmaps.append(value.value)
+        return True
+
+    def close_handle(_handle):
+        return True
+
+    kernel32 = SimpleNamespace(
+        OpenFileMappingW=open_mapping,
+        MapViewOfFile=map_view,
+        UnmapViewOfFile=unmap_view,
+        CloseHandle=close_handle,
+    )
+    try:
+        CaptureBridge._instance = None
+        bridge = CaptureBridge()
+        monkeypatch.setattr(
+            capture_bridge_module.ctypes, 'windll',
+            SimpleNamespace(kernel32=kernel32), raising=False)
+        results = []
+        initializer = threading.Thread(
+            target=lambda: results.append(bridge.initialize()))
+        initializer.start()
+        assert entered_map.wait(1)
+
+        shutdown = threading.Thread(
+            target=lambda: (bridge.shutdown(), shutdown_finished.set()))
+        shutdown.start()
+        assert not shutdown_finished.wait(0.05)
+
+        release_map.set()
+        initializer.join(2)
+        shutdown.join(2)
+
+        assert results == [True]
+        assert shutdown_finished.is_set()
+        assert unmaps == [pointer]
+        assert bridge._initialized is False
+    finally:
+        release_map.set()
+        CaptureBridge._instance = previous
 
 
 def test_peek_does_not_consume():
@@ -279,57 +371,3 @@ def _a_path() -> str:
 def _encode_engine_string(text: str):
     """engine_string is wchar on Windows and raw bytes on Linux."""
     return text if sys.platform == 'win32' else text.encode('utf-8')
-
-
-def test_get_status_exposes_failure_detail_only_with_backend_failed():
-    from core.capture_health import CaptureHealthFlag
-
-    layout, buf = _make_fake_layout()
-    bridge = _FakeBridge(layout)
-    layout.engine_string = _encode_engine_string(
-        "Screen sharing was declined in the desktop's dialog.")
-
-    # engine_string also carries save results; it is only a capture failure
-    # detail while the engine publishes BACKEND_FAILED alongside it.
-    layout.capture_health_flags = CaptureHealthFlag.ACTIVE
-    assert bridge.get_status()['capture_failure_detail'] == ''
-
-    layout.capture_health_flags = CaptureHealthFlag.BACKEND_FAILED
-    # Only the Linux engine writes the reason there; on Windows the string
-    # still holds the last save error, so the bridge reports nothing.
-    expected = ('' if sys.platform == 'win32'
-                else "Screen sharing was declined in the desktop's dialog.")
-    assert bridge.get_status()['capture_failure_detail'] == expected
-
-
-def test_linux_connect_before_engine_ready_returns_false_without_buffererror():
-    import os
-    import uuid
-
-    import pytest
-
-    if not sys.platform.startswith('linux') or not os.path.isdir('/dev/shm'):
-        pytest.skip('POSIX shared memory in /dev/shm is Linux-only')
-
-    # A private segment shaped like the engine's, still marked uninitialised:
-    # the window between the engine creating the mapping and finishing
-    # startup, which the UI's connect loop polls through.
-    name = f'FTHR_SharedMemory_test_{uuid.uuid4().hex}'
-    path = f'/dev/shm/{name}'
-    with open(path, 'wb') as handle:
-        handle.write(b'\0' * ctypes.sizeof(SharedMemoryLayout))
-    try:
-        # Bypass the process-wide singleton so no real bridge state leaks.
-        bridge = object.__new__(CaptureBridge)
-        bridge._initialized = False
-        bridge._linux_mmap = None
-        bridge._layout = None
-        bridge._logged_read_errors = set()
-        bridge.SHARED_MEM_NAME = name
-
-        assert bridge._initialize_linux() is False   # used to raise BufferError
-        assert bridge._layout is None
-        assert bridge._linux_mmap is None
-        assert bridge._initialize_linux() is False   # and stays retryable
-    finally:
-        os.unlink(path)

@@ -25,16 +25,13 @@ FTHR_Clips/
 │       ├── include/            Headers, incl. shared_memory.h (IPC contract)
 │       ├── src/                DXGI/WGC capture, NVENC/AMF/QSV encode
 │       └── third_party/ffmpeg/ LGPL FFmpeg — headers+libs tracked, bin/ fetched
-├── FTHRcapture_linux/          Linux capture engine (C++17, CMake)
 │   ├── CMakeLists.txt
 │   ├── src/                    X11 / wlroots / ext-image-copy-capture backends
 │   └── protocols/              Generated Wayland protocol bindings (tracked)
 ├── tests/                      pytest suite
 ├── tools/                      Release verification and build helpers
-├── FTHR.spec / FTHR_linux.spec PyInstaller bundles
+├── FTHR.spec                  Windows PyInstaller bundle
 ├── installer_windows.iss       Inno Setup installer
-├── build_linux.sh              AppImage builder
-└── AppDir/                     AppImage .desktop + icon (source only)
 ```
 
 ### Entry points
@@ -43,15 +40,13 @@ FTHR_Clips/
 |---|---|
 | Application | `FTHR_UI/main.py` (`python FTHR_UI/main.py`) |
 | Windows engine | `FTHRcapture/FTHRclips/src/main.cpp` → `FTHRcapture/x64/Release/FTHRclips.exe` |
-| Linux engine | `FTHRcapture_linux/src/main.cpp` → `FTHRcapture_linux/build/FTHRclips` |
 | Product version | `FTHR_UI/version.py` |
 | IPC contract | `FTHR_UI/core/capture_bridge.py` ↔ `FTHRcapture/FTHRclips/include/shared_memory.h` |
 
 ### Generated — never edit, never commit
 
 `build/`, `dist/`, `Output/`, `FTHRcapture/x64/`, `FTHRcapture/FTHRclips/x64/`,
-`FTHRcapture_linux/build/`, `AppDir/AppRun`, `AppDir/usr/`, `.vs/`,
-`build/version_win.txt`, `__pycache__/`, `*.AppImage`, and the FFmpeg runtime
+`build/version_win.txt`, `__pycache__/`, the FFmpeg runtime
 under `FTHRcapture/FTHRclips/third_party/ffmpeg/bin/`.
 
 ## Setup
@@ -105,23 +100,6 @@ script pulls them from the exact BtbN release pinned by sha256 in
 
 See [`BUILDING.md`](BUILDING.md) for the full walkthrough.
 
-### Linux engine
-
-```bash
-# Deps: cmake, gcc, pkg-config, ffmpeg, libpulse, wayland-protocols, wayland-scanner
-cd FTHRcapture_linux
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
-```
-
-Full AppImage:
-
-```bash
-./build_linux.sh
-```
-
-See [`BUILDING.md`](BUILDING.md).
-
 ## The shared-memory contract
 
 The UI and the engine talk through one fixed-layout struct in shared memory.
@@ -129,18 +107,17 @@ There is no serialisation and no handshake. **If the two definitions drift by a
 single byte, every field after the drift point reads garbage — silently, at
 runtime, with no build error.**
 
-Three definitions must stay in lockstep:
+Two definitions must stay in lockstep:
 
 | Side | File |
 |---|---|
-| Python | `FTHR_UI/core/capture_bridge.py` — `SharedMemoryLayout` (separate win32 / posix branches) |
+| Python | `FTHR_UI/core/capture_bridge.py` — `SharedMemoryLayout` |
 | Windows engine | `FTHRcapture/FTHRclips/include/shared_memory.h` |
-| Linux engine | `FTHRcapture_linux/src/shared_memory.h` |
 
 Rules:
 
 1. **Never reorder fields.** Append only.
-2. **Never change a field's type or array extent** without changing all three.
+2. **Never change a field's type or array extent** without changing both.
 3. **Never reuse command IDs 4–9.** Those are the retired `SET_*` commands.
    They are dead, but an engine built before they were retired still acts on
    those numbers — reusing one would make an old binary do the wrong thing
@@ -155,12 +132,12 @@ Rules:
    python tools/verify_shared_memory_contract.py
    ```
 
-   It parses both C++ headers, models the compiler's alignment, and compares
+   It parses the Windows C++ header, models the compiler's alignment, and compares
    field order, types, array extents, offsets and total size against the ctypes
-   struct — for both platforms, from any platform. It also runs as part of
+   struct for Windows. It also runs as part of
    `pytest` (`tests/test_shared_memory_contract.py`).
 
-Current layout: 29 fields, 2736 B on Windows, 4272 B on Linux.
+Current layout: 29 fields, 2736 B on Windows.
 
 The positional engine arguments are documented in
 [`docs/engine-startup.md`](docs/engine-startup.md).
@@ -204,7 +181,6 @@ build: pin alpha dependencies exactly (AUDIT-009)
 ## What we're looking for
 
 - Bug fixes
-- Linux hardware compatibility (AMD/Intel GPU capture, other Wayland compositors)
 - Windows testing and fixes
 - Python and native C++ test coverage
 - Documentation improvements
@@ -252,4 +228,3 @@ explains an ordering rule worth keeping.
 These conventions follow the practical guidance in the
 [Google C++ style guide](https://google.github.io/styleguide/cppguide#Comments)
 and the [Linux kernel commenting guide](https://docs.kernel.org/process/coding-style.html#commenting).
-

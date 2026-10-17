@@ -18,9 +18,9 @@ const char* EncoderVendorName(EncoderVendor vendor) noexcept {
     case EncoderVendor::Nvidia: return "NVIDIA";
     case EncoderVendor::Amd: return "AMD";
     case EncoderVendor::Intel: return "Intel";
-    case EncoderVendor::Software: return "unknown/software";
+    case EncoderVendor::Software: return "Software";
     }
-    return "unknown/software";
+    return "Software";
 }
 
 const char* ReplayEncoderBackendName(ReplayEncoderBackend backend) noexcept {
@@ -28,9 +28,9 @@ const char* ReplayEncoderBackendName(ReplayEncoderBackend backend) noexcept {
     case ReplayEncoderBackend::NativeNvenc: return "native-nvenc";
     case ReplayEncoderBackend::FfmpegAmf: return "ffmpeg-amf";
     case ReplayEncoderBackend::FfmpegQsv: return "ffmpeg-qsv";
-    case ReplayEncoderBackend::Software: return "software/unavailable";
+    case ReplayEncoderBackend::Software: return "software-openh264";
     }
-    return "software/unavailable";
+    return "software-openh264";
 }
 
 const char* ReplayStartupErrorName(ReplayStartupError error) noexcept {
@@ -47,6 +47,8 @@ const char* ReplayStartupErrorName(ReplayStartupError error) noexcept {
     case ReplayStartupError::ReplayCapacityLimited:
         return "REPLAY_CAPACITY_LIMITED";
     case ReplayStartupError::EncoderInitFailed: return "ENCODER_INIT_FAILED";
+    case ReplayStartupError::CaptureTargetUnavailable:
+        return "CAPTURE_TARGET_UNAVAILABLE";
     }
     return "ENCODER_INIT_FAILED";
 }
@@ -91,7 +93,8 @@ ActiveReplayCapability EvaluateActiveReplayCapability(
         result.error = selection.error;
         return result;
     }
-    if (!initialized || !active.hardware
+    if (!initialized
+        || active.hardware != (selection.backend != ReplayEncoderBackend::Software)
         || active.backend != selection.backend
         || active.vendor != selection.encoder_vendor) {
         result.error = ReplayStartupError::EncoderInitFailed;

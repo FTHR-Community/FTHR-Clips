@@ -13,14 +13,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from fthr_upload_api import (
-    DEFAULT_BASE_URL,
-    FthrUploadClient,
-    load_credentials,
-    resolve_api_key,
-)
 
 
 CATBOX_URL = 'https://catbox.moe/user/api.php'
@@ -28,27 +22,16 @@ HISTORY_FILE = Path.home() / '.fthr' / 'uploader' / 'upload_history.json'
 _BOUNDARY = b'FTHRClipBoundary8f61d4'
 _RETRY_DELAYS = (5, 15, 45)
 _PROVIDER_LIMIT_BYTES = {
-    'lustful': 100 * 1024 * 1024,
     'catbox': 200 * 1024 * 1024,
 }
 _CUSTOM_PROVIDER = 'custom'
 
 
-class UploadResponseError(RuntimeError):
-    """An upload response that is safe to classify before retrying."""
-
-    def __init__(self, message: str, status: int):
-        super().__init__(message)
-        self.status = int(status)
-
-
 class UploadRuntime:
     def __init__(
             self,
-            settings: dict[str, Any],
-            hardware_id_provider: Callable[[], str] | None = None):
+            settings: dict[str, Any]):
         self.settings = dict(settings)
-        self._hardware_id_provider = hardware_id_provider
 
     def upload(self, file_path: str) -> tuple[bool, str, dict[str, Any]]:
         path = Path(file_path)
@@ -66,13 +49,15 @@ class UploadRuntime:
                 f'this file is {actual / (1024 * 1024):.1f} MB. '
                 'Use Automatically compress in FTHR Clips.'), {}
         final_error = 'Upload failed.'
-        for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
+        # Never repeat SFTP authentication or an ambiguous commit automatically.
+        delays = (None,) if provider == 'sftp' else (*_RETRY_DELAYS, None)
+        for attempt, delay in enumerate(delays, start=1):
             try:
                 result = (
-                    self._upload_catbox(path)
+                    self._upload_sftp(path)
+                    if provider == 'sftp'
+                    else self._upload_catbox(path)
                     if provider == 'catbox'
-                    else self._upload_lustful(path)
-                    if provider == 'lustful'
                     else self._upload_custom(path)
                 )
                 entry = {
@@ -90,8 +75,6 @@ class UploadRuntime:
                 return True, str(result.get('url') or 'Upload complete.'), entry
             except Exception as exc:
                 final_error = str(exc)
-                if isinstance(exc, UploadResponseError) and not _retryable_status(exc.status):
-                    break
                 if delay is None:
                     break
                 sys.stderr.write(
@@ -101,15 +84,9 @@ class UploadRuntime:
 
     def test_connection(self) -> tuple[bool, str]:
         provider = self._provider()
-        if provider == 'lustful':
-            credentials = load_credentials()
-            if not credentials:
-                return False, 'Create or log in to a Lustful account first.'
-            hardware_id = self._hardware_id()
-            if credentials.get('hwid') != hardware_id:
-                return False, 'This Lustful account is registered to a different PC.'
-            data = self._lustful_client().verify(str(credentials['account_id']), hardware_id)
-            return True, f'Lustful connected ({data.get("role", "user")}).'
+        if provider == 'sftp':
+            from sftp_provider import test_connection
+            return test_connection(self.settings)
         if provider == _CUSTOM_PROVIDER:
             return self._test_custom_connection()
         request = urllib.request.Request(CATBOX_URL, method='HEAD')
@@ -123,25 +100,17 @@ class UploadRuntime:
 
     def _provider(self) -> str:
         provider = str(self.settings.get('upload_provider', 'catbox')).lower()
-        if provider == 'fthr':
-            provider = 'lustful'
         if provider in {'own_server', 'your_server'}:
             provider = _CUSTOM_PROVIDER
-        if provider not in {'catbox', 'lustful', _CUSTOM_PROVIDER}:
-            raise ValueError('Only Catbox, Lustful, and your server are supported.')
+        if provider not in {'catbox', _CUSTOM_PROVIDER, 'sftp'}:
+            raise ValueError('Unsupported upload provider.')
         return provider
 
-    def _hardware_id(self) -> str:
-        if not self._hardware_id_provider:
-            raise PermissionError(
-                'Install Hardware Identity after accepting Lustful’s policies.')
-        return self._hardware_id_provider()
+    def _upload_sftp(self, path: Path) -> dict[str, Any]:
+        from sftp_provider import upload
+        return upload(self.settings, path)
 
-    def _lustful_client(self) -> FthrUploadClient:
-        return FthrUploadClient(
-            api_key=str(self.settings.get('lustful_api_key', '')),
-            base_url=DEFAULT_BASE_URL,
-        )
+
 
     def _upload_catbox(self, path: Path) -> dict[str, Any]:
         fields = {'reqtype': 'fileupload'}
@@ -151,49 +120,10 @@ class UploadRuntime:
         status, raw = _multipart_post(
             CATBOX_URL, fields, 'fileToUpload', path, headers={})
         text = raw.decode('utf-8', errors='replace').strip()
-        if not 200 <= status < 300:
-            raise UploadResponseError(text or f'Catbox returned HTTP {status}.', status)
-        if not text.startswith('https://'):
-            raise RuntimeError(text or 'Catbox returned an invalid upload URL.')
+        if not 200 <= status < 300 or not text.startswith('https://'):
+            raise RuntimeError(text or f'Catbox returned HTTP {status}.')
         return {'url': text, 'raw_url': text, 'favorite': False}
 
-    def _upload_lustful(self, path: Path) -> dict[str, Any]:
-        credentials = load_credentials()
-        if not credentials:
-            raise RuntimeError('Create or log in to a Lustful account first.')
-        account_id = str(credentials.get('account_id', '')).strip()
-        hardware_id = self._hardware_id()
-        if credentials.get('hwid') != hardware_id:
-            raise PermissionError('This Lustful account is registered to a different PC.')
-        self._lustful_client().verify(account_id, hardware_id)
-        status, raw = _multipart_post(
-            f'{DEFAULT_BASE_URL}/api/upload',
-            {},
-            'file',
-            path,
-            headers={
-                'Authorization': f'Bearer {resolve_api_key(str(self.settings.get("lustful_api_key", "")))}',
-                'X-Account-Id': account_id,
-                'Accept': 'application/json',
-            },
-        )
-        try:
-            data = json.loads(raw.decode('utf-8', errors='replace'))
-        except ValueError as exc:
-            raise RuntimeError(f'Lustful returned HTTP {status} with invalid JSON.') from exc
-        if not 200 <= status < 300:
-            message = data.get('message') or data.get('error') if isinstance(data, dict) else ''
-            raise UploadResponseError(str(message or f'Lustful returned HTTP {status}.'), status)
-        if not isinstance(data, dict) or data.get('ok') is False:
-            message = data.get('message') or data.get('error') if isinstance(data, dict) else ''
-            raise RuntimeError(str(message or 'Lustful rejected the upload.'))
-        return {
-            'url': str(data.get('url') or data.get('raw_url') or ''),
-            'raw_url': str(data.get('raw_url') or ''),
-            'file_id': data.get('id'),
-            'expires_at': str(data.get('expires_at') or ''),
-            'favorite': False,
-        }
 
     def _upload_custom(self, path: Path) -> dict[str, Any]:
         """Upload to the user-selected endpoint using the FTHR multipart contract."""
@@ -209,7 +139,7 @@ class UploadRuntime:
         )
         text = raw.decode('utf-8', errors='replace').strip()
         if not 200 <= status < 300:
-            raise UploadResponseError(text or f'Your server returned HTTP {status}.', status)
+            raise RuntimeError(text or f'Your server returned HTTP {status}.')
 
         # Custom endpoints commonly return either a bare URL or a small JSON
         # object. Preserve the useful response in history without requiring
@@ -260,11 +190,6 @@ class UploadRuntime:
         temporary = HISTORY_FILE.with_suffix('.tmp')
         temporary.write_text(json.dumps(history, indent=2), encoding='utf-8')
         os.replace(str(temporary), str(HISTORY_FILE))
-
-
-def _retryable_status(status: int) -> bool:
-    """Retry transient server failures, never permanent client failures."""
-    return status == 429 or 500 <= status < 600
 
 
 def _multipart_post(

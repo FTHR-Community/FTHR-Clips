@@ -18,6 +18,8 @@
 #include <windows.h>
 #include <mmreg.h>
 
+#include "audio_signal_metrics.h"
+
 namespace fthr {
 
 // Converts one generation's native WASAPI format to the single format shared
@@ -49,6 +51,11 @@ public:
                               uint32_t compensation_distance_samples);
 
     void Reset();
+
+    // Bounded lifetime signal health for the decoded native stage and the
+    // canonical post-resampler stage.  These snapshots never retain PCM.
+    AudioSignalMetricsSnapshot GetInputSignalMetrics() const;
+    AudioSignalMetricsSnapshot GetOutputSignalMetrics() const;
 
     uint32_t input_sample_rate() const { return input_sample_rate_; }
     uint32_t input_channels() const { return input_channels_; }

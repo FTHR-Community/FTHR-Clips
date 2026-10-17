@@ -7,7 +7,6 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtMultimedia import QMediaPlayer
 
 from ui.clip_viewer import ClipViewer, PlayerLifecycleState
-from ui import clip_viewer
 
 
 def test_player_lifecycle_states_are_explicit_and_terminal_failure_exists():
@@ -168,71 +167,6 @@ def test_media_without_audio_sources_can_finish_audio_preparation():
     assert ready_updates == [True]
 
 
-def test_autoplay_starts_when_media_and_audio_become_ready(monkeypatch, qtbot):
-    play_requests = []
-    viewer = SimpleNamespace(
-        _closing=False,
-        _player_lifecycle_state=PlayerLifecycleState.PREPARING,
-        _media_ready=True,
-        _audio_preparation_ready=True,
-        _playback_ready=False,
-        _play_when_ready=True,
-        _audio_prepare_timed_out=False,
-        _playback_requested_at=0.0,
-        _audio_prepare_deadline=QTimer(),
-        _playback_stall_timer=QTimer(),
-        _playback_status_lbl=SimpleNamespace(setText=lambda *_: None),
-        _update_video_renderer=lambda: None,
-        _schedule_timeline_thumbnails=lambda: None,
-        _clear_ready_status=lambda: None,
-    )
-    viewer._set_player_state = ClipViewer._set_player_state.__get__(viewer)
-    viewer._toggle_play = lambda: play_requests.append(True)
-    monkeypatch.setattr('ui.clip_viewer.emit_event', lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        ClipViewer, '_toggle_play',
-        lambda _viewer: play_requests.append(True),
-    )
-
-    ClipViewer._update_playback_readiness(viewer)
-    qtbot.waitUntil(lambda: play_requests == [True])
-
-    assert viewer._playback_ready is True
-    assert viewer._play_when_ready is False
-
-
-def test_autoplay_disabled_does_not_queue_playback(monkeypatch, qtbot):
-    play_requests = []
-    viewer = SimpleNamespace(
-        _closing=False,
-        _player_lifecycle_state=PlayerLifecycleState.PREPARING,
-        _media_ready=True,
-        _audio_preparation_ready=True,
-        _playback_ready=False,
-        _play_when_ready=False,
-        _audio_prepare_timed_out=False,
-        _playback_requested_at=0.0,
-        _audio_prepare_deadline=QTimer(),
-        _playback_stall_timer=QTimer(),
-        _playback_status_lbl=SimpleNamespace(setText=lambda *_: None),
-        _update_video_renderer=lambda: None,
-        _schedule_timeline_thumbnails=lambda: None,
-        _clear_ready_status=lambda: None,
-    )
-    viewer._set_player_state = ClipViewer._set_player_state.__get__(viewer)
-    monkeypatch.setattr('ui.clip_viewer.emit_event', lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        ClipViewer, '_toggle_play',
-        lambda _viewer: play_requests.append(True),
-    )
-
-    ClipViewer._update_playback_readiness(viewer)
-    qtbot.wait(20)
-
-    assert viewer._playback_ready is True
-    assert play_requests == []
-
-
 def test_failed_player_rejects_new_play_command():
     viewer = SimpleNamespace(
         _closing=False,
@@ -318,6 +252,7 @@ def test_fifty_teardown_cycles_are_idempotent_and_close_state(qtbot):
             _player_failure_detail='',
         )
         viewer._set_player_state = ClipViewer._set_player_state.__get__(viewer)
+        viewer._flush_clip_details = lambda: None
         viewer._teardown_player = ClipViewer._teardown_player.__get__(viewer)
         viewer._teardown_player()
         viewer._teardown_player()
@@ -326,85 +261,16 @@ def test_fifty_teardown_cycles_are_idempotent_and_close_state(qtbot):
         assert viewer._player_lifecycle_state is PlayerLifecycleState.CLOSED
 
 
-def test_renderer_change_recreates_player_with_output_before_source(monkeypatch):
-    events = []
-
-    class _Signal:
-        def connect(self, callback):
-            events.append(('connect', callback.__name__))
-
-        def disconnect(self, _callback):
-            return None
-
-    class _Player:
-        def __init__(self, _parent=None):
-            self.playbackStateChanged = _Signal()
-            self.mediaStatusChanged = _Signal()
-            self.positionChanged = _Signal()
-            self.errorOccurred = _Signal()
-
-        def stop(self):
-            return None
-
-        def setVideoOutput(self, output):
-            events.append(('video', output))
-
-        def setAudioOutput(self, output):
-            events.append(('audio', output))
-
-        def setSource(self, source):
-            events.append(('source', source.isEmpty()))
-
-        def deleteLater(self):
-            events.append(('deleted', True))
-
-    class _Timer:
-        def start(self):
-            events.append(('timer', 'start'))
-
-        def stop(self):
-            return None
-
-    monkeypatch.setattr(clip_viewer, 'QMediaPlayer', _Player)
-    old_player = _Player()
-    software_sink = object()
+def test_renderer_change_keeps_player_identity_and_source():
+    calls = []
+    player = object()
     viewer = SimpleNamespace(
         _closing=False,
-        player=old_player,
-        _audio_mixer=None,
-        audio_output=object(),
-        _native_video_widget=object(),
-        video_widget=SimpleNamespace(video_sink=software_sink),
-        _on_state_changed=lambda *_: None,
-        _on_media_status_changed=lambda *_: None,
-        _on_player_position_changed=lambda *_: None,
-        _on_player_error=lambda *_: None,
-        _apply_playback_rate=lambda: None,
-        _renderer_resume_position_ms=None,
-        _renderer_resume_playing=False,
-        _media_ready=True,
-        _playback_ready=True,
-        _play_when_ready=False,
-        _player_lifecycle_state=PlayerLifecycleState.PLAYING,
-        _player_failure_detail='',
-        _playback_stall_timer=_Timer(),
-        _timeline_prepare_timer=_Timer(),
-        trim_slider=SimpleNamespace(cancel_thumbnail_loading=lambda: None),
-        clip_path='C:/clips/example.mp4',
-        _playback_path='C:/clips/example.mp4',
+        player=player,
+        _update_video_renderer=lambda: calls.append(True),
     )
-    viewer._connect_media_player_signals = (
-        ClipViewer._connect_media_player_signals.__get__(viewer))
-    viewer._set_player_state = ClipViewer._set_player_state.__get__(viewer)
-    viewer._fail_playback = ClipViewer._fail_playback.__get__(viewer)
 
     assert ClipViewer._recreate_player_for_renderer(
         viewer, 'software', 12_345, True) is True
-
-    assert events.index(('video', software_sink)) < events.index(
-        ('source', False))
-    assert events.index(('deleted', True)) < events.index(('source', False))
-    assert viewer._renderer_resume_position_ms == 12_345
-    assert viewer._play_when_ready is True
-    assert viewer._media_ready is False
-    assert viewer._player_lifecycle_state is PlayerLifecycleState.PREPARING
+    assert viewer.player is player
+    assert calls == [True]

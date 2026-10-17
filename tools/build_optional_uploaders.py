@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build and seal the two dormant Windows upload packages.
+"""Build and seal the dormant Windows upload package.
 
-The uploader and Hardware Identity are frozen as independent one-shot
-executables, optionally signed, wrapped in integrity-declared ``.fthrplugin``
+The uploader is frozen as a one-shot
+executable, optionally signed, wrapped in integrity-declared ``.fthrplugin``
 archives, and then bound into Core through generated SHA-256 constants.
 """
 
@@ -12,7 +12,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -29,12 +28,9 @@ CORE_MANIFEST = ROOT / 'FTHR_UI' / 'core' / 'uploader_bundle_manifest.py'
 ICON = ROOT / 'FTHR_UI' / 'assets' / 'favicon.ico'
 
 UPLOADER_PLUGIN_ID = 'com.fthrclips.uploader'
-UPLOADER_PLUGIN_VERSION = '1.1.0'
-UPLOADER_TERMS_VERSION = '2026-08-24-v1'
-UPLOADER_PRIVACY_VERSION = '2026-08-24-v1'
-HARDWARE_PLUGIN_ID = 'com.fthrclips.hardware-identity'
-HARDWARE_PLUGIN_VERSION = '1.0.0'
-HARDWARE_POLICY_VERSION = 'lustful-2026-07-27-hwid-v1'
+UPLOADER_PLUGIN_VERSION = '1.4.0'
+UPLOADER_TERMS_VERSION = '2026-10-15-v3'
+UPLOADER_PRIVACY_VERSION = '2026-10-15-v3'
 
 
 @dataclass(frozen=True)
@@ -63,16 +59,7 @@ PACKAGE_DEFINITIONS = (
             'privacy_version': UPLOADER_PRIVACY_VERSION,
         },
     ),
-    Package(
-        name='hardware-identity',
-        source_dir=ROOT / 'FTHR_Hardware_ID',
-        source_file=ROOT / 'FTHR_Hardware_ID' / 'hardware_id_service.py',
-        executable='FTHR Hardware Identity.exe',
-        bundle='FTHR-Hardware-Identity.fthrplugin',
-        plugin_id=HARDWARE_PLUGIN_ID,
-        plugin_version=HARDWARE_PLUGIN_VERSION,
-        legal_versions={'policy_version': HARDWARE_POLICY_VERSION},
-    ),
+
 )
 
 
@@ -136,6 +123,8 @@ def _build_executable(package: Package) -> Path:
     ]
     if ICON.is_file():
         command.extend(['--icon', str(ICON)])
+    if package.name == 'uploader':
+        command.extend(['--hidden-import', 'keyring.backends.Windows'])
     command.append(str(package.source_file))
     _run(command, f'Build {package.executable}')
     executable = dist / package.executable
@@ -146,6 +135,8 @@ def _build_executable(package: Package) -> Path:
 
 def _seal(package: Package, executable: Path) -> Path:
     destination = PACKAGES / package.bundle
+    licenses = (sorted(path for path in (ROOT / 'licenses' / 'optional-uploader').rglob('*')
+                       if path.is_file()) if package.name == 'uploader' else [])
     manifest = {
         'schema_version': 1,
         'plugin_id': package.plugin_id,
@@ -157,7 +148,11 @@ def _seal(package: Package, executable: Path) -> Path:
             'path': f'payload/{package.executable}',
             'sha256': _sha256(executable),
             'size': executable.stat().st_size,
-        }],
+        }, *[{
+            'path': 'payload/' + path.relative_to(ROOT).as_posix(),
+            'sha256': _sha256(path),
+            'size': path.stat().st_size,
+        } for path in licenses]],
     }
     PACKAGES.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix('.tmp')
@@ -169,38 +164,25 @@ def _seal(package: Package, executable: Path) -> Path:
             json.dumps(manifest, indent=2, sort_keys=True).encode('utf-8'))
         archive.write(package.source_dir / 'TERMS_OF_SERVICE.txt', 'TERMS_OF_SERVICE.txt')
         archive.write(package.source_dir / 'PRIVACY_POLICY.txt', 'PRIVACY_POLICY.txt')
+        for license_file in licenses:
+            archive.write(license_file, 'payload/' + license_file.relative_to(ROOT).as_posix())
         archive.write(executable, f'payload/{package.executable}')
     os.replace(temporary, destination)
     print(f'Sealed {destination.relative_to(ROOT)} ({_sha256(destination)})')
     return destination
 
 
-def bind_windows_bundle_hashes(existing: str, hashes: dict[str, str]) -> str:
-    """Update only Windows bundle hashes while preserving other bindings."""
-    result = existing
-    for name, key in (
-            ('EXPECTED_UPLOADER_BUNDLE_SHA256', 'uploader'),
-            ('EXPECTED_HARDWARE_BUNDLE_SHA256', 'hardware-identity')):
-        replacement = f'{name} = {hashes[key]!r}'
-        updated, count = re.subn(
-            rf'^{re.escape(name)} = [^\r\n]*',
-            replacement,
-            result,
-            count=1,
-            flags=re.MULTILINE,
-        )
-        if count != 1:
-            raise ValueError(f'uploader manifest is missing {name}')
-        result = updated
-    return result
-
-
 def _write_core_manifest(hashes: dict[str, str]) -> None:
-    existing = CORE_MANIFEST.read_text(encoding='utf-8')
-    CORE_MANIFEST.write_text(
-        bind_windows_bundle_hashes(existing, hashes),
-        encoding='utf-8',
-    )
+    text = f'''"""Generated release bindings for dormant optional uploader packages."""
+
+UPLOADER_PLUGIN_ID = {UPLOADER_PLUGIN_ID!r}
+UPLOADER_PLUGIN_VERSION = {UPLOADER_PLUGIN_VERSION!r}
+UPLOADER_TERMS_VERSION = {UPLOADER_TERMS_VERSION!r}
+UPLOADER_PRIVACY_VERSION = {UPLOADER_PRIVACY_VERSION!r}
+EXPECTED_UPLOADER_BUNDLE_SHA256 = {hashes['uploader']!r}
+
+'''
+    CORE_MANIFEST.write_text(text, encoding='utf-8')
 
 
 def main() -> int:

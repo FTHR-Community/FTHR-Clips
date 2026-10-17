@@ -18,11 +18,8 @@ from ui.clip_viewer import ClipViewer, LiveVideoPreview, TrimSlider
 
 
 class _Settings:
-    def __init__(self, values=None):
-        self.values = dict(values or {})
-
     def get(self, _key, default=None):
-        return self.values.get(_key, default)
+        return default
 
     def set(self, *_args):
         return None
@@ -48,25 +45,13 @@ class _DraftManager:
         return True
 
 
-def _viewer(monkeypatch, qtbot, path: str, metadata_manager=None, settings=None) -> ClipViewer:
-    monkeypatch.setattr(clip_viewer, 'discover_playback_sources', lambda _path: ())
+def _viewer(monkeypatch, qtbot, path: str, metadata_manager=None) -> ClipViewer:
+    monkeypatch.setattr(clip_viewer, 'discover_playback_sources', lambda _path, cancelled=None: ())
     viewer = ClipViewer(
-        path, None, settings_manager=settings or _Settings(),
+        path, None, settings_manager=_Settings(),
         metadata_manager=metadata_manager)
     qtbot.addWidget(viewer)
     return viewer
-
-
-def test_viewer_reads_autoplay_setting(monkeypatch, qtbot, tmp_path):
-    viewer = _viewer(
-        monkeypatch,
-        qtbot,
-        str(tmp_path / 'clip.mp4'),
-        settings=_Settings({'clip_viewer_autoplay': False}),
-    )
-
-    assert viewer._play_when_ready is False
-    viewer._teardown_player()
 
 
 def test_playback_has_one_ui_loop_and_filmstrip_is_idle_only(
@@ -202,18 +187,13 @@ def test_editor_draft_is_debounced_and_restored_on_reopen(
 
 def test_immediate_play_is_deferred_until_preparation_finishes(
         monkeypatch, qtbot, tmp_path):
-    viewer = _viewer(
-        monkeypatch,
-        qtbot,
-        str(tmp_path / 'clip.mp4'),
-        settings=_Settings({'clip_viewer_autoplay': False}),
-    )
+    viewer = _viewer(monkeypatch, qtbot, str(tmp_path / 'clip.mp4'))
 
     viewer._toggle_play()
 
     assert viewer._play_when_ready is True
     assert viewer.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState
-    assert 'PLAY QUEUED' in viewer._playback_status_lbl.text()
+    assert 'play queued' in viewer._playback_status_lbl.text()
 
     viewer._media_ready = True
     viewer._audio_preparation_ready = True

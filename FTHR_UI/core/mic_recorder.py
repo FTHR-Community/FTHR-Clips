@@ -25,7 +25,7 @@ SAMPLE_RATE = 48000
 BLOCK_SIZE  = 1024
 # Match the truthful maximum replay duration. Mono float32 at 48 kHz costs
 # about 58 MB at five minutes and is allocated gradually as samples arrive.
-KEEP_SECONDS = 300
+KEEP_SECONDS = 900
 
 
 class MicRecorder:

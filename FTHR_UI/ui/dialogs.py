@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from ui.style import set_theme_style
+
+import sys
+from ui.icons import IconButton
+
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import (
     QDialog,
@@ -23,6 +28,7 @@ from ui.style import (
     label_body,
     label_uppercase,
 )
+from ui.frameless_window_windows import start_system_move
 
 
 class _DialogHeader(QFrame):
@@ -39,14 +45,14 @@ class _DialogHeader(QFrame):
         layout.setContentsMargins(12, 0, 6, 0)
         layout.setSpacing(0)
 
-        title_label = QLabel(title.upper())
+        title_label = QLabel(title)
         title_label.setObjectName('fthrDialogTitle')
-        title_label.setStyleSheet(label_uppercase(
-            Colors.TEXT, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL))
+        set_theme_style(title_label, lambda: (label_uppercase(
+            Colors.TEXT, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL)))
         layout.addWidget(title_label)
         layout.addStretch(1)
 
-        close = QPushButton('×')
+        close = IconButton('close.png', label='Close')
         close.setObjectName('fthrDialogClose')
         close.setFixedSize(30, 30)
         close.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -56,6 +62,11 @@ class _DialogHeader(QFrame):
 
     def mousePressEvent(self, event):  # noqa: N802 - Qt API name
         if event.button() == Qt.MouseButton.LeftButton:
+            if (sys.platform == 'win32'
+                    and start_system_move(self._dialog.windowHandle())):
+                self._drag_offset = None
+                event.accept()
+                return
             self._drag_offset = (
                 event.globalPosition().toPoint()
                 - self._dialog.frameGeometry().topLeft())
@@ -83,17 +94,17 @@ class FthrDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(width)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.setStyleSheet(f'''
+        set_theme_style(self, lambda: (f'''
             QDialog#fthrDialog {{
                 background-color: {Colors.BG};
                 border: {Sizes.BORDER_W}px solid {Colors.BORDER_HI};
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
             }}
             QFrame#fthrDialogHeader {{
                 background-color: {Colors.SURFACE_2};
                 border: none;
                 border-bottom: {Sizes.BORDER_W}px solid {Colors.BORDER};
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
             }}
             QLabel#fthrDialogTitle {{
                 color: {Colors.TEXT};
@@ -103,7 +114,7 @@ class FthrDialog(QDialog):
             QPushButton#fthrDialogClose {{
                 background: transparent;
                 border: none;
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
                 color: {Colors.TEXT_DIM};
                 font-family: {Fonts.BODY};
                 font-size: 20px;
@@ -121,7 +132,7 @@ class FthrDialog(QDialog):
             QLineEdit#fthrDialogInput {{
                 background: {Colors.SURFACE_1};
                 border: {Sizes.BORDER_W}px solid {Colors.BORDER_HI};
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
                 color: {Colors.TEXT};
                 font-family: {Fonts.BODY};
                 font-size: {Fonts.SIZE_BODY}px;
@@ -130,7 +141,7 @@ class FthrDialog(QDialog):
                 selection-color: {Colors.BG};
             }}
             QLineEdit#fthrDialogInput:focus {{ border-color: {Colors.ACCENT}; }}
-        ''')
+        '''))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -158,17 +169,17 @@ def install_fthr_titlebar(dialog: QDialog, title: str) -> None:
         | Qt.WindowType.Dialog
         | Qt.WindowType.FramelessWindowHint)
     dialog.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-    dialog.setStyleSheet(dialog.styleSheet() + f'''
+    set_theme_style(dialog, lambda dialog=dialog: (dialog.styleSheet() + f'''
         QFrame#fthrDialogHeader {{
             background: {Colors.SURFACE_2};
             border: none;
             border-bottom: 1px solid {Colors.BORDER};
-            border-radius: 0px;
+            border-radius: {Sizes.RADIUS_MD}px;
         }}
         QPushButton#fthrDialogClose {{
             background: transparent;
             border: none;
-            border-radius: 0px;
+            border-radius: {Sizes.RADIUS_MD}px;
             color: {Colors.TEXT_DIM};
             font-family: {Fonts.BODY};
             font-size: 20px;
@@ -178,7 +189,7 @@ def install_fthr_titlebar(dialog: QDialog, title: str) -> None:
             background: {Colors.ERROR};
             color: {Colors.TEXT};
         }}
-    ''')
+    '''))
     layout.insertWidget(0, _DialogHeader(dialog, title))
 
 
@@ -187,9 +198,9 @@ class FthrInputDialog(FthrDialog):
 
     def __init__(self, title: str, label: str, text: str = '', parent=None):
         super().__init__(title, parent, width=360)
-        prompt = QLabel(label.upper())
-        prompt.setStyleSheet(label_uppercase(
-            Colors.TEXT, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL))
+        prompt = QLabel(label)
+        set_theme_style(prompt, lambda: (label_uppercase(
+            Colors.TEXT, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL)))
         self.body_layout.addWidget(prompt)
 
         self.text_edit = QLineEdit(text)
@@ -199,12 +210,12 @@ class FthrInputDialog(FthrDialog):
         self.text_edit.returnPressed.connect(self.accept)
 
         self.action_layout.addStretch(1)
-        cancel = QPushButton('CANCEL')
-        cancel.setStyleSheet(button_outline_qss())
+        cancel = QPushButton('Cancel')
+        set_theme_style(cancel, lambda: (button_outline_qss()))
         cancel.clicked.connect(self.reject)
         self.action_layout.addWidget(cancel)
         ok = QPushButton('OK')
-        ok.setStyleSheet(button_primary_qss())
+        set_theme_style(ok, lambda: (button_primary_qss()))
         ok.clicked.connect(self.accept)
         self.action_layout.addWidget(ok)
         self._ok_button = ok
@@ -228,24 +239,24 @@ class FthrMessageDialog(FthrDialog):
         super().__init__(title, parent, width=360 if question else 340)
         copy = QLabel(message)
         copy.setWordWrap(True)
-        copy.setStyleSheet(label_body(Colors.TEXT, Fonts.SIZE_BODY_L))
+        set_theme_style(copy, lambda: (label_body(Colors.TEXT, Fonts.SIZE_BODY_L)))
         self.body_layout.addWidget(copy)
 
         if question:
             self.action_layout.addStretch(1)
-            no = QPushButton('NO')
-            no.setStyleSheet(button_outline_qss())
+            no = QPushButton('No')
+            set_theme_style(no, lambda: (button_outline_qss()))
             no.clicked.connect(self.reject)
             self.action_layout.addWidget(no)
-            yes = QPushButton('YES')
-            yes.setStyleSheet(button_primary_qss())
+            yes = QPushButton('Yes')
+            set_theme_style(yes, lambda: (button_primary_qss()))
             yes.clicked.connect(self.accept)
             self.action_layout.addWidget(yes)
             no.setFocus()
         else:
             self.action_layout.addStretch(1)
             ok = QPushButton('OK')
-            ok.setStyleSheet(button_primary_qss())
+            set_theme_style(ok, lambda: (button_primary_qss()))
             ok.clicked.connect(self.accept)
             self.action_layout.addWidget(ok)
 

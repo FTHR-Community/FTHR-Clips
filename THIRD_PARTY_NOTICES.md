@@ -10,7 +10,7 @@ identified below retain their respective licences.
 
 Full licence texts live in [`licenses/`](licenses/), and are installed
 alongside the application (Windows: `licenses\` in the install directory;
-Linux: `licenses/` inside the AppImage).
+the `licenses/` directory).
 
 Last verified: **2026-08-24**.
 
@@ -93,26 +93,6 @@ remain fully available.
 > outside the scope of the LGPL fix — but it is worth a deliberate decision
 > before a large public release.
 
-### FFmpeg (Linux engine and AppImage)
-
-| | |
-|---|---|
-| **Version** | `n8.1.2-34-g9b6c8969e0` (release branch 8.1) |
-| **Source** | [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), release `autobuild-2026-07-31-14-10`, asset `ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-lgpl-shared-8.1.tar.xz` |
-| **SHA-256 (archive)** | `c882a80f06617149...` — full value, and the hash of every shipped library, recorded in [`tools/ffmpeg_manifest_linux.json`](tools/ffmpeg_manifest_linux.json) |
-| **Licence** | **LGPL v3 or later** (`--enable-version3`, no `--enable-gpl`, no `--enable-nonfree`) — self-reported by the binaries as `LGPL version 3 or later` |
-| **Linkage** | Dynamic. The native capture engine (`FTHRclips`) and `libFTHRPlaybackMixer.so` link the shared libraries through an `$ORIGIN` RPATH; the Python UI shells out to the bundled `ffmpeg` and `ffprobe`, which use the same libraries. |
-| **Used for** | The same roles as the Windows build: encoding and muxing in the capture engine; audio mix, watermark, webcam overlay, clip export and share in the UI. |
-| **Shipped files** | `libavcodec.so.62`, `libavdevice.so.62`, `libavfilter.so.11`, `libavformat.so.62`, `libavutil.so.60`, `libswresample.so.6`, `libswscale.so.9` (seven libraries, hash-pinned), and the `ffmpeg` and `ffprobe` command-line tools (RPATH `$ORIGIN/../lib:$ORIGIN`, verified by banner, configure flags, NEEDED and RPATH rather than by hash) |
-| **Source route** | The binaries are the unmodified upstream build apart from the RPATH of the two command-line tools, which `tools/fetch_third_party.py --ffmpeg-linux` rewrites with `patchelf`. The corresponding source is FFmpeg tag `n8.1.2` plus the build scripts in the BtbN release named above; the exact asset is reproduced with `python tools/fetch_third_party.py --ffmpeg-linux`. |
-| **Licence text** | [`licenses/FFmpeg-LICENSE.txt`](licenses/FFmpeg-LICENSE.txt) |
-
-The configuration is the Windows build's LGPL configuration (see above): no
-GPL encoders, software H.264 through `libopenh264`, H.265 through `libkvazaar`,
-AV1 through `libsvtav1`. The distribution's own FFmpeg (a GPL build on Ubuntu)
-is never bundled; the licence gate refuses an AppDir that contains it, or an
-`ffmpeg`/`ffprobe` that links it or carries a non-`$ORIGIN` RPATH.
-
 ### Qt 6
 
 | | |
@@ -176,15 +156,15 @@ conflict.
 | **Version** | 0.5.5 · **Licence** MIT |
 | **Used for** | Microphone capture |
 | **Licence text** | [`licenses/sounddevice-LICENSE.txt`](licenses/sounddevice-LICENSE.txt) |
-| **Note** | Wraps **PortAudio** (MIT). On Linux `libportaudio.so.2` is bundled explicitly by `FTHR_linux.spec`. |
+| **Note** | Wraps **PortAudio** (MIT).  |
 
-### jeepney
+### keyboard
 
 | | |
 |---|---|
-| **Version** | 0.9.0 · **Licence** MIT |
-| **Used for** | Linux only: D-Bus client for the XDG GlobalShortcuts portal (`core/portal_shortcuts.py`). Pure Python, no native code. |
-| **Licence text** | [`licenses/jeepney-LICENSE.txt`](licenses/jeepney-LICENSE.txt) |
+| **Version** | 0.13.5 · **Licence** MIT |
+| **Used for** | Global hotkeys (the only hotkey path on Windows) |
+| **Licence text** | [`licenses/keyboard-LICENSE.txt`](licenses/keyboard-LICENSE.txt) |
 
 ### cffi and pycparser
 
@@ -205,26 +185,6 @@ conflict.
 | **Linkage** | **None at build time.** NVENC is resolved at runtime via `LoadLibraryA("nvEncodeAPI64.dll")` against the user's installed driver. The header is source-only and the NVIDIA runtime is **not** redistributed. |
 | **Licence text** | [`licenses/NVIDIA-NVENC-SDK-LICENSE.txt`](licenses/NVIDIA-NVENC-SDK-LICENSE.txt) |
 
-### Wayland protocol definitions and generated bindings
-
-| | |
-|---|---|
-| **Files** | `FTHRcapture_linux/protocols/*.xml` and generated client bindings compiled into the Linux engine |
-| **Copyright** | The wlroots, Chromium OS, and Wayland contributors named in the source notices |
-| **Licence** | MIT-style permissive grants stated in the protocol sources |
-| **Used for** | Linux compositor capture and related Wayland protocol integration |
-| **Licence notices** | [`licenses/Wayland-Protocols-NOTICES.txt`](licenses/Wayland-Protocols-NOTICES.txt) |
-
-### PipeWire and D-Bus headers (Linux engine)
-
-| | |
-|---|---|
-| **Files** | System headers `pipewire-0.3/`, `spa-0.2/` and `dbus-1.0/` read at build time only; nothing from either project is copied into this repository or the AppImage |
-| **Copyright** | PipeWire: Wim Taymans and contributors. D-Bus: Red Hat, Inc. and contributors |
-| **Licence** | PipeWire headers: MIT. libdbus: dual AFL-2.1 / GPL-2.0-or-later, used under the AFL-2.1 option |
-| **Linkage** | **None at build time.** The engine resolves `libpipewire-0.3.so.0` and `libdbus-1.so.3` with `dlopen()`/`dlsym()` on the user's system when the ScreenCast portal capture backend is needed, and reports that backend as unavailable otherwise. The libraries are **not** redistributed. |
-| **Used for** | `org.freedesktop.portal.ScreenCast` session setup over the session bus and PipeWire video stream capture on compositors without a capture protocol |
-
 ### Microsoft Visual C++ Redistributable
 
 | | |
@@ -232,31 +192,6 @@ conflict.
 | **File** | `redist/vc_redist.x64.exe`, executed by the Windows installer |
 | **Licence** | Microsoft Visual Studio redistributable terms |
 | **Note** | Redistributed unmodified as permitted for VC++ runtime redistribution. |
-
-### AppImage type-2 runtime
-
-| | |
-|---|---|
-| **Version** | `20251108`, upstream commit `dd6cebedcbddde9c82f89b011e8e1d40b6e43868` |
-| **Source** | [AppImage/type2-runtime](https://github.com/AppImage/type2-runtime/releases/tag/20251108), asset `runtime-x86_64` |
-| **SHA-256** | `2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d` |
-| **Usage** | Embedded by the pinned Linux AppImage build as its type-2 runtime; it is not loaded by the FTHR application process. |
-| **Licence** | MIT for the runtime project, with statically linked musl, libfuse, squashfuse, libzstd, and zlib components listed in the upstream notice. |
-| **Licence text** | [`licenses/AppImage-type2-runtime-LICENSE.txt`](licenses/AppImage-type2-runtime-LICENSE.txt) |
-
-The runtime is fetched by the manifest-pinned build step and supplied to
-`appimagetool` explicitly with `--runtime-file`. Its URL, release tag, commit,
-size, and hash are recorded in
-[`tools/appimage_tool_manifest.json`](tools/appimage_tool_manifest.json).
-
-### AppImage packaging tool (build-only)
-
-`appimagetool` itself is a build-time dependency and is not part of the
-distributed AppImage. The build uses AppImage/appimagetool `1.9.1`, commit
-`8c8c91f762b412a19f4e8d2c4b35afb98f2d7c81`, and verifies its size and SHA-256
-from the same manifest before executing it.
-
----
 
 ## Project assets
 
@@ -304,15 +239,9 @@ Listed so future audits do not have to re-derive it:
 
 - **`imageio-ffmpeg`** — *removed* on 2026-08-05. Its bundled binary is a
   gyan.dev build with `--enable-gpl --enable-libx264 --enable-libx265`
-  (GPLv3). It is now excluded in both PyInstaller specs and removed from
+  (GPLv3). It is now excluded in the Windows PyInstaller spec and removed from
   `requirements.txt`. See `FTHR_UI/core/ffmpeg_tools.py`.
-- **System FFmpeg on Linux** — if the bundled binary is absent, FTHR falls back
-  to `ffmpeg` on `PATH`. That copy belongs to the user's distribution and is not
-  redistributed by this project.
 - **Development tooling** — pytest, ruff, PyInstaller, Inno Setup, MSVC.
-- **PipeWire and libdbus runtime libraries** — loaded from the user's system
-  with `dlopen()` by the Linux engine when the ScreenCast portal backend runs;
-  never bundled. See the headers entry above.
 
 ---
 
@@ -326,7 +255,6 @@ files described here. Run it before every release:
 ```bash
 python tools/verify_release_licenses.py --tree .
 python tools/verify_release_licenses.py --windows-dist dist/FTHRClips
-python tools/verify_release_licenses.py --appdir build_output/AppDir
 ```
 
 **This is a technical verification, not legal advice.**

@@ -55,7 +55,7 @@ def test_audio_settings_restore_all_notification_volume_sliders(
     assert set(page.sound_sliders) == {
         'clip', 'screenshot', 'error', 'startup',
         'upload_successful', 'upload_failed',
-    }
+    } | ({'master'} if sys.platform == 'win32' else set())
     assert page.error_notifications_check.isChecked()
     page.error_notifications_check.setChecked(False)
     assert settings.get('error_notifications_enabled') is False

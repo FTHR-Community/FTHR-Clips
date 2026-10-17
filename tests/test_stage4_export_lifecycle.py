@@ -278,43 +278,12 @@ def test_export_job_cancel_wins_if_requested_during_commit(tmp_path):
     assert not staged.exists()
 
 
-def test_editor_export_button_stays_enabled_as_cancel_control():
-    class _Worker:
-        def is_alive(self):
-            return True
-
-    class _Button:
-        def __init__(self):
-            self.text = None
-            self.enabled = None
-
-        def setText(self, value):
-            self.text = value
-
-        def setEnabled(self, value):
-            self.enabled = value
-
-    class _Job:
-        def __init__(self):
-            self.cancelled = False
-
-        def cancel(self):
-            self.cancelled = True
-
-    cancel_event = threading.Event()
-    job = _Job()
-    button = _Button()
-    viewer = type('Viewer', (), {
-        '_export_thread': _Worker(), '_export_cancel': cancel_event,
-        '_export_job': job, 'export_btn': button,
-        '_export_clip': lambda self: (_ for _ in ()).throw(AssertionError()),
-    })()
+def test_editor_export_button_submits_another_independent_job():
+    calls = []
+    viewer = type('Viewer', (), {'_export_clip': lambda self: calls.append('queued')})()
     ClipViewer._on_export_button(viewer)
-
-    assert cancel_event.is_set()
-    assert job.cancelled is True
-    assert button.text == 'CANCELLING…'
-    assert button.enabled is False
+    ClipViewer._on_export_button(viewer)
+    assert calls == ['queued', 'queued']
 
 
 def test_export_job_launch_failure_is_terminal(tmp_path):

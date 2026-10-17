@@ -12,9 +12,6 @@ body:
     attributes:
       label: Platform
       options:
-        - Linux (Wayland — Hyprland)
-        - Linux (Wayland — KDE Plasma)
-        - Linux (Wayland — GNOME)
         - Windows 10
         - Windows 11
     validations:

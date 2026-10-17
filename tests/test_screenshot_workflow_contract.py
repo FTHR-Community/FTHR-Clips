@@ -20,12 +20,6 @@ def test_screenshot_capture_is_side_band_and_transactional():
     assert 'ScreenshotPngSaveWorker' in MAIN_SOURCE
     assert 'reserve_screenshot_paths' in MAIN_SOURCE
     assert 'pixmap.save(str(raw_path))' not in MAIN_SOURCE
-    assert 'grim capture failed; trying the selected Qt' not in MAIN_SOURCE
-    assert '_offer_wayland_portal_screenshot(paths, reason)' in MAIN_SOURCE
-    assert '_capture_selected_qt_screen(paths, selected_monitor)' in MAIN_SOURCE
-    assert "os.environ.get('WAYLAND_DISPLAY')" in MAIN_SOURCE
-    assert 'QProcess(self)' in MAIN_SOURCE
-    assert 'subprocess.run(\n                    build_grim_command' not in MAIN_SOURCE
     assert 'self.capture_card.show_screenshot()' in MAIN_SOURCE
     assert 'self._screenshot_inflight' in MAIN_SOURCE
     assert 'self._screenshot_pending_requests' in MAIN_SOURCE

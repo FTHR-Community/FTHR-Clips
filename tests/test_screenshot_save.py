@@ -144,7 +144,11 @@ def test_editor_crop_encodes_in_worker_then_publishes_both_pngs(qtbot, tmp_path)
     write_png_to_staged(_test_image(), paths.staged)
     editor = ScreenshotEditor(str(paths.staged), str(paths.final))
     qtbot.addWidget(editor)
-    editor.canvas.crop_rect.setRect(0, 0, 1, 1)
+    editor.show()
+    qtbot.wait(1)
+    displayed = editor.canvas._image_rect()
+    editor.canvas.crop_rect.setRect(
+        displayed.x(), displayed.y(), displayed.width() // 2, displayed.height() // 2)
 
     editor._save_crop()
     qtbot.waitUntil(

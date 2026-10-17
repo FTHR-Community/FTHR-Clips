@@ -20,6 +20,272 @@
 
 namespace fthr {
 
+namespace {
+
+size_t CorrectionBucket(uint64_t magnitude) {
+    if (magnitude <= 1) return 0;
+    if (magnitude <= 4) return 1;
+    if (magnitude <= 16) return 2;
+    if (magnitude <= 64) return 3;
+    if (magnitude <= 256) return 4;
+    return 5;
+}
+
+}  // namespace
+
+const char* AudioCorrectionSourceName(AudioCorrectionSource source) {
+    switch (source) {
+    case AudioCorrectionSource::System: return "system";
+    case AudioCorrectionSource::Microphone: return "microphone";
+    }
+    return "unknown";
+}
+
+const char* AudioCorrectionDirectionName(AudioCorrectionDirection direction) {
+    switch (direction) {
+    case AudioCorrectionDirection::Insert: return "insert";
+    case AudioCorrectionDirection::Skip: return "skip";
+    }
+    return "unknown";
+}
+
+const char* AudioTimelineAdjustmentClassName(AudioTimelineAdjustmentClass value) {
+    switch (value) {
+    case AudioTimelineAdjustmentClass::Aligned: return "aligned";
+    case AudioTimelineAdjustmentClass::NormalJitterAbsorbed:
+        return "normal_jitter_absorbed";
+    case AudioTimelineAdjustmentClass::HardGap: return "hard_gap_recovery";
+    case AudioTimelineAdjustmentClass::HardOverlap: return "hard_overlap_recovery";
+    case AudioTimelineAdjustmentClass::LargeGap: return "large_gap_unrecoverable";
+    }
+    return "unknown";
+}
+
+void AudioCorrectionEventRing::Record(AudioCorrectionEvent event) {
+    if (event.correction_frames == 0) return;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    const int64_t signed_frames = event.direction == AudioCorrectionDirection::Insert
+        ? static_cast<int64_t>(event.correction_frames)
+        : -static_cast<int64_t>(event.correction_frames);
+    if ((signed_frames > 0
+            && cumulative_signed_correction_frames_
+                > std::numeric_limits<int64_t>::max() - signed_frames)
+        || (signed_frames < 0
+            && cumulative_signed_correction_frames_
+                < std::numeric_limits<int64_t>::min() - signed_frames)) {
+        cumulative_signed_correction_frames_ = signed_frames > 0
+            ? std::numeric_limits<int64_t>::max()
+            : std::numeric_limits<int64_t>::min();
+    } else {
+        cumulative_signed_correction_frames_ += signed_frames;
+    }
+    event.correction_ms = event.sample_rate > 0
+        ? static_cast<double>(event.correction_frames) * 1000.0
+            / static_cast<double>(event.sample_rate)
+        : 0.0;
+    event.cumulative_signed_correction_frames = cumulative_signed_correction_frames_;
+    if (event.correction_qpc_100ns > 0 && last_correction_qpc_100ns_ > 0
+            && event.correction_qpc_100ns >= last_correction_qpc_100ns_) {
+        event.time_since_previous_correction_ms = static_cast<double>(
+            event.correction_qpc_100ns - last_correction_qpc_100ns_) / 10'000.0;
+    } else {
+        event.time_since_previous_correction_ms = 0.0;
+    }
+    if (event.correction_qpc_100ns > 0) {
+        last_correction_qpc_100ns_ = event.correction_qpc_100ns;
+    }
+
+    events_[next_index_] = event;
+    next_index_ = (next_index_ + 1) % kAudioCorrectionEventRingCapacity;
+    if (size_ < kAudioCorrectionEventRingCapacity) {
+        ++size_;
+    } else {
+        ++overwritten_count_;
+    }
+}
+
+void AudioCorrectionEventRing::Reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    events_.fill(AudioCorrectionEvent{});
+    next_index_ = 0;
+    size_ = 0;
+    overwritten_count_ = 0;
+    cumulative_signed_correction_frames_ = 0;
+    last_correction_qpc_100ns_ = 0;
+}
+
+AudioCorrectionEventSnapshot AudioCorrectionEventRing::Snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AudioCorrectionEventSnapshot result;
+    result.overwritten_count = overwritten_count_;
+    result.events.reserve(size_);
+    const size_t first = size_ == kAudioCorrectionEventRingCapacity
+        ? next_index_ : 0;
+    for (size_t offset = 0; offset < size_; ++offset) {
+        result.events.push_back(events_[(first + offset)
+            % kAudioCorrectionEventRingCapacity]);
+    }
+    return result;
+}
+
+namespace {
+
+void AddCorrectionToLargest(const AudioCorrectionEvent& event,
+                            AudioCorrectionLargest* largest) {
+    if (!largest || (largest->present
+            && largest->correction_frames >= event.correction_frames)) return;
+    largest->present = true;
+    largest->correction_frames = event.correction_frames;
+    largest->correction_qpc_100ns = event.correction_qpc_100ns;
+    largest->clip_relative_time_ms = event.clip_relative_time_ms;
+}
+
+AudioCorrectionDensity MaxDensity(
+    const std::vector<AudioCorrectionEvent>& events, uint64_t window_100ns) {
+    AudioCorrectionDensity result;
+    size_t right = 0;
+    uint64_t corrected_frames = 0;
+    for (size_t left = 0; left < events.size(); ++left) {
+        const uint64_t window_end = events[left].correction_qpc_100ns
+                > std::numeric_limits<uint64_t>::max() - window_100ns
+            ? std::numeric_limits<uint64_t>::max()
+            : events[left].correction_qpc_100ns + window_100ns;
+        while (right < events.size()
+                && events[right].correction_qpc_100ns < window_end) {
+            corrected_frames += events[right].correction_frames;
+            ++right;
+        }
+        result.event_count = std::max<uint64_t>(result.event_count,
+            static_cast<uint64_t>(right - left));
+        result.corrected_frames = std::max(result.corrected_frames,
+            corrected_frames);
+        corrected_frames -= events[left].correction_frames;
+    }
+    return result;
+}
+
+}  // namespace
+
+AudioCorrectionClipSummary SummarizeAudioCorrections(
+    const AudioCorrectionEventSnapshot& system,
+    const AudioCorrectionEventSnapshot& microphone,
+    uint64_t selected_start_qpc_100ns, uint64_t selected_end_qpc_100ns) {
+    AudioCorrectionClipSummary result;
+    result.selected_start_qpc_100ns = selected_start_qpc_100ns;
+    result.selected_end_qpc_100ns = selected_end_qpc_100ns;
+    result.system_events_overwritten = system.overwritten_count;
+    result.mic_events_overwritten = microphone.overwritten_count;
+    if (selected_end_qpc_100ns <= selected_start_qpc_100ns) return result;
+
+    const auto append = [&](const AudioCorrectionEventSnapshot& source,
+                            AudioCorrectionSource expected_source) {
+        for (const auto& original : source.events) {
+            if (original.source != expected_source
+                    || original.correction_qpc_100ns < selected_start_qpc_100ns
+                    || original.correction_qpc_100ns >= selected_end_qpc_100ns) {
+                continue;
+            }
+            AudioCorrectionEvent event = original;
+            event.clip_relative_time_ms = static_cast<double>(
+                event.correction_qpc_100ns - selected_start_qpc_100ns) / 10'000.0;
+            result.events.push_back(event);
+            const bool is_system = event.source == AudioCorrectionSource::System;
+            if (is_system) {
+                ++result.system_corrections_inside_clip;
+                if (event.direction == AudioCorrectionDirection::Insert)
+                    result.system_inserted_frames_inside_clip += event.correction_frames;
+                else
+                    result.system_skipped_frames_inside_clip += event.correction_frames;
+                AddCorrectionToLargest(event,
+                    &result.largest_system_correction_inside_clip);
+            } else {
+                ++result.mic_corrections_inside_clip;
+                if (event.direction == AudioCorrectionDirection::Insert)
+                    result.mic_inserted_frames_inside_clip += event.correction_frames;
+                else
+                    result.mic_skipped_frames_inside_clip += event.correction_frames;
+                AddCorrectionToLargest(event,
+                    &result.largest_mic_correction_inside_clip);
+            }
+        }
+    };
+    append(system, AudioCorrectionSource::System);
+    append(microphone, AudioCorrectionSource::Microphone);
+    std::sort(result.events.begin(), result.events.end(),
+        [](const AudioCorrectionEvent& left, const AudioCorrectionEvent& right) {
+            return left.correction_qpc_100ns < right.correction_qpc_100ns;
+        });
+    result.maximum_density_250ms = MaxDensity(result.events, 2'500'000ULL);
+    result.maximum_density_1s = MaxDensity(result.events, 10'000'000ULL);
+    return result;
+}
+
+void AudioCorrectionDistribution::Observe(int64_t frames) {
+    if (frames == 0) return;
+    const uint64_t magnitude = frames == std::numeric_limits<int64_t>::min()
+        ? static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1ULL
+        : static_cast<uint64_t>(std::llabs(frames));
+    event_count_.fetch_add(1, std::memory_order_relaxed);
+    total_magnitude_frames_.fetch_add(magnitude, std::memory_order_relaxed);
+    signed_total_frames_.fetch_add(frames, std::memory_order_relaxed);
+    uint64_t maximum = max_single_frames_.load(std::memory_order_relaxed);
+    while (magnitude > maximum
+            && !max_single_frames_.compare_exchange_weak(
+                maximum, magnitude, std::memory_order_relaxed,
+                std::memory_order_relaxed)) {}
+    buckets_[CorrectionBucket(magnitude)].fetch_add(1, std::memory_order_relaxed);
+}
+
+void AudioCorrectionDistribution::Reset() {
+    event_count_.store(0, std::memory_order_relaxed);
+    total_magnitude_frames_.store(0, std::memory_order_relaxed);
+    signed_total_frames_.store(0, std::memory_order_relaxed);
+    max_single_frames_.store(0, std::memory_order_relaxed);
+    for (auto& bucket : buckets_) bucket.store(0, std::memory_order_relaxed);
+}
+
+AudioCorrectionDistributionSnapshot AudioCorrectionDistribution::Snapshot() const {
+    AudioCorrectionDistributionSnapshot result;
+    result.event_count = event_count_.load(std::memory_order_relaxed);
+    result.total_magnitude_frames = total_magnitude_frames_.load(
+        std::memory_order_relaxed);
+    result.signed_total_frames = signed_total_frames_.load(
+        std::memory_order_relaxed);
+    result.max_single_frames = max_single_frames_.load(std::memory_order_relaxed);
+    for (size_t index = 0; index < result.buckets.size(); ++index) {
+        result.buckets[index] = buckets_[index].load(std::memory_order_relaxed);
+    }
+    return result;
+}
+
+AvSyncTimelineEvidence EvaluateAvSyncTimeline(
+    double selected_window_start_s, double selected_window_end_s,
+    MediaTimelineRange video, MediaTimelineRange audio,
+    bool generation_continuous) {
+    AvSyncTimelineEvidence result;
+    result.generation_continuous = generation_continuous;
+    if (!generation_continuous || !video.valid || !audio.valid
+            || selected_window_end_s <= selected_window_start_s
+            || video.end_s < video.start_s || audio.end_s < audio.start_s) {
+        return result;
+    }
+    result.valid = true;
+    result.video_duration_s = video.end_s - video.start_s;
+    result.audio_duration_s = audio.end_s - audio.start_s;
+    result.video_start_relative_to_window_ms =
+        (video.start_s - selected_window_start_s) * 1000.0;
+    result.audio_start_relative_to_window_ms =
+        (audio.start_s - selected_window_start_s) * 1000.0;
+    result.video_end_relative_to_window_ms =
+        (video.end_s - selected_window_end_s) * 1000.0;
+    result.audio_end_relative_to_window_ms =
+        (audio.end_s - selected_window_end_s) * 1000.0;
+    result.av_start_delta_ms = (audio.start_s - video.start_s) * 1000.0;
+    result.av_end_delta_ms = (audio.end_s - video.end_s) * 1000.0;
+    return result;
+}
+
 uint64_t CurrentAudioTimeline100ns() {
 #ifdef _WIN32
     LARGE_INTEGER counter{};
@@ -53,11 +319,27 @@ AudioTimelinePacketAdjustment ReconcileAudioTimelinePacket(
     }
     if (packet_qpc_100ns > next_timeline_100ns) {
         result.gap_100ns = packet_qpc_100ns - next_timeline_100ns;
+        result.timing_error_100ns = result.gap_100ns >
+                static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
+            ? std::numeric_limits<int64_t>::max()
+            : static_cast<int64_t>(result.gap_100ns);
+        if (result.gap_100ns <= kAudioTimelineNormalJitterTolerance100ns) {
+            // Keep the real packet boundary.  A sub-millisecond endpoint
+            // scheduling error must not become literal zero samples in the
+            // waveform; the persistent resampler handles the slow clock
+            // component without repeatedly editing speech/transient edges.
+            result.classification = AudioTimelineAdjustmentClass::NormalJitterAbsorbed;
+            result.normal_jitter_absorbed = true;
+            result.next_timeline_100ns = packet_end;
+            return result;
+        }
         const uint64_t max_gap_100ns = max_synthetic_gap_seconds >
                 std::numeric_limits<uint64_t>::max() / 10'000'000ULL
             ? std::numeric_limits<uint64_t>::max()
             : static_cast<uint64_t>(max_synthetic_gap_seconds) * 10'000'000ULL;
         if (result.gap_100ns > max_gap_100ns) {
+            result.classification = AudioTimelineAdjustmentClass::LargeGap;
+            result.hard_discontinuity = true;
             result.large_gap = true;
             // Do not advance the cursor on a gap that the caller cannot
             // represent with bounded synthetic audio. Providers must fail or
@@ -71,19 +353,35 @@ AudioTimelinePacketAdjustment ReconcileAudioTimelinePacket(
         const uint64_t maximum = static_cast<uint64_t>(max_synthetic_gap_seconds)
             * canonical_sample_rate;
         if (gap_frames > maximum) {
+            result.classification = AudioTimelineAdjustmentClass::LargeGap;
+            result.hard_discontinuity = true;
             result.large_gap = true;
             result.next_timeline_100ns = next_timeline_100ns;
             return result;
         }
         result.silence_frames = static_cast<uint32_t>(std::min<uint64_t>(
             gap_frames, std::numeric_limits<uint32_t>::max()));
+        result.classification = AudioTimelineAdjustmentClass::HardGap;
+        result.hard_discontinuity = true;
     } else if (packet_qpc_100ns < next_timeline_100ns && input_frames > 0) {
         const uint64_t overlap_100ns = next_timeline_100ns - packet_qpc_100ns;
+        result.timing_error_100ns = overlap_100ns >
+                static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
+            ? std::numeric_limits<int64_t>::min()
+            : -static_cast<int64_t>(overlap_100ns);
+        if (overlap_100ns <= kAudioTimelineNormalJitterTolerance100ns) {
+            result.classification = AudioTimelineAdjustmentClass::NormalJitterAbsorbed;
+            result.normal_jitter_absorbed = true;
+            result.next_timeline_100ns = std::max(next_timeline_100ns, packet_end);
+            return result;
+        }
         const uint64_t overlap_frames = overlap_100ns >= packet_duration
             ? input_frames
             : (overlap_100ns * input_sample_rate) / 10'000'000ULL;
         result.skip_input_frames = static_cast<uint32_t>(std::min<uint64_t>(
             overlap_frames, input_frames));
+        result.classification = AudioTimelineAdjustmentClass::HardOverlap;
+        result.hard_discontinuity = true;
     }
     result.next_timeline_100ns = std::max(next_timeline_100ns, packet_end);
     return result;

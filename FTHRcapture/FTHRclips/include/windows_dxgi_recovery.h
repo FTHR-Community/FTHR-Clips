@@ -222,6 +222,24 @@ inline const char* PipelineStallCode(
     return "CAPTURE_FRAME_STALLED";
 }
 
+// A live DXGI duplication can legitimately return S_OK pointer-only updates
+// or WAIT_TIMEOUT while the desktop is static. This is a diagnostic-only
+// watchdog exemption: it requires recent acquire-loop progress, at least one
+// packet, no pending encoder work, and direct evidence of either condition.
+// Persistent encoder resource mappings are not pending work and are excluded
+// by the caller before this helper is evaluated.
+inline bool IsDxgiAliveButDesktopStatic(
+    bool has_packet,
+    bool acquire_loop_recent,
+    bool encoder_idle,
+    bool wait_timeout_current,
+    bool pointer_only_recent) noexcept {
+    return has_packet
+        && acquire_loop_recent
+        && encoder_idle
+        && (wait_timeout_current || pointer_only_recent);
+}
+
 // Bounded DXGI event history written by CaptureThread and read at recovery.
 // The mutex protects event copies: a seqlock check after a non-atomic copy
 // would still permit a C++ data race.
@@ -230,6 +248,7 @@ struct RecentDxgiEvent {
     int64_t acquire_end_qpc = 0;
     int64_t last_present_qpc = 0;
     int64_t presentation_gap_qpc = 0;
+    uint32_t accumulated_frames = 0;
     int32_t acquire_hresult = 0;
     int32_t release_hresult = 0;
     // Opaque per-capture-thread token. Never expose a raw COM pointer in a
@@ -243,6 +262,8 @@ struct RecentDxgiEvent {
     bool acquired = false;
     bool timed_out = false;
     bool pointer_only = false;
+    bool pacing_accepted = false;
+    bool pacing_rejected = false;
     bool release_attempted = false;
 };
 

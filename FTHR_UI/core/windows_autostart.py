@@ -93,8 +93,6 @@ def set_enabled(enabled: bool, *, registry=None,
 
 
 def _winreg():
-    if sys.platform != 'win32':
-        return None
     try:
         import winreg
         return winreg

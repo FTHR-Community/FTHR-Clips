@@ -1,5 +1,11 @@
 """Application entry point, main window, capture coordination, and save flow."""
 
+from ui.icons import IconButton
+from ui.motion import reduce_motion, set_reduce_motion
+from ui.shell_transitions import (
+    ShellPageStack, SnapshotFlight, SnapshotSlide, sidebar_rect, compact_snapshot,
+)
+
 import sys
 import json
 import subprocess
@@ -12,7 +18,6 @@ import threading
 from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime
-from core.compositor import detect_compositor
 _NO_WINDOW = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
 _BACKGROUND_NO_WINDOW = {
     'creationflags': (
@@ -27,8 +32,7 @@ _BACKGROUND_NO_WINDOW = {
 # Windows playback path is Media Foundation; it delivers every source frame in
 # the same smoke clip and reaches a stable handle/memory plateau. Keep an
 # explicit environment override available for backend diagnostics.
-if sys.platform == 'win32':
-    os.environ.setdefault('QT_MEDIA_BACKEND', 'windows')
+os.environ.setdefault('QT_MEDIA_BACKEND', 'windows')
 
 
 # File logging - all output also goes to ~/.fthr/logs/fthr.log
@@ -86,8 +90,6 @@ def _setup_file_logging():
         # Structured logging uses the same file; print() still works
         from core import diagnostics
         diagnostics.configure(log_file=log_file)
-        from core import crash_logging
-        crash_logging.enable_fault_handler(log_dir / 'fthr-crash.log')
     except Exception as e:
         # Log setup failed - report on stderr before redirection
         print(f'[Startup] File logging unavailable: {type(e).__name__}: {e}',
@@ -99,24 +101,20 @@ _setup_file_logging()
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QScrollArea, QFrame, QComboBox, QGridLayout,
-    QGraphicsOpacityEffect, QSizePolicy, QStackedWidget,
+    QSizePolicy,
     QCheckBox, QSlider,
     QToolButton, QButtonGroup, QFileDialog, QLineEdit, QMenu,
     QSystemTrayIcon, QSpinBox, QAbstractSpinBox,
-    QLayout, QDialog, QStyle, QStyleOptionSlider,
+    QLayout, QDialog, QStyle, QStyleOptionSlider, QMessageBox,
 )
-from PySide6.QtCore import (
-    QTimer, QProcess, Signal, Qt, QPoint, QPointF, QSize, QRect, QEvent,
-    QPropertyAnimation, QEasingCurve,
+from PySide6.QtCore import (QUrl, 
+    QTimer, Signal, Qt, QPoint, QSize, QRect, QEvent,
+    QPropertyAnimation, QEasingCurve, Slot,
 )
-from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, QColor, QIcon, QBrush, QPolygonF, QPalette, QAction
+from PySide6.QtGui import QDesktopServices, QImage, QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, QColor, QIcon, QBrush, QPalette, QAction
 
-from core import crash_logging
-crash_logging.install_qt_message_handler()
 from version import __version__ as APP_VERSION, APP_NAME
-from core import linux_tools
 from core.capture_bridge import CaptureBridge
-from core import linux_runtime
 from core.alpha_capabilities import (
     encoder_preset_supported,
     filter_alpha_preset,
@@ -133,6 +131,7 @@ from core.capture_settings import (
     normalize_audio_capture_mode,
     validate_fps,
     validate_normal_clip_length,
+    custom_clip_lengths,
 )
 from core.encoder_capabilities import (
     EncoderCapability,
@@ -142,10 +141,12 @@ from core.encoder_capabilities import (
     save_encoder_capabilities_cache,
 )
 from core.capture_health import (
+    CaptureHealthFlag,
     CaptureHealthMonitor,
     CaptureHealthState,
     evaluate_save_admission,
 )
+from core.error_recovery import RecoveryTracker
 from core.error_codes import APP_FAILURE_CODE_BY_TITLE, format_error_title
 from core.diagnostics import get_logger
 from core.field_diagnostics import (
@@ -183,9 +184,7 @@ from core.hotkey_manager import (
 )
 from core.game_detector import (
     ForegroundGameDetector,
-    GameDetector,
     GameWindow,
-    crop_profile_for_window,
     is_capture_window_valid,
     matching_custom_game_rule,
     normalise_custom_game_rules,
@@ -193,18 +192,22 @@ from core.game_detector import (
 from core.focus_monitor import FocusMonitor
 from core.presets_manager import PresetsManager, PRESET_KEYS
 from core.settings_manager import (
-    SettingsManager, clips_directory_from, recording_directory_from,
+    SettingsManager, StoragePathError, clips_directory_from,
+    default_clips_directory, ensure_storage_directory,
+    prepare_clips_storage, recording_directory_from,
 )
 from core.theme_manager import ThemeManager
 from core.windows_monitor import (
-    default_windows_monitor_path,
+    MonitorSelectionError,
+    MonitorSelectionResult,
+    MonitorSelectionState,
     enumerate_windows_monitors,
-    is_valid_monitor_device_path,
-    normalize_monitor_device_path,
+    is_monitor_capture_identity,
+    is_monitor_selection_sentinel,
+    resolve_monitor_selection,
+    validate_engine_monitor_argument,
 )
 from core.screenshot_target import (
-    build_grim_command,
-    qt_screen_name,
     select_qt_screen,
 )
 from core.screenshot_save import (
@@ -212,12 +215,6 @@ from core.screenshot_save import (
     ScreenshotSaveError,
     publish_staged_png,
     reserve_screenshot_paths,
-)
-from core.wayland_screenshot_portal import WaylandScreenshotPortal
-from core.x11_monitor import (
-    X11MonitorError,
-    is_native_x11_session,
-    resolve_x11_capture_target,
 )
 from core.library_ownership import add_import_root, remove_import_root
 from core.mic_recorder import MicRecorder, write_wav
@@ -249,8 +246,13 @@ from core.windows_microphone_devices import (
     migrate_legacy_microphone_name,
 )
 from core.combined_audio_policy import (
+    build_combined_audio_filter,
     descriptors_from_ffprobe_streams,
     select_combined_audio_streams,
+)
+from core.av_sync_diagnostics import (
+    TimelineProbeError,
+    probe_clip_av_timeline,
 )
 from core.ffmpeg_tools import (
     get_ffmpeg_exe, get_ffprobe_exe, postprocess_video_args,
@@ -262,9 +264,21 @@ from core.media_metadata import (
 )
 from ui.capture_card_client import CaptureCardClient
 from ui.error_bar import ErrorBar
-from ui.frameless_window_linux import install_resize_filter, start_system_move
+from ui.frameless_window_windows import (
+    apply_native_resize_style,
+    decode_nchittest_point,
+    native_hit_test,
+    start_system_move,
+)
+from core.window_geometry import (
+    is_rect_visible,
+    popup_rect_for_anchor,
+    restore_window_geometry,
+    save_window_geometry,
+)
+from core.windows_dpi import dpi_awareness_snapshot
+from ui.smooth_scroll_area import SmoothScrollArea
 from ui.clip_grid import ClipGrid, _show_in_file_manager
-from ui.customize_page import CustomizePage
 from ui.gary_overlay import GaryOverlay
 from ui.camera_overlay_editor import (
     CameraOverlayEditor, OverlayPlacementEditor, UnifiedOverlayPreview,
@@ -284,8 +298,8 @@ from ui.style import (
     ThemedDropdownButton, WheelSafeComboBox, paint_dropdown_arrow,
     retarget_widget_font_styles,
 )
-from ui.app_style import apply_app_style, configure_qt_for_linux_ui
-from ui.dialogs import FthrInputDialog, FthrMessageDialog
+from ui.app_style import apply_app_style, configure_qt_style
+from ui.dialogs import FthrDialog, FthrInputDialog, FthrMessageDialog
 
 try:
     import numpy as _np
@@ -326,263 +340,12 @@ def _load_logo_asset(path: Path) -> QPixmap:
     return QPixmap(str(path))
 
 
-def _make_settings_icon(size: int = 18, color: str = Colors.TEXT) -> QIcon:
-    """Minimal 3-line sliders icon."""
-    pix = QPixmap(size, size)
-    pix.fill(QColor(0, 0, 0, 0))
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor(color), 1.6)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    # Three horizontal lines (decreasing length → "filter/sliders" icon)
-    p.drawLine(1, 4,  size - 1, 4)
-    p.drawLine(1, 9,  size - 4, 9)
-    p.drawLine(1, 14, size - 7, 14)
-    p.end()
-    return QIcon(pix)
-
-
-def _make_power_icon(size: int = 18, color: str = Colors.TEXT) -> QIcon:
-    """Power glyph icon."""
-    pix, painter = _icon_canvas(size)
-    pen = QPen(QColor(color), max(1.4, size * 0.09))
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    painter.setPen(pen)
-    painter.setBrush(Qt.BrushStyle.NoBrush)
-    margin = max(2, round(size * 0.16))
-    painter.drawArc(
-        margin,
-        margin,
-        size - margin * 2,
-        size - margin * 2,
-        130 * 16,
-        280 * 16,
-    )
-    center = size // 2
-    painter.drawLine(center, 1, center, round(size * 0.48))
-    painter.end()
-    return QIcon(pix)
-
-
-def _icon_canvas(size: int):
-    """Create a blank canvas for drawing an icon."""
-    pix = QPixmap(size, size)
-    pix.fill(QColor(0, 0, 0, 0))
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    return pix, p
-
-
-def _make_general_icon(size: int = 22, color: str = Colors.TEXT) -> QIcon:
-    """Gear / sun-burst — 8 pegs around a hollow ring."""
-    pix, p = _icon_canvas(size)
-    pen = QPen(QColor(color), 1.6)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    cx = cy = size / 2
-    # Centre ring
-    r1 = size * 0.20
-    p.drawEllipse(int(cx - r1), int(cy - r1), int(r1 * 2), int(r1 * 2))
-    # 8 pegs
-    for i in range(8):
-        a = i * math.pi / 4
-        x1 = cx + math.cos(a) * (r1 + 1.5)
-        y1 = cy + math.sin(a) * (r1 + 1.5)
-        x2 = cx + math.cos(a) * (size * 0.46)
-        y2 = cy + math.sin(a) * (size * 0.46)
-        p.drawLine(int(x1), int(y1), int(x2), int(y2))
-    p.end()
-    return QIcon(pix)
-
-
-def _make_clip_icon(size: int = 22, color: str = Colors.TEXT) -> QIcon:
-    """Filmstrip — rounded rectangle with sprocket holes top + bottom."""
-    pix, p = _icon_canvas(size)
-    pen = QPen(QColor(color), 1.6)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    pad = 2
-    p.drawRect(pad, pad + 1, size - pad * 2, size - pad * 2 - 2)
-    p.setBrush(QBrush(QColor(color)))
-    p.setPen(Qt.PenStyle.NoPen)
-    hole_w = (size - pad * 2 - 8) / 3
-    for i in range(3):
-        x = pad + 4 + int(i * (hole_w + 2))
-        p.drawRect(x, pad + 4, max(2, int(hole_w)), 2)
-        p.drawRect(x, size - pad - 6, max(2, int(hole_w)), 2)
-    p.end()
-    return QIcon(pix)
-
-
-def _make_audio_icon(size: int = 22, color: str = Colors.TEXT) -> QIcon:
-    """Speaker with two emanation arcs."""
-    pix, p = _icon_canvas(size)
-    pen = QPen(QColor(color), 1.6)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    p.setBrush(QBrush(QColor(color)))
-    # Speaker box
-    p.drawRect(3, int(size * 0.38), 4, int(size * 0.24))
-    # Speaker cone (triangle)
-    cone = QPolygonF([
-        QPointF(7, size * 0.38),
-        QPointF(size * 0.55, size * 0.18),
-        QPointF(size * 0.55, size * 0.82),
-        QPointF(7, size * 0.62),
-    ])
-    p.drawPolygon(cone)
-    # Sound arcs
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    for i, r in enumerate([3.5, 6.5]):
-        rect_x = int(size * 0.55 + i * 1)
-        rect_y = int(size / 2 - r)
-        p.drawArc(rect_x, rect_y, int(r * 2), int(r * 2),
-                  -60 * 16, 120 * 16)
-    p.end()
-    return QIcon(pix)
-
-
-def _make_upload_icon(size: int = 22, color: str = Colors.TEXT) -> QIcon:
-    """Upward arrow rising from a tray — upload icon."""
-    pix, p = _icon_canvas(size)
-    pen = QPen(QColor(color), 1.6)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    cx = size / 2
-    # Tray (horizontal base line)
-    p.drawLine(3, int(size * 0.78), size - 3, int(size * 0.78))
-    # Shaft of arrow
-    p.drawLine(int(cx), int(size * 0.62), int(cx), int(size * 0.22))
-    # Arrow head
-    p.drawLine(int(cx), int(size * 0.22), int(cx - 4), int(size * 0.40))
-    p.drawLine(int(cx), int(size * 0.22), int(cx + 4), int(size * 0.40))
-    p.end()
-    return QIcon(pix)
-
-
-def _make_visuals_icon(size: int = 22, color: str = Colors.TEXT) -> QIcon:
-    """Monitor — rectangle on a stand."""
-    pix, p = _icon_canvas(size)
-    pen = QPen(QColor(color), 1.6)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawRect(2, 4, size - 4, int(size * 0.55))
-    # Stand
-    p.drawLine(int(size / 2) - 3, int(size * 0.78), int(size / 2) + 3, int(size * 0.78))
-    p.drawLine(int(size / 2),     int(size * 0.59),  int(size / 2),     int(size * 0.78))
-    p.end()
-    return QIcon(pix)
-
-
-def _make_version_icon(size: int = 22, color: str = Colors.TEXT) -> QIcon:
-    """Up-arrow inside a downloading-style ring — version & updates."""
-    pix, p = _icon_canvas(size)
-    pen = QPen(QColor(color), 1.6)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    # Three-quarter ring
-    p.drawArc(3, 3, size - 6, size - 6, 30 * 16, 300 * 16)
-    # Down arrow (download)
-    cx = size / 2
-    p.drawLine(int(cx), int(size * 0.30), int(cx), int(size * 0.66))
-    p.drawLine(int(cx), int(size * 0.66), int(cx - 3), int(size * 0.55))
-    p.drawLine(int(cx), int(size * 0.66), int(cx + 3), int(size * 0.55))
-    p.end()
-    return QIcon(pix)
-
-
 _icon_registry: list[tuple[object, str, int]] = []
-
-# QPainter fallbacks for icons that don't have a PNG asset on disk.
-# Maps icon filename → maker(size, color) → QIcon.
-_PAINTER_ICON_FALLBACKS: dict[str, object] = {
-    'upload.png': _make_upload_icon,
-}
-
-
-def _tint_pixmap(pixmap: QPixmap, color: QColor) -> QPixmap:
-    """Recolor all opaque pixels to *color*, preserving alpha."""
-    tinted = QPixmap(pixmap.size())
-    tinted.fill(Qt.GlobalColor.transparent)
-    p = QPainter(tinted)
-    p.drawPixmap(0, 0, pixmap)
-    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-    p.fillRect(tinted.rect(), color)
-    p.end()
-    return tinted
 
 
 def _load_icon(name: str, size: int = 20) -> QIcon:
-    """Load icon, preferring custom theme override over default asset.
-
-    Custom (imported) icons are used as-is.
-    Default icons are tinted with the icon tint color from the theme.
-    """
-    if QApplication.instance() is None:
-        QApplication([])
-    theme = ThemeManager()
-
-    def _file_icon(path: Path) -> QIcon:
-        pix = QPixmap(str(path)).scaled(
-            size, size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        return QIcon(pix)
-
-    # Custom imported icon — use as-is, no tinting
-    try:
-        custom = theme.get_custom_icon_path(name)
-        if custom and custom.exists():
-            return _file_icon(custom)
-    except Exception:
-        # Missing/corrupt optional icons fall through to the text fallback.
-        pass
-
-    # Performance icon = updates.png flipped vertically (arrow points up instead of down)
-    if name == 'performance.png':
-        from PySide6.QtGui import QTransform
-        src = Path(__file__).parent / 'assets' / 'icons' / 'updates.png'
-        if src.exists():
-            pix = QPixmap(str(src)).scaled(
-                size, size,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            pix = pix.transformed(QTransform().scale(1, -1))
-            # Performance is derived from Updates, but it still has its own
-            # customization row so a user can tune the two independently.
-            tint_hex = (
-                theme.get_icon_tint('performance.png')
-                if theme.has_icon_tint_override('performance.png')
-                else theme.get_icon_tint('updates.png')
-            )
-            pix = _tint_pixmap(pix, QColor(tint_hex))
-            return QIcon(pix)
-
-    # Default asset — apply icon tint color
-    path = Path(__file__).parent / 'assets' / 'icons' / name
-    if path.exists():
-        pix = QPixmap(str(path)).scaled(
-            size, size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        tint_hex = theme.get_icon_tint(name)
-        pix = _tint_pixmap(pix, QColor(tint_hex))
-        return QIcon(pix)
-    # Window/tray branding lives at assets/ rather than assets/icons/. Keep
-    # brand artwork in its original colours instead of applying an icon tint.
-    brand_path = Path(__file__).parent / 'assets' / name
-    if brand_path.exists():
-        return QIcon(str(brand_path))
-    # QPainter fallback (registered by feature modules for icons with no PNG)
-    maker = _PAINTER_ICON_FALLBACKS.get(name)
-    if maker:
-        return maker(size)
-    return QIcon()
+    from ui.icons import load_icon
+    return load_icon(name, size)
 
 
 def _register_icon_widget(widget, name: str, size: int):
@@ -668,6 +431,8 @@ FTHR_TEAL_DIM = Colors.ACCENT_DIM
 PANEL_FADE_MS = 180
 
 
+
+
 # Canonical QSS / label fragments come from style.py; aliased so call-sites stay short.
 _saved_fonts = ThemeManager().get_fonts()
 Fonts.configure(_saved_fonts.get('display'), _saved_fonts.get('body'))
@@ -742,14 +507,14 @@ class _NumberSpinBox(QSpinBox):
         self.lineEdit().setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        self._minus = QPushButton('−', self)
+        self._minus = IconButton('decrease.png', self, label='Decrease')
         self._minus.setObjectName('fthrStepDown')
         self._minus.setToolTip('Decrease')
         self._minus.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._minus.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._minus.clicked.connect(self.stepDown)
 
-        self._plus = QPushButton('+', self)
+        self._plus = IconButton('increase.png', self, label='Increase')
         self._plus.setObjectName('fthrStepUp')
         self._plus.setToolTip('Increase')
         self._plus.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -775,15 +540,15 @@ class _NumberSpinBox(QSpinBox):
         self._plus.setEnabled(enabled and self.value() < self.maximum())
 
     def _apply_style(self):
-        self.setStyleSheet(f'''
+        set_theme_style(self, lambda: (f'''
             QSpinBox#fthrNumberSpin {{
                 background-color: {Colors.SURFACE_2};
                 border: 1px solid {Colors.BORDER};
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
                 color: {Colors.TEXT};
                 font-family: {Fonts.DISPLAY};
                 font-size: {Fonts.SIZE_BODY}px;
-                font-weight: bold;
+                font-weight: 600;
                 letter-spacing: 0.8px;
                 padding: 6px 64px 6px 10px;
                 selection-background-color: {Colors.ACCENT};
@@ -803,11 +568,11 @@ class _NumberSpinBox(QSpinBox):
                 background-color: {Colors.SURFACE_1};
                 border: none;
                 border-left: 1px solid {Colors.BORDER};
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_SM}px;
                 color: {Colors.ACCENT};
                 font-family: {Fonts.DISPLAY};
                 font-size: 14px;
-                font-weight: bold;
+                font-weight: 600;
                 padding: 0px;
             }}
             QPushButton#fthrStepDown:hover,
@@ -825,7 +590,7 @@ class _NumberSpinBox(QSpinBox):
                 color: {Colors.TEXT_MUTED};
                 background-color: {Colors.SURFACE_1};
             }}
-        ''')
+        '''))
 
 
 # Mic level meter — paints a horizontal RMS bar driven by a sounddevice stream
@@ -1073,7 +838,7 @@ class _PopupPanel(QFrame):
         self._show_anim: QPropertyAnimation | None = None
 
     def _apply_popup_style(self):
-        self.setStyleSheet(f'''
+        set_theme_style(self, lambda: (f'''
             QFrame#popupPanel {{
                 background-color: {Colors.SURFACE_2};
                 border: {Sizes.BORDER_W}px solid {Colors.BORDER_HI};
@@ -1083,7 +848,7 @@ class _PopupPanel(QFrame):
                 color: {Colors.TEXT};
                 background-color: transparent;
             }}
-        ''')
+        '''))
 
     def refresh_theme(self):
         """Refresh the shared popup shell after an Apply Theme action."""
@@ -1101,6 +866,7 @@ class _PopupPanel(QFrame):
 
     def show_below(self, button: QWidget):
         self.adjustSize()
+        anchor_pos = button.mapToGlobal(QPoint(0, 0))
         pos = button.mapToGlobal(QPoint(0, button.height()))
         x = pos.x()
         y = pos.y()
@@ -1119,27 +885,19 @@ class _PopupPanel(QFrame):
             max_h = max(120, area.height() - margin * 2)
             if self.width() > max_w or self.height() > max_h:
                 self.resize(min(self.width(), max_w), min(self.height(), max_h))
-
-            if x + self.width() > area.right() - margin + 1:
-                x = button.mapToGlobal(
-                    QPoint(button.width() - self.width(), button.height())
-                ).x()
-            x = max(
-                area.left() + margin,
-                min(x, area.right() - margin - self.width() + 1),
-            )
-
-            if y + self.height() > area.bottom() - margin + 1:
-                y = button.mapToGlobal(QPoint(0, -self.height())).y()
-            y = max(
-                area.top() + margin,
-                min(y, area.bottom() - margin - self.height() + 1),
-            )
+            anchor = QRect(
+                anchor_pos.x(), anchor_pos.y(),
+                button.width(), button.height())
+            placed = popup_rect_for_anchor(
+                anchor, self.width(), self.height(), area, margin=margin)
+            x, y = placed.x(), placed.y()
+            if placed.size() != self.size():
+                self.resize(placed.size())
 
         self.move(QPoint(x, y))
 
         app = QApplication.instance()
-        animate = bool(app and app.platformName() != 'wayland')
+        animate = bool(app and app.platformName() != 'wayland' and not reduce_motion(self))
         if animate:
             self.setWindowOpacity(0.0)
         self.show()
@@ -1176,7 +934,7 @@ class _PopupPanel(QFrame):
 
 
 class _ToggleSwitch(QCheckBox):
-    """Compact squared switch matching FTHR's original game controls."""
+    """Rounded switch with a clickable surface covering the entire control."""
 
     def __init__(self, checked: bool = False, parent=None):
         super().__init__(parent)
@@ -1186,9 +944,12 @@ class _ToggleSwitch(QCheckBox):
         self.setFixedSize(38, 20)
         self.toggled.connect(lambda _checked: self.update())
 
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
     def paintEvent(self, _event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         if self.isEnabled():
             track = Colors.ACCENT_SOFT if self.isChecked() else Colors.SURFACE_1
@@ -1205,23 +966,72 @@ class _ToggleSwitch(QCheckBox):
 
         painter.setPen(QPen(QColor(border), 1))
         painter.setBrush(QBrush(QColor(track)))
-        painter.drawRect(1, 2, self.width() - 2, self.height() - 4)
+        painter.drawRoundedRect(1, 2, self.width() - 2, self.height() - 4, 8, 8)
 
         diameter = 12
         x = self.width() - diameter - 5 if self.isChecked() else 5
         y = (self.height() - diameter) // 2
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(QColor(knob)))
-        painter.drawRect(x, y, diameter, diameter)
+        painter.drawEllipse(x, y, diameter, diameter)
         painter.end()
 
 
 # Capture Settings popup
 
+class CustomClipLengthDialog(FthrDialog):
+    """A compact minutes-only duration picker using the app's dialog shell."""
+
+    def __init__(self, seconds=30, parent=None):
+        super().__init__('Custom clip length', parent, width=340)
+        validate_normal_clip_length(seconds)
+        row = QHBoxLayout()
+        label = QLabel('Length')
+        set_theme_style(label, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
+        row.addWidget(label)
+        self.duration_spin = _NumberSpinBox()
+        self.duration_spin.setRange(1, 15)
+        self.duration_spin.setValue(max(1, min(15, round(seconds / 60))))
+        self.duration_spin.setSuffix(' min')
+        self.duration_spin.setAccessibleName('Clip length in minutes')
+        self.duration_spin.setKeyboardTracking(False)
+        row.addWidget(self.duration_spin, 1)
+        self.body_layout.addLayout(row)
+        hint = QLabel('Choose 1–15 minutes.')
+        set_theme_style(hint, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_MICRO)))
+        self.body_layout.addWidget(hint)
+        self.memory_warning = QLabel('Longer clips use more memory, especially at high quality.')
+        self.memory_warning.setWordWrap(True)
+        set_theme_style(self.memory_warning, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_MICRO)))
+        self.body_layout.addWidget(self.memory_warning)
+        cancel = QPushButton('Cancel')
+        set_theme_style(cancel, lambda: (button_outline_qss()))
+        cancel.clicked.connect(self.reject)
+        self.add_button = QPushButton('Add length')
+        set_theme_style(self.add_button, lambda: (button_primary_qss()))
+        self.add_button.clicked.connect(self._accept_length)
+        self.action_layout.addStretch()
+        self.action_layout.addWidget(cancel)
+        self.action_layout.addWidget(self.add_button)
+        self.duration_spin.valueChanged.connect(self._update_warning)
+        self._update_warning()
+
+    def seconds(self):
+        return self.duration_spin.value() * 60
+
+    def _update_warning(self, _value=None):
+        self.memory_warning.setVisible(self.seconds() >= 120)
+
+    def _accept_length(self):
+        self.duration_spin.interpretText()
+        self.accept()
+
+
 class CaptureSettingsPopup(_PopupPanel):
     """Dropdown panel for independent replay-clip and recording profiles."""
 
     clip_length_changed   = Signal(int)
+    custom_lengths_changed = Signal()
     framerate_changed     = Signal(int)
     resolution_changed  = Signal(int, int)
     bitrate_changed     = Signal(int)
@@ -1243,6 +1053,7 @@ class CaptureSettingsPopup(_PopupPanel):
         super().__init__(parent)
         self.sm = settings_manager
         self._restart_pending = False
+        self.setMinimumWidth(460)
 
         self.cur_clip   = self.sm.get('clip_length',    30)
         self.cur_fps    = self.sm.get('framerate',       60)
@@ -1272,7 +1083,7 @@ class CaptureSettingsPopup(_PopupPanel):
             row = QHBoxLayout()
             row.setSpacing(16)
             lbl = QLabel(label_text)
-            lbl.setStyleSheet(_LABEL_STYLE)
+            set_theme_style(lbl, lambda: (_LABEL_STYLE))
             lbl.setFixedWidth(92)
             row.addWidget(lbl)
             row.addWidget(combo, stretch=1)
@@ -1280,8 +1091,8 @@ class CaptureSettingsPopup(_PopupPanel):
 
         profile_row = QHBoxLayout()
         profile_row.setSpacing(8)
-        self.clips_profile_btn = self._make_profile_button('CLIPS')
-        self.recording_profile_btn = self._make_profile_button('RECORDING')
+        self.clips_profile_btn = self._make_profile_button('Clips')
+        self.recording_profile_btn = self._make_profile_button('Recording')
         self.clips_profile_btn.setChecked(True)
         self.clips_profile_btn.clicked.connect(
             lambda: self._set_settings_profile('clips'))
@@ -1298,32 +1109,54 @@ class CaptureSettingsPopup(_PopupPanel):
         clip_fields_layout.setSpacing(12)
 
         # Clip length
-        clip_idx = self._CLIP_VALUES.index(self.cur_clip) \
-            if self.cur_clip in self._CLIP_VALUES else 3
-        self.clip_combo = self._make_combo(self._CLIP_LABELS, clip_idx,
-                                           self._on_clip_changed)
-        clip_fields_layout.addLayout(_row('CLIP LENGTH', self.clip_combo))
+        self.clip_combo = self._make_combo([], -1, self._on_clip_changed)
+        self._reload_clip_choices()
+        clip_fields_layout.addLayout(_row('Clip length', self.clip_combo))
+        self.add_custom_length_btn = QPushButton('Add custom clip length…')
+        set_theme_style(self.add_custom_length_btn, lambda: (button_outline_qss()))
+        self.add_custom_length_btn.clicked.connect(self._add_custom_length)
+        clip_fields_layout.addWidget(self.add_custom_length_btn)
+        self.custom_lengths_scroll = QScrollArea()
+        self.custom_lengths_scroll.setWidgetResizable(True)
+        self.custom_lengths_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.custom_lengths_widget = QWidget()
+        self.custom_lengths_layout = QVBoxLayout(self.custom_lengths_widget)
+        self.custom_lengths_layout.setContentsMargins(0, 0, 0, 0)
+        self.custom_lengths_scroll.setWidget(self.custom_lengths_widget)
+        clip_fields_layout.addWidget(self.custom_lengths_scroll)
+        self.custom_lengths_hint = QLabel('Set a separate shortcut for each length in Hotkeys.')
+        self.custom_lengths_hint.setWordWrap(True)
+        set_theme_style(self.custom_lengths_hint, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_MICRO)))
+        clip_fields_layout.addWidget(self.custom_lengths_hint)
+        self._reload_custom_lengths()
+
+        self.clip_memory_warning = QLabel(
+            'Longer clips can use a lot of memory, especially at high quality.')
+        self.clip_memory_warning.setWordWrap(True)
+        set_theme_style(self.clip_memory_warning, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_MICRO)))
+        self.clip_memory_warning.setVisible(self.cur_clip >= 120)
+        clip_fields_layout.addWidget(self.clip_memory_warning)
 
         # FPS
         fps_idx = self._FPS_VALUES.index(self.cur_fps) \
             if self.cur_fps in self._FPS_VALUES else 1
         self.fps_combo = self._make_combo(
             [str(v) for v in self._FPS_VALUES], fps_idx, self._on_fps_changed)
-        clip_fields_layout.addLayout(_row('FRAMERATE', self.fps_combo))
+        clip_fields_layout.addLayout(_row('Framerate', self.fps_combo))
 
         # Resolution
         res_idx = self._RES_KEYS.index(self.cur_res.lower()) \
             if self.cur_res.lower() in self._RES_KEYS else 4
         self.res_combo = self._make_combo(self._RES_LABELS, res_idx,
                                           self._on_res_changed)
-        clip_fields_layout.addLayout(_row('RESOLUTION', self.res_combo))
+        clip_fields_layout.addLayout(_row('Resolution', self.res_combo))
 
         # Quality
         qual_idx = self._QUAL_KEYS.index(self.cur_qual) \
             if self.cur_qual in self._QUAL_KEYS else 2
         self.qual_combo = self._make_combo(self._QUAL_LABELS, qual_idx,
                                             self._on_qual_changed)
-        clip_fields_layout.addLayout(_row('QUALITY', self.qual_combo))
+        clip_fields_layout.addLayout(_row('Quality', self.qual_combo))
 
         # Keep the editable value and both step buttons inside one control.
         # This restores the compact original treatment and aligns the control
@@ -1331,8 +1164,8 @@ class CaptureSettingsPopup(_PopupPanel):
         # into the label gutter.
         bitrate_row = QHBoxLayout()
         bitrate_row.setSpacing(16)
-        bitrate_label = QLabel('CUSTOM BITRATE')
-        bitrate_label.setStyleSheet(_LABEL_STYLE)
+        bitrate_label = QLabel('Custom bitrate')
+        set_theme_style(bitrate_label, lambda: (_LABEL_STYLE))
         bitrate_label.setFixedWidth(92)
         bitrate_row.addWidget(bitrate_label)
 
@@ -1382,26 +1215,26 @@ class CaptureSettingsPopup(_PopupPanel):
             [str(v) for v in self._FPS_VALUES], recording_fps_idx,
             self._on_recording_fps_changed)
         recording_fields_layout.addLayout(
-            _row('FRAMERATE', self.recording_fps_combo))
+            _row('Framerate', self.recording_fps_combo))
 
         recording_res_idx = self._RES_KEYS.index(str(self.recording_res).lower()) \
             if str(self.recording_res).lower() in self._RES_KEYS else 4
         self.recording_res_combo = self._make_combo(
             self._RES_LABELS, recording_res_idx, self._on_recording_res_changed)
         recording_fields_layout.addLayout(
-            _row('RESOLUTION', self.recording_res_combo))
+            _row('Resolution', self.recording_res_combo))
 
         recording_qual_idx = self._QUAL_KEYS.index(self.recording_qual) \
             if self.recording_qual in self._QUAL_KEYS else 2
         self.recording_qual_combo = self._make_combo(
             self._QUAL_LABELS, recording_qual_idx, self._on_recording_qual_changed)
         recording_fields_layout.addLayout(
-            _row('QUALITY', self.recording_qual_combo))
+            _row('Quality', self.recording_qual_combo))
 
         recording_bitrate_row = QHBoxLayout()
         recording_bitrate_row.setSpacing(16)
-        recording_bitrate_label = QLabel('CUSTOM BITRATE')
-        recording_bitrate_label.setStyleSheet(_LABEL_STYLE)
+        recording_bitrate_label = QLabel('Custom bitrate')
+        set_theme_style(recording_bitrate_label, lambda: (_LABEL_STYLE))
         recording_bitrate_label.setFixedWidth(92)
         recording_bitrate_row.addWidget(recording_bitrate_label)
         self.recording_custom_bitrate_spin = _NumberSpinBox()
@@ -1436,8 +1269,8 @@ class CaptureSettingsPopup(_PopupPanel):
         # row focused on the action that belongs to this popup.
         apply_row = QHBoxLayout()
         apply_row.addStretch(1)
-        self.restart_btn = QPushButton('APPLY')
-        self.restart_btn.setStyleSheet(button_primary_qss())
+        self.restart_btn = QPushButton('Apply')
+        set_theme_style(self.restart_btn, lambda: (button_primary_qss()))
         self.restart_btn.setVisible(False)
         self.restart_btn.clicked.connect(self._on_restart)
         apply_row.addWidget(self.restart_btn)
@@ -1447,22 +1280,23 @@ class CaptureSettingsPopup(_PopupPanel):
         c = _DropdownCombo()
         c.addItems(items)
         c.setCurrentIndex(idx)
-        c.setStyleSheet(_COMBO_STYLE)
+        set_theme_style(c, lambda: (_COMBO_STYLE))
         c.currentIndexChanged.connect(callback)
         return c
 
     def refresh_theme(self):
         super().refresh_theme()
         for combo in self.findChildren(QComboBox):
-            combo.setStyleSheet(_COMBO_STYLE)
+            set_theme_style(combo, lambda: (_COMBO_STYLE))
         for label in self.findChildren(QLabel):
             if label.text() in {
-                    'CLIP LENGTH', 'FRAMERATE', 'RESOLUTION',
-                    'QUALITY', 'CUSTOM BITRATE'}:
-                label.setStyleSheet(_LABEL_STYLE)
+                    'Clip length', 'Framerate', 'Resolution',
+                    'Quality', 'Custom bitrate'}:
+                set_theme_style(label, lambda: (_LABEL_STYLE))
         for button in (self.clips_profile_btn, self.recording_profile_btn):
-            button.setStyleSheet(self._profile_button_qss())
-        self.restart_btn.setStyleSheet(button_primary_qss())
+            set_theme_style(button, lambda: (self._profile_button_qss()))
+        set_theme_style(self.clip_memory_warning, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_MICRO)))
+        set_theme_style(self.restart_btn, lambda: (button_primary_qss()))
 
     @staticmethod
     def _profile_button_qss() -> str:
@@ -1474,7 +1308,7 @@ class CaptureSettingsPopup(_PopupPanel):
                 color: {Colors.TEXT_DIM};
                 font-family: {Fonts.DISPLAY};
                 font-size: {Fonts.SIZE_LABEL}px;
-                font-weight: bold;
+                font-weight: 600;
                 letter-spacing: {Fonts.TRACK_LABEL}px;
                 padding: 0 12px;
             }}
@@ -1497,7 +1331,7 @@ class CaptureSettingsPopup(_PopupPanel):
         button.setFixedHeight(30)
         button.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        button.setStyleSheet(CaptureSettingsPopup._profile_button_qss())
+        set_theme_style(button, lambda: (CaptureSettingsPopup._profile_button_qss()))
         return button
 
     def _set_settings_profile(self, profile: str):
@@ -1512,16 +1346,89 @@ class CaptureSettingsPopup(_PopupPanel):
         self.adjustSize()
 
     def _on_clip_changed(self, idx):
-        self.cur_clip = self._CLIP_VALUES[idx]
+        if idx < 0:
+            return
+        seconds = self.clip_combo.itemData(idx)
+        self.cur_clip = validate_normal_clip_length(seconds)
         self.sm.set('clip_length', self.cur_clip)
         self.sm.save_settings()
+        self._reload_clip_choices()
+        self.clip_memory_warning.setVisible(self.cur_clip >= 120)
+        self.adjustSize()
         self._mark_restart()
         self.clip_length_changed.emit(self.cur_clip)
         self._update_summary()
 
+    def _add_custom_length(self):
+        dialog = CustomClipLengthDialog(self.cur_clip, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        seconds = validate_normal_clip_length(dialog.seconds())
+        custom = sorted(set(self._custom_clip_lengths() + [seconds]))
+        if custom == self._custom_clip_lengths():
+            return
+        self.sm.set('custom_clip_lengths', custom)
+        self.sm.save_settings()
+        self._reload_custom_lengths()
+        self._mark_restart()
+        self.custom_lengths_changed.emit()
+        self.adjustSize()
+
+    def _custom_clip_lengths(self):
+        return custom_clip_lengths(self.sm.get('custom_clip_lengths', []))
+
+    def _reload_custom_lengths(self):
+        count = len(self._custom_clip_lengths())
+        self.custom_lengths_scroll.setVisible(bool(count))
+        self.custom_lengths_scroll.setFixedHeight(min(150, count * 48))
+        self.custom_lengths_hint.setVisible(bool(count))
+        while self.custom_lengths_layout.count():
+            item = self.custom_lengths_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for seconds in self._custom_clip_lengths():
+            widget = QWidget()
+            row = QHBoxLayout(widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            label = QLabel(f'Custom {self._clip_length_label(seconds)}')
+            set_theme_style(label, lambda: (_LABEL_STYLE))
+            row.addWidget(label, 1)
+            remove = QPushButton('Remove')
+            set_theme_style(remove, lambda: (button_outline_qss()))
+            remove.clicked.connect(lambda _checked=False, value=seconds:
+                                   self._remove_custom_length(value))
+            row.addWidget(remove)
+            self.custom_lengths_layout.addWidget(widget)
+    def _remove_custom_length(self, seconds):
+        self.sm.set('custom_clip_lengths', [value for value in
+                    self._custom_clip_lengths() if value != seconds])
+        self.sm.save_settings()
+        self._reload_custom_lengths()
+        self._mark_restart()
+        self.custom_lengths_changed.emit()
+        self.adjustSize()
+
+    @staticmethod
+    def _clip_length_label(seconds):
+        minutes, remainder = divmod(seconds, 60)
+        if not minutes:
+            return f'{seconds}s'
+        value = f'{seconds / 60:.2f}'.rstrip('0').rstrip('.')
+        return f'{value}m'
+
+    def _reload_clip_choices(self):
+        values = sorted(set(self._CLIP_VALUES + [self.cur_clip]))
+        self.clip_combo.blockSignals(True)
+        self.clip_combo.clear()
+        for seconds in values:
+            self.clip_combo.addItem(self._clip_length_label(seconds), seconds)
+        self.clip_combo.setCurrentIndex(self.clip_combo.findData(self.cur_clip))
+        self.clip_combo.blockSignals(False)
+
 
     def reload_from_settings(self):
         self.cur_clip = self.sm.get('clip_length', 30)
+        self._reload_custom_lengths()
         self.cur_fps  = self.sm.get('framerate', 60)
         self.cur_res  = self.sm.get('resolution', 'source')
         self.cur_qual = self.sm.get('bitrate_level', 'high')
@@ -1537,8 +1444,9 @@ class CaptureSettingsPopup(_PopupPanel):
             self.sm.get('recording_custom_bitrate_kbps'),
             self.recording_custom_bitrate)
 
+        self._reload_clip_choices()
+        self.clip_memory_warning.setVisible(self.cur_clip >= 120)
         for combo, values, val in [
-            (self.clip_combo, self._CLIP_VALUES, self.cur_clip),
             (self.fps_combo,  self._FPS_VALUES,   self.cur_fps),
         ]:
             idx = values.index(val) if val in values else 0
@@ -1706,25 +1614,13 @@ class CaptureSettingsPopup(_PopupPanel):
             self.restart_btn.setVisible(False)
 
     def _update_summary(self):
-        clip_label = self._CLIP_LABELS[self._CLIP_VALUES.index(self.cur_clip)] \
-            if self.cur_clip in self._CLIP_VALUES else f'{self.cur_clip}s'
-        res_label  = self._RES_LABELS[self._RES_KEYS.index(self.cur_res.lower())] \
-            if self.cur_res.lower() in self._RES_KEYS else self.cur_res.upper()
-        quality_label = (
-            f'CUSTOM {self.cur_custom_bitrate:,} KBPS'
-            if self.cur_qual == 'custom' else self.cur_qual.upper())
-        summary = f'{clip_label}  ·  {self.cur_fps}fps  ·  {res_label}  ·  {quality_label}'
-        self.summary_changed.emit(summary)
+        self.summary_changed.emit(self.get_summary())
 
     def get_summary(self) -> str:
-        clip_label = self._CLIP_LABELS[self._CLIP_VALUES.index(self.cur_clip)] \
-            if self.cur_clip in self._CLIP_VALUES else f'{self.cur_clip}s'
+        clip_label = self._clip_length_label(self.cur_clip)
         res_label  = self._RES_LABELS[self._RES_KEYS.index(self.cur_res.lower())] \
-            if self.cur_res.lower() in self._RES_KEYS else self.cur_res.upper()
-        quality_label = (
-            f'CUSTOM {self.cur_custom_bitrate:,} KBPS'
-            if self.cur_qual == 'custom' else self.cur_qual.upper())
-        return f'{clip_label}  ·  {self.cur_fps}fps  ·  {res_label}  ·  {quality_label}'
+            if self.cur_res.lower() in self._RES_KEYS else self.cur_res
+        return f'{clip_label} // {self.cur_fps} fps // {res_label} // {self.get_bitrate():,} kbps'
 
     def get_bitrate(self) -> int:
         if self.cur_qual == 'custom':
@@ -1765,15 +1661,15 @@ class SourcePopup(_PopupPanel):
         # the standard 300px panel width and removes stale vertical geometry.
         layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        layout.setSpacing(Sizes.ROW_GAP)
 
-        lbl = QLabel('CAPTURE SOURCE')
-        lbl.setStyleSheet(_LABEL_STYLE)
+        lbl = QLabel('Capture source')
+        set_theme_style(lbl, lambda: (_LABEL_STYLE))
         layout.addWidget(lbl)
 
         self.mode_combo = _DropdownCombo()
         self.mode_combo.addItems(['Desktop', 'Window / Game'])
-        self.mode_combo.setStyleSheet(_COMBO_STYLE)
+        set_theme_style(self.mode_combo, lambda: (_COMBO_STYLE))
         if self.cur_mode == 'window':
             self.mode_combo.setCurrentIndex(1)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
@@ -1781,9 +1677,9 @@ class SourcePopup(_PopupPanel):
 
         # Window list row
         win_row = QHBoxLayout()
-        win_row.setSpacing(6)
+        win_row.setSpacing(Sizes.SPACE_3)
         self.window_combo = _DropdownCombo()
-        self.window_combo.setStyleSheet(_COMBO_STYLE)
+        set_theme_style(self.window_combo, lambda: (_COMBO_STYLE))
         self.window_combo.setMinimumWidth(240)
         self.window_combo.currentIndexChanged.connect(self._on_window_selected)
         win_row.addWidget(self.window_combo)
@@ -1795,9 +1691,9 @@ class SourcePopup(_PopupPanel):
             self.refresh_btn.setIconSize(QSize(14, 14))
             _register_icon_widget(self.refresh_btn, 'refresh.png', 14)
         else:
-            self.refresh_btn.setText('↺')
+            self.refresh_btn.setText('Refresh')
         self.refresh_btn.setFixedSize(28, 28)
-        self.refresh_btn.setStyleSheet(f'''
+        set_theme_style(self.refresh_btn, lambda: (f'''
             QPushButton {{
                 background-color: {Colors.BG};
                 border: {Sizes.BORDER_W}px solid {Colors.TEXT};
@@ -1808,62 +1704,85 @@ class SourcePopup(_PopupPanel):
                 border-color: {Colors.ACCENT};
                 color: {Colors.ACCENT};
             }}
-        ''')
+        '''))
         self.refresh_btn.clicked.connect(self._refresh_windows)
         win_row.addWidget(self.refresh_btn)
         layout.addLayout(win_row)
 
         # Monitor selector (desktop mode only)
         self.monitor_combo = _DropdownCombo()
-        self.monitor_combo.setStyleSheet(_COMBO_STYLE)
-        if sys.platform == 'win32':
-            monitor_choices = enumerate_windows_monitors()
-            screens_by_name = {
-                screen.name().lower(): screen for screen in QApplication.screens()
-            }
-            for choice in monitor_choices:
-                screen = screens_by_name.get(choice.gdi_name.lower())
-                details = ''
-                if screen is not None:
-                    geometry = screen.availableGeometry()
-                    details = (
-                        f'  ({geometry.width()}×{geometry.height()} '
-                        f'@ {int(screen.refreshRate())}Hz)'
-                    )
-                primary = ' · Primary' if choice.primary else ''
-                self.monitor_combo.addItem(
-                    f'{choice.friendly_name}{details}{primary}',
-                    userData=choice.device_path,
-                )
-
-            saved_mon = normalize_monitor_device_path(self.cur_monitor)
-            if saved_mon and self.monitor_combo.findData(saved_mon) < 0:
-                # One-time migration from the former QScreen/GDI-name setting.
-                legacy = next(
-                    (choice for choice in monitor_choices
-                     if choice.gdi_name.lower() == self.cur_monitor.lower()),
-                    None,
-                )
-                saved_mon = legacy.device_path if legacy else saved_mon
-            if self.monitor_combo.count() and self.monitor_combo.findData(saved_mon) < 0:
-                saved_mon = default_windows_monitor_path(monitor_choices)
-            if saved_mon != self.cur_monitor:
-                self.cur_monitor = saved_mon
-                self.sm.set('capture_monitor', saved_mon)
-                self.sm.save_settings()
-            if not monitor_choices:
-                self.monitor_combo.addItem('No active Windows monitor found', userData='')
-                self.monitor_combo.setEnabled(False)
-        else:
-            self.monitor_combo.addItem('First Screen (Default)', userData='')
-            for screen in QApplication.screens():
+        set_theme_style(self.monitor_combo, lambda: (_COMBO_STYLE))
+        monitor_choices = enumerate_windows_monitors()
+        screens_by_name = {
+            screen.name().lower(): screen for screen in QApplication.screens()
+        }
+        for choice in monitor_choices:
+            screen = screens_by_name.get(choice.gdi_name.lower())
+            details = ''
+            if screen is not None:
                 geometry = screen.availableGeometry()
-                self.monitor_combo.addItem(
-                    f'{screen.name()}  ({geometry.width()}×{geometry.height()} '
-                    f'@ {int(screen.refreshRate())}Hz)',
-                    userData=screen.name(),
+                details = (
+                    f'  ({geometry.width()}×{geometry.height()} '
+                    f'@ {int(screen.refreshRate())}Hz)'
                 )
-            saved_mon = self.cur_monitor
+            primary = ' · Primary' if choice.primary else ''
+            self.monitor_combo.addItem(
+                f'{choice.friendly_name}{details}{primary}',
+                userData=choice.device_path,
+            )
+
+        stored_mon = str(self.cur_monitor or '')
+        selection = resolve_monitor_selection(stored_mon, monitor_choices)
+        self._monitor_selection_result = selection
+        saved_mon = selection.path
+        if selection.persist_required and selection.path:
+            previous_value = self.sm.get('capture_monitor', stored_mon)
+            self.sm.set('capture_monitor', selection.path)
+            if not self.sm.save_settings():
+                # Do not leave an in-memory path that was not committed to
+                # settings.  Startup will independently fail closed if the
+                # same persistence operation cannot be completed.
+                self.sm.set('capture_monitor', previous_value)
+                saved_mon = str(previous_value or '')
+                self._monitor_selection_result = MonitorSelectionResult(
+                    state=MonitorSelectionState.PERSIST_FAILED,
+                    code='MONITOR_PERSIST_FAILED',
+                    reason='could not persist resolved monitor path',
+                    previous_state=selection.previous_state,
+                    previous_path=selection.previous_path,
+                )
+                emit_event(
+                    'capture', 'monitor_selection_failed', state='FAILED',
+                    error='MONITOR_PERSIST_FAILED',
+                    monitor_selection=self._monitor_selection_result.as_dict())
+        if self._monitor_selection_result.path:
+            emit_event(
+                'capture', self._monitor_selection_result.code.lower(),
+                **self._monitor_selection_result.as_dict())
+        if not saved_mon and stored_mon:
+            if is_monitor_selection_sentinel(stored_mon):
+                # Diagnostic sentinels are not monitor identities. Keep
+                # the unresolved state visible without putting the marker
+                # into combo userData or the in-memory selection.
+                self.monitor_combo.addItem(
+                    'Monitor selection requires recovery', userData='')
+            elif is_monitor_capture_identity(stored_mon):
+                # A stale canonical path may remain visible as a bounded
+                # diagnostic-only row; it is still rejected by startup
+                # unless the resolver can recover it.
+                saved_mon = stored_mon
+                self.monitor_combo.addItem(
+                    'Unavailable monitor (saved)', userData=stored_mon)
+            else:
+                # Legacy/non-canonical values are never exposed as a
+                # selectable monitor identity when migration is ambiguous.
+                self.monitor_combo.addItem(
+                    'Monitor selection requires recovery', userData='')
+        if saved_mon != self.cur_monitor:
+            self.cur_monitor = saved_mon
+        if not monitor_choices:
+            self.monitor_combo.addItem('No active Windows monitor found', userData='')
+            self.monitor_combo.setEnabled(False)
         idx = self.monitor_combo.findData(saved_mon)
         if idx >= 0:
             self.monitor_combo.setCurrentIndex(idx)
@@ -1872,8 +1791,8 @@ class SourcePopup(_PopupPanel):
 
         apply_row = QHBoxLayout()
         apply_row.addStretch(1)
-        self.restart_btn = QPushButton('APPLY')
-        self.restart_btn.setStyleSheet(button_primary_qss())
+        self.restart_btn = QPushButton('Apply')
+        set_theme_style(self.restart_btn, lambda: (button_primary_qss()))
         self.restart_btn.setVisible(False)
         self.restart_btn.clicked.connect(self._on_restart)
         apply_row.addWidget(self.restart_btn)
@@ -1903,11 +1822,11 @@ class SourcePopup(_PopupPanel):
     def refresh_theme(self):
         super().refresh_theme()
         for combo in self.findChildren(QComboBox):
-            combo.setStyleSheet(_COMBO_STYLE)
+            set_theme_style(combo, lambda: (_COMBO_STYLE))
         for label in self.findChildren(QLabel):
             if label.text() == 'CAPTURE SOURCE':
-                label.setStyleSheet(_LABEL_STYLE)
-        self.refresh_btn.setStyleSheet(f'''
+                set_theme_style(label, lambda: (_LABEL_STYLE))
+        set_theme_style(self.refresh_btn, lambda: (f'''
             QPushButton {{
                 background-color: {Colors.SURFACE_2};
                 border: {Sizes.BORDER_W}px solid {Colors.BORDER};
@@ -1916,8 +1835,8 @@ class SourcePopup(_PopupPanel):
             QPushButton:hover {{
                 border-color: {Colors.ACCENT}; color: {Colors.ACCENT};
             }}
-        ''')
-        self.restart_btn.setStyleSheet(button_primary_qss())
+        '''))
+        set_theme_style(self.restart_btn, lambda: (button_primary_qss()))
 
     def show_below(self, button: QWidget):
         self._fit_to_visible_content()
@@ -2055,7 +1974,7 @@ class SourcePopup(_PopupPanel):
         elif self._window_list:
             idx = self.window_combo.currentIndex()
             if 0 <= idx < len(self._window_list):
-                label = self._window_list[idx]['display_name'].upper()
+                label = self._window_list[idx]['display_name']
             else:
                 label = 'WINDOW'
         else:
@@ -2067,7 +1986,7 @@ class SourcePopup(_PopupPanel):
             return 'DESKTOP'
         idx = self.window_combo.currentIndex()
         if 0 <= idx < len(self._window_list):
-            return self._window_list[idx]['display_name'].upper()
+            return self._window_list[idx]['display_name']
         return 'WINDOW'
 
 
@@ -2100,8 +2019,8 @@ class GameDetectionPopup(_PopupPanel):
 
         header = QHBoxLayout()
         header.setSpacing(12)
-        title = QLabel('GAME DETECTION')
-        title.setStyleSheet(_LABEL_STYLE)
+        title = QLabel('Game detection')
+        set_theme_style(title, lambda: (_LABEL_STYLE))
         header.addWidget(title)
         header.addStretch()
         self.detection_switch = _ToggleSwitch(
@@ -2114,8 +2033,8 @@ class GameDetectionPopup(_PopupPanel):
 
         layout.addWidget(self._section_divider())
 
-        mode_label = QLabel('SWITCH MODE')
-        mode_label.setStyleSheet(_LABEL_STYLE)
+        mode_label = QLabel('Switch mode')
+        set_theme_style(mode_label, lambda: (_LABEL_STYLE))
         layout.addWidget(mode_label)
 
         mode_row = QHBoxLayout()
@@ -2132,9 +2051,9 @@ class GameDetectionPopup(_PopupPanel):
 
         fallback_row = QHBoxLayout()
         fallback_row.setSpacing(12)
-        fallback_label = QLabel('FALL BACK TO DESKTOP')
-        fallback_label.setStyleSheet(label_uppercase(
-            Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL))
+        fallback_label = QLabel('Fall back to desktop')
+        set_theme_style(fallback_label, lambda: (label_uppercase(
+            Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         fallback_label.setToolTip(
             'Only automatic game selections are returned to desktop capture.')
         fallback_row.addWidget(fallback_label)
@@ -2152,45 +2071,28 @@ class GameDetectionPopup(_PopupPanel):
 
         layout.addWidget(self._section_divider())
 
-        manual_label = QLabel('MANUAL GAMES')
-        manual_label.setStyleSheet(_LABEL_STYLE)
+        manual_label = QLabel('Manual games')
+        set_theme_style(manual_label, lambda: (_LABEL_STYLE))
         layout.addWidget(manual_label)
 
-        title_row = QHBoxLayout()
-        title_row.setSpacing(8)
-        title_row.addWidget(self._field_caption('TITLE'))
-        self.title_edit = QLineEdit()
-        self.title_edit.setPlaceholderText('Contains text, e.g. Minecraft')
-        self.title_edit.setStyleSheet(self._custom_game_input_qss())
-        title_row.addWidget(self.title_edit, 1)
-        layout.addLayout(title_row)
-
-        exe_row = QHBoxLayout()
-        exe_row.setSpacing(8)
-        exe_row.addWidget(self._field_caption('EXECUTABLE'))
-        self.exe_edit = QLineEdit()
-        self.exe_edit.setPlaceholderText('Optional .exe path or name')
-        self.exe_edit.setStyleSheet(self._custom_game_input_qss())
-        exe_row.addWidget(self.exe_edit, 1)
-        browse = QPushButton('BROWSE')
-        browse.setStyleSheet(button_outline_qss())
-        browse.clicked.connect(self._browse_executable)
-        exe_row.addWidget(browse)
-        browse_folder = QPushButton('FOLDER')
-        browse_folder.setStyleSheet(button_outline_qss())
-        browse_folder.clicked.connect(self._browse_game_folder)
-        exe_row.addWidget(browse_folder)
-        layout.addLayout(exe_row)
-
-        add_btn = QPushButton('ADD MANUAL GAME')
-        add_btn.setStyleSheet(button_secondary_qss())
-        add_btn.clicked.connect(self._add_rule)
-        layout.addWidget(add_btn)
-
+        self.running_window_combo = QComboBox()
+        set_theme_style(self.running_window_combo, combo_qss)
+        layout.addWidget(self.running_window_combo)
+        buttons = QHBoxLayout()
+        for label, callback in (
+                ('Refresh windows', self._refresh_running_windows),
+                ('Add manual game', lambda: self._add_running_window(False)),
+                ('Block detection', lambda: self._add_running_window(True))):
+            button = QPushButton(label)
+            set_theme_style(button, lambda: (button_outline_qss()))
+            button.clicked.connect(callback)
+            buttons.addWidget(button)
+        layout.addLayout(buttons)
+        QTimer.singleShot(0, self._refresh_running_windows)
+    
         self.browser_status = QLabel('')
         self.browser_status.setWordWrap(True)
-        self.browser_status.setStyleSheet(
-            label_body(Colors.TEXT_DIM, Fonts.SIZE_MICRO))
+        set_theme_style(self.browser_status, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_MICRO)))
         self.browser_status.setVisible(False)
         layout.addWidget(self.browser_status)
 
@@ -2208,16 +2110,15 @@ class GameDetectionPopup(_PopupPanel):
     def _section_divider() -> QFrame:
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setStyleSheet(
-            f'QFrame {{ color: {Colors.BORDER}; max-height: 1px; }}')
+        set_theme_style(divider, lambda: (f'QFrame {{ color: {Colors.BORDER}; max-height: 1px; }}'))
         return divider
 
     @staticmethod
     def _field_caption(text: str) -> QLabel:
         caption = QLabel(text)
         caption.setFixedWidth(76)
-        caption.setStyleSheet(label_uppercase(
-            Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL))
+        set_theme_style(caption, lambda: (label_uppercase(
+            Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         return caption
 
     def _custom_game_input_qss(self) -> str:
@@ -2243,7 +2144,7 @@ class GameDetectionPopup(_PopupPanel):
         button.setFixedHeight(30)
         button.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        button.setStyleSheet(self._mode_button_qss())
+        set_theme_style(button, lambda: (self._mode_button_qss()))
         return button
 
     @staticmethod
@@ -2256,7 +2157,7 @@ class GameDetectionPopup(_PopupPanel):
                 color: {Colors.TEXT_DIM};
                 font-family: {Fonts.DISPLAY};
                 font-size: {Fonts.SIZE_LABEL}px;
-                font-weight: bold;
+                font-weight: 600;
                 letter-spacing: {Fonts.TRACK_LABEL}px;
                 padding: 0 10px;
             }}
@@ -2280,35 +2181,39 @@ class GameDetectionPopup(_PopupPanel):
     def refresh_theme(self):
         super().refresh_theme()
         for edit in self.findChildren(QLineEdit):
-            edit.setStyleSheet(self._custom_game_input_qss())
+            set_theme_style(edit, lambda: (self._custom_game_input_qss()))
         for button in self.findChildren(QToolButton):
             if button in (self.auto_switch_btn, self.prompt_switch_btn):
-                button.setStyleSheet(self._mode_button_qss())
+                set_theme_style(button, lambda: (self._mode_button_qss()))
         for button in self.findChildren(QPushButton):
             if button.text() in {'BROWSE', 'FOLDER'}:
-                button.setStyleSheet(button_outline_qss())
+                set_theme_style(button, lambda: (button_outline_qss()))
             elif button.text() == 'ADD MANUAL GAME':
-                button.setStyleSheet(button_secondary_qss())
+                set_theme_style(button, lambda: (button_secondary_qss()))
             else:
-                button.setStyleSheet(button_outline_qss())
+                set_theme_style(button, lambda: (button_outline_qss()))
         for label in self.findChildren(QLabel):
             if label.text() in {
                     'GAME DETECTION', 'SWITCH MODE', 'MANUAL GAMES'}:
-                label.setStyleSheet(_LABEL_STYLE)
+                set_theme_style(label, lambda: (_LABEL_STYLE))
         self._rebuild_rules()
         self._sync_state()
 
     def _rebuild_rules(self):
-        while self._rules_layout.count():
-            item = self._rules_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        def clear_layout(layout):
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.hide()
+                    widget.deleteLater()
+                elif item.layout() is not None:
+                    clear_layout(item.layout())
+        clear_layout(self._rules_layout)
         if not self._custom_rules:
             empty = QLabel('No manual game rules.')
-            empty.setStyleSheet(label_body(Colors.TEXT_MUTED, Fonts.SIZE_MICRO))
+            set_theme_style(empty, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_MICRO)))
             self._rules_layout.addWidget(empty)
-            return
 
         for index, rule in enumerate(self._custom_rules):
             row = QHBoxLayout()
@@ -2320,26 +2225,81 @@ class GameDetectionPopup(_PopupPanel):
             if title and exe:
                 label = f'{title} · {exe}'
             text = QLabel(label)
-            text.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_MICRO))
+            set_theme_style(text, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_MICRO)))
             text.setToolTip(str(rule.get('exe_path', '')
                                 or rule.get('folder_path', '') or title))
             row.addWidget(text, 1)
-            crop_profile = rule.get('crop_profile')
-            crop = QPushButton(
-                'CROP OVERRIDE ON' if isinstance(crop_profile, dict)
-                and crop_profile.get('enabled', True) else 'CROP OVERRIDE')
-            crop.setStyleSheet(button_outline_qss())
-            crop.setToolTip('Set an exact manual crop for this game.')
-            crop.clicked.connect(
-                lambda _checked=False, i=index: self._edit_crop(i))
-            row.addWidget(crop)
-            remove = QPushButton('×')
+            pass
+            remove = IconButton('close.png', label='Close')
             remove.setFixedSize(24, 24)
-            remove.setStyleSheet(button_outline_qss())
+            set_theme_style(remove, lambda: (button_outline_qss()))
             remove.clicked.connect(
                 lambda _checked=False, i=index: self._remove_rule(i))
             row.addWidget(remove)
             self._rules_layout.addLayout(row)
+
+        self._rules_layout.addWidget(QLabel('Blocked from game detection'))
+        blocked = normalise_custom_game_rules(self.sm.get('game_detection_blacklist', []))
+        if not blocked:
+            self._rules_layout.addWidget(QLabel('No blocked applications.'))
+        for index, rule in enumerate(blocked):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(str(rule['exe_name'] or rule['title_contains'])), 1)
+            remove = IconButton('close.png', label='Remove blocked application')
+            remove.setFixedSize(24, 24)
+            remove.clicked.connect(lambda _checked=False, i=index: self._remove_blacklist_rule(i))
+            row.addWidget(remove)
+            self._rules_layout.addLayout(row)
+
+    def _refresh_running_windows(self):
+        from ui.capture_settings_widget import _enumerate_capturable_windows
+        selected = self.running_window_combo.currentData()
+        self.running_window_combo.clear()
+        windows = _enumerate_capturable_windows()
+        for window in windows:
+            self.running_window_combo.addItem(
+                f"{window['display_name']} · {window['title']}", window['hwnd'])
+        index = self.running_window_combo.findData(selected)
+        if index >= 0:
+            self.running_window_combo.setCurrentIndex(index)
+        if not windows:
+            self.running_window_combo.addItem('No running windows available', None)
+
+    def _add_running_window(self, blacklist=False):
+        from core.game_detector import get_window_info
+        hwnd = self.running_window_combo.currentData()
+        window = get_window_info(hwnd) if hwnd else None
+        if window is None:
+            self._set_browser_status('That window has closed. Refresh the list.', error=True)
+            return
+        rule = {'exe_path': window.exe_path, 'exe_name': window.exe_name,
+                'title_contains': '' if window.exe_path or window.exe_name else window.title}
+        rules = list(normalise_custom_game_rules([rule]))
+        if not rules:
+            return
+        if blacklist:
+            blocked = list(normalise_custom_game_rules(
+                self.sm.get('game_detection_blacklist', [])))
+            if rules[0] not in blocked:
+                blocked.append(rules[0])
+            self.sm.set('game_detection_blacklist', blocked)
+            self.sm.save_settings()
+            self._rebuild_rules()
+            self.custom_games_changed.emit(list(self._custom_rules))
+        else:
+            if rules[0] not in self._custom_rules:
+                self._custom_rules.append(rules[0])
+            self._save_rules()
+        self._set_browser_status('Detection blocked.' if blacklist else 'Manual game added.')
+
+    def _remove_blacklist_rule(self, index):
+        rules = list(normalise_custom_game_rules(self.sm.get('game_detection_blacklist', [])))
+        if 0 <= index < len(rules):
+            del rules[index]
+            self.sm.set('game_detection_blacklist', rules)
+            self.sm.save_settings()
+            self._rebuild_rules()
+            self.custom_games_changed.emit(list(self._custom_rules))
 
     def _browse_executable(self):
         self._open_deferred_game_picker(folder=False)
@@ -2349,10 +2309,10 @@ class GameDetectionPopup(_PopupPanel):
 
     def _set_browser_status(self, message: str, *, error: bool = False):
         self.browser_status.setText(message)
-        self.browser_status.setStyleSheet(label_body(
+        set_theme_style(self.browser_status, lambda error=error: (label_body(
             Colors.ERROR if error else Colors.ACCENT,
             Fonts.SIZE_MICRO,
-        ))
+        )))
         self.browser_status.setVisible(bool(message))
 
     def _open_deferred_game_picker(self, *, folder: bool):
@@ -2399,8 +2359,8 @@ class GameDetectionPopup(_PopupPanel):
             self._custom_rules.append(normalized[0])
             self._save_rules()
             self._set_browser_status(
-                f'Added {Path(selected).name}. An exact crop override can be '
-                'set below.')
+                f'Added {Path(selected).name}.' + (' An exact crop override can be set below.'
+                                                  if sys.platform != 'win32' else ''))
 
         QTimer.singleShot(0, _open)
 
@@ -2416,7 +2376,7 @@ class GameDetectionPopup(_PopupPanel):
                     for name in names:
                         checked += 1
                         candidate = Path(root) / name
-                        if ((sys.platform == 'win32' and candidate.suffix.lower() == '.exe')
+                        if ((candidate.suffix.lower() == '.exe')
                                 or (sys.platform != 'win32'
                                     and os.access(candidate, os.X_OK))):
                             return ''
@@ -2429,10 +2389,9 @@ class GameDetectionPopup(_PopupPanel):
             return 'No executable was found in the selected game folder.'
         if not target.is_file():
             return 'The selected executable no longer exists.'
-        if sys.platform == 'win32' and target.suffix.lower() != '.exe':
+        if target.suffix.lower() != '.exe':
             return 'Select a Windows .exe file.'
-        if sys.platform != 'win32' and not os.access(target, os.X_OK):
-            return 'The selected file is not executable.'
+        pass
         return ''
 
     def _add_rule(self):
@@ -2552,14 +2511,14 @@ class GameDetectionPopup(_PopupPanel):
 
     def _emit_summary(self):
         self.summary_changed.emit(
-            'GAME DETECT ON' if self.detection_switch.isChecked()
-            else 'GAME DETECT OFF')
+            'Game detection: On' if self.detection_switch.isChecked()
+            else 'Game detection: Off')
 
     def get_summary(self) -> str:
         return (
-            'GAME DETECT ON'
+            'Game detection: On'
             if self.detection_switch.isChecked()
-            else 'GAME DETECT OFF'
+            else 'Game detection: Off'
         )
 
 def _record_button_qss(recording: bool = False, muted: bool = False) -> str:
@@ -2594,7 +2553,7 @@ def _clear_button_qss() -> str:
             font-size: {Fonts.SIZE_MICRO}px;
             font-family: {Fonts.DISPLAY};
             letter-spacing: {Fonts.TRACK_LABEL}px;
-            font-weight: bold;
+            font-weight: 600;
             padding: 0 7px;
             min-height: 28px;
         }}
@@ -2634,7 +2593,7 @@ class _KeyboardBindingButton(QPushButton):
         if not self._recording:
             value = self.hotkey_manager.get_hotkey(self.action, device='keyboard')
             self.setText(format_keyboard_combo(value))
-            self.setStyleSheet(_record_button_qss(muted=not bool(value)))
+            set_theme_style(self, lambda value=value: (_record_button_qss(muted=not bool(value))))
 
     def cancel_recording(self):
         if self._recording:
@@ -2649,7 +2608,7 @@ class _KeyboardBindingButton(QPushButton):
             self._recorded_order.clear()
             self.hotkey_manager.begin_input_capture()
             self.setText('Press keys')
-            self.setStyleSheet(_record_button_qss(recording=True))
+            set_theme_style(self, lambda: (_record_button_qss(recording=True)))
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self.grabKeyboard()
 
@@ -2725,8 +2684,7 @@ class _ControllerBindingButton(QPushButton):
         self.setMinimumWidth(108)
         self.setFixedHeight(30)
         self.setEnabled(sys.platform == 'win32')
-        if sys.platform != 'win32':
-            self.setToolTip('Controller hotkeys are available on Windows.')
+        pass
         self.clicked.connect(self._toggle_recording)
         self.refresh_value()
 
@@ -2734,7 +2692,7 @@ class _ControllerBindingButton(QPushButton):
         if not self._recording:
             value = self.hotkey_manager.get_controller_hotkey(self.action)
             self.setText(format_controller_combo(value))
-            self.setStyleSheet(_record_button_qss(muted=not bool(value)))
+            set_theme_style(self, lambda value=value: (_record_button_qss(muted=not bool(value))))
 
     def cancel_recording(self):
         if self._recording:
@@ -2750,7 +2708,7 @@ class _ControllerBindingButton(QPushButton):
         self.hotkey_manager.controller_buttons_changed.connect(
             self._on_controller_buttons_changed)
         self.setText('Press buttons')
-        self.setStyleSheet(_record_button_qss(recording=True))
+        set_theme_style(self, lambda: (_record_button_qss(recording=True)))
         self.setFocus(Qt.FocusReason.MouseFocusReason)
 
     def _on_controller_buttons_changed(self, buttons):
@@ -2796,8 +2754,10 @@ class HotkeyPopup(_PopupPanel):
     def __init__(self, hotkey_manager: HotkeyManager, parent=None):
         super().__init__(parent)
         self.hotkey_manager = hotkey_manager
-        self.setMinimumWidth(456)
+        self.setMinimumWidth(550)
         self._binding_buttons = []
+        self._keyboard_buttons = {}
+        self._keyboard_clear_buttons = {}
         self._controller_buttons = {}
         self._controller_clear_buttons = {}
         self._setup_ui()
@@ -2808,107 +2768,123 @@ class HotkeyPopup(_PopupPanel):
         layout.setSpacing(12)
 
         label = QLabel('HOTKEYS')
-        label.setStyleSheet(_LABEL_STYLE)
+        set_theme_style(label, lambda: (_LABEL_STYLE))
         layout.addWidget(label)
+        self.actions_scroll = QScrollArea()
+        self.actions_scroll.setWidgetResizable(True)
+        self.actions_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.actions_widget = QWidget()
+        self.actions_layout = QVBoxLayout(self.actions_widget)
+        self.actions_layout.setContentsMargins(0, 0, 0, 0)
+        self.actions_layout.setSpacing(10)
+        self.actions_scroll.setWidget(self.actions_widget)
+        layout.addWidget(self.actions_scroll)
+        self.reload_actions()
+
+    def reload_actions(self):
+        for button in self._binding_buttons:
+            button.cancel_recording()
+        while self.actions_layout.count():
+            item = self.actions_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._binding_buttons.clear()
+        self._keyboard_buttons.clear()
+        self._keyboard_clear_buttons.clear()
+        self._controller_buttons.clear()
+        self._controller_clear_buttons.clear()
         actions = [
             ('CAPTURE CLIP', 'save_clip'),
             ('SCREENSHOT', 'save_screenshot'),
+            ('CONFIRM GAME', 'confirm_game_detection'),
+            ('DISMISS GAME', 'dismiss_game_detection'),
+            ('START RECORDING', 'start_recording'),
+            ('STOP RECORDING', 'stop_recording'),
         ]
-        if sys.platform == 'win32':
-            actions.extend([
-                ('START RECORDING', 'start_recording'),
-                ('STOP RECORDING', 'stop_recording'),
-            ])
+        from core.hotkey_manager import custom_clip_seconds
+        custom_actions = sorted(
+            (custom_clip_seconds(action), action)
+            for action in self.hotkey_manager.hotkeys
+            if custom_clip_seconds(action) is not None)
+        actions[1:1] = [(f'CLIP {CaptureSettingsPopup._clip_length_label(seconds)}', action)
+                        for seconds, action in custom_actions]
         for label_text, action_key in actions:
-            layout.addWidget(self._create_action_row(label_text, action_key))
-
-        if sys.platform != 'win32':
-            if self.hotkey_manager.portal_active:
-                # The desktop owns these keys: pressing a key above only states
-                # a preference, and the compositor's answer is written back.
-                note = QLabel(
-                    'Your desktop manages these shortcuts. If it keeps a '
-                    'different key, change it in the desktop shortcut settings.')
-                note.setWordWrap(True)
-                note.setStyleSheet(
-                    f'color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px; '
-                    'padding-top: 6px;')
-                layout.addWidget(note)
-                desktop_btn = QPushButton('EDIT IN DESKTOP SETTINGS')
-                desktop_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-                desktop_btn.setStyleSheet(_clear_button_qss())
-                desktop_btn.clicked.connect(
-                    self.hotkey_manager.open_desktop_shortcut_settings)
-                layout.addWidget(desktop_btn, 0, Qt.AlignmentFlag.AlignLeft)
-                self.hotkey_manager.desktop_bindings_changed.connect(
-                    self._refresh_binding_values)
-            else:
-                from core.compositor import detect_compositor
-                compositor = detect_compositor()
-                instructions = self.hotkey_manager.setup_instructions(compositor)
-                instructions_label = QLabel(instructions)
-                instructions_label.setWordWrap(True)
-                instructions_label.setTextInteractionFlags(
-                    Qt.TextInteractionFlag.TextSelectableByMouse)
-                instructions_label.setStyleSheet(
-                    f'color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px; '
-                    'font-family: monospace; padding-top: 6px;')
-                layout.addWidget(instructions_label)
-
-    def _refresh_binding_values(self, *_args):
-        for button in self._binding_buttons:
-            button.refresh_value()
+            self.actions_layout.addWidget(self._create_action_row(label_text, action_key))
+        self.actions_scroll.setFixedHeight(min(540, len(actions) * 86))
+        self.adjustSize()
 
     def _create_action_row(self, label_text: str, action_key: str) -> QFrame:
         frame = QFrame()
         frame.setObjectName('hotkeyActionRow')
-        frame.setStyleSheet(_hotkey_action_frame_qss())
+        set_theme_style(frame, lambda: (_hotkey_action_frame_qss()))
         grid = QGridLayout(frame)
         grid.setContentsMargins(12, 10, 12, 10)
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(6)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(3, 1)
 
         action_label = QLabel(label_text)
-        action_label.setStyleSheet(
-            label_uppercase(Colors.TEXT, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL))
+        set_theme_style(action_label, lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL)))
         action_label.setFixedWidth(108)
         grid.addWidget(action_label, 0, 0, 2, 1)
 
-        keyboard_label = QLabel('KEYBOARD')
-        keyboard_label.setStyleSheet(
-            label_uppercase(Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL))
-        grid.addWidget(keyboard_label, 0, 1)
-        controller_label = QLabel('CONTROLLER')
-        controller_label.setStyleSheet(
-            label_uppercase(Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL))
-        grid.addWidget(controller_label, 0, 2, 1, 2)
+        keyboard_label = QLabel('Keyboard')
+        set_theme_style(keyboard_label, lambda: (label_uppercase(Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
+        grid.addWidget(keyboard_label, 0, 1, 1, 2)
+        controller_label = QLabel('Controller')
+        set_theme_style(controller_label, lambda: (label_uppercase(Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
+        grid.addWidget(controller_label, 0, 3, 1, 2)
 
         keyboard_btn = _KeyboardBindingButton(self.hotkey_manager, action_key)
         controller_btn = _ControllerBindingButton(self.hotkey_manager, action_key)
-        clear_btn = QPushButton('CLEAR')
+        keyboard_clear = QPushButton('Clear')
+        keyboard_clear.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        keyboard_clear.setFixedSize(46, 30)
+        set_theme_style(keyboard_clear, lambda: (_clear_button_qss()))
+        keyboard_clear.setAccessibleName(f'Clear keyboard shortcut for {label_text.lower()}')
+        keyboard_clear.clicked.connect(
+            lambda _checked=False, action=action_key: self._clear_keyboard_bind(action))
+        keyboard_btn.binding_changed.connect(
+            lambda action=action_key: self._sync_keyboard_clear(action))
+        clear_btn = QPushButton('Clear')
         clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         clear_btn.setFixedSize(46, 30)
-        clear_btn.setStyleSheet(_clear_button_qss())
+        set_theme_style(clear_btn, lambda: (_clear_button_qss()))
+        clear_btn.setAccessibleName(f'Clear controller shortcut for {label_text.lower()}')
         clear_btn.clicked.connect(
             lambda _checked=False, action=action_key: self._clear_controller_bind(action))
         controller_btn.binding_changed.connect(
             lambda action=action_key: self._sync_controller_clear(action))
 
         self._binding_buttons.extend([keyboard_btn, controller_btn])
+        self._keyboard_buttons[action_key] = keyboard_btn
+        self._keyboard_clear_buttons[action_key] = keyboard_clear
         self._controller_buttons[action_key] = controller_btn
         self._controller_clear_buttons[action_key] = clear_btn
         grid.addWidget(keyboard_btn, 1, 1)
-        grid.addWidget(controller_btn, 1, 2)
-        grid.addWidget(clear_btn, 1, 3)
+        grid.addWidget(keyboard_clear, 1, 2)
+        grid.addWidget(controller_btn, 1, 3)
+        grid.addWidget(clear_btn, 1, 4)
+        self._sync_keyboard_clear(action_key)
         self._sync_controller_clear(action_key)
         return frame
 
     def _clear_controller_bind(self, action_key: str):
+        self._controller_buttons[action_key].cancel_recording()
         self.hotkey_manager.set_hotkey(action_key, '', device='controller')
         self._controller_buttons[action_key].refresh_value()
         self._sync_controller_clear(action_key)
+
+    def _clear_keyboard_bind(self, action_key: str):
+        self._keyboard_buttons[action_key].cancel_recording()
+        self.hotkey_manager.set_hotkey(action_key, '', device='keyboard')
+        self._keyboard_buttons[action_key].refresh_value()
+        self._sync_keyboard_clear(action_key)
+
+    def _sync_keyboard_clear(self, action_key: str):
+        self._keyboard_clear_buttons[action_key].setEnabled(
+            bool(self.hotkey_manager.get_hotkey(action_key, device='keyboard')))
 
     def _sync_controller_clear(self, action_key: str):
         clear_btn = self._controller_clear_buttons[action_key]
@@ -2920,19 +2896,21 @@ class HotkeyPopup(_PopupPanel):
         super().refresh_theme()
         for button in self._binding_buttons:
             button.refresh_value()
+        for action_key, button in self._keyboard_clear_buttons.items():
+            set_theme_style(button, lambda: (_clear_button_qss()))
+            self._sync_keyboard_clear(action_key)
         for action_key, button in self._controller_clear_buttons.items():
-            button.setStyleSheet(_clear_button_qss())
+            set_theme_style(button, lambda: (_clear_button_qss()))
             self._sync_controller_clear(action_key)
         for frame in self.findChildren(QFrame):
             if frame.objectName() == 'hotkeyActionRow':
-                frame.setStyleSheet(_hotkey_action_frame_qss())
+                set_theme_style(frame, lambda: (_hotkey_action_frame_qss()))
         for label in self.findChildren(QLabel):
             if label.text() in {'HOTKEYS', 'KEYBOARD', 'CONTROLLER'}:
-                label.setStyleSheet(
-                    _LABEL_STYLE if label.text() == 'HOTKEYS'
+                set_theme_style(label, lambda label=label: (_LABEL_STYLE if label.text() == 'HOTKEYS'
                     else label_uppercase(
                         Colors.TEXT_DIM, Fonts.SIZE_MICRO,
-                        Fonts.TRACK_LABEL))
+                        Fonts.TRACK_LABEL)))
 
     def hideEvent(self, event):
         for button in self._binding_buttons:
@@ -2943,53 +2921,38 @@ class HotkeyPopup(_PopupPanel):
 # TopBarButton — a styled button for the top bar dropdowns
 
 class TopBarButton(ThemedDropdownButton):
-    """Compact rounded-rect button for the dark status row that shows a summary + dropdown arrow."""
+    """Readable capture toolbar control with a shared dropdown arrow."""
 
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
-        self.setFixedHeight(32)
-        self.setStyleSheet(f'''
-            QPushButton {{
-                background-color: {Colors.SURFACE_2};
-                border: 1px solid {Colors.BORDER};
-                border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.TEXT};
-                font-size: {Fonts.SIZE_LABEL}px;
-                font-family: {Fonts.DISPLAY};
-                letter-spacing: {Fonts.TRACK_LABEL}px;
-                font-weight: bold;
-                padding: 0px 30px 0px 14px;
-                min-width: 60px;
-            }}
-            QPushButton:hover {{
-                color: {Colors.ACCENT};
-                border-color: {Colors.ACCENT};
-            }}
-            QPushButton:pressed {{
-                color: {Colors.BG};
-                background-color: {Colors.ACCENT};
-                border-color: {Colors.ACCENT};
-            }}
-        ''')
+        self.setFixedHeight(Sizes.CAPTURE_CONTROL_H)
+        self.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+        self.refresh_theme()
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(str(text))
+
     def refresh_theme(self):
-        self.setStyleSheet(f'''
+        set_theme_style(self, lambda: (f'''
             QPushButton {{
-                background-color: {Colors.SURFACE_2};
-                border: 1px solid {Colors.BORDER};
+                background-color: {Colors.SURFACE_3};
+                border: none;
                 border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px;
+                color: {Colors.TEXT}; font-size: {Fonts.SIZE_TOOLBAR}px;
                 font-family: {Fonts.DISPLAY};
-                letter-spacing: {Fonts.TRACK_LABEL}px; font-weight: bold;
-                padding: 0px 30px 0px 14px; min-width: 60px;
+                letter-spacing: {Fonts.TRACK_LABEL}px; font-weight: 400;
+                padding: 0px 30px 0px 14px;
+                text-align: left;
             }}
-            QPushButton:hover {{ color: {Colors.ACCENT}; border-color: {Colors.ACCENT}; }}
+            QPushButton:hover {{ color: {Colors.ACCENT}; background-color: {Colors.SURFACE_2}; }}
             QPushButton:pressed {{
                 color: {Colors.BG}; background-color: {Colors.ACCENT};
-                border-color: {Colors.ACCENT};
             }}
-        ''')
+        '''))
+        self.ensurePolished()
+        self.updateGeometry()
 
 
 # Stats strip
@@ -3024,7 +2987,7 @@ class _StatsStrip(QFrame):
 
         layout.addStretch()
 
-        buf_text = QLabel('BUFFER')
+        buf_text = QLabel('Buffer')
         buf_text.setObjectName('statsBufText')
         layout.addWidget(buf_text)
 
@@ -3033,12 +2996,10 @@ class _StatsStrip(QFrame):
         # Buffer progress bar with a thin track and themed accent fill.
         bar_wrap = QFrame()
         bar_wrap.setFixedSize(120, 3)
-        bar_wrap.setStyleSheet(
-            f'QFrame {{ background-color: {Colors.BORDER}; border: none; }}')
+        set_theme_style(bar_wrap, lambda: (f'QFrame {{ background-color: {Colors.BORDER}; border: none; }}'))
         self._buf_fill = QFrame(bar_wrap)
         self._buf_fill.setGeometry(0, 0, 0, 3)
-        self._buf_fill.setStyleSheet(
-            f'QFrame {{ background-color: {Colors.ACCENT}; border: none; }}')
+        set_theme_style(self._buf_fill, lambda: (f'QFrame {{ background-color: {Colors.ACCENT}; border: none; }}'))
         layout.addWidget(bar_wrap)
 
         layout.addSpacing(12)
@@ -3047,7 +3008,7 @@ class _StatsStrip(QFrame):
         self._buf_time_lbl.setObjectName('statsBufTime')
         layout.addWidget(self._buf_time_lbl)
 
-        self.setStyleSheet(f'''
+        set_theme_style(self, lambda: (f'''
             QFrame#statsStrip {{
                 background-color: {Colors.BG};
                 border-bottom: 1px solid {Colors.TEXT};
@@ -3055,7 +3016,7 @@ class _StatsStrip(QFrame):
             QLabel#statsEncoder {{
                 color: {Colors.ACCENT};
                 font-size: {Fonts.SIZE_MICRO}px;
-                font-weight: bold;
+                font-weight: 600;
                 font-family: {Fonts.DISPLAY};
                 letter-spacing: {Fonts.TRACK_LABEL}px;
                 background: transparent;
@@ -3074,7 +3035,7 @@ class _StatsStrip(QFrame):
             QLabel#statsBufText {{
                 color: {Colors.TEXT_DIM};
                 font-size: {Fonts.SIZE_MICRO}px;
-                font-weight: bold;
+                font-weight: 600;
                 font-family: {Fonts.DISPLAY};
                 letter-spacing: {Fonts.TRACK_LABEL}px;
                 background: transparent;
@@ -3086,7 +3047,7 @@ class _StatsStrip(QFrame):
                 background: transparent;
                 min-width: 60px;
             }}
-        ''')
+        '''))
 
     def update_stats(self, frames: int, fill_ratio: float, encoder: str,
                      connected: bool, buffer_sec: int):
@@ -3130,19 +3091,21 @@ class MainWindow(QMainWindow):
         self._shutdown_timer_started = None
         self._tray_icon = None
         self._background_ui_paused = False
-        # Set by the first paintEvent; see _apply_background_ui_paused.
+        # A freshly shown Wayland surface must paint once before UI updates
+        # are paused; otherwise the compositor may never map the window.
         self._first_frame_painted = False
         self._background_ui_pause_deferred = False
         self._pending_status_display: tuple[str, str] | None = None
         self._capture_settings_applying = False
+        self._capture_apply_timer = QTimer(self)
+        self._capture_apply_timer.setSingleShot(True)
+        self._capture_apply_timer.setInterval(30_000)
+        self._capture_apply_timer.timeout.connect(self._capture_apply_timed_out)
         self._screenshot_inflight = False
         self._screenshot_pending_requests = 0
         self._screenshot_capture_process = None
         self._screenshot_capture_paths = None
         self._screenshot_save_worker = None
-        self._screenshot_portal = None
-        self._screenshot_portal_paths = None
-        self._screenshot_portal_offer_paths = None
         self._lifecycle_log = get_logger('lifecycle')
         self._diagnostics = get_diagnostic_session()
         self._last_capture_health_event_at = 0.0
@@ -3151,12 +3114,19 @@ class MainWindow(QMainWindow):
         self._clip_diagnostic_started_by_path: dict[str, float] = {}
         self._diagnostic_engine_start_count = 0
         self._active_clip_viewer = None
+        self._active_editor_session = None
+        self._editor_sessions = []
 
         # Frameless window --
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
         self.settings_manager = SettingsManager()
+        set_reduce_motion(self.settings_manager.get('reduce_ui_animations', False))
+        # Fail early and visibly if the selected library root cannot be
+        # created. Never switch to another location behind the user's back.
+        clips_root = prepare_clips_storage(
+            clips_directory_from(self.settings_manager), probe_writable=True)
         # Windows keyboard visualizers are sampled independently from the
         # native replay engine.  Keeping this service alive with MainWindow
         # means the timestamped source ring continues while the settings page
@@ -3224,11 +3194,14 @@ class MainWindow(QMainWindow):
 
         self.capture_width, self.capture_height = _resolution_to_dims(saved_res)
         self.buffer_seconds = compute_buffer_seconds(
-            self.clip_duration)
+            self.clip_duration, self.settings_manager.get('custom_clip_lengths', []))
         self._capture_config = CaptureConfigTracker()
 
         self.engine_process = None
-        self._engine_connect_thread: threading.Thread | None = None
+        self._engine_gen = 0
+        self._engine_process_generation = None
+        self._recoverable_error_incidents = {}
+        self._error_recovery_tracker = RecoveryTracker()
         self._engine_startup_output = None
         self.bridge         = CaptureBridge()
         self._engine_profile = 'clips'
@@ -3247,36 +3220,25 @@ class MainWindow(QMainWindow):
         self._capture_health_snapshot = None
         self._capture_health_log = get_logger('capture.health')
 
-        if sys.platform == 'win32':
-            if getattr(sys, 'frozen', False):
-                possible_paths = [Path(sys._MEIPASS) / 'engine' / 'FTHRClips.exe']
-            else:
-                project_root   = Path(__file__).parent.parent / 'FTHRcapture'
-                possible_paths = [
-                    # Direct project builds are useful while the running
-                    # solution-level engine is locked. Prefer the freshly
-                    # compiled source-checkout artifact; frozen releases still
-                    # use only their bundled _MEIPASS engine above.
-                    project_root / 'FTHRclips' / 'x64' / 'CFRReleaseFinal' / 'FTHRclips.exe',
-                    project_root / 'FTHRclips' / 'x64' / 'CFRRelease' / 'FTHRclips.exe',
-                    project_root / 'FTHRclips' / 'x64' / 'Release' / 'FTHRclips.exe',
-                    project_root / 'FTHRclips' / 'x64' / 'Debug'   / 'FTHRclips.exe',
-                    project_root / 'x64' / 'Release' / 'FTHRClips.exe',
-                    project_root / 'x64' / 'Debug'   / 'FTHRClips.exe',
-                    project_root / 'Release'          / 'FTHRClips.exe',
-                    project_root / 'Debug'            / 'FTHRClips.exe',
-                ]
+        if getattr(sys, 'frozen', False):
+            possible_paths = [Path(sys._MEIPASS) / 'engine' / 'FTHRClips.exe']
         else:
-            _env_engine = os.environ.get('FTHR_ENGINE', '')
-            if getattr(sys, 'frozen', False):
-                # In frozen PyInstaller build the engine is in _internal/ (_MEIPASS)
-                possible_paths = [Path(sys._MEIPASS) / 'FTHRclips']
-            else:
-                linux_root = Path(__file__).parent.parent / 'FTHRcapture_linux'
-                possible_paths = [
-                    *([ Path(_env_engine) ] if _env_engine else []),
-                    linux_root / 'build' / 'FTHRclips',
-                ]
+            project_root   = Path(__file__).parent.parent / 'FTHRcapture'
+            possible_paths = [
+                # Direct project builds are useful while the running
+                # solution-level engine is locked. Prefer the freshly
+                # compiled source-checkout artifact; frozen releases still
+                # use only their bundled _MEIPASS engine above.
+                project_root / 'FTHRclips' / 'x64' / 'CFRReleasePause' / 'FTHRclips.exe',
+                project_root / 'FTHRclips' / 'x64' / 'CFRReleaseFinal' / 'FTHRclips.exe',
+                project_root / 'FTHRclips' / 'x64' / 'CFRRelease' / 'FTHRclips.exe',
+                project_root / 'FTHRclips' / 'x64' / 'Release' / 'FTHRclips.exe',
+                project_root / 'FTHRclips' / 'x64' / 'Debug'   / 'FTHRclips.exe',
+                project_root / 'x64' / 'Release' / 'FTHRClips.exe',
+                project_root / 'x64' / 'Debug'   / 'FTHRClips.exe',
+                project_root / 'Release'          / 'FTHRClips.exe',
+                project_root / 'Debug'            / 'FTHRClips.exe',
+            ]
         self.engine_path = None
         existing_engines = [p for p in possible_paths if p.is_file()]
         if existing_engines:
@@ -3288,12 +3250,6 @@ class MainWindow(QMainWindow):
             print(f"Engine found: {self.engine_path.resolve()}")
         if not self.engine_path:
             print("Engine not found.")
-
-        clips_root = clips_directory_from(self.settings_manager)
-
-        # Pre-create the special folders so users can find them right away
-        for _folder in ('Desktop', 'Recordings', 'Exported', 'Shared', 'Screenshots'):
-            (clips_root / _folder).mkdir(parents=True, exist_ok=True)
 
         # A hard kill can leave the engine's same-directory transaction file.
         # Only old, FTHR-named partials are removed; fresh files may belong to a
@@ -3312,6 +3268,8 @@ class MainWindow(QMainWindow):
              clips_root, on_complete=_report_partial_recovery)
 
         self.hotkey_manager = HotkeyManager()
+        self.hotkey_manager.configure_custom_clips(
+            self.settings_manager.get('custom_clip_lengths', []), register=False)
 
         self._pending_game_window: GameWindow | dict | None = None
         self._active_game_window: GameWindow | None = None
@@ -3331,18 +3289,14 @@ class MainWindow(QMainWindow):
         self._fallback_watch_timer.setInterval(1000)
         self._fallback_watch_timer.timeout.connect(self._on_game_lost)
 
-        if sys.platform == 'win32':
-            self._game_detector = ForegroundGameDetector(
-                self,
-                custom_game_rules=self.settings_manager.get(
-                    'game_detection_custom_games', []),
-            )
-            self._game_detector.game_detected.connect(self._on_game_detected)
-            self._game_detector.game_lost.connect(self._on_game_lost)
-        else:
-            self._game_detector = GameDetector(parent=self)
-            self._game_detector.game_appeared.connect(self._on_game_appeared)
-            self._game_detector.game_closed.connect(self._on_game_closed)
+        self._game_detector = ForegroundGameDetector(
+            self,
+            custom_game_rules=self.settings_manager.get(
+                'game_detection_custom_games', []),
+            blacklist_rules=self.settings_manager.get('game_detection_blacklist', []),
+        )
+        self._game_detector.game_detected.connect(self._on_game_detected)
+        self._game_detector.game_lost.connect(self._on_game_lost)
 
         self._focus_monitor = FocusMonitor()
         self._focus_monitor.focus_lost.connect(self._on_focus_lost)
@@ -3363,12 +3317,9 @@ class MainWindow(QMainWindow):
             # doing it inline froze the whole UI during startup.
             def _on_cam_result(ok):
                 if not ok:
-                    self._ui_call.emit(lambda: self.push_error(
-                        'CAMERA UNAVAILABLE',
-                        'Device not found or in use by another application.',
-                        level='warning',
-                        actions=[('OPEN CAMERA SETTINGS', self._toggle_settings_page)],
-                    ))
+                    self._ui_call.emit(lambda: self._show_camera_unavailable(
+                        'Could not open the selected camera. Confirm it is '
+                        'connected and not in use by another app.'))
             CameraRecorder().start_async(device_idx, on_result=_on_cam_result)
 
         self.is_capturing    = True
@@ -3379,6 +3330,8 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f'{APP_NAME} {APP_VERSION}')
         self.setMinimumSize(1100, 720)
+        self._desired_maximized = True
+        self._restore_window_geometry()
 
         if not self._background_start:
             self.ensure_main_ui()
@@ -3387,6 +3340,7 @@ class MainWindow(QMainWindow):
         self._create_system_tray()
         if not self._background_start:
             QTimer.singleShot(800, self.capture_card.play_startup)
+
         # Start Python microphone capture where needed; Windows uses native WASAPI.
         if self.settings_manager.get('audio_capture_enabled', True):
             self._start_mic_recorder()
@@ -3420,6 +3374,77 @@ class MainWindow(QMainWindow):
                 self._on_application_state_changed)
         QTimer.singleShot(0, self._refresh_background_ui_pause_state)
 
+    def _restore_window_geometry(self) -> None:
+        """Restore logical geometry before the first show, if it is valid."""
+        pass
+        saved = self.settings_manager.get('main_window_geometry', {})
+        app = QApplication.instance()
+        screens = app.screens() if app is not None else []
+        primary = app.primaryScreen() if app is not None else None
+        rect, maximized, screen = restore_window_geometry(
+            saved, screens, primary, default_size=(1100, 720),
+            default_maximized=True)
+        self.setGeometry(rect)
+        self._desired_maximized = bool(maximized)
+        if screen is not None:
+            self._restored_screen_name = str(screen.name() or '')
+        else:
+            self._restored_screen_name = ''
+        if saved:
+            emit_event(
+                'ui', 'window_geometry_restored',
+                screen=self._restored_screen_name,
+                geometry={
+                    'x': rect.x(), 'y': rect.y(),
+                    'width': rect.width(), 'height': rect.height(),
+                }, maximized=self._desired_maximized)
+
+    def _persist_window_geometry(self) -> None:
+        """Persist normalGeometry even when the window is currently maximized."""
+        pass
+        try:
+            payload = save_window_geometry(self)
+            self.settings_manager.set('main_window_geometry', payload)
+            self.settings_manager.save_settings()
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
+            emit_event('ui', 'window_geometry_persist_failed',
+                       detail=f'{type(error).__name__}: {error}')
+
+    def _on_window_screen_changed(self, screen) -> None:
+        """Record a bounded DPI/screen transition and recover off-screen state."""
+        name = str(screen.name() or '') if screen is not None else ''
+        app = QApplication.instance()
+        screens = list(app.screens()) if app is not None else []
+        normal = self.normalGeometry()
+        recovered = False
+        if screens and not is_rect_visible(normal, screens):
+            payload = save_window_geometry(self)
+            payload['screen_name'] = name
+            rect, _maximized, _screen = restore_window_geometry(
+                payload, screens, app.primaryScreen(),
+                default_size=(1100, 720), default_maximized=False)
+            self.setGeometry(rect)
+            recovered = True
+        emit_event(
+            'ui', 'window_screen_changed', screen=name,
+            displays=qt_display_snapshot(QApplication.instance(), self),
+            dpi_awareness=dpi_awareness_snapshot(self),
+            geometry_recovered=recovered,
+            recovery_reason=('window_outside_current_work_areas'
+                             if recovered else 'not_required'))
+
+    def _connect_window_screen_signals(self) -> None:
+        handle = self.windowHandle()
+        if handle is None:
+            return
+        try:
+            handle.screenChanged.connect(self._on_window_screen_changed)
+            self._on_window_screen_changed(handle.screen())
+        except (AttributeError, RuntimeError, TypeError):
+            # Background startup or teardown may temporarily expose no native
+            # handle; the first later show retries the normal setup path.
+            pass
+
     def ensure_main_ui(self) -> None:
         """Build library and settings widgets on first window use.
 
@@ -3435,6 +3460,7 @@ class MainWindow(QMainWindow):
         self._load_saved_theme()
         self._apply_styles()
         self._ui_ready = True
+        self._setup_keyboard_navigation()
         # A tray-started window can build its UI after background suspension
         # was already entered. Force the new widgets into the current state.
         self._apply_background_ui_paused(
@@ -3525,7 +3551,9 @@ class MainWindow(QMainWindow):
         self.ensure_main_ui()
         self.setWindowState(
             self.windowState() & ~Qt.WindowState.WindowMinimized)
-        if self.isMaximized() or self._background_start:
+        if (self.isMaximized()
+                or (self._background_start
+                    and getattr(self, '_desired_maximized', True))):
             self.showMaximized()
         else:
             self.showNormal()
@@ -3538,7 +3566,7 @@ class MainWindow(QMainWindow):
     def _on_close_to_tray_changed(self, enabled: bool) -> None:
         """Keep the Windows title-bar affordance aligned with close behavior."""
         if hasattr(self, 'power_btn'):
-            self.power_btn.setVisible(sys.platform == 'win32' and bool(enabled))
+            self.power_btn.setVisible(bool(enabled))
 
     def _on_error_notifications_changed(self, enabled: bool) -> None:
         """Apply the bottom-bar preference immediately, including open errors."""
@@ -3607,16 +3635,13 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # UNIFIED TOP BAR
-        # logo  |  capture / source / hotkeys / gear  |  close-settings  |  — ✕
-        # The mode-specific clusters (main vs settings) swap visibility when
-        # _toggle_settings_page is called.
+        # Compact draggable title strip, separate from capture controls.
         top_bar = QFrame()
         top_bar.setObjectName('topBar')
-        top_bar.setFixedHeight(Sizes.UNIFIED_BAR_H)
+        top_bar.setFixedHeight(Sizes.TITLE_BAR_H)
         tb = QHBoxLayout(top_bar)
         tb.setContentsMargins(16, 0, 0, 0)
-        tb.setSpacing(10)
+        tb.setSpacing(Sizes.ROW_GAP)
 
         # Logo — check theme override first, then fall back to default asset.
         # Default asset is black-on-white so we invert RGB for the dark bar.
@@ -3625,28 +3650,31 @@ class MainWindow(QMainWindow):
         self._load_logo()
         self._logo_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         tb.addWidget(self._logo_label)
-
+        brand = QLabel('FTHR Clips')
+        set_theme_style(brand, lambda: (f'color: {Colors.TEXT}; font-family: {Fonts.BRAND}; '
+            f'font-size: {Fonts.SIZE_BODY_L}px; font-weight: 700; background: transparent;'))
+        tb.addWidget(brand)
         tb.addStretch(1)
 
         # One always-visible capture indicator. It is intentionally just text:
         # no badge, box, or animation competing with the controls beside it.
-        self.status_label = QLabel('STARTING CAPTURE')
-        self.status_label.setStyleSheet(status_idle_qss())
+        self.status_label = QLabel('Starting capture')
+        set_theme_style(self.status_label, lambda: (status_idle_qss()))
         self.status_label.setObjectName('statusLabel')
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight |
                                        Qt.AlignmentFlag.AlignVCenter)
-        self.status_label.setMinimumWidth(118)
-        tb.addWidget(self.status_label)
+        self.status_label.setMinimumWidth(110)
 
         # Main-mode cluster: capture-settings dropdowns + gear --
         self.main_mode_cluster = QFrame()
         self.main_mode_cluster.setObjectName('topClusterMain')
         mc = QHBoxLayout(self.main_mode_cluster)
-        mc.setContentsMargins(0, 0, 0, 0)
-        mc.setSpacing(10)
+        mc.setContentsMargins(14, 6, 14, 6)
+        mc.setSpacing(8)
 
         self.cap_settings_popup = CaptureSettingsPopup(self.settings_manager, self)
         self.cap_settings_popup.clip_length_changed.connect(self._on_clip_length_changed)
+        self.cap_settings_popup.custom_lengths_changed.connect(self._on_custom_lengths_changed)
         self.cap_settings_popup.framerate_changed.connect(self._on_framerate_changed)
         self.cap_settings_popup.resolution_changed.connect(self._on_resolution_changed)
         self.cap_settings_popup.bitrate_changed.connect(self._on_bitrate_changed)
@@ -3655,13 +3683,13 @@ class MainWindow(QMainWindow):
 
         self.cap_btn = TopBarButton(self.cap_settings_popup.get_summary())
         self.cap_btn.clicked.connect(self._toggle_cap_settings)
-        mc.addWidget(self.cap_btn)
+        mc.addWidget(self.cap_btn, 3)
 
         self.source_popup = SourcePopup(self.settings_manager, self)
         self.source_popup.restart_needed.connect(self._restart_capture_engine)
-        self.source_btn = TopBarButton('SOURCE')
+        self.source_btn = TopBarButton('Source')
         self.source_btn.clicked.connect(self._toggle_source)
-        mc.addWidget(self.source_btn)
+        mc.addWidget(self.source_btn, 2)
 
         self.game_detection_popup = GameDetectionPopup(
             self.settings_manager, self.hotkey_manager, self)
@@ -3674,26 +3702,24 @@ class MainWindow(QMainWindow):
         self.game_detection_btn = TopBarButton(
             self.game_detection_popup.get_summary())
         self.game_detection_btn.clicked.connect(self._toggle_game_detection)
-        mc.addWidget(self.game_detection_btn)
+        mc.addWidget(self.game_detection_btn, 2)
 
-        self.record_btn = QPushButton('●  RECORD')
-        self.record_btn.setFixedHeight(32)
+        self.record_btn = QPushButton('Record')
+        self.record_btn.setFixedHeight(Sizes.CAPTURE_CONTROL_H)
+        self.record_btn.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         self.record_btn.setCursor(
             QCursor(Qt.CursorShape.PointingHandCursor))
         self.record_btn.setToolTip(
             'Start a manual recording while replay capture stays active')
-        self.record_btn.setStyleSheet(self._manual_record_button_qss(False))
+        set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(False)))
         self.record_btn.clicked.connect(self._toggle_manual_recording)
-        if sys.platform != 'win32':
-            self.record_btn.setEnabled(False)
-            self.record_btn.setToolTip(
-                'Manual recording currently requires the Windows capture engine')
-        mc.addWidget(self.record_btn)
+        pass
+        mc.insertWidget(0, self.record_btn, 1)
 
         self.hotkey_popup = HotkeyPopup(self.hotkey_manager, self)
-        self.hotkey_btn = TopBarButton('HOTKEYS')
+        self.hotkey_btn = TopBarButton('Hotkeys')
         self.hotkey_btn.clicked.connect(self._toggle_hotkeys)
-        mc.addWidget(self.hotkey_btn)
+        mc.addWidget(self.hotkey_btn, 1)
 
         for popup in (
                 self.cap_settings_popup,
@@ -3708,45 +3734,53 @@ class MainWindow(QMainWindow):
         self.hw_label.setVisible(False)
         mc.addWidget(self.hw_label)
 
-        self.settings_gear_btn = QPushButton()
+        self.settings_gear_btn = QToolButton()
+        self.settings_gear_btn.setText('Settings')
+        self.settings_gear_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.settings_gear_btn.setCheckable(True)
         _gear_ico = _load_icon('settings(general).png', 18)
-        self.settings_gear_btn.setIcon(_gear_ico if not _gear_ico.isNull() else _make_settings_icon(18, Colors.TEXT))
+        self.settings_gear_btn.setIcon(_gear_ico)
         self.settings_gear_btn.setIconSize(QSize(18, 18))
         _register_icon_widget(self.settings_gear_btn, 'settings(general).png', 18)
         self.settings_gear_btn.setObjectName('settingsGearBtn')
-        self.settings_gear_btn.setFixedSize(36, 32)
+        self.settings_gear_btn.setFixedSize(78, 78)
         self.settings_gear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.settings_gear_btn.clicked.connect(self._toggle_settings_page)
-        mc.addWidget(self.settings_gear_btn)
+        self.settings_gear_btn.clicked.connect(lambda: self._set_main_page(1))
+        mc.addWidget(self.status_label)
+        self.main_mode_cluster.setMinimumHeight(Sizes.CAPTURE_CONTROL_H + 12)
 
-        tb.addWidget(self.main_mode_cluster)
-
-        # Settings-mode cluster: just the close-settings button --
-        self.settings_mode_cluster = QFrame()
-        self.settings_mode_cluster.setObjectName('topClusterSettings')
-        sc = QHBoxLayout(self.settings_mode_cluster)
-        sc.setContentsMargins(0, 0, 0, 0)
-        sc.setSpacing(10)
-
-        self.close_settings_btn = QPushButton()
+        # Persistent navigation destinations are attached to the left panel below.
+        self.close_settings_btn = QToolButton()
+        self.close_settings_btn.setText('Clips')
+        self.close_settings_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.close_settings_btn.setCheckable(True)
+        self.close_settings_btn.setChecked(True)
         self.close_settings_btn.setObjectName('homeBtn')
-        self.close_settings_btn.setFixedSize(36, 32)
+        self.close_settings_btn.setFixedSize(78, 78)
         _home_ico = _load_icon('home.png', 18)
         if not _home_ico.isNull():
             self.close_settings_btn.setIcon(_home_ico)
             self.close_settings_btn.setIconSize(QSize(18, 18))
             _register_icon_widget(self.close_settings_btn, 'home.png', 18)
         else:
-            self.close_settings_btn.setText('⌂')
+            self.close_settings_btn.setText('Home')
         self.close_settings_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.close_settings_btn.setToolTip('Back to clips')
-        self.close_settings_btn.clicked.connect(self._toggle_settings_page)
-        sc.addWidget(self.close_settings_btn)
-
-        tb.addWidget(self.settings_mode_cluster)
-        self.settings_mode_cluster.setVisible(False)
+        self.close_settings_btn.clicked.connect(lambda: self._set_main_page(0))
 
         # Window controls (always visible) --
+        self.kofi_widget = QPushButton('Help us keep the app free and open for everyone')
+        self.kofi_widget.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'icons' / 'kofi_symbol.png')))
+        self.kofi_widget.setIconSize(QSize(26, 22))
+        self.kofi_widget.setToolTip('Support FTHRClips on Ko-fi')
+        self.kofi_widget.setAccessibleName('Help us keep the app free and open for everyone — support on Ko-fi')
+        self.kofi_widget.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        set_theme_style(self.kofi_widget, button_outline_qss)
+        self.kofi_widget.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl('https://ko-fi.com/fthrclips')))
+        self.kofi_widget.setVisible(bool(self.settings_manager.get('show_kofi_widget', True)))
+        tb.addWidget(self.kofi_widget)
+
         # Windows gets a dedicated full-shutdown control while X is configured
         # to hide the app to the notification area.
         self.power_btn = QPushButton()
@@ -3758,7 +3792,7 @@ class MainWindow(QMainWindow):
             self.power_btn.setIconSize(QSize(18, 18))
             _register_icon_widget(self.power_btn, 'shutdown.png', 18)
         else:
-            self.power_btn.setIcon(_make_power_icon(18, Colors.TEXT_DIM))
+            self.power_btn.setIcon(_load_icon('shutdown.png', 18))
         self.power_btn.setIconSize(QSize(18, 18))
         self.power_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.power_btn.setToolTip('Shut down FTHR Clips and stop capture')
@@ -3779,7 +3813,7 @@ class MainWindow(QMainWindow):
             self.min_btn.setIconSize(QSize(14, 14))
             _register_icon_widget(self.min_btn, 'minimize.png', 14)
         else:
-            self.min_btn.setText('—')
+            self.min_btn.setText('Minimize')
         self.min_btn.clicked.connect(self.showMinimized)
         tb.addWidget(self.min_btn)
 
@@ -3793,7 +3827,7 @@ class MainWindow(QMainWindow):
             self.max_btn.setIconSize(QSize(14, 14))
             _register_icon_widget(self.max_btn, 'maximize.png', 14)
         else:
-            self.max_btn.setText('□')
+            self.max_btn.setText('Maximize')
         self.max_btn.clicked.connect(self._toggle_maximize)
         tb.addWidget(self.max_btn)
 
@@ -3806,11 +3840,21 @@ class MainWindow(QMainWindow):
             self.close_btn.setIconSize(QSize(14, 14))
             _register_icon_widget(self.close_btn, 'close.png', 14)
         else:
-            self.close_btn.setText('✕')
+            self.close_btn.setText('Close')
         self.close_btn.clicked.connect(self.close)
         tb.addWidget(self.close_btn)
 
         root.addWidget(top_bar)
+        # Small windows scroll the toolbar horizontally instead of clipping
+        # labels or shrinking their type. Large windows retain the single row.
+        self.capture_toolbar_scroll = QScrollArea()
+        self.capture_toolbar_scroll.setObjectName('captureToolbarScroll')
+        self.capture_toolbar_scroll.setWidgetResizable(True)
+        self.capture_toolbar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.capture_toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.capture_toolbar_scroll.setFixedHeight(Sizes.CAPTURE_BAR_H)
+        self.capture_toolbar_scroll.setWidget(self.main_mode_cluster)
+        root.addWidget(self.capture_toolbar_scroll)
 
         # Drag/double-click on the bar background (the buttons absorb their own clicks)
         top_bar.mousePressEvent       = self._bar_mouse_press
@@ -3820,7 +3864,7 @@ class MainWindow(QMainWindow):
         self._top_bar = top_bar
 
         # Main content stack --
-        self.main_stack = QStackedWidget()
+        self.main_stack = ShellPageStack()
         self.main_stack.setObjectName('mainStack')
 
         # Page 0: clip grid
@@ -3830,11 +3874,13 @@ class MainWindow(QMainWindow):
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
-        scroll = QScrollArea()
+        scroll = SmoothScrollArea()
+        self.clip_scroll_area = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.clip_grid = ClipGrid(settings_manager=self.settings_manager)
+        self.clip_grid = ClipGrid(settings_manager=self.settings_manager,
+                                  metadata_manager=self.clip_metadata_manager)
         self.clip_grid.set_readiness_checker(self._clip_readiness.can_access)
         self.clip_grid.clip_opened.connect(self._on_clip_opened)
         self.clip_grid.screenshot_clicked.connect(_show_in_file_manager)
@@ -3848,10 +3894,13 @@ class MainWindow(QMainWindow):
             self.settings_manager,
             keyboard_capture=self._keyboard_overlay_capture,
         )
+        self._settings_page_widget.camera_unavailable.connect(
+            self._show_camera_unavailable)
         self._settings_page_widget.close_requested.connect(
             self._toggle_settings_page)
         self._settings_page_widget.clips_directory_changed.connect(
-            self.clip_grid.set_clips_directory)
+            lambda path: self.clip_grid.set_clips_directory(
+                path, prepared=True))
         self._settings_page_widget.imported_folders_changed.connect(
             self.clip_grid.force_refresh)
         self._settings_page_widget.notification_monitor_changed.connect(
@@ -3880,6 +3929,8 @@ class MainWindow(QMainWindow):
         # replay and uploads do not depend on this screen.  These bindings are
         # the view-specific half and are created only with the library grid.
         self.clip_grid.clip_upload_requested.connect(self.upload_manager.enqueue_upload)
+        self.upload_manager.upload_started.connect(
+            lambda path: self.clip_grid.set_upload_status(path, 'Uploading…'))
         self.clip_grid.set_upload_checker(self.upload_manager.is_uploaded)
         self.clip_grid.set_upload_info_checker(self.upload_manager.get_upload_info)
         self.clip_grid.set_upload_enabled_checker(
@@ -3888,7 +3939,33 @@ class MainWindow(QMainWindow):
             lambda _installed, _enabled:
             self.clip_grid.set_upload_enabled_checker(self.upload_manager.is_enabled))
 
-        root.addWidget(self.main_stack, stretch=1)
+        # Both destinations stay instantiated. Navigation only changes the
+        # visible page; transitions paint snapshots without moving live trees.
+        shell = QWidget()
+        shell_layout = QHBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        self.nav_panel = QFrame()
+        self.nav_panel.setObjectName('navigationPanel')
+        self.nav_panel.setFixedWidth(94)
+        nav = QVBoxLayout(self.nav_panel)
+        nav.setContentsMargins(8, 16, 8, 12)
+        nav.setSpacing(12)
+        nav.addWidget(self.close_settings_btn)
+        nav.addWidget(self.settings_gear_btn)
+        self._sidebar_layout = nav
+        nav.addStretch(1)
+        self._settings_page_widget.kofi_widget_changed.connect(self.kofi_widget.setVisible)
+        self._navigation_group = QButtonGroup(self)
+        self._navigation_group.setExclusive(True)
+        self._navigation_group.addButton(self.close_settings_btn, 0)
+        self._navigation_group.addButton(self.settings_gear_btn, 1)
+        shell_layout.addWidget(self.nav_panel)
+        shell_layout.addWidget(self.main_stack, 1)
+        root.addWidget(shell, stretch=1)
+        self.clip_grid.set_mutation_callbacks(
+            self._prepare_clip_mutation, self.upload_manager.end_local_mutation)
+        self.clip_grid.clip_renamed.connect(self._on_clip_renamed)
 
         # Error bar (shown at bottom of app for warnings/errors)
         self.error_bar = ErrorBar()
@@ -3898,9 +3975,7 @@ class MainWindow(QMainWindow):
 
     def _bar_mouse_press(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            # Let the compositor drag the window on Linux so its own snapping
-            # and tiling apply; a plain move() would bypass them.
-            if sys.platform != 'win32' and start_system_move(self.windowHandle()):
+            if start_system_move(self.windowHandle()):
                 self._drag_pos = None
                 return
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -3938,17 +4013,16 @@ class MainWindow(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self._refresh_background_ui_pause_state)
-        if sys.platform != 'win32':
-            # Idempotent: reuses the filter on repeated shows and catches a
-            # first show where the native window did not exist yet.
-            install_resize_filter(self.windowHandle())
+        if not getattr(self, '_window_screen_signals_connected', False):
+            self._window_screen_signals_connected = True
+            QTimer.singleShot(0, self._connect_window_screen_signals)
+        pass
         if not getattr(self, '_native_style_applied', False):
             self._native_style_applied = True
             # Defer SetWindowPos(SWP_FRAMECHANGED) to after the event loop starts.
             # Calling it synchronously inside showEvent sends WM_NCCALCSIZE back
             # into nativeEvent while Qt is mid-show, causing a crash.
-            if sys.platform == 'win32':
-                QTimer.singleShot(0, self._apply_native_style)
+            QTimer.singleShot(0, self._apply_native_style)
             # Pre-realize the settings page so the first time the user clicks
             # the gear button it doesn't pay for layout, font resolution, and
             # stylesheet compilation. The page is already constructed; we just
@@ -3976,29 +4050,8 @@ class MainWindow(QMainWindow):
             print(f'[Prerealize] settings page warm-up failed: {e}')
 
     def _apply_native_style(self):
-        """Apply WS_THICKFRAME so native resize/Aero-snap work on the frameless window.
-
-        Linux uses ui.frameless_window_linux instead: the compositor performs
-        the move/resize, which is also what makes its snapping work.
-        """
-        try:
-            import ctypes
-            hwnd = int(self.winId())
-            GWL_STYLE      = -16
-            WS_THICKFRAME  = 0x00040000
-            WS_MAXIMIZEBOX = 0x00010000
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
-            ctypes.windll.user32.SetWindowLongW(
-                hwnd, GWL_STYLE, style | WS_THICKFRAME | WS_MAXIMIZEBOX)
-            SWP_FRAMECHANGED = 0x0020
-            SWP_NOMOVE = 0x0002
-            SWP_NOSIZE = 0x0001
-            ctypes.windll.user32.SetWindowPos(
-                hwnd, None, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED)
-        except Exception:
-            # Native frame styling is best-effort on unsupported Windows builds.
-            pass
+        """Apply WS_THICKFRAME so native resize/Aero-snap work on the frameless window."""
+        apply_native_resize_style(self)
 
     def nativeEvent(self, eventType, message):
         # Returning (False, 0) lets Qt's WndProc continue with default
@@ -4008,43 +4061,21 @@ class MainWindow(QMainWindow):
                 import ctypes, ctypes.wintypes
                 ptr = int(message)
                 if ptr:
-                    # Safe peek: read only the UINT message field.
-                    # MSG layout on 64-bit Windows:
-                    #   HWND   hwnd    (8 bytes)
-                    #   UINT   message (4 bytes)  ← uint32 index [2]
-                    #   ...
                     msg_type = ctypes.cast(
                         ptr, ctypes.POINTER(ctypes.c_uint32))[2]
-                    if msg_type == 0x0084:  # WM_NCHITTEST — safe to read full MSG
+                    if msg_type == 0x0084:  # WM_NCHITTEST
                         msg = ctypes.wintypes.MSG.from_address(ptr)
-                        lp  = msg.lParam
-                        cx  = ctypes.c_short(lp & 0xFFFF).value
-                        cy  = ctypes.c_short((lp >> 16) & 0xFFFF).value
-                        g   = self.frameGeometry()
-                        bw  = 6  # resize border width in pixels
-
-                        left   = cx <  g.left()   + bw
-                        right  = cx >= g.right()  - bw
-                        top    = cy <  g.top()    + bw
-                        bottom = cy >= g.bottom() - bw
-
-                        if not self.isMaximized():
-                            if top    and left:  return True, 13  # HTTOPLEFT
-                            if top    and right: return True, 14  # HTTOPRIGHT
-                            if bottom and left:  return True, 16  # HTBOTTOMLEFT
-                            if bottom and right: return True, 17  # HTBOTTOMRIGHT
-                            if top:              return True, 12  # HTTOP
-                            if bottom:           return True, 15  # HTBOTTOM
-                            if left:             return True, 10  # HTLEFT
-                            if right:            return True, 11  # HTRIGHT
-
-                        # Caption area: enables Aero snap & native drag
-                        if cy < g.top() + Sizes.UNIFIED_BAR_H:
-                            local = self.mapFromGlobal(QPoint(cx, cy))
-                            w = self.childAt(local)
-                            if w is None or not isinstance(w, (QPushButton, QComboBox)):
-                                return True, 2  # HTCAPTION
+                        cx, cy = decode_nchittest_point(msg.lParam)
+                        hit = native_hit_test(
+                            self, cx, cy,
+                            titlebar_height=Sizes.UNIFIED_BAR_H,
+                            resize_border=6)
+                        if hit is not None:
+                            return True, hit
             except Exception:
+                # Native hit testing must safely defer to Qt's WndProc when a
+                # transient native value is unavailable. Logging this mouse
+                # hot path would create unbounded diagnostic spam.
                 pass
         return False, 0  # not handled — Qt WndProc continues normally
 
@@ -4066,10 +4097,8 @@ class MainWindow(QMainWindow):
     def _vsep(self):
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet(
-            f'QFrame {{ color: {Colors.BORDER_HI};'
-            f' max-width: 1px; margin: 12px 4px; }}'
-        )
+        set_theme_style(sep, lambda: (f'QFrame {{ color: {Colors.BORDER_HI};'
+            f' max-width: 1px; margin: 12px 4px; }}'))
         return sep
 
     # Popup toggles --
@@ -4085,9 +4114,6 @@ class MainWindow(QMainWindow):
         self._sync_topbar_dropdown_arrows()
 
     def _toggle_source(self):
-        if self._uses_kde_portal_source_picker():
-            self._open_kde_portal_source_picker()
-            return
         if self.source_popup.isVisible():
             self.source_popup.hide()
         else:
@@ -4096,25 +4122,6 @@ class MainWindow(QMainWindow):
             self.game_detection_popup.hide()
             self.source_popup.show_below(self.source_btn)
         self._sync_topbar_dropdown_arrows()
-
-    @staticmethod
-    def _uses_kde_portal_source_picker() -> bool:
-        if sys.platform == 'win32' or not os.environ.get('WAYLAND_DISPLAY'):
-            return False
-        return detect_compositor() == 'kwin'
-
-    def _open_kde_portal_source_picker(self) -> None:
-        token_path = Path.home() / '.fthr' / 'portal_screencast_token'
-        try:
-            token_path.unlink(missing_ok=True)
-        except OSError as error:
-            self.push_error(
-                'SOURCE PICKER UNAVAILABLE',
-                f'Could not reset the KDE screen-sharing selection: {error}',
-                level='warning',
-            )
-            return
-        self._restart_capture_engine()
 
     def _toggle_game_detection(self):
         if self.game_detection_popup.isVisible():
@@ -4151,70 +4158,283 @@ class MainWindow(QMainWindow):
         self.game_detection_btn.setText(text)
 
     def _toggle_settings_page(self):
-        if self.main_stack.currentIndex() == 1:
-            # Fade out settings, then switch back to clip grid
-            effect = self._settings_page_widget.graphicsEffect()
-            if effect is None:
-                effect = QGraphicsOpacityEffect(self._settings_page_widget)
-                self._settings_page_widget.setGraphicsEffect(effect)
-            anim = QPropertyAnimation(effect, b'opacity', self)
-            anim.setDuration(PANEL_FADE_MS)
-            anim.setStartValue(1.0)
-            anim.setEndValue(0.0)
-            anim.setEasingCurve(QEasingCurve.Type.InCubic)
-            anim.finished.connect(lambda: self.main_stack.setCurrentIndex(0))
-            self._settings_fade_out = anim
-            camera_timer = getattr(
-                self._settings_page_widget, '_camera_preview_timer', None)
-            if camera_timer is not None:
-                camera_timer.stop()
-            anim.start()
-            self.main_mode_cluster.setVisible(True)
-            self.settings_mode_cluster.setVisible(False)
-        else:
-            self.main_stack.setCurrentIndex(1)
-            camera_timer = getattr(
-                self._settings_page_widget, '_camera_preview_timer', None)
-            if (camera_timer is not None
+        self._set_main_page(1 if self._active_clip_viewer is not None
+                            else 1 - self.main_stack.currentIndex())
+
+    def _setup_keyboard_navigation(self):
+        from core.navigation_bindings import navigation_bindings_for
+        from ui.keyboard_navigation import KeyboardNavigation
+        bindings = navigation_bindings_for(self.settings_manager)
+        self._keyboard_navigation = KeyboardNavigation(
+            self, bindings, {
+                'switch_panel': self._toggle_settings_page,
+                'sidebar_next': lambda: self._navigate_sidebar(1),
+                'sidebar_previous': lambda: self._navigate_sidebar(-1),
+                'toggle_detection': lambda: self.game_detection_popup.detection_switch.toggle(),
+                'restart_capture': self._restart_engine_shortcut,
+                'library_scroll_up': lambda: self._scroll_clip_library(-1),
+                'library_scroll_down': lambda: self._scroll_clip_library(1),
+                'category_next': lambda: self._settings_page_widget.navigate_category(1),
+                'category_previous': lambda: self._settings_page_widget.navigate_category(-1),
+            }, lambda: {'application', 'main', 'settings'}
+            if self.main_stack.currentIndex() == 1
+            else {'application', 'main', 'library'},
+            repeat_actions=('library_scroll_up', 'library_scroll_down'))
+
+    def _scroll_clip_library(self, direction):
+        if self.main_stack.currentIndex() != 0:
+            return
+        bar = self.clip_scroll_area.verticalScrollBar()
+        bar.setValue(bar.value() + direction * max(40, bar.singleStep() * 3))
+
+    def _set_main_page(self, index: int) -> None:
+        if self._active_clip_viewer is not None and not self._park_active_editor():
+            return
+        for popup in (self.cap_settings_popup, self.source_popup,
+                      self.hotkey_popup, self.game_detection_popup):
+            popup.hide()
+        self.main_stack.setCurrentIndex(index)
+        if index == 1:
+            for key in ('timeline_preview_strip_enabled', 'hide_deleted_timeline_segments',
+                        'grid_show_edited_duration'):
+                check = self._settings_page_widget.__dict__.get(key + '_check')
+                if check is not None:
+                    check.blockSignals(True)
+                    check.setChecked(bool(self.settings_manager.get(
+                        key, key == 'timeline_preview_strip_enabled')))
+                    check.blockSignals(False)
+        self.close_settings_btn.setChecked(index == 0)
+        self.settings_gear_btn.setChecked(index == 1)
+        self._settings_page_widget.set_background_ui_paused(
+            self._background_ui_paused or index != 1)
+        self.clip_grid.set_background_paused(
+            self._background_ui_paused or index != 0)
+        if index == 0 and hasattr(self.clip_grid, 'refresh_duration_labels'):
+            self.clip_grid.refresh_duration_labels()
+        camera_timer = self._settings_page_widget.__dict__.get('_camera_preview_timer')
+        if camera_timer is not None:
+            if (index == 1 and not self._background_ui_paused
+                    and self._settings_page_widget.stack.currentIndex() == 3
                     and self.settings_manager.get('camera_enabled', False)):
                 camera_timer.start()
-            self.main_mode_cluster.setVisible(False)
-            self.settings_mode_cluster.setVisible(True)
-            # Close any open dropdowns from main mode
-            self.cap_settings_popup.hide()
-            self.source_popup.hide()
-            self.hotkey_popup.hide()
-            self.game_detection_popup.hide()
-            # Fade in settings page
-            effect = QGraphicsOpacityEffect(self._settings_page_widget)
-            self._settings_page_widget.setGraphicsEffect(effect)
-            effect.setOpacity(0.0)
-            anim = QPropertyAnimation(effect, b'opacity', self)
-            anim.setDuration(PANEL_FADE_MS)
-            anim.setStartValue(0.0)
-            anim.setEndValue(1.0)
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            self._settings_fade_in = anim
-            anim.start()
+            else:
+                camera_timer.stop()
+        if hasattr(self, '_keyboard_navigation'):
+            (self.close_settings_btn if index == 0 else self.settings_gear_btn).setFocus()
+        if self.isVisible():
+            self.raise_()
+            self.activateWindow()
+
+    def _navigate_sidebar(self, step):
+        destinations = [0, 1] + list(self._editor_sessions)
+        current = (self._active_editor_session if self._active_clip_viewer is not None
+                   else self.main_stack.currentIndex())
+        index = destinations.index(current) if current in destinations else 0
+        destination = destinations[(index + step) % len(destinations)]
+        if isinstance(destination, int):
+            self._set_main_page(destination)
+        else:
+            self._restore_editor_session(destination)
+
+    def _refresh_editor_sidebar(self):
+        for index, session in enumerate(self._editor_sessions, 1):
+            stem = Path(session.clip_path).stem
+            session.button.ensurePolished()
+            short = session.button.fontMetrics().elidedText(
+                stem, Qt.TextElideMode.ElideRight, session.button.width() - 22)
+            session.button.setText(f'Editor {index}\n{short}')
+            session.button.setAccessibleName(f'Editor {index}: {stem}')
+            session.button.setToolTip(
+                f'{Path(session.clip_path).name}\n'
+                + ('Active editor' if session is self._active_editor_session
+                   and self._active_clip_viewer is not None else 'Paused — click to restore')
+                + '\nRight-click to close')
+        active = self._active_editor_session if self._active_clip_viewer is not None else None
+        if active is not None:
+            active.button.setChecked(True)
+        else:
+            (self.close_settings_btn if self.main_stack.currentIndex() == 0
+             else self.settings_gear_btn).setChecked(True)
+
+    def _add_editor_session(self, clip_path):
+        from ui.editor_sessions import EditorSession
+        session = EditorSession(clip_path)
+        button = QToolButton(self.nav_panel)
+        session.button = button
+        button.setObjectName('editorSidebarButton')
+        button.setFixedSize(78, 78)
+        button.setCheckable(True)
+        button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        button.clicked.connect(lambda: self._restore_editor_session(session))
+        button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        button.customContextMenuRequested.connect(
+            lambda pos: self._editor_session_menu(session, pos))
+        self._navigation_group.addButton(button)
+        self._sidebar_layout.insertWidget(self._sidebar_layout.count() - 1, button)
+        self._editor_sessions.append(session)
+        self._refresh_editor_sidebar()
+        return session
+
+    def _remove_editor_session(self, session):
+        if session not in self._editor_sessions:
+            return
+        self._editor_sessions.remove(session)
+        self._navigation_group.removeButton(session.button)
+        self._sidebar_layout.removeWidget(session.button)
+        session.button.hide()
+        session.button.deleteLater()
+        if self._active_editor_session is session:
+            self._active_editor_session = None
+        self._refresh_editor_sidebar()
+
+    def _editor_session_menu(self, session, pos):
+        menu = QMenu(session.button)
+        menu.addAction('Close editor', lambda: self._close_editor_session(session))
+        menu.exec(session.button.mapToGlobal(pos))
+
+    def _close_editor_session(self, session):
+        if session is self._active_editor_session and self._active_clip_viewer is not None:
+            self._active_clip_viewer._close()
+        else:
+            self._remove_editor_session(session)
+
+    def _park_active_editor(self):
+        viewer = self._active_clip_viewer
+        if viewer is None:
+            return True
+        worker = getattr(viewer, '_export_thread', None)
+        if worker is not None and worker.is_alive():
+            QMessageBox.information(viewer, 'Export in progress',
+                                    'Finish or cancel the export before minimizing this editor.')
+            return False
+        self._cancel_editor_transition()
+        session = self._active_editor_session
+        session.window_geometry = QRect(viewer.mapToGlobal(QPoint(0, 0)), viewer.size())
+        session.window_maximized = viewer.isMaximized()
+        session.state = viewer.capture_session_state()
+        self._active_clip_viewer = None
+        self._active_editor_session = None
+        # One reusable shell, no active media or timers. Dormant sessions
+        # continue to own only edit data; they never each retain a decoder.
+        viewer._teardown_player(wait_for_workers=False)
+        viewer.hide()
+        self._parked_editor_shell = viewer
+        self._refresh_editor_sidebar()
+        return True
+
+    def _minimize_active_editor(self, viewer):
+        if viewer is not self._active_clip_viewer:
+            return
+        worker = getattr(viewer, '_export_thread', None)
+        animate = (self.isVisible() and viewer.isVisible() and not reduce_motion(self)
+                   and not (worker is not None and worker.is_alive()))
+        session = self._active_editor_session
+        start = QRect(viewer.mapToGlobal(QPoint(0, 0)), viewer.size())
+        frame = compact_snapshot(viewer) if animate else QPixmap()
+        if self._park_active_editor():
+            if not animate or frame.isNull():
+                self._set_main_page(self.main_stack.currentIndex())
+                return
+            flight = SnapshotFlight(self, frame, start, sidebar_rect(session.button), compact=True)
+            self._editor_flight = flight
+            # Resume library previews after the flight, so thumbnail loading
+            # does not compete with animation frames on the UI thread.
+            def finish_minimize():
+                self._editor_transition_finished()
+                if not self._shutdown_requested:
+                    self._set_main_page(self.main_stack.currentIndex())
+
+            flight._animation.finished.connect(finish_minimize)
+            flight.start()
+
+    def _editor_transition_finished(self):
+        self._editor_flight = None
+
+    def _cancel_editor_transition(self):
+        flight = getattr(self, '_editor_flight', None)
+        if flight is not None:
+            flight._animation.stop()
+            flight.hide()
+            flight.deleteLater()
+            self._editor_flight = None
+
+    def _restore_editor_session(self, session):
+        if session not in self._editor_sessions:
+            return
+        if session is self._active_editor_session and self._active_clip_viewer is not None:
+            self._active_clip_viewer.raise_()
+            self._active_clip_viewer.activateWindow()
+            return
+        if not os.path.isfile(session.clip_path) or not self._clip_readiness.can_access(session.clip_path):
+            self.push_error('CLIP NOT FOUND', 'The editor clip is no longer available.', level='warning')
+            self._remove_editor_session(session)
+            return
+        if self._park_active_editor():
+            self._show_editor_session(session, QPixmap(), animate_restore=True)
+
+    def _prepare_clip_mutation(self, path: str) -> str:
+        if not self._clip_readiness.can_access(path):
+            return 'This clip is still being saved or processed. Try again when it finishes.'
+        from core.ffmpeg_playback import finish_audio_cleanup
+        if not finish_audio_cleanup(path):
+            return 'This clip is still closing in the editor. Try again when it finishes.'
+        viewer = self._active_clip_viewer
+        if viewer is not None and os.path.normcase(viewer.clip_path) == os.path.normcase(path):
+            worker = getattr(viewer, '_export_thread', None)
+            if worker is not None and worker.is_alive():
+                return 'This clip is exporting. Finish or cancel the export before changing its files.'
+        if not self.upload_manager.begin_local_mutation(path):
+            return 'This clip is uploading. Try again when the upload finishes.'
+        viewer = self._active_clip_viewer
+        if viewer is not None and os.path.normcase(viewer.clip_path) == os.path.normcase(path):
+            viewer.close()  # flush draft and detach all multimedia handles
+            self._active_clip_viewer = None
+            if not finish_audio_cleanup(path):
+                self.upload_manager.end_local_mutation(path)
+                return 'This clip is still closing in the editor. Try again when it finishes.'
+        for session in list(self._editor_sessions):
+            if os.path.normcase(session.clip_path) == os.path.normcase(path):
+                self._remove_editor_session(session)
+        return ''
+
+    def _on_clip_renamed(self, old_path: str, new_path: str) -> None:
+        try:
+            self.clip_metadata_manager.rename_path(old_path, new_path)
+            self.upload_manager.rename_history_path(old_path, new_path)
+        except (OSError, ValueError) as error:
+            self.push_error('Clip renamed', f'The file was renamed, but its saved metadata could not be updated: {error}', level='warning')
 
     # Hotkeys
 
-    def _warn_no_engine(self):
+
+    def _warn_no_engine(self, process_generation: int | None = None):
         if getattr(sys, 'frozen', False):
             detail = ('FTHRcapture binary is missing from the installation.'
                       ' Re-download the latest release.')
         else:
             detail = ('FTHRcapture binary not found. Build it:'
-                      ' cd FTHRcapture_linux && bash build_linux.sh')
+                      ' msbuild FTHRcapture/FTHRcapture.sln -p:Configuration=Release -p:Platform=x64')
         self.push_error(
             'ENGINE NOT FOUND',
             detail,
             level='error',
             actions=[('OPEN SETTINGS', self._toggle_settings_page)],
+            key='engine-launch',
+            diagnostic_context={
+                'diagnostic_error': DiagnosticError.ENGINE_START_FAILED,
+                'technical_cause': 'ENGINE_EXECUTABLE_MISSING',
+                'technical_subsystem': 'process',
+                'operation': 'executable_discovery',
+                'process_generation': process_generation,
+                'backend_generation': None,
+                'recovery_kind': 'engine_lineage',
+                'recovery_status': 'awaiting_replacement_engine',
+            },
         )
 
     def _setup_hotkeys(self):
         self.hotkey_manager.save_clip_triggered.connect(self._on_hotkey_save_clip)
+        self.hotkey_manager.custom_clip_triggered.connect(self._save_clip)
         self.hotkey_manager.save_screenshot_triggered.connect(
             self._on_hotkey_save_screenshot)
         self.hotkey_manager.start_recording_triggered.connect(
@@ -4226,20 +4446,11 @@ class MainWindow(QMainWindow):
         self.hotkey_manager.dismiss_game_detection_triggered.connect(
             self._on_dismiss_game_detection)
         self.hotkey_manager.error_occurred.connect(
-            lambda title, detail, level: self.push_error(
-                title, detail, level,
-                actions=[('OPEN HOTKEYS', self._toggle_hotkeys)],
-            )
+            self._show_hotkey_warning
         )
         self.hotkey_manager.register_all()
         print("Hotkeys registered.")
 
-        # Warn if key features are limited on the current compositor
-        from core.compositor import detect_compositor as _dc, has_xtools as _hx
-        if (sys.platform != 'win32'
-                and _dc() not in ('hyprland', 'x11') and not _hx()):
-            from PySide6.QtCore import QTimer as _QT
-            _QT.singleShot(2000, self._show_compositor_warning)
 
     def _on_hotkey_save_clip(self):
         config = self._capture_config.active
@@ -4282,26 +4493,12 @@ class MainWindow(QMainWindow):
             self._finish_screenshot_request()
             self._show_screenshot_error(error.code, error.detail)
             return
-
-        is_wayland = (
-            sys.platform != 'win32' and bool(os.environ.get('WAYLAND_DISPLAY')))
-        screen = self._resolve_screenshot_screen(selected_monitor)
-        if is_wayland:
-            # grim is a Wayland backend, not an X11 probe. Run it asynchronously
-            # and always name the exact selected output; plain `grim` would
-            # combine all outputs into one image.
-            grim = linux_tools.path('grim')
-            output_name = qt_screen_name(screen) if screen is not None else ''
-            if grim and output_name:
-                self._start_grim_screenshot(
-                    paths, selected_monitor, grim, output_name)
-                return
-            reason = (
-                'The configured replay monitor is not available to grim.'
-                if grim else 'grim is not installed or could not be found.')
-            self._offer_wayland_portal_screenshot(paths, reason)
+        except StoragePathError as error:
+            self._finish_screenshot_request()
+            self._show_screenshot_error('STORAGE_UNAVAILABLE', str(error))
             return
 
+        screen = self._resolve_screenshot_screen(selected_monitor)
         if screen is None:
             self._fail_screenshot_request(
                 paths,
@@ -4310,6 +4507,8 @@ class MainWindow(QMainWindow):
                 'fall back to another display.',
             )
             return
+
+        pass
 
         self._capture_selected_qt_screen(paths, selected_monitor)
 
@@ -4325,143 +4524,12 @@ class MainWindow(QMainWindow):
             primary=QApplication.primaryScreen(),
         )
 
-    def _start_grim_screenshot(
-            self, paths, selected_monitor: str,
-            grim_path: str, output_name: str) -> None:
-        command = build_grim_command(
-            grim_path, str(paths.staged), output_name)
-        process = QProcess(self)
-        process.setProgram(command[0])
-        process.setArguments(command[1:])
-        process.setProcessChannelMode(
-            QProcess.ProcessChannelMode.SeparateChannels)
-        process.finished.connect(
-            lambda exit_code, exit_status, proc=process, target=paths,
-                   monitor=selected_monitor: self._on_grim_finished(
-                       proc, target, monitor, exit_code, exit_status))
-        process.errorOccurred.connect(
-            lambda error, proc=process, target=paths,
-                   monitor=selected_monitor: self._on_grim_error(
-                       proc, target, monitor, error))
-        self._screenshot_capture_process = process
-        self._screenshot_capture_paths = paths
-        process.start()
-        QTimer.singleShot(
-            5000, lambda proc=process: self._on_grim_timeout(proc))
 
-    def _on_grim_error(self, process, paths, selected_monitor, error) -> None:
-        if (self._screenshot_capture_process is process
-                and error == QProcess.ProcessError.FailedToStart):
-            self._on_grim_finished(
-                process, paths, selected_monitor, -1,
-                QProcess.ExitStatus.CrashExit)
 
-    def _on_grim_timeout(self, process) -> None:
-        if (self._screenshot_capture_process is process
-                and process.state() != QProcess.ProcessState.NotRunning):
-            process.setProperty('fthrTimedOut', True)
-            process.kill()
 
-    def _on_grim_finished(
-            self, process, paths, selected_monitor: str,
-            exit_code: int, _exit_status) -> None:
-        if self._screenshot_capture_process is not process:
-            return
-        self._screenshot_capture_process = None
-        self._screenshot_capture_paths = None
-        timed_out = bool(process.property('fthrTimedOut'))
-        detail = bytes(process.readAllStandardError()).decode(
-            errors='replace').strip()
-        process.deleteLater()
-        try:
-            staged_size = paths.staged.stat().st_size
-        except OSError:
-            staged_size = 0
-        if exit_code == 0 and staged_size > 0 and not timed_out:
-            self._publish_screenshot(paths)
-            return
-        if self._shutdown_requested:
-            paths.staged.unlink(missing_ok=True)
-            self._finish_screenshot_request()
-            return
-
-        if timed_out:
-            detail = 'grim exceeded the 5-second capture deadline'
-        reason = detail or f'grim exited with code {exit_code}'
-        self._offer_wayland_portal_screenshot(paths, reason)
-
-    def _offer_wayland_portal_screenshot(self, paths, reason: str) -> None:
-        """Offer a compositor-selected still without claiming replay monitor."""
-
-        self._screenshot_portal_offer_paths = paths
-        detail = (
-            'FTHR could not capture the configured replay monitor with grim. '
-            'CHOOSE SCREENSHOT opens your desktop screenshot permission dialog; '
-            'the compositor chooses the screenshot content independently of '
-            f'the replay monitor. Reason: {str(reason)[:300]}')
-        print(f'[Screenshot] Portal choice offered: {detail}')
-        self.push_error(
-            'CAPTURE UNAVAILABLE',
-            detail,
-            level='warning',
-            actions=[(
-                'CHOOSE SCREENSHOT',
-                lambda target=paths: self._start_wayland_portal_screenshot(
-                    target),
-            )],
-        )
-        QTimer.singleShot(
-            60_000,
-            lambda target=paths: self._expire_wayland_portal_offer(target),
-        )
-
-    def _expire_wayland_portal_offer(self, paths) -> None:
-        if (self._screenshot_portal_offer_paths is paths
-                and self._screenshot_portal is None):
-            self._screenshot_portal_offer_paths = None
-            self._fail_screenshot_request(
-                paths,
-                'SCREENSHOT_NOT_SELECTED',
-                'No compositor screenshot was requested; no image was saved.',
-            )
-
-    def _start_wayland_portal_screenshot(self, paths) -> None:
-        if (self._shutdown_requested
-                or self._screenshot_portal_offer_paths is not paths
-                or self._screenshot_portal is not None):
-            return
-        self._screenshot_portal_offer_paths = None
-        portal_holder = {}
-
-        def completed(succeeded, detail):
-            self._on_wayland_portal_screenshot_finished(
-                paths, portal_holder.get('portal'), succeeded, detail)
-
-        portal = WaylandScreenshotPortal(paths.staged, completed, self)
-        portal_holder['portal'] = portal
-        self._screenshot_portal = portal
-        self._screenshot_portal_paths = paths
-        portal.start()
-
-    def _on_wayland_portal_screenshot_finished(
-            self, paths, portal, succeeded: bool, detail: str) -> None:
-        if (self._shutdown_requested
-                or self._screenshot_portal is not portal
-                or self._screenshot_portal_offer_paths is not None):
-            paths.staged.unlink(missing_ok=True)
-            return
-        self._screenshot_portal = None
-        self._screenshot_portal_paths = None
-        if succeeded:
-            self._publish_screenshot(paths)
-        else:
-            self._fail_screenshot_request(
-                paths, 'PORTAL_SCREENSHOT_FAILED', detail)
 
     def _capture_selected_qt_screen(self, paths, selected_monitor: str) -> None:
-        # Resolve again after an asynchronous Wayland attempt. Windows receives
-        # the same stable DISPLAYCONFIG device path that starts replay; X11 and
-        # Wayland use the connector name. No QScreen list index is persisted.
+        # Resolve the current stable Windows monitor identity before capture.
         screen = self._resolve_screenshot_screen(selected_monitor)
         if screen is None:
             self._fail_screenshot_request(
@@ -4552,18 +4620,6 @@ class MainWindow(QMainWindow):
         """Bound screenshot-worker cleanup during full application shutdown."""
 
         self._screenshot_pending_requests = 0
-        offer_paths = self._screenshot_portal_offer_paths
-        self._screenshot_portal_offer_paths = None
-        if offer_paths is not None:
-            offer_paths.staged.unlink(missing_ok=True)
-        portal = self._screenshot_portal
-        portal_paths = self._screenshot_portal_paths
-        self._screenshot_portal = None
-        self._screenshot_portal_paths = None
-        if portal is not None:
-            portal.close()
-            if portal_paths is not None:
-                portal_paths.staged.unlink(missing_ok=True)
         process = self._screenshot_capture_process
         paths = self._screenshot_capture_paths
         self._screenshot_capture_process = None
@@ -4591,21 +4647,6 @@ class MainWindow(QMainWindow):
             f'{code}\n\n{detail}',
         )
 
-    def _show_compositor_warning(self):
-        from core.compositor import detect_compositor
-        comp = detect_compositor()
-        comp_name = {
-            'kwin':            'KDE Plasma',
-            'gnome':           'GNOME',
-            'wayland-unknown': 'your Wayland compositor',
-        }.get(comp, comp)
-        self.push_error(
-            'LIMITED FEATURE SUPPORT',
-            f'FTHR Clips is running on {comp_name}. Game detection and focus '
-            'monitoring need xdotool; install it with your package manager. '
-            'Hotkeys remain available through the Unix socket.',
-            level='warning',
-        )
 
     def _prepare_startup_capture_source(self) -> None:
         """Start game detection from desktop capture.
@@ -4695,7 +4736,14 @@ class MainWindow(QMainWindow):
     def _on_game_detected(self, window: GameWindow):
         self._handle_game_candidate(window)
 
+    def _game_candidate_blocked(self, window) -> bool:
+        return bool(isinstance(window, GameWindow)
+                    and matching_custom_game_rule(window, self.settings_manager.get(
+                        'game_detection_blacklist', [])))
+
     def _handle_game_candidate(self, window) -> None:
+        if MainWindow._game_candidate_blocked(self, window):
+            return
         if not bool(self.settings_manager.get('game_detection_enabled', False)):
             return
         if isinstance(window, GameWindow) and not is_capture_window_valid(window.hwnd):
@@ -4812,6 +4860,8 @@ class MainWindow(QMainWindow):
             return
         self._pending_game_window = None
         self._game_dismiss_timer.stop()
+        if MainWindow._game_candidate_blocked(self, window):
+            return
         self._switch_capture_to_game(window)
 
     def _on_dismiss_game_detection(self):
@@ -4832,7 +4882,7 @@ class MainWindow(QMainWindow):
 
         # Foreground loss is not a close. Keep the selected target until the
         # window really disappears, then the timer will call this method again.
-        if sys.platform == 'win32' and is_capture_window_valid(
+        if is_capture_window_valid(
                 self._auto_capture_hwnd):
             if not self._fallback_watch_timer.isActive():
                 self._fallback_watch_timer.start()
@@ -4885,12 +4935,9 @@ class MainWindow(QMainWindow):
     def _on_custom_game_rules_changed(self, rules: object):
         if hasattr(self._game_detector, 'set_custom_game_rules'):
             self._game_detector.set_custom_game_rules(rules)
-        if (sys.platform == 'win32'
-                and isinstance(getattr(self, '_active_game_window', None), GameWindow)
-                and self.settings_manager.get('capture_mode') == 'window'):
-            # Crop is part of the encoder input contract. Recreate the replay
-            # generation so subsequent frames are cropped before encoding.
-            QTimer.singleShot(0, self._restart_capture_engine)
+        if hasattr(self._game_detector, 'set_blacklist_rules'):
+            self._game_detector.set_blacklist_rules(
+                self.settings_manager.get('game_detection_blacklist', []))
 
     def _on_focus_lost(self):
         if focus_pause_supported(sys.platform) and self.bridge.is_connected():
@@ -4908,8 +4955,14 @@ class MainWindow(QMainWindow):
     def _on_clip_length_changed(self, duration: int):
         self.clip_duration  = duration
         self.buffer_seconds = compute_buffer_seconds(
-            duration)
+            duration, self.settings_manager.get('custom_clip_lengths', []))
 
+
+    def _on_custom_lengths_changed(self):
+        self.hotkey_manager.configure_custom_clips(
+            self.settings_manager.get('custom_clip_lengths', []))
+        self.hotkey_popup.reload_actions()
+        self._on_clip_length_changed(self.clip_duration)
 
     def _on_framerate_changed(self, fps: int):        self.capture_fps = fps
     def _on_resolution_changed(self, w: int, h: int): self.capture_width, self.capture_height = w, h
@@ -4929,16 +4982,60 @@ class MainWindow(QMainWindow):
     def _on_capture_card_changed(self, enabled: bool):
         setter = getattr(self.capture_card, 'set_visuals_enabled', None)
         if setter is not None:
-            setter(bool(enabled))
+            mode = self.settings_manager.get('capture_card_mode', 'all')
+            setter(bool(enabled) and (mode == 'all'))
 
     def _set_capture_apply_state(self, applying: bool):
+        was_applying = getattr(self, '_capture_settings_applying', False)
         self._capture_settings_applying = bool(applying)
+        timer = getattr(self, '_capture_apply_timer', None)
+        if timer is not None:
+            if applying and not was_applying:
+                timer.start()
+            elif not applying:
+                timer.stop()
+        if not applying:
+            self._engine_restart_requested = False
         for popup_name in ('cap_settings_popup', 'source_popup'):
             popup = getattr(self, popup_name, None)
             if popup is not None:
                 popup.set_apply_state(applying)
         if applying:
-            self._set_status('APPLYING SETTINGS', status_idle_qss())
+            self._set_status(self._capture_pending_text(), status_idle_qss())
+
+    def _capture_apply_timed_out(self):
+        if (not self._capture_settings_applying
+                or getattr(self, '_shutdown_requested', False)):
+            return
+        detail = 'Capture did not confirm the new settings within 30 seconds.'
+        # This is a UI confirmation deadline, not proof of an engine failure.
+        # Keep capture alive, and prevent a late handshake from reopening Apply.
+        self._engine_handshake_generation = None
+        self._pending_launch_config = None
+        self._pending_launch_generation = None
+        self._restart_pending = False
+        self._restart_deferred_for_save = False
+        self._capture_config.fail(detail)
+        self._set_capture_apply_state(False)
+        self._set_status('SETTINGS APPLY FAILED', status_warning_qss())
+        self.push_error(
+            'SETTINGS APPLY TIMED OUT',
+            detail + ' Adjust the settings and apply again, or restart the engine.',
+            level='error',
+            actions=[('RESTART ENGINE', self._restart_capture_engine)],
+            key='capture-apply-timeout',
+        )
+        if getattr(self, '_manual_record_state', 'idle') == 'preparing':
+            self._fail_manual_recording(detail)
+
+    def _capture_pending_text(self):
+        return ('RESTARTING ENGINE' if getattr(self, '_engine_restart_requested', False)
+                else 'APPLYING SETTINGS')
+
+    def _restart_engine_shortcut(self):
+        if getattr(self, '_manual_record_state', 'idle') == 'idle':
+            self._engine_restart_requested = True
+        self._restart_capture_engine()
 
     def _sync_requested_capture_settings(self) -> bool:
         try:
@@ -4974,7 +5071,7 @@ class MainWindow(QMainWindow):
             self.capture_bitrate = max(500, min(200_000, custom_bitrate))
         else:
             self.capture_bitrate = BITRATE_PRESETS[resolution][quality]
-        self.buffer_seconds = compute_buffer_seconds(clip)
+        self.buffer_seconds = compute_buffer_seconds(clip, self.settings_manager.get('custom_clip_lengths', []))
         return True
 
     def _requested_capture_config(self, profile: str | None = None) -> CaptureConfig:
@@ -5006,31 +5103,54 @@ class MainWindow(QMainWindow):
                 bitrate = BITRATE_PRESETS[resolution].get(
                     quality, BITRATE_PRESETS[resolution]['high'])
         monitor = str(self.settings_manager.get('capture_monitor', '') or '')
-        if (sys.platform == 'win32'
-                or monitor.casefold().startswith(r'\\?\display#')):
-            current_choices = enumerate_windows_monitors()
-            if current_choices and not is_valid_monitor_device_path(monitor, current_choices):
-                monitor = default_windows_monitor_path(current_choices)
-                if monitor:
-                    self.settings_manager.set('capture_monitor', monitor)
-                    self.settings_manager.save_settings()
+        current_choices = enumerate_windows_monitors()
+        selection = resolve_monitor_selection(monitor, current_choices)
+        if not selection.path:
+            # This failure is deliberately raised before CaptureConfig is
+            # handed to start_engine, so no unresolved value can reach the
+            # native process.  The event preserves stale/not-configured/
+            # ambiguous/no-display semantics for field diagnostics.
+            emit_event(
+                'capture', 'monitor_selection_failed', state='FAILED',
+                error=getattr(DiagnosticError, selection.code,
+                              selection.code),
+                monitor_selection=selection.as_dict())
+            raise MonitorSelectionError(selection)
+        if selection.persist_required:
+            previous_value = self.settings_manager.get(
+                'capture_monitor', monitor)
+            self.settings_manager.set('capture_monitor', selection.path)
+            if self.settings_manager.save_settings() is False:
+                self.settings_manager.set('capture_monitor', previous_value)
+                failed = MonitorSelectionResult(
+                    state=MonitorSelectionState.PERSIST_FAILED,
+                    code='MONITOR_PERSIST_FAILED',
+                    reason='could not persist resolved monitor path',
+                    previous_state=selection.previous_state,
+                    previous_path=selection.previous_path,
+                )
+                emit_event(
+                    'capture', 'monitor_selection_failed', state='FAILED',
+                    error=getattr(DiagnosticError, failed.code,
+                                  failed.code),
+                    monitor_selection=failed.as_dict())
+                raise MonitorSelectionError(failed)
+        emit_event(
+            'capture', selection.code.lower(),
+            **selection.as_dict())
+        monitor = selection.path
         crop = None
-        active_game = getattr(self, '_active_game_window', None)
+        getattr(self, '_active_game_window', None)
         try:
-            target_hwnd = int(self.settings_manager.get('target_hwnd', 0) or 0)
+            int(self.settings_manager.get('target_hwnd', 0) or 0)
         except (TypeError, ValueError):
-            target_hwnd = 0
-        if (isinstance(active_game, GameWindow)
-                and target_hwnd == int(active_game.hwnd)):
-            crop = crop_profile_for_window(
-                active_game,
-                self.settings_manager.get('game_detection_custom_games', []),
-            )
+            pass
+        pass
         crop_enabled = bool(crop and crop.get('enabled', True))
         return CaptureConfig(
             fps=fps,
             buffer_seconds=compute_buffer_seconds(
-                self.clip_duration),
+                self.clip_duration, self.settings_manager.get('custom_clip_lengths', [])),
             width=width,
             height=height,
             bitrate_kbps=bitrate,
@@ -5050,6 +5170,8 @@ class MainWindow(QMainWindow):
                                     == AUDIO_CAPTURE_MODE_SEPARATED),
             microphone_endpoint_id=str(
                 self.settings_manager.get('mic_device_id') or ''),
+            playback_endpoint_id=str(self.settings_manager.get('playback_device_id') or '') if sys.platform == 'win32' else '',
+            microphone_mono=bool(self.settings_manager.get('mic_downmix_mono', False)) if sys.platform == 'win32' else False,
             normal_clip_seconds=self.clip_duration,
             crop_enabled=crop_enabled,
             crop_x=float(crop.get('x', 0.0)) if crop_enabled else 0.0,
@@ -5060,15 +5182,8 @@ class MainWindow(QMainWindow):
 
     def _apply_active_audio_state(self, config: CaptureConfig) -> None:
         # Windows captures microphones natively; Python recording is for Linux.
-        if sys.platform == 'win32':
-            MicRecorder().stop()
-            return
-        recorder = MicRecorder()
-        if config.audio_enabled:
-            if not recorder.is_running():
-                self._start_mic_recorder()
-        else:
-            recorder.stop()
+        MicRecorder().stop()
+        return
 
     # Engine lifecycle
 
@@ -5100,19 +5215,119 @@ class MainWindow(QMainWindow):
             'crop_enabled': values['crop_enabled'],
         }
 
+    def _owns_engine_attempt(self, generation: int, process, bridge) -> bool:
+        """Check both the attempt token and its exact process/bridge owners."""
+        return (
+            getattr(self, '_engine_gen', None) == generation
+            and getattr(self, 'engine_process', None) is process
+            and getattr(self, 'bridge', None) is bridge
+        )
+
+    def _schedule_owned_hardware_check(
+            self, generation: int, process, bridge) -> None:
+        """Defer encoder inspection without letting a stale timer read new state."""
+        def check_if_current():
+            if not self._owns_engine_attempt(generation, process, bridge):
+                return
+            self._check_hardware_encoding_status(
+                expected_generation=generation,
+                expected_process=process,
+                expected_bridge=bridge,
+            )
+
+        QTimer.singleShot(2000, check_if_current)
+
+    def _advance_recoverable_errors(
+            self, *, connected: bool, frame_count: int,
+            health_state: CaptureHealthState, backend_generation: int,
+            hardware_active: bool = False) -> None:
+        """Clear only keyed incidents with stable current-lineage evidence."""
+        incidents = getattr(self, '_recoverable_error_incidents', {})
+        tracker = getattr(self, '_error_recovery_tracker', None)
+        if tracker is None:
+            tracker = RecoveryTracker()
+            self._error_recovery_tracker = tracker
+
+        active_process_generation = getattr(
+            self, '_engine_process_generation', None)
+        if active_process_generation is None:
+            for key, incident in incidents.items():
+                if incident['recovery_kind'] == 'encoder_init':
+                    tracker.reset(key)
+            return
+        recovered = []
+        for key, incident in tuple(incidents.items()):
+            if incident['recovery_kind'] == 'encoder_init':
+                if (active_process_generation
+                        <= incident['process_generation']
+                        or not connected
+                        or hardware_active is not True
+                        or health_state is not CaptureHealthState.HEALTHY):
+                    tracker.reset(key)
+                    continue
+            if (incident['recovery_kind'] == 'engine_lineage'
+                    and active_process_generation
+                    <= incident['process_generation']):
+                tracker.reset(key)
+                continue
+            allow_content_suspect = (
+                incident['recovery_kind'] == 'capture_backend')
+            is_recovered = tracker.observe(
+                key,
+                connected=connected,
+                process_generation=active_process_generation,
+                backend_generation=backend_generation,
+                frame_count=frame_count,
+                health_state=health_state,
+                allow_content_suspect=allow_content_suspect,
+            )
+            if is_recovered:
+                recovered.append((key, incident))
+
+        for key, incident in recovered:
+            incidents.pop(key, None)
+            error_bar = getattr(self, 'error_bar', None)
+            remove_by_key = getattr(error_bar, 'remove_by_key', None)
+            if callable(remove_by_key):
+                remove_by_key(key)
+            emit_event(
+                'application', 'failure_recovered', state='RECOVERED',
+                compatibility_error=incident['public_error_code'],
+                title=incident['title'],
+                process_generation=active_process_generation,
+                backend_generation=backend_generation,
+                recovery_status='stable_progress_observed',
+                incident_key=key,
+            )
+
     def connect_to_engine(self) -> bool:
+        generation = getattr(self, '_engine_gen', 0)
+        process_owner = self.engine_process
+        bridge_owner = self.bridge
         max_retries = 10
         for attempt in range(1, max_retries + 1):
-            if self.bridge.initialize():
+            if not self._owns_engine_attempt(
+                    generation, process_owner, bridge_owner):
+                return False
+            connected = bridge_owner.initialize()
+            if not self._owns_engine_attempt(
+                    generation, process_owner, bridge_owner):
+                return False
+            if connected:
                 print(f"Connected to capture engine (attempt {attempt}).")
                 self._set_status('STARTING CAPTURE', status_idle_qss())
-                QTimer.singleShot(2000, self._check_hardware_encoding_status)
+                self._schedule_owned_hardware_check(
+                    generation, process_owner, bridge_owner)
                 return True
             if attempt < max_retries:
                 print(f"Connection attempt {attempt}/{max_retries} failed, retrying...")
                 self._set_status(f'CONNECTING {attempt}/{max_retries}', status_idle_qss())
-                self.bridge.shutdown()
+                bridge_owner.shutdown()
+                if not self._owns_engine_attempt(
+                        generation, process_owner, bridge_owner):
+                    return False
                 self.bridge = CaptureBridge()
+                bridge_owner = self.bridge
                 time.sleep(0.5)
 
         print("Bridge connection failed after all retries.")
@@ -5120,10 +5335,31 @@ class MainWindow(QMainWindow):
         return False
 
     def start_engine(self) -> bool:
+        # This token identifies the launch attempt, not the native capture
+        # backend generation reported later through shared memory.
+        self._engine_gen = getattr(self, '_engine_gen', 0) + 1
+        _my_gen = self._engine_gen
         self._diagnostic_engine_start_count += 1
         capture_restart_count = max(
             0, self._diagnostic_engine_start_count - 1)
-        launch_config = self._requested_capture_config()
+        try:
+            launch_config = self._requested_capture_config()
+        except MonitorSelectionError as monitor_error:
+            selection = monitor_error.result
+            detail = (f'{selection.reason}. Capture was not started; a canonical '
+                      'Windows monitor device path is required.')
+            self._capture_config.fail(detail)
+            self._restart_pending = False
+            self._set_capture_apply_state(False)
+            self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+            emit_event(
+                'engine', 'start_failed', state='FAILED',
+                error=getattr(DiagnosticError, selection.code, selection.code),
+                monitor_selection=selection.as_dict(),
+                detail=detail)
+            self.push_error('CAPTURE FAILED', f'{selection.code}: {detail}',
+                            level='error')
+            return False
         self._capture_config.request(launch_config)
         self._capture_config.begin_apply()
         requested_diagnostics = self._diagnostic_capture_config(launch_config)
@@ -5135,6 +5371,7 @@ class MainWindow(QMainWindow):
                 build_adapter_chain(
                     None, unavailable_reason='engine_process_not_started'))
         emit_event('engine', 'start_requested', state='REQUESTED',
+                   process_generation=_my_gen,
                    requested_configuration=requested_diagnostics,
                    engine_process_start_count=self._diagnostic_engine_start_count,
                    capture_restart_count=capture_restart_count)
@@ -5146,13 +5383,18 @@ class MainWindow(QMainWindow):
         if not self.engine_path or not self.engine_path.exists():
             print("Engine executable not found.")
             self._set_status('NO ENGINE', status_warning_qss())
-            QTimer.singleShot(500, self._warn_no_engine)
             self._capture_config.fail('engine executable not found')
             emit_event(
                 'engine', 'start_failed', state='FAILED',
                 error=DiagnosticError.ENGINE_START_FAILED,
+                compatibility_error='Error 003',
+                technical_cause='ENGINE_EXECUTABLE_MISSING',
+                technical_subsystem='process', operation='executable_discovery',
+                process_generation=_my_gen,
+                native_capture_generation=None,
                 api_call='engine_executable_discovery',
                 detail='engine executable not found')
+            self._warn_no_engine(process_generation=_my_gen)
             self._restart_pending = False
             self._set_capture_apply_state(False)
             return False
@@ -5171,29 +5413,27 @@ class MainWindow(QMainWindow):
         target_hwnd     = self.settings_manager.get('target_hwnd',     0)
         capture_monitor = launch_config.monitor
         engine_monitor_arg = capture_monitor
-        if sys.platform != 'win32' and is_native_x11_session():
-            xrandr = linux_tools.path('xrandr')
-            if not xrandr:
-                detail = linux_tools.missing_message('xrandr')
-                self._capture_config.fail(detail)
-                self._restart_pending = False
-                self._set_capture_apply_state(False)
-                self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
-                self.push_error('X11 MONITOR UNAVAILABLE', detail, level='error')
-                return False
-            try:
-                x11_target = resolve_x11_capture_target(
-                    capture_monitor, xrandr)
-            except X11MonitorError as error:
-                detail = str(error)
-                self._capture_config.fail(detail)
-                self._restart_pending = False
-                self._set_capture_apply_state(False)
-                self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
-                self.push_error('X11 MONITOR UNAVAILABLE', detail, level='error')
-                return False
-            engine_monitor_arg = x11_target.engine_argument
-            capture_monitor = x11_target.output.name
+        pass
+        try:
+            engine_monitor_arg = validate_engine_monitor_argument(
+                engine_monitor_arg)
+        except MonitorSelectionError as monitor_error:
+            selection = monitor_error.result
+            detail = (f'{selection.reason}. Capture was not started; a '
+                      'canonical Windows monitor device path is required.')
+            self._capture_config.fail(detail)
+            self._restart_pending = False
+            self._set_capture_apply_state(False)
+            self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+            emit_event(
+                'engine', 'start_failed', state='FAILED',
+                error=getattr(DiagnosticError, selection.code,
+                              selection.code),
+                monitor_selection=selection.as_dict(),
+                detail=detail, api_call='native_process_argument_guard')
+            self.push_error('CAPTURE FAILED',
+                            f'{selection.code}: {detail}', level='error')
+            return False
         # target_hwnd comes from user-editable settings.json — never trust it.
         try:
             target_hwnd = int(target_hwnd)
@@ -5269,7 +5509,8 @@ class MainWindow(QMainWindow):
                      f'{launch_config.crop_y:.9g}',
                      f'{launch_config.crop_w:.9g}',
                      f'{launch_config.crop_h:.9g}',
-                     audio_mode_arg],
+                     audio_mode_arg, launch_config.playback_endpoint_id,
+                     '1' if launch_config.microphone_mono else '0'],
                     **popen_options
                 )
                 self._engine_startup_output.attach(self.engine_process.stdout)
@@ -5297,7 +5538,11 @@ class MainWindow(QMainWindow):
                 emit_event(
                     'engine', 'start_failed', state='FAILED',
                     error=DiagnosticError.ENGINE_START_FAILED,
-                    compatibility_error='Error 001',
+                    compatibility_error='Error 005',
+                    technical_cause='PROCESS_LAUNCH_FAILED',
+                    technical_subsystem='process', operation='launch',
+                    process_generation=_my_gen,
+                    native_capture_generation=None,
                     native_failure={
                         'api_call': ('CreateProcessW' if sys.platform == 'win32'
                                      else 'subprocess.Popen'),
@@ -5333,10 +5578,24 @@ class MainWindow(QMainWindow):
                 self.stop_engine()
                 self._set_status('ERROR', status_warning_qss())
                 self.push_error(
-                    'CAPTURE FAILED',
+                    'ENGINE COULD NOT START',
                     f'{failure.title}: {failure.detail}',
                     level='error',
                     actions=[('RESTART ENGINE', self._restart_capture_engine)],
+                    key='engine-launch',
+                    dismiss_on_action=False,
+                    diagnostic_context={
+                        'diagnostic_error': DiagnosticError.ENGINE_START_FAILED,
+                        'technical_cause': 'PROCESS_LAUNCH_FAILED',
+                        'technical_subsystem': 'process',
+                        'operation': 'launch',
+                        'process_generation': _my_gen,
+                        'backend_generation': None,
+                        'recovery_kind': 'engine_lineage',
+                        'recovery_status': 'awaiting_replacement_engine',
+                        'native_error': native_signed,
+                        'win32_error': getattr(error, 'winerror', None),
+                    },
                 )
                 self._capture_config.fail(failure.detail)
                 self._restart_pending = False
@@ -5345,21 +5604,50 @@ class MainWindow(QMainWindow):
             # Poll for up to 10 seconds off the Qt thread during hardware startup.
             # Dispatch UI changes through _ui_call. A generation check prevents an old
             # polling worker from disconnecting a replacement engine after a restart.
-            self._engine_gen = getattr(self, '_engine_gen', 0) + 1
-            _my_gen = self._engine_gen
+            process_owner = self.engine_process
+            bridge_owner = getattr(self, 'bridge', None)
+            startup_owner = getattr(self, '_engine_startup_output', None)
+            self._engine_process_generation = _my_gen
+            self._engine_handshake_generation = _my_gen
 
             def _poll_connect():
                 for _ in range(60):
                     time.sleep(0.15)
-                    if self._engine_gen != _my_gen:
+                    if not self._owns_engine_attempt(
+                            _my_gen, process_owner, bridge_owner):
                         return   # superseded by a newer start/restart
-                    if self.bridge.initialize():
-                        startup_output = self._read_engine_startup_output()
+                    connected = bridge_owner.initialize()
+                    if not self._owns_engine_attempt(
+                            _my_gen, process_owner, bridge_owner):
+                        # Stop/restart may replace the bridge while initialize
+                        # is blocked. Release only the captured old mapping.
+                        if getattr(self, 'bridge', None) is not bridge_owner:
+                            try:
+                                bridge_owner.shutdown()
+                            except Exception as cleanup_error:
+                                print('Old capture bridge cleanup failed: '
+                                      f'{cleanup_error}')
+                        return
+                    if connected:
+                        if not self._owns_engine_attempt(
+                                _my_gen, process_owner, bridge_owner):
+                            return
+                        startup_output = self._read_engine_startup_output(
+                            startup_owner)
+                        if not self._owns_engine_attempt(
+                                _my_gen, process_owner, bridge_owner):
+                            return
                         startup_warnings = extract_startup_warnings(startup_output)
                         if startup_output.strip():
                             print(startup_output.rstrip())
                         def _on_connected(
                                 startup_warnings=startup_warnings):
+                            if not self._owns_engine_attempt(
+                                    _my_gen, process_owner, bridge_owner):
+                                return
+                            if self._engine_handshake_generation != _my_gen:
+                                return
+                            self._engine_handshake_generation = None
                             # Connection proves IPC only. Promote requested to
                             # active after capture-health observes fresh frames.
                             self._pending_launch_config = launch_config
@@ -5372,11 +5660,19 @@ class MainWindow(QMainWindow):
                             # enumerate microphones.
                             if self._ui_ready:
                                 QTimer.singleShot(
-                                    0, self._settings_page_widget._populate_mic_devices)
-                            QTimer.singleShot(2000, self._check_hardware_encoding_status)
+                                    0, lambda: (
+                                        self._settings_page_widget
+                                        ._populate_mic_devices()
+                                        if self._owns_engine_attempt(
+                                            _my_gen, process_owner, bridge_owner)
+                                        else None))
+                            self._schedule_owned_hardware_check(
+                                _my_gen, process_owner, bridge_owner)
                             emit_event(
                                 'engine', 'handshake_completed', state='CONNECTED',
-                                capture_generation=_my_gen)
+                                process_generation=_my_gen,
+                                native_capture_generation=(
+                                    'unavailable:status_not_polled'))
                             for warning in startup_warnings:
                                 warning_action = (
                                     ('EDIT GAME CROP', self._toggle_game_detection)
@@ -5392,70 +5688,131 @@ class MainWindow(QMainWindow):
                         self._ui_call.emit(_on_connected)
                         print("Connected to capture engine.")
                         return
-                    if (self.engine_process is not None
-                            and self.engine_process.poll() is not None):
+                    if process_owner.poll() is not None:
                         break
                 # initialize() never succeeded — kill the orphaned process
-                if self._engine_gen != _my_gen:
+                if not self._owns_engine_attempt(
+                        _my_gen, process_owner, bridge_owner):
                     return   # a newer start owns the engine now — don't kill it
-                startup_output = self._read_engine_startup_output()
+                startup_output = self._read_engine_startup_output(startup_owner)
+                if not self._owns_engine_attempt(
+                        _my_gen, process_owner, bridge_owner):
+                    return
                 if startup_output.strip():
                     print(startup_output.rstrip())
                 failure = extract_startup_failure(startup_output)
                 print(f"Engine did not respond — {failure.code}: "
                       f"{failure.detail}")
+                explicit_native_failure = failure.code != 'ENGINE_START_FAILED'
+                public_error_code = (
+                    'Error 001' if explicit_native_failure else 'Error 004')
+                failure_title = (
+                    'CAPTURE FAILED' if explicit_native_failure
+                    else 'ENGINE NOT RESPONDING')
+                technical_error = getattr(
+                    DiagnosticError, failure.code,
+                    DiagnosticError.ENGINE_HANDSHAKE_TIMEOUT)
                 emit_event(
                     'engine', 'handshake_timeout', state='FAILED',
-                    error=DiagnosticError.ENGINE_HANDSHAKE_TIMEOUT,
-                    compatibility_error='Error 001',
+                    error=technical_error,
+                    compatibility_error=public_error_code,
+                    technical_cause=failure.code,
+                    technical_subsystem=('native_backend'
+                                         if explicit_native_failure else 'ipc'),
+                    operation='startup_handshake',
+                    process_generation=_my_gen,
+                    native_capture_generation=None,
                     startup_failure={
                         'code': failure.code,
                         'title': failure.title,
                         'detail': failure.detail,
                     })
                 def _on_failed():
+                    if not self._owns_engine_attempt(
+                            _my_gen, process_owner, bridge_owner):
+                        return
+                    if self._engine_handshake_generation != _my_gen:
+                        return
+                    self._engine_handshake_generation = None
                     self.stop_engine()
                     self._capture_config.fail(failure.detail)
                     self._restart_pending = False
                     self._set_capture_apply_state(False)
                     self._set_status('DISCONNECTED', status_warning_qss())
                     self.push_error(
-                        'CAPTURE FAILED',
+                        failure_title,
                         f'{failure.title}: {failure.detail}',
                         level='error',
                         actions=[('RESTART ENGINE', self._restart_capture_engine)],
+                        key='engine-launch',
+                        dismiss_on_action=False,
+                        diagnostic_context={
+                            'diagnostic_error': technical_error,
+                            'technical_cause': failure.code,
+                            'technical_subsystem': (
+                                'native_backend' if explicit_native_failure
+                                else 'ipc'),
+                            'operation': 'startup_handshake',
+                            'process_generation': _my_gen,
+                            'backend_generation': None,
+                            'recovery_kind': (
+                                'capture_backend' if explicit_native_failure
+                                and failure.code.startswith('CAPTURE_')
+                                else 'engine_lineage' if not explicit_native_failure
+                                else None),
+                            'recovery_status': (
+                                'awaiting_replacement_engine'
+                                if not explicit_native_failure
+                                else 'manual_restart_required'),
+                        },
                     )
                     if self._manual_record_state == 'preparing':
                         self._fail_manual_recording(
                             'The recording quality profile could not connect to capture.')
                 self._ui_call.emit(_on_failed)
 
-            self._engine_connect_thread = threading.Thread(
-                target=_poll_connect, daemon=True, name='fthr-engine-connect')
-            self._engine_connect_thread.start()
+            threading.Thread(target=_poll_connect, daemon=True,
+                             name='fthr-engine-connect').start()
             return True
         except Exception as e:
             print(f"Engine start error: {e}")
             emit_event(
                 'engine', 'start_failed', state='FAILED',
                 error=DiagnosticError.ENGINE_START_FAILED,
-                compatibility_error='Error 001',
+                compatibility_error='Error 005',
+                technical_cause=type(e).__name__,
+                technical_subsystem='process', operation='launch',
+                process_generation=_my_gen,
+                native_capture_generation=None,
                 detail=f'{type(e).__name__}: {e}')
             self.stop_engine()
             self._set_status('ERROR', status_warning_qss())
             self.push_error(
-                'CAPTURE FAILED',
+                'ENGINE COULD NOT START',
                 f'Engine failed to start: {e}',
                 level='error',
                 actions=[('RESTART ENGINE', self._restart_capture_engine)],
+                key='engine-launch',
+                dismiss_on_action=False,
+                diagnostic_context={
+                    'diagnostic_error': DiagnosticError.ENGINE_START_FAILED,
+                    'technical_cause': type(e).__name__,
+                    'technical_subsystem': 'process',
+                    'operation': 'launch',
+                    'process_generation': _my_gen,
+                    'backend_generation': None,
+                    'recovery_kind': 'engine_lineage',
+                    'recovery_status': 'awaiting_replacement_engine',
+                },
             )
             self._capture_config.fail(str(e))
             self._restart_pending = False
             self._set_capture_apply_state(False)
             return False
 
-    def _read_engine_startup_output(self) -> str:
-        capture = self._engine_startup_output
+    def _read_engine_startup_output(self, capture=None) -> str:
+        if capture is None:
+            capture = self._engine_startup_output
         if capture is None:
             return ''
         try:
@@ -5474,9 +5831,13 @@ class MainWindow(QMainWindow):
                 pass
 
     def stop_engine(self):
+        # Invalidate queued handshake work before shutdown can block.
+        self._engine_handshake_generation = None
+        self._engine_gen = getattr(self, '_engine_gen', 0) + 1
         process = self.engine_process
+        bridge = getattr(self, 'bridge', None)
         graceful_requested = False
-        request_shutdown = getattr(self.bridge, 'request_engine_shutdown', None)
+        request_shutdown = getattr(bridge, 'request_engine_shutdown', None)
         if callable(request_shutdown):
             graceful_requested = request_shutdown()
         if process:
@@ -5490,7 +5851,7 @@ class MainWindow(QMainWindow):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     try:
-                        process.wait(timeout=0.5)  # reap — no zombie on Linux
+                        process.wait(timeout=0.5)
                     except subprocess.TimeoutExpired:
                         print('[Lifecycle] Engine could not be reaped before exit')
             print('[Lifecycle] EngineStopped '
@@ -5498,9 +5859,11 @@ class MainWindow(QMainWindow):
             emit_event(
                 'engine', 'stopped', state='STOPPED',
                 graceful=graceful_requested, exit_code=process.returncode)
-            self.engine_process = None
-        if self.bridge:
-            self.bridge.shutdown()
+            if self.engine_process is process:
+                self.engine_process = None
+            self._engine_process_generation = None
+        if bridge:
+            bridge.shutdown()
         self._close_engine_startup_output()
 
     def _restart_capture_engine(self, *, allow_recording_prepare: bool = False):
@@ -5517,12 +5880,18 @@ class MainWindow(QMainWindow):
             return
         self._set_capture_apply_state(True)
         if hasattr(self, '_save_state') and self._save_state.is_busy():
-            self._set_status('APPLYING SETTINGS', status_idle_qss())
+            # Save completion has its own bounded lifecycle. Do not terminate
+            # a live save using the encoder-startup deadline.
+            timer = getattr(self, '_capture_apply_timer', None)
+            if timer is not None:
+                timer.stop()
+            self._set_status(self._capture_pending_text(), status_idle_qss())
             if not getattr(self, '_restart_deferred_for_save', False):
                 self._restart_deferred_for_save = True
                 def _retry_after_save():
                     self._restart_deferred_for_save = False
-                    self._restart_capture_engine()
+                    if self._capture_settings_applying:
+                        self._restart_capture_engine()
                 QTimer.singleShot(500, _retry_after_save)
             return
         # Guard against button spam: each unguarded click would spawn another
@@ -5531,18 +5900,57 @@ class MainWindow(QMainWindow):
             print('[Engine] Restart already in progress — ignored')
             return
         self._restart_pending = True
-        self._set_status('APPLYING SETTINGS', status_idle_qss())
+        timer = getattr(self, '_capture_apply_timer', None)
+        if timer is not None:
+            timer.start()
+        self._set_status(self._capture_pending_text(), status_idle_qss())
         self.stop_engine()
         QTimer.singleShot(1000, self._finish_restart)
+
+    def _maybe_restart_for_display_mode_change(self, status):
+        if (sys.platform != 'win32'
+                or not status.get('connected')
+                or not int(status.get('capture_health_flags', 0)) & int(CaptureHealthFlag.RECONFIGURE_REQUIRED)
+                or getattr(self, '_manual_record_state', 'idle') != 'idle'
+                or getattr(self, '_restart_pending', False)
+                or getattr(self, '_capture_settings_applying', False)):
+            return
+        generation = getattr(self, '_engine_gen', None)
+        if getattr(self, '_display_mode_restart_generation', None) == generation:
+            return
+        now = time.monotonic()
+        attempts = [stamp for stamp in getattr(self, '_display_mode_restart_times', [])
+                    if now - stamp < 30]
+        if len(attempts) >= 3:
+            return
+        self._display_mode_restart_times = attempts + [now]
+        self._display_mode_restart_generation = generation
+        process, bridge = self.engine_process, self.bridge
+        def restart():
+            if (self._owns_engine_attempt(generation, process, bridge)
+                    and getattr(self, '_manual_record_state', 'idle') == 'idle'
+                    and not getattr(self, '_restart_pending', False)
+                    and int(bridge.get_status().get('capture_health_flags', 0))
+                    & int(CaptureHealthFlag.RECONFIGURE_REQUIRED)):
+                self._restart_capture_engine()
+        QTimer.singleShot(750, restart)
 
     def _on_encoder_config_changed(self):
         self._set_status('APPLYING SETTINGS', status_idle_qss())
         self._restart_capture_engine()
 
     def _finish_restart(self):
-        self.bridge = CaptureBridge()
-        if not self.start_engine():
+        try:
+            self.bridge = CaptureBridge()
+            started = self.start_engine()
+        except Exception as error:
+            self._capture_config.fail(str(error))
+            self._set_status('SETTINGS APPLY FAILED', status_warning_qss())
+            self.push_error('SETTINGS APPLY FAILED', str(error), level='error')
+            started = False
+        if not started:
             self._restart_pending = False
+            self._set_capture_apply_state(False)
             if getattr(self, '_manual_record_state', 'idle') == 'preparing':
                 self._fail_manual_recording(
                     'The recording quality profile could not be started.')
@@ -5550,32 +5958,7 @@ class MainWindow(QMainWindow):
     # Microphone recorder
 
     def _start_mic_recorder(self):
-        if sys.platform == 'win32':
-            # Native WASAPI capture starts with the engine so microphone and
-            # video share one generation-local QPC timeline. Do not create a
-            # second PortAudio ring that could later post-mix stale audio.
-            return
-        if not MicRecorder.is_available():
-            print('[Mic] sounddevice not installed — mic-in-clips disabled')
-            self.push_error(
-                'MIC NOT FOUND',
-                'No recording device detected. Check audio settings or permissions.',
-                level='warning',
-                actions=[('OPEN AUDIO SETTINGS', self._toggle_settings_page)],
-            )
-            return
-        device_index = self._resolved_mic_device_index()
-        gain = float(self.settings_manager.get('mic_volume', 100)) / 100.0
-        if MicRecorder().start(device_index, gain=gain):
-            print(f'[Mic] Recorder started (device={device_index}, gain={gain:.2f})')
-        else:
-            print('[Mic] Recorder failed to start — clips will have no mic audio')
-            self.push_error(
-                'MIC NOT FOUND',
-                'Microphone failed to start. Clips will have no mic audio.',
-                level='warning',
-                actions=[('OPEN AUDIO SETTINGS', self._toggle_settings_page)],
-            )
+        return
 
     def _resolved_mic_device_index(self):
         """Translate the saved mic_device_name into a sounddevice index, or None."""
@@ -5586,26 +5969,11 @@ class MainWindow(QMainWindow):
             return None
         try:
             import sounddevice as _sd
-            if sys.platform.startswith('linux'):
-                matches = [
-                    i for i, dev in enumerate(_sd.query_devices())
-                    if dev.get('max_input_channels', 0) > 0
-                    and dev.get('name') == name
-                ]
-                if len(matches) == 1:
-                    return matches[0]
-                if len(matches) > 1:
-                    print('[Mic] Saved microphone name is ambiguous; using system default')
-                else:
-                    print('[Mic] Saved microphone name was not found; using system default')
-                return None
             for i, dev in enumerate(_sd.query_devices()):
                 if dev.get('max_input_channels', 0) > 0 and dev.get('name') == name:
                     return i
-        except Exception as e:
-            # Device enumeration is optional; a missing match uses system default.
-            if sys.platform.startswith('linux'):
-                print(f'[Mic] Device lookup failed; using system default: {e}')
+        except Exception:
+            # Device enumeration is optional; no match means mic capture stays off.
             pass
         return None
 
@@ -5644,12 +6012,9 @@ class MainWindow(QMainWindow):
             recorder_running = (MicRecorder.is_available()
                                  and MicRecorder().is_running())
             if restart_recorder or not recorder_running:
-                if sys.platform == 'win32':
-                    if recorder_running and self._gary_recorder_active:
-                        MicRecorder().stop()
-                    self._start_gary_mic_recorder()
-                elif not recorder_running:
-                    self._start_mic_recorder()
+                if recorder_running and self._gary_recorder_active:
+                    MicRecorder().stop()
+                self._start_gary_mic_recorder()
         else:
             self._gary_current_intensity = 0.0
             self._gary_overlay.set_intensity(0.0)
@@ -5678,9 +6043,9 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _manual_record_button_qss(active: bool) -> str:
-        color = Colors.ERROR if active else Colors.TEXT
-        border = Colors.ERROR if active else Colors.BORDER
-        background = Colors.ERROR_SOFT if active else Colors.SURFACE_2
+        color = Colors.TEXT if active else Colors.BG
+        border = Colors.ERROR if active else Colors.ACCENT
+        background = Colors.DELETE if active else Colors.ACCENT
         return f'''
             QPushButton {{
                 background-color: {background};
@@ -5688,12 +6053,18 @@ class MainWindow(QMainWindow):
                 border-radius: {Sizes.RADIUS_MD}px;
                 color: {color};
                 font-family: {Fonts.DISPLAY};
-                font-size: {Fonts.SIZE_LABEL}px;
-                font-weight: bold;
+                font-size: {Fonts.SIZE_H3}px;
+                font-weight: 600;
                 letter-spacing: {Fonts.TRACK_LABEL}px;
                 padding: 0 12px;
             }}
-            QPushButton:hover {{ border-color: {Colors.ACCENT}; }}
+            QPushButton:hover {{
+                background-color: {Colors.ERROR_SOFT if active else Colors.ACCENT_SOFT};
+                color: {Colors.ERROR if active else Colors.ACCENT};
+                border-color: {Colors.ERROR if active else Colors.ACCENT};
+            }}
+            QPushButton:pressed {{ background-color: {Colors.DELETE if active else Colors.ACCENT_DIM}; }}
+            QPushButton:focus {{ border: 2px solid {Colors.TEXT}; }}
             QPushButton:disabled {{ color: {Colors.TEXT_MUTED}; }}
         '''
 
@@ -5704,8 +6075,7 @@ class MainWindow(QMainWindow):
             self._stop_manual_recording()
 
     def _start_manual_recording(self):
-        if sys.platform != 'win32':
-            return
+        pass
         if self._save_state.is_busy():
             self.push_error(
                 'WAIT FOR CLIP SAVE',
@@ -5764,9 +6134,8 @@ class MainWindow(QMainWindow):
             self._engine_profile = 'recording'
             self._manual_record_state = 'preparing'
             self.record_btn.setEnabled(False)
-            self.record_btn.setText('PREPARING…')
-            self.record_btn.setStyleSheet(
-                self._manual_record_button_qss(True))
+            self.record_btn.setText('Preparing…')
+            set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(True)))
             self._set_status('PREPARING RECORDING QUALITY', status_idle_qss())
             self._restart_capture_engine(allow_recording_prepare=True)
             return
@@ -5807,8 +6176,8 @@ class MainWindow(QMainWindow):
         self._manual_record_path = final_path
         self._pending_manual_record_path = None
         self.record_btn.setEnabled(False)
-        self.record_btn.setText('STARTING…')
-        self.record_btn.setStyleSheet(self._manual_record_button_qss(True))
+        self.record_btn.setText('Starting…')
+        set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(True)))
         self._set_status('STARTING RECORDING', status_idle_qss())
         self._manual_record_timer.start()
 
@@ -5826,7 +6195,7 @@ class MainWindow(QMainWindow):
         self._manual_record_state = 'stopping'
         self._manual_record_requested_at = time.monotonic()
         self.record_btn.setEnabled(False)
-        self.record_btn.setText('FINALIZING…')
+        self.record_btn.setText('Finalizing…')
         self._set_status('FINALIZING RECORDING', status_idle_qss())
 
     @staticmethod
@@ -5881,7 +6250,7 @@ class MainWindow(QMainWindow):
         if state == 'recording':
             elapsed = now - self._manual_record_started_at
             self.record_btn.setText(
-                f'■  {self._format_recording_elapsed(elapsed)}')
+                f'Stop  {self._format_recording_elapsed(elapsed)}')
             recording = self._manual_record_path
             try:
                 if not native_recording and elapsed > 0.75:
@@ -5893,7 +6262,7 @@ class MainWindow(QMainWindow):
                         self._manual_record_state = 'stopping'
                         self._manual_record_requested_at = now
                         self.record_btn.setEnabled(False)
-                        self.record_btn.setText('RECOVERING…')
+                        self.record_btn.setText('Recovering…')
                     else:
                         self._fail_manual_recording(
                             'The recording writer stopped unexpectedly.',
@@ -5930,10 +6299,10 @@ class MainWindow(QMainWindow):
         self._manual_record_state = 'recording'
         self._manual_record_started_at = time.monotonic()
         self.record_btn.setEnabled(True)
-        self.record_btn.setText('■  00:00:00')
+        self.record_btn.setText('Stop  00:00:00')
         self.record_btn.setToolTip(
             'Stop and finalize the current manual recording')
-        self.record_btn.setStyleSheet(self._manual_record_button_qss(True))
+        set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(True)))
         self._set_status('RECORDING', status_active_qss())
 
     def _restore_clip_capture_profile(self):
@@ -5968,7 +6337,7 @@ class MainWindow(QMainWindow):
         self._manual_record_state = 'finalizing'
         if hasattr(self, 'record_btn'):
             self.record_btn.setEnabled(False)
-            self.record_btn.setText('FINALIZING…')
+            self.record_btn.setText('Finalizing…')
         if not publish_ui:
             try:
                 probe_media(recording)
@@ -6011,10 +6380,10 @@ class MainWindow(QMainWindow):
         self._manual_record_finalize_thread = None
         if hasattr(self, 'record_btn'):
             self.record_btn.setEnabled(sys.platform == 'win32')
-            self.record_btn.setText('●  RECORD')
+            self.record_btn.setText('Record')
             self.record_btn.setToolTip(
                 'Start a manual recording while replay capture stays active')
-            self.record_btn.setStyleSheet(self._manual_record_button_qss(False))
+            set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(False)))
         if publish_ui:
             if hasattr(self, 'clip_grid'):
                 self.clip_grid.force_refresh()
@@ -6043,8 +6412,8 @@ class MainWindow(QMainWindow):
                 pass
         if hasattr(self, 'record_btn'):
             self.record_btn.setEnabled(sys.platform == 'win32')
-            self.record_btn.setText('●  RECORD')
-            self.record_btn.setStyleSheet(self._manual_record_button_qss(False))
+            self.record_btn.setText('Record')
+            set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(False)))
         self._set_status('RECORDING FAILED', status_warning_qss())
         if keep_recording and recording is not None:
             detail = (
@@ -6057,14 +6426,13 @@ class MainWindow(QMainWindow):
         self._restore_clip_capture_profile()
 
     def _open_recordings_folder(self):
-        folder = recording_directory_from(self.settings_manager)
-        folder.mkdir(parents=True, exist_ok=True)
-        if sys.platform == 'win32':
+        try:
+            folder = ensure_storage_directory(
+                recording_directory_from(self.settings_manager))
             os.startfile(str(folder))
-        else:
-            opener = linux_tools.path('xdg-open')
-            if opener:
-                subprocess.Popen([opener, str(folder)])
+        except OSError as error:
+            self.push_error(
+                'RECORDING FOLDER UNAVAILABLE', str(error), level='error')
 
     # Save clip
 
@@ -6117,7 +6485,12 @@ class MainWindow(QMainWindow):
         self._last_save_request = now
 
         timestamp    = datetime.now().strftime('%d%b%Y_%H-%M-%S')
-        clips_root   = clips_directory_from(self.settings_manager)
+        try:
+            clips_root = clips_directory_from(self.settings_manager)
+        except StoragePathError as error:
+            self.capture_card.show_error()
+            self.push_error('CLIP SAVE FAILED', str(error), level='error')
+            return
         capture_mode = self.settings_manager.get('capture_mode', 'desktop')
 
         if capture_mode == 'window':
@@ -6162,7 +6535,7 @@ class MainWindow(QMainWindow):
         # bridge the failure is indistinguishable from a write error, and the
         # user got told to check disk space while the real cause was a deep
         # folder (a long game name under a long user profile path is enough).
-        if sys.platform == 'win32' and len(str(output_path)) > 255:
+        if len(str(output_path)) > 255:
             self.capture_card.show_error()
             self.push_error(
                 'CLIP PATH TOO LONG',
@@ -6185,31 +6558,8 @@ class MainWindow(QMainWindow):
         # and microphone rings, so post-processing extracts the matching interval.
         mic_end_time = time.monotonic()
         crop_profile = None
-        active_game = getattr(self, '_active_game_window', None)
-        if isinstance(active_game, GameWindow):
-            try:
-                active_hwnd = int(self.settings_manager.get(
-                    'target_hwnd', 0) or 0)
-            except (TypeError, ValueError):
-                active_hwnd = 0
-            if active_hwnd == int(active_game.hwnd):
-                crop_profile = crop_profile_for_window(
-                    active_game,
-                    self.settings_manager.get('game_detection_custom_games', []),
-                )
-                active_config = self._capture_config.active
-                if (crop_profile and active_config
-                        and active_config.crop_enabled
-                        and all(math.isclose(
-                            float(crop_profile.get(key, fallback)),
-                            float(getattr(active_config, f'crop_{key}')),
-                            rel_tol=0.0, abs_tol=1e-6)
-                            for key, fallback in (
-                                ('x', 0.0), ('y', 0.0),
-                                ('w', 1.0), ('h', 1.0)))):
-                    # This replay generation already cropped every frame before
-                    # encode; do not crop the finalized clip a second time.
-                    crop_profile = None
+        getattr(self, '_active_game_window', None)
+        pass
 
         try:
             # Consume the previous response before submitting another save, so its
@@ -6379,9 +6729,21 @@ class MainWindow(QMainWindow):
                 'CLIP WAS NOT SAVED',
                 outcome.detail or
                 'The capture engine failed while writing the clip. '
-                f'Check free disk space at {clips_directory_from(self.settings_manager)}.',
+                'Check free disk space and the configured clips storage folder.',
                 level='error',
                 actions=[('OPEN FOLDER', self._open_clips_folder)],
+                diagnostic_context={
+                    'diagnostic_error': DiagnosticError.CLIP_SAVE_FAILED,
+                    'technical_cause': 'NATIVE_SAVE_FAILURE',
+                    'technical_subsystem': 'clip_save',
+                    'operation': 'write_clip',
+                    'operation_id': op.op_id,
+                    'process_generation': getattr(
+                        self, '_engine_process_generation', None),
+                    'backend_generation': getattr(
+                        self, '_last_native_capture_generation', None),
+                    'recovery_status': 'terminal_not_recoverable',
+                },
             )
             return
 
@@ -6411,6 +6773,18 @@ class MainWindow(QMainWindow):
                 'The capture engine returned an incomplete clip path. The file '
                 'was not added to the library or post-processing pipeline.',
                 level='error',
+                diagnostic_context={
+                    'diagnostic_error': DiagnosticError.CLIP_SAVE_FAILED,
+                    'technical_cause': 'INCOMPLETE_OUTPUT_PATH',
+                    'technical_subsystem': 'clip_save',
+                    'operation': 'validate_output_path',
+                    'operation_id': op.op_id,
+                    'process_generation': getattr(
+                        self, '_engine_process_generation', None),
+                    'backend_generation': getattr(
+                        self, '_last_native_capture_generation', None),
+                    'recovery_status': 'terminal_not_recoverable',
+                },
             )
             return
 
@@ -6425,10 +6799,22 @@ class MainWindow(QMainWindow):
                 self.push_error(
                     'CLIP WAS NOT SAVED',
                     'The capture engine reported success but no clip file was '
-                    'written. Check free disk space at '
-                    f'{clips_directory_from(self.settings_manager)}.',
+                    'written. Check free disk space and the configured clips '
+                    'storage folder.',
                     level='error',
                     actions=[('OPEN FOLDER', self._open_clips_folder)],
+                    diagnostic_context={
+                        'diagnostic_error': DiagnosticError.CLIP_SAVE_FAILED,
+                        'technical_cause': 'OUTPUT_FILE_MISSING_OR_EMPTY',
+                        'technical_subsystem': 'clip_save',
+                        'operation': 'verify_output_file',
+                        'operation_id': op.op_id,
+                        'process_generation': getattr(
+                            self, '_engine_process_generation', None),
+                        'backend_generation': getattr(
+                            self, '_last_native_capture_generation', None),
+                        'recovery_status': 'terminal_not_recoverable',
+                    },
                 )
                 return
         except OSError as e:
@@ -6620,18 +7006,14 @@ class MainWindow(QMainWindow):
 
     def _open_clips_folder(self):
         """Open the configured FTHR clips folder in the platform file manager."""
-        folder = clips_directory_from(self.settings_manager)
         try:
-            if sys.platform == 'win32':
-                os.startfile(str(folder))  # os.startfile exists on Windows only
-            else:
-                opener = linux_tools.path('xdg-open')
-                if opener:
-                    subprocess.Popen([opener, str(folder)])
-                else:
-                    print(f'[UI] {linux_tools.missing_message("xdg-open")}')
-        except Exception as e:
-            print(f'[UI] Could not open clips folder: {e}')
+            folder = ensure_storage_directory(
+                clips_directory_from(self.settings_manager))
+            os.startfile(str(folder))  # os.startfile exists on Windows only
+        except OSError as error:
+            if isinstance(error, StoragePathError):
+                self.push_error('CLIP SAVE FAILED', str(error), level='error')
+            print(f'[UI] Could not open clips folder: {error}')
 
     # Upload finished callback --
 
@@ -6752,34 +7134,20 @@ class MainWindow(QMainWindow):
             audio_mode if audio_mode is not None
             else self.settings_manager.get(
                 'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED))
-        if sys.platform == 'win32':
-            if audio_mode == AUDIO_CAPTURE_MODE_COMBINED:
-                self._spawn_mux_thread(
-                    target=self._combine_native_audio_worker,
-                    args=(clip_path, duration_seconds, mic_end_time,
-                          clip_ready, crop_profile),
-                )
-            else:
-                # Separated Windows clips are already published as distinct
-                # native audio streams with a matching FTHR manifest. The
-                # normal route selector sends visual-only work to finalize.
-                if clip_ready is not None:
-                    clip_ready.set()
-            return
+        if audio_mode == AUDIO_CAPTURE_MODE_COMBINED:
+            self._spawn_mux_thread(
+                target=self._combine_native_audio_worker,
+                args=(clip_path, duration_seconds, mic_end_time,
+                      clip_ready, crop_profile),
+            )
+        else:
+            # Separated Windows clips are already published as distinct
+            # native audio streams with a matching FTHR manifest. The
+            # normal route selector sends visual-only work to finalize.
+            if clip_ready is not None:
+                clip_ready.set()
+        return
 
-        if not MicRecorder.is_available() or not MicRecorder().is_running():
-            self._record_finalization_warning(
-                clip_path, 'Microphone capture stopped before finalization; '
-                'the base clip was retained.')
-            self._complete_clip_finalization(clip_path, duration_seconds)
-            return
-
-        self._spawn_mux_thread(
-            target=self._mic_mux_worker,
-            args=(clip_path, duration_seconds, mic_end_time, clip_ready,
-                  crop_profile,
-                  audio_mode == AUDIO_CAPTURE_MODE_SEPARATED),
-        )
 
     def _spawn_mux_thread(self, target, args):
         """Start a tracked post-processing worker (mic mux / finalize).
@@ -6831,21 +7199,42 @@ class MainWindow(QMainWindow):
 
         def _run_and_publish():
             source_timeline_rejected = False
+            source_timeline_validated = False
             try:
                 # Reject a proven sparse native source before a crop/overlay
                 # can rewrite its timestamps and before CFR repair could
-                # expand the hole into repeated frames. An inconclusive probe
-                # remains on the existing conservative finalization path.
+                # expand the hole into repeated frames. Probe failures are
+                # also terminal: an unvalidated source must never enter a
+                # timestamp-rewriting or CFR-normalization path.
                 if not MainWindow._source_timeline_is_safe(
                         self, str(worker_args[0])):
                     source_timeline_rejected = True
                     if original_ready is not None:
                         worker_args[3].fail()
                     return
+                source_timeline_validated = True
                 target(*worker_args)
             except Exception as exc:
                 worker_clip_path = str(worker_args[0])
                 print(f'[Finalize] Unhandled worker error: {exc}')
+                if not source_timeline_validated:
+                    # A probe can fail before it has recorded readiness. Keep
+                    # that exception on the same fail-closed path as missing
+                    # or inconclusive probe evidence.
+                    source_timeline_rejected = True
+                    message = (
+                        'Post-processing refused because source timing '
+                        f'validation failed: {type(exc).__name__}: {exc}')
+                    try:
+                        self._clip_readiness.finalization_failed(
+                            worker_clip_path, message, base_clip_usable=False)
+                        self._record_finalization_warning(
+                            worker_clip_path, message)
+                    except Exception:
+                        # Readiness diagnostics must not reopen media processing.
+                        pass
+                    if original_ready is not None:
+                        worker_args[3].fail()
                 self._record_finalization_warning(
                     worker_clip_path, f'Optional clip processing failed: {exc}')
             finally:
@@ -6946,6 +7335,26 @@ class MainWindow(QMainWindow):
                 clip_ready.set()
             return
 
+        def emit_timeline(event: str, path: str) -> None:
+            try:
+                timeline = probe_clip_av_timeline(ffprobe, path)
+            except TimelineProbeError as error:
+                emit_event(
+                    'clip_save', event, state='UNAVAILABLE',
+                    clip_path=clip_path,
+                    timeline_time_unit='seconds',
+                    detail=str(error)[:512])
+                return
+            emit_event(
+                'clip_save', event, state='OBSERVED',
+                clip_path=clip_path,
+                **timeline.diagnostic_fields())
+
+        # This is the committed native MP4 before amix decodes/re-encodes its
+        # source tracks. Comparing it with the staged output identifies the
+        # first finalization boundary that changes relative A/V timing.
+        emit_timeline('post_native_mux_av_timeline', clip_path)
+
         try:
             probe = subprocess.run(
                 [ffprobe, '-v', 'error', '-select_streams', 'a',
@@ -6988,15 +7397,7 @@ class MainWindow(QMainWindow):
             return
 
         audio_count = len(selected_audio_indexes)
-        audio_inputs = ''.join(
-            f'[0:a:{index}]' for index in selected_audio_indexes)
-        if audio_count == 1:
-            audio_filter = f'{audio_inputs}anull[aout]'
-        else:
-            audio_filter = (
-                f'{audio_inputs}amix=inputs={audio_count}:normalize=0:'
-                'duration=longest:dropout_transition=0,'
-                'alimiter=limit=0.98:level=disabled[aout]')
+        audio_filter = build_combined_audio_filter(selected_audio_indexes)
 
         with tempfile.TemporaryDirectory(
                 prefix='.fthr-audio-', dir=os.path.dirname(clip_path)) as td:
@@ -7034,6 +7435,8 @@ class MainWindow(QMainWindow):
                 self._record_finalization_warning(
                     clip_path, 'Combined audio failed; the native audio layout was retained.')
                 return
+
+            emit_timeline('post_final_mix_av_timeline', output)
 
             try:
                 os.replace(output, clip_path)
@@ -7844,12 +8247,6 @@ class MainWindow(QMainWindow):
 
     # UI state
 
-    def _connect_worker_active(self) -> bool:
-        # The connect worker calls initialize() on the singleton bridge; the
-        # status poll must not shut that bridge down underneath it.
-        thread = getattr(self, '_engine_connect_thread', None)
-        return thread is not None and thread.is_alive()
-
     def _update_status(self):
         # Detect an engine crash. The shared-memory mapping outlives the
         # process (is_initialized stays true), so is_connected() keeps lying
@@ -7857,23 +8254,44 @@ class MainWindow(QMainWindow):
         # burns the 1 s save timeout with a generic error.
         proc = self.engine_process
         if proc is not None and proc.poll() is not None:
+            process_generation = getattr(
+                self, '_engine_process_generation', None)
+            bridge_owner = getattr(self, 'bridge', None)
+            if (self.engine_process is not proc
+                    or self.bridge is not bridge_owner):
+                return
             code = proc.returncode
+            self._engine_gen = getattr(self, '_engine_gen', 0) + 1
             self.engine_process = None
+            self._engine_process_generation = None
             self._capture_config.deactivate(
                 f'capture engine exited unexpectedly (code {code})')
             self._pending_launch_config = None
             self._pending_launch_generation = None
             self._restart_pending = False
             self._set_capture_apply_state(False)
-            if self.bridge:
-                self.bridge.shutdown()
+            if bridge_owner:
+                bridge_owner.shutdown()
             self.bridge = CaptureBridge()
+            recovery_key = 'engine-process-exit'
+            process_generation = (
+                self._engine_gen - 1 if process_generation is None
+                else process_generation)
             self._capture_health_snapshot = self._capture_health.observe(
                 connected=False, frame_count=0, engine_flags=0)
+            tracker = getattr(self, '_error_recovery_tracker', None)
+            if tracker is not None:
+                tracker.reset()
             self._set_status('ENGINE STOPPED', status_warning_qss())
             emit_event(
                 'engine', 'process_exited', state='FAILED',
                 error=DiagnosticError.ENGINE_START_FAILED,
+                compatibility_error='Error 006',
+                technical_cause='UNEXPECTED_PROCESS_EXIT',
+                technical_subsystem='process', operation='process_poll',
+                process_generation=process_generation,
+                native_capture_generation=getattr(
+                    self, '_last_native_capture_generation', None),
                 exit_code=code,
                 unexpected=True)
             self.push_error(
@@ -7882,37 +8300,74 @@ class MainWindow(QMainWindow):
                 'Clips cannot be saved until it is restarted.',
                 level='error',
                 actions=[('RESTART ENGINE', self._restart_capture_engine)],
+                key=recovery_key,
+                dismiss_on_action=False,
+                diagnostic_context={
+                    'diagnostic_error': DiagnosticError.ENGINE_START_FAILED,
+                    'technical_cause': 'UNEXPECTED_PROCESS_EXIT',
+                    'technical_subsystem': 'process',
+                    'operation': 'process_poll',
+                    'process_generation': process_generation,
+                    'backend_generation': getattr(
+                        self, '_last_native_capture_generation', None),
+                    'recovery_kind': 'engine_lineage',
+                    'recovery_status': 'awaiting_replacement_engine',
+                },
             )
             return
         is_connected = getattr(self.bridge, 'is_connected', lambda: False)
         if not self.bridge or not is_connected():
+            self._advance_recoverable_errors(
+                connected=False, frame_count=0,
+                health_state=CaptureHealthState.STOPPED,
+                backend_generation=getattr(
+                    self, '_last_native_capture_generation', 0) or 0)
             self._reconnect_counter = getattr(self, '_reconnect_counter', 0) + 1
             # Only try to reconnect while an engine process actually exists —
             # on Linux a crashed engine leaves its /dev/shm segment behind
             # with is_initialized still true, so initialize() would happily
             # "reconnect" to a corpse.
             if (self.engine_process is not None
-                    and not self._connect_worker_active()
-                    and self._reconnect_counter % 3 == 1):
-                if self.bridge:
-                    self.bridge.shutdown()
-                self.bridge = CaptureBridge()
-                if self.bridge.initialize():
+                    and self._reconnect_counter % 3 == 1
+                    and getattr(self, '_engine_handshake_generation', None)
+                    != getattr(self, '_engine_gen', 0)):
+                generation = getattr(self, '_engine_gen', 0)
+                process_owner = self.engine_process
+                old_bridge = self.bridge
+                if old_bridge:
+                    old_bridge.shutdown()
+                if not self._owns_engine_attempt(
+                        generation, process_owner, old_bridge):
+                    return
+                reconnect_bridge = CaptureBridge()
+                self.bridge = reconnect_bridge
+                reconnected = reconnect_bridge.initialize()
+                if not self._owns_engine_attempt(
+                        generation, process_owner, reconnect_bridge):
+                    return
+                if reconnected:
                     print("Reconnected to capture engine.")
                     self._set_status('STARTING CAPTURE', status_idle_qss())
                     self._reconnect_counter = 0
-                    QTimer.singleShot(2000, self._check_hardware_encoding_status)
+                    self._schedule_owned_hardware_check(
+                        generation, process_owner, reconnect_bridge)
                     return
             self._set_status(
-                'APPLYING SETTINGS' if self._capture_settings_applying else 'CONNECTING',
+                self._capture_pending_text() if self._capture_settings_applying else 'CONNECTING',
                 status_idle_qss(),
             )
             return
 
         status = self.bridge.get_status()
+        self._maybe_restart_for_display_mode_change(status)
         if not status.get('connected'):
             self._capture_health_snapshot = self._capture_health.observe(
                 connected=False, frame_count=0, engine_flags=0)
+            self._advance_recoverable_errors(
+                connected=False, frame_count=0,
+                health_state=CaptureHealthState.STOPPED,
+                backend_generation=getattr(
+                    self, '_last_native_capture_generation', 0) or 0)
             self._set_status('DISCONNECTED', status_warning_qss())
             return
 
@@ -7931,18 +8386,27 @@ class MainWindow(QMainWindow):
             else:
                 new_enc_text = codec
             if self._ui_ready and not self._background_ui_paused:
-                lbl = self._settings_page_widget.active_encoder_lbl
-                if lbl.text() != new_enc_text:
+                lbl = self._settings_page_widget.__dict__.get('active_encoder_lbl')
+                if lbl is not None and lbl.text() != new_enc_text:
                     lbl.setText(new_enc_text)
         if self.is_capturing:
             frames = status.get('frames_captured', 0)
+            backend_generation = status.get('capture_generation', 0)
             snapshot = self._capture_health.observe(
                 connected=True,
                 frame_count=frames,
                 engine_flags=status.get('capture_health_flags', 0),
-                generation=status.get('capture_generation', 0),
+                generation=backend_generation,
             )
             self._capture_health_snapshot = snapshot
+            self._last_native_capture_generation = backend_generation
+            self._advance_recoverable_errors(
+                connected=True, frame_count=frames,
+                health_state=snapshot.state,
+                backend_generation=backend_generation,
+                # Legacy ABI flag means an initialized compressed replay encoder,
+                # including explicitly selected Windows software H.264.
+                hardware_active=status.get('nvenc_active') is True)
             pending_config = getattr(self, '_pending_launch_config', None)
             pending_generation = getattr(
                 self, '_pending_launch_generation', None)
@@ -7950,7 +8414,14 @@ class MainWindow(QMainWindow):
                     and pending_generation == self._engine_gen):
                 if snapshot.state in {
                         CaptureHealthState.HEALTHY,
-                        CaptureHealthState.CONTENT_SUSPECT}:
+                        CaptureHealthState.CONTENT_SUSPECT} or (
+                            snapshot.state is CaptureHealthState.DEGRADED
+                            and status.get('capture_health_flags', 0)
+                            & int(CaptureHealthFlag.PAUSED)
+                            and status.get('capture_health_flags', 0)
+                            & int(CaptureHealthFlag.ACTIVE)
+                            and status.get('nvenc_active') is True
+                            ):
                     self._capture_config.succeed()
                     self._restart_pending = False
                     self._apply_active_audio_state(pending_config)
@@ -7981,6 +8452,8 @@ class MainWindow(QMainWindow):
                     emit_event(
                         'capture', 'configuration_activated', state='ACTIVE',
                         actual_configuration=actual,
+                        process_generation=getattr(
+                            self, '_engine_process_generation', None),
                         capture_generation=status.get('capture_generation', 0))
                     if self._manual_record_state == 'preparing':
                         QTimer.singleShot(
@@ -8007,6 +8480,8 @@ class MainWindow(QMainWindow):
                     previous_state=snapshot.previous_state.value.upper(),
                     reason=snapshot.reason,
                     frames_acquired=frames,
+                    process_generation=getattr(
+                        self, '_engine_process_generation', None),
                     capture_generation=status.get('capture_generation', 0),
                     content_sample_sequence=status.get(
                         'content_sample_sequence', 0),
@@ -8015,14 +8490,30 @@ class MainWindow(QMainWindow):
                     luma_mean=status.get('content_luma_mean', 0.0),
                     luma_variance=status.get('content_luma_variance', 0.0))
                 if snapshot.state is CaptureHealthState.FAILED:
-                    # The engine explains terminal failures (no capture
-                    # protocol, declined portal dialog) in engine_string.
+                    # Linux capture backends publish their terminal reason in
+                    # engine_string so portal failures are actionable.
                     self.push_error(
                         'CAPTURE FAILED',
                         status.get('capture_failure_detail')
                         or snapshot.reason or 'The capture backend failed.',
                         level='error',
                         actions=[('RESTART ENGINE', self._restart_capture_engine)],
+                        key='capture-backend',
+                        dismiss_on_action=False,
+                        diagnostic_context={
+                            'diagnostic_error': (
+                                DiagnosticError.CAPTURE_NO_FRAMES),
+                            'technical_cause': (
+                                status.get('capture_failure_code')
+                                or 'CAPTURE_BACKEND_FAILED'),
+                            'technical_subsystem': 'capture_backend',
+                            'operation': 'capture_health_poll',
+                            'process_generation': getattr(
+                                self, '_engine_process_generation', None),
+                            'backend_generation': backend_generation,
+                            'recovery_kind': 'capture_backend',
+                            'recovery_status': 'awaiting_stable_progress',
+                        },
                     )
                 self._capture_health_log.info(
                     'Capture health: %s -> %s reason=%s frame_count=%d generation=%d '
@@ -8043,6 +8534,8 @@ class MainWindow(QMainWindow):
                 health = {
                     'state': snapshot.state.value.upper(),
                     'frames_acquired': frames,
+                    'process_generation': getattr(
+                        self, '_engine_process_generation', None),
                     'capture_generation': status.get('capture_generation', 0),
                     'capture_restart_count': max(
                         0, self._diagnostic_engine_start_count - 1),
@@ -8059,21 +8552,23 @@ class MainWindow(QMainWindow):
             state_text = {
                 CaptureHealthState.INITIALIZING: 'STARTING CAPTURE',
                 CaptureHealthState.HEALTHY: 'CAPTURING',
-                CaptureHealthState.DEGRADED: 'CAPTURE DEGRADED',
-                CaptureHealthState.CONTENT_SUSPECT: 'CAPTURE DEGRADED — DARK / UNIFORM',
+                CaptureHealthState.DEGRADED: ('CAPTURING' if sys.platform == 'win32' else 'CAPTURE DEGRADED'),
+                CaptureHealthState.CONTENT_SUSPECT: ('CAPTURING' if sys.platform == 'win32' else 'CAPTURE DEGRADED — DARK / UNIFORM'),
                 CaptureHealthState.STALLED: 'CAPTURE STALLED',
                 CaptureHealthState.FAILED: 'CAPTURE FAILED',
                 CaptureHealthState.RECOVERING: 'RECOVERING CAPTURE',
                 CaptureHealthState.STOPPED: 'CAPTURE STOPPED',
             }
             new_text = (
-                'APPLYING SETTINGS'
+                self._capture_pending_text()
                 if self._capture_settings_applying else state_text[snapshot.state]
             )
             style = (status_idle_qss()
                      if self._capture_settings_applying
                      else status_active_qss()
-                     if snapshot.state is CaptureHealthState.HEALTHY
+                     if (snapshot.state is CaptureHealthState.HEALTHY
+                         or (snapshot.state in (
+                             CaptureHealthState.DEGRADED, CaptureHealthState.CONTENT_SUSPECT)))
                      else status_idle_qss()
                      if snapshot.state in {
                          CaptureHealthState.INITIALIZING,
@@ -8087,13 +8582,17 @@ class MainWindow(QMainWindow):
                     'engine-owned and a manual process restart is available')
 
     def _set_status(self, text: str, style: str):
+        if (getattr(self, '_engine_restart_requested', False)
+                and getattr(self, '_capture_settings_applying', False)
+                and (text == 'STARTING CAPTURE' or text.startswith('CONNECTING'))):
+            text = 'RESTARTING ENGINE'
         self._pending_status_display = (text, style)
         if not hasattr(self, 'status_label'):
             print(f'[Lifecycle] Status={text}')
             return
         if self._background_ui_paused:
             return
-        self.status_label.setText(text)
+        self.status_label.setText(text.capitalize())
         # Skip the QSS reapply when the style didn't change (CONNECTING ticks
         # every 500ms during reconnect would otherwise re-style on every tick).
         if getattr(self, '_last_status_style', None) != style:
@@ -8108,26 +8607,23 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if state is None and app is not None:
             state = app.applicationState()
-        inactive = (
+        hidden = (
             self._background_start
             or not self.isVisible()
             or self.isMinimized()
-            or state != Qt.ApplicationState.ApplicationActive
         )
         enabled = bool(self.settings_manager.get(
             'pause_ui_in_background', True))
-        self._apply_background_ui_paused(enabled and inactive)
+        # Minimized/hidden UI never needs previews, even when the user opts
+        # to keep them live while merely switching focus to another app.
+        self._apply_background_ui_paused(
+            hidden or (enabled and state != Qt.ApplicationState.ApplicationActive))
 
     def _apply_background_ui_paused(
             self, paused: bool, *, force: bool = False) -> None:
         """Pause presentation work; capture, cards, sounds and saves stay live."""
         paused = bool(paused)
         if paused and not self._first_frame_painted:
-            # Never pause a window that has not painted yet. On Wayland the
-            # compositor maps a surface only after its first buffer and only
-            # grants focus (ApplicationActive) to mapped windows, so pausing
-            # here would leave the app invisible for good. paintEvent re-runs
-            # the check once the first frame is out.
             self._background_ui_pause_deferred = True
             return
         if paused == self._background_ui_paused and not force:
@@ -8137,8 +8633,12 @@ class MainWindow(QMainWindow):
             return
 
         self.setUpdatesEnabled(not paused)
-        self.clip_grid.set_background_paused(paused)
-        self._settings_page_widget.set_background_ui_paused(paused)
+        editor_active = getattr(self, "_active_clip_viewer", None) is not None
+        stack = getattr(self, "main_stack", None)
+        self.clip_grid.set_background_paused(
+            paused or (stack is not None and stack.currentIndex() != 0) or editor_active)
+        self._settings_page_widget.set_background_ui_paused(
+            paused or (stack is not None and stack.currentIndex() != 1) or editor_active)
         if not paused:
             if self._pending_status_display is not None:
                 text, style = self._pending_status_display
@@ -8169,99 +8669,238 @@ class MainWindow(QMainWindow):
             self.clip_grid._known_files = None   # force rescan
             self.clip_grid._load_clips()
             return
-        camera_timer = getattr(
-            self._settings_page_widget, '_camera_preview_timer', None)
+        viewer = getattr(self, '_basic_clip_viewer', None)
+        if viewer is not None:
+            viewer.close()
+        if not self.settings_manager.get('clip_editor_enabled', True):
+            from ui.basic_clip_viewer import BasicClipViewer
+            viewer = BasicClipViewer(clip_path, self)
+            self._basic_clip_viewer = viewer
+            viewer.destroyed.connect(lambda: self._forget_basic_viewer(viewer))
+            viewer.show()
+            return
+        camera_timer = self._settings_page_widget.__dict__.get('_camera_preview_timer')
         if camera_timer is not None:
             camera_timer.stop()
-        from ui.clip_viewer import ClipViewer
-        # MainWindow is the sole owner of the modal viewer.  A stale hidden
-        # viewer must be torn down before another clip can be opened.
-        previous_viewer = self._active_clip_viewer
-        if previous_viewer is not None:
-            try:
-                previous_viewer.close()
-                previous_viewer.deleteLater()
-            except (RuntimeError, TypeError):
-                # Qt may have deleted an already-closed viewer; ownership is
-                # cleared below and the next viewer remains authoritative.
-                pass
-            self._active_clip_viewer = None
-        upload_on = self.upload_manager.is_enabled()
-        viewer = ClipViewer(clip_path, self.bridge, self, thumb_pixmap=thumb_pixmap,
-                            settings_manager=self.settings_manager,
-                            upload_enabled=upload_on,
-                            metadata_manager=self.clip_metadata_manager,
-                            linked_import=self.clip_grid.is_linked_import(clip_path))
-        viewer.upload_requested.connect(self.upload_manager.enqueue_upload)
-        viewer.export_error.connect(self.push_error)
-        self._active_clip_viewer = viewer
-        viewer.showMaximized()
-        try:
-            viewer.exec()
-        finally:
-            # exec() can return through Escape, close(), accept(), or an
-            # application shutdown.  All paths leave one explicit owner and
-            # release it before the next clip is opened.
-            try:
-                viewer._teardown_player()
-                viewer.deleteLater()
-            except (AttributeError, RuntimeError, TypeError):
-                # exec() can return after Qt has already destroyed the dialog.
-                pass
-            if self._active_clip_viewer is viewer:
-                self._active_clip_viewer = None
+        from ui.editor_sessions import MAX_EDITOR_SESSIONS
+        for session in self._editor_sessions:
+            if os.path.normcase(session.clip_path) == os.path.normcase(clip_path):
+                self._restore_editor_session(session)
+                return
+        if self._active_clip_viewer is not None:
+            self._active_clip_viewer._close()
+        if len(self._editor_sessions) >= MAX_EDITOR_SESSIONS:
+            QMessageBox.information(self, 'Three editors are open',
+                                    'Close a sidebar editor before opening another clip.')
+            return
+        self._show_editor_session(self._add_editor_session(clip_path), thumb_pixmap)
+
+    def _forget_basic_viewer(self, viewer):
+        if getattr(self, '_basic_clip_viewer', None) is viewer:
+            self._basic_clip_viewer = None
 
     # Error bar
 
+    def _show_hotkey_warning(self, title: str, detail: str,
+                             level: str) -> None:
+        """Show native Windows hotkey warnings without adding public codes."""
+        normalized_title = str(title or '').strip().upper()
+        action = [('OPEN HOTKEYS', self._toggle_hotkeys)]
+        if (sys.platform != 'win32'
+                or not normalized_title.startswith(
+                    ('HOTKEY ', 'CONTROLLER HOTKEY '))):
+            self.push_error(title, detail, level, actions=action)
+            return
+
+        settings_manager = getattr(self, 'settings_manager', None)
+        if (settings_manager is not None
+                and not bool(settings_manager.get(
+                    'error_notifications_enabled', True))):
+            return
+
+        bounded_detail = str(detail or
+                             'The shortcut could not be activated.')[:240]
+        error_bar = getattr(self, 'error_bar', None)
+        if error_bar is None:
+            print(f'[Hotkey] {normalized_title}: {bounded_detail}')
+            return
+        error_bar.push(
+            normalized_title[:80], bounded_detail, level or 'warning', action)
+
+    def _show_camera_unavailable(self, detail: str) -> None:
+        """Show a camera warning without adding a public error code."""
+        if not self.settings_manager.get('error_notifications_enabled', True):
+            return
+        self.error_bar.push(
+            'CAMERA UNAVAILABLE',
+            str(detail or 'Camera could not be opened.')[:240],
+            'warning',
+            [('OPEN CAMERA SETTINGS', self._toggle_settings_page)],
+        )
+
     def push_error(self, title: str, detail: str,
                    level: str = 'error',
-                   actions: list[tuple[str, callable]] | None = None) -> None:
-        if hasattr(self, 'error_bar'):
-            normalized_title = str(title or '').strip().upper()
-            if normalized_title not in _ERROR_BAR_FAILURE_TITLES:
-                return
-            settings_manager = getattr(self, 'settings_manager', None)
-            if (settings_manager is not None
-                    and not bool(settings_manager.get(
-                        'error_notifications_enabled', True))):
-                return
-            normalized_detail = str(detail or '').strip()
-            if not normalized_detail:
-                normalized_detail = 'No additional failure reason was provided.'
+                   actions: list[tuple[str, callable]] | None = None,
+                   *, key: str | None = None,
+                   dismiss_on_action: bool = True,
+                   diagnostic_context: dict | None = None) -> None:
+        normalized_title = str(title or '').strip().upper()
+        failure = APP_FAILURE_CODE_BY_TITLE.get(normalized_title)
+        if failure is None:
+            return
+
+        context = dict(diagnostic_context or {})
+        normalized_detail = str(detail or '').strip()
+        if not normalized_detail:
+            normalized_detail = 'No additional failure reason was provided.'
+
+        def bounded_text(value, limit=160):
+            return None if value is None else str(value)[:limit]
+
+        public_code = failure.code
+        recovery_kind = context.get('recovery_kind')
+        encoder_recovery = (
+            key == 'encoder-init'
+            and public_code == 'Error 001'
+            and context.get('technical_cause') == 'ENCODER_INIT_FAILED'
+            and recovery_kind == 'encoder_init'
+            and context.get('process_generation') is not None)
+        default_recovery_status = (
+            'awaiting_replacement_hardware_and_stable_progress'
+            if encoder_recovery else
+            'awaiting_stable_progress'
+            if recovery_kind in {'capture_backend', 'engine_lineage'} else
+            'not_recoverable')
+        recovery_status = context.get('recovery_status') or (
+            default_recovery_status)
+        event_fields = {
+            'public_error_code': public_code,
+            'compatibility_error': public_code,
+            'title': normalized_title,
+            'detail': normalized_detail[:1000],
+            'technical_cause': bounded_text(
+                context.get('technical_cause') or 'UNSPECIFIED'),
+            'technical_subsystem': bounded_text(
+                context.get('technical_subsystem') or 'application'),
+            'operation': bounded_text(context.get('operation') or 'report'),
+            'process_generation': context.get('process_generation'),
+            'backend_generation': context.get('backend_generation'),
+            'recovery_status': bounded_text(recovery_status),
+        }
+        if key is not None:
+            event_fields['incident_key'] = bounded_text(key, limit=128)
+        operation_id = bounded_text(context.get('operation_id'))
+        if operation_id is not None:
+            event_fields['operation_id'] = operation_id
+        emit_event(
+            'application', 'failure_reported', state='FAILED',
+            error=context.get('diagnostic_error'), **event_fields)
+
+        if (key is not None and (
+                (public_code in {
+                    'Error 001', 'Error 003', 'Error 004',
+                    'Error 005', 'Error 006'}
+                 and recovery_kind in {'capture_backend', 'engine_lineage'})
+                or encoder_recovery)):
+            incidents = getattr(self, '_recoverable_error_incidents', None)
+            if incidents is None:
+                incidents = {}
+                self._recoverable_error_incidents = incidents
+            tracker = getattr(self, '_error_recovery_tracker', None)
+            if tracker is None:
+                tracker = RecoveryTracker()
+                self._error_recovery_tracker = tracker
+            tracker.reset(key)
+            incidents[key] = {
+                'title': normalized_title,
+                'public_error_code': public_code,
+                'recovery_kind': recovery_kind,
+                'process_generation': int(
+                    context.get('process_generation') or 0),
+            }
+        elif key is not None:
+            incidents = getattr(self, '_recoverable_error_incidents', None)
+            if incidents is not None:
+                incidents.pop(key, None)
+            tracker = getattr(self, '_error_recovery_tracker', None)
+            if tracker is not None:
+                tracker.reset(key)
+
+        settings_manager = getattr(self, 'settings_manager', None)
+        if (settings_manager is not None
+                and not bool(settings_manager.get(
+                    'error_notifications_enabled', True))):
+            return
+
+        if not hasattr(self, 'error_bar'):
+            print(f'[Lifecycle] {level.upper()}: {title}: {normalized_detail}')
+            return
+        display_title = format_error_title(normalized_title)
+        if key is None and dismiss_on_action:
+            # Keep the historical positional call path for lightweight test
+            # hosts and existing ErrorBar-compatible fakes.
             self.error_bar.push(
-                format_error_title(normalized_title), normalized_detail,
-                level, actions or [])
+                display_title, normalized_detail, level, actions or [])
         else:
-            print(f'[Lifecycle] {level.upper()}: {title}: {detail}')
+            self.error_bar.push(
+                display_title, normalized_detail, level, actions or [],
+                key=key, dismiss_on_action=dismiss_on_action)
 
     # Hardware encoding detection
 
-    def _check_hardware_encoding_status(self):
-        if not self.bridge or not self.bridge.is_connected():
+    def _check_hardware_encoding_status(
+            self, *, expected_generation: int | None = None,
+            expected_process=None, expected_bridge=None):
+        if (expected_generation is not None
+                and not self._owns_engine_attempt(
+                    expected_generation, expected_process, expected_bridge)):
             return
-        codec = self.bridge.get_active_codec()
+        bridge = (self.bridge if expected_bridge is None
+                  else expected_bridge)
+        if not bridge or not bridge.is_connected():
+            return
+        codec = bridge.get_active_codec()
         hw_keywords = ('nvenc', 'amf', 'qsv', 'vaapi')
         hw_active = any(k in codec.lower() for k in hw_keywords) if codec else False
 
         try:
-            nvenc_active = self.bridge._layout.nvenc_active
+            nvenc_active = bridge._layout.nvenc_active
         except Exception:
             nvenc_active = False
 
-        is_hw = hw_active or nvenc_active
+        software_active = (codec == 'libopenh264' and nvenc_active
+                           and self.settings_manager.get('encoder_pref', 'auto') == 'software')
+        is_hw = hw_active or (nvenc_active and codec != 'libopenh264')
         self._encoder_type = codec.upper() if codec else ('NVENC' if nvenc_active else 'SW')
 
-        if not is_hw:
+        if not (is_hw or software_active):
             self.push_error(
-                'HARDWARE ENCODING UNAVAILABLE',
-                'No hardware replay encoder is active. Capture must be restarted; '
-                'FTHR does not silently switch to a shorter raw replay buffer.',
+                'CAPTURE FAILED',
+                'HARDWARE ENCODING UNAVAILABLE: no hardware replay encoder is '
+                f'active (codec={codec or "unknown"}). Encoder initialization '
+                'failed; capture must be restarted. FTHR does not silently switch '
+                'to a shorter raw replay buffer.',
                 level='error',
                 actions=[('RESTART ENGINE', self._restart_capture_engine)],
+                key='encoder-init',
+                dismiss_on_action=False,
+                diagnostic_context={
+                    'diagnostic_error': DiagnosticError.ENCODER_INIT_FAILED,
+                    'technical_cause': 'ENCODER_INIT_FAILED',
+                    'technical_subsystem': 'encoder',
+                    'operation': 'startup_verification',
+                    'recovery_kind': 'encoder_init',
+                    'process_generation': getattr(
+                        self, '_engine_process_generation', None),
+                    'backend_generation': getattr(
+                        self, '_last_native_capture_generation', None),
+                    'recovery_status': (
+                        'awaiting_replacement_hardware_and_stable_progress'),
+                },
             )
             print(f"[UI] Hardware encoding not available (codec: {codec or 'unknown'})")
         else:
-            print(f"[UI] Hardware encoding active: {codec or 'NVENC'}")
+            print(f"[UI] Encoding active: {codec or 'NVENC'}")
 
     # Styles
 
@@ -8275,9 +8914,11 @@ class MainWindow(QMainWindow):
         for token, value in colors.items():
             if hasattr(C, token):
                 setattr(C, token, value)
+        C.BAR_BG, C.BAR_FG = C.SHELL_BG, C.TEXT
+        C.BAR_FG_DIM, C.BAR_HAIRLINE = C.TEXT_DIM, C.SHELL_DIVIDER
 
     def _apply_styles(self):
-        self.setStyleSheet(f'''
+        set_theme_style(self, lambda: (f'''
             /* -- Window canvas -- */
             QMainWindow {{ background-color: {Colors.BG}; }}
             QWidget {{
@@ -8289,18 +8930,50 @@ class MainWindow(QMainWindow):
             /* -- Unified top bar -- */
             QFrame#topBar {{
                 background-color: {Colors.SHELL_BG};
-                border-bottom: 1px solid {Colors.SHELL_DIVIDER};
+                border: none;
             }}
             QFrame#topBar QLabel {{
                 background-color: transparent;
                 color: {Colors.TEXT};
             }}
-            QFrame#topClusterMain,
-            QFrame#topClusterSettings {{
-                background: transparent;
+            QFrame#topClusterMain {{
+                background: {Colors.SHELL_BG_2};
                 border: none;
             }}
+            QStackedWidget#mainStack {{
+                border: none;
+                border-top: 1px solid {Colors.SHELL_DIVIDER};
+            }}
             QLabel#statusLabel {{ background: transparent; }}
+
+            QFrame#navigationPanel {{
+                background: {Colors.SHELL_BG_2};
+                border: none;
+                border-right: 1px solid {Colors.SHELL_DIVIDER};
+            }}
+            QFrame#navigationPanel QToolButton {{
+                background: transparent;
+                color: {Colors.TEXT_DIM};
+                font-family: {Fonts.BODY};
+                font-size: {Fonts.SIZE_LABEL}px;
+                font-weight: 400;
+                border: 1px solid transparent;
+                border-radius: {Sizes.RADIUS_MD}px;
+                padding: 8px;
+            }}
+            QFrame#navigationPanel QToolButton:hover {{
+                background: {Colors.SURFACE_2};
+                color: {Colors.TEXT};
+            }}
+            QFrame#navigationPanel QToolButton:checked {{
+                background: {Colors.ACCENT_SOFT};
+                color: {Colors.TEXT};
+                font-weight: 600;
+                border-left: 3px solid {Colors.ACCENT};
+            }}
+            QFrame#navigationPanel QToolButton:focus {{
+                border: 1px solid {Colors.ACCENT};
+            }}
 
             /* Settings gear — quiet square button */
             QPushButton#settingsGearBtn {{
@@ -8328,7 +9001,7 @@ class MainWindow(QMainWindow):
                 border: none;
                 color: {Colors.TEXT_DIM};
                 font-size: 14px;
-                font-weight: bold;
+                font-weight: 600;
             }}
             QPushButton#winBtn:hover {{
                 background-color: {Colors.SURFACE_3};
@@ -8348,7 +9021,7 @@ class MainWindow(QMainWindow):
                 border: none;
                 color: {Colors.TEXT_DIM};
                 font-size: 12px;
-                font-weight: bold;
+                font-weight: 600;
             }}
             QPushButton#closeBtn:hover {{
                 background-color: {Colors.ERROR};
@@ -8358,7 +9031,7 @@ class MainWindow(QMainWindow):
             {scrollbar_qss()}
 
             {tooltip_qss()}
-        ''')
+        '''))
 
     def _load_logo(self):
         """Load the top-bar brand mark, retaining the user's logo override."""
@@ -8376,8 +9049,7 @@ class MainWindow(QMainWindow):
             ))
             return
         self._logo_label.setText('FTHR')
-        self._logo_label.setStyleSheet(
-            label_display(Colors.TEXT, Fonts.SIZE_H2, Fonts.TRACK_HEADING))
+        set_theme_style(self._logo_label, lambda: (label_display(Colors.TEXT, Fonts.SIZE_H2, Fonts.TRACK_HEADING)))
 
     def _apply_theme(self):
         """Rebuild the main window stylesheet from current Colors class values.
@@ -8397,15 +9069,14 @@ class MainWindow(QMainWindow):
             if callable(refresh):
                 refresh()
         if hasattr(self, 'record_btn'):
-            self.record_btn.setStyleSheet(self._manual_record_button_qss(
-                self._manual_record_state == 'recording'))
+            set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(
+                self._manual_record_state == 'recording')))
         _refresh_all_icons()
         self._load_logo()
         self.capture_card.restart()
         if hasattr(self, 'clip_grid'):
             self.clip_grid.refresh_theme()
         self.update()
-        QApplication.processEvents()
 
     # Shutdown
 
@@ -8465,7 +9136,18 @@ class MainWindow(QMainWindow):
         if self._shutdown_complete:
             return
         self._shutdown_complete = True
+        from core.export_queue import shutdown as shutdown_exports
+        from ui.clip_viewer import _share_windows
+        for share in tuple(_share_windows):
+            share.close()
+        shutdown_exports()
+        self._persist_window_geometry()
         self.is_capturing = False
+
+        basic_viewer = getattr(self, '_basic_clip_viewer', None)
+        if basic_viewer is not None:
+            basic_viewer.close()
+            self._basic_clip_viewer = None
 
         active_viewer = getattr(self, '_active_clip_viewer', None)
         if active_viewer is not None:
@@ -8477,6 +9159,15 @@ class MainWindow(QMainWindow):
                 # Shutdown continues when the dialog was destroyed by Qt.
                 pass
             self._active_clip_viewer = None
+        self._active_editor_session = None
+        for session in list(self._editor_sessions):
+            self._remove_editor_session(session)
+
+        parked = getattr(self, '_parked_editor_shell', None)
+        if parked is not None:
+            parked._teardown_player()
+            parked.deleteLater()
+            self._parked_editor_shell = None
 
         if hasattr(self, 'status_timer'):
             self.status_timer.stop()
@@ -8611,28 +9302,163 @@ class MainWindow(QMainWindow):
         if (close_to_tray
                 and self._tray_icon is not None
                 and self._tray_icon.isVisible()):
+            self._persist_window_geometry()
             event.ignore()
             self._hide_main_window_to_tray()
             return
         # With close-to-tray disabled, or when Windows cannot expose a tray,
         # X deliberately uses the same bounded full-exit path as the power icon.
+        self._persist_window_geometry()
         event.ignore()
         self.request_full_exit()
+
+    def _show_editor_session(self, session, thumb_pixmap, *, animate_restore=False):
+        self._cancel_editor_transition()
+        from ui.clip_editor_window import ClipEditorWindow
+        clip_path = session.clip_path
+        upload_on = self.upload_manager.is_enabled()
+        options = dict(thumb_pixmap=thumb_pixmap, settings_manager=self.settings_manager,
+                       upload_enabled=upload_on, metadata_manager=self.clip_metadata_manager,
+                       linked_import=self.clip_grid.is_linked_import(clip_path))
+        viewer = getattr(self, '_parked_editor_shell', None)
+        self._parked_editor_shell = None
+        reused = viewer is not None
+        if reused:
+            if not viewer.replace_clip(clip_path, session_state=session.state, **options):
+                viewer._teardown_player(wait_for_workers=False)
+                viewer.hide()
+                self._parked_editor_shell = viewer
+                return
+            # A hidden maximized QWidget otherwise keeps its old window-state
+            # bit and skips the platform maximize geometry negotiation.
+            viewer.setWindowState(Qt.WindowState.WindowNoState)
+        else:
+            viewer = ClipEditorWindow(clip_path, self.bridge, self,
+                                      session_state=session.state, **options)
+        viewer.editor_session = session
+        if not reused:
+            viewer.upload_requested.connect(self.upload_manager.enqueue_upload)
+            viewer.export_error.connect(self.push_error)
+            viewer.clip_navigation_requested.connect(
+                lambda step: self._navigate_editor_clip(viewer, step))
+            viewer.minimize_requested.connect(lambda: self._minimize_active_editor(viewer))
+            viewer.sidebar_navigation_requested.connect(self._navigate_sidebar)
+            viewer.panel_switch_requested.connect(self._toggle_settings_page)
+            viewer.finished.connect(lambda _result: self._editor_finished(viewer, viewer.editor_session))
+        session.state = None
+        self._active_clip_viewer = viewer
+        self._active_editor_session = session
+        self.clip_grid.set_background_paused(True)
+        self._settings_page_widget.set_background_ui_paused(True)
+        self._refresh_editor_sidebar()
+        # Nonmodal ownership lets a minimized editor disappear completely,
+        # without a nested exec() loop or an OS-minimized dialog on the shell.
+        if animate_restore and session.window_geometry is not None:
+            if session.window_maximized:
+                viewer.move(session.window_geometry.topLeft())
+            else:
+                viewer.setGeometry(session.window_geometry)
+        if animate_restore and self.isVisible() and not reduce_motion(self):
+            # Let the window manager resolve the final maximized size before
+            # capturing. Reveal this same native surface at the end; showing
+            # it maximized a second time can change the target geometry.
+            viewer.setWindowOpacity(0.0)
+            if session.window_maximized:
+                viewer.showMaximized()
+            else:
+                viewer.show()
+
+            def begin_restore():
+                if self._active_clip_viewer is not viewer:
+                    return
+                if reduce_motion(self):
+                    viewer.setWindowOpacity(1.0)
+                    viewer.raise_()
+                    viewer.activateWindow()
+                    return
+                end = QRect(viewer.mapToGlobal(QPoint(0, 0)), viewer.size())
+                flight = SnapshotFlight(self, viewer.grab(), sidebar_rect(session.button), end)
+                self._editor_flight = flight
+                flight._animation.finished.connect(self._editor_transition_finished)
+
+                def reveal():
+                    if self._active_clip_viewer is viewer:
+                        viewer.setWindowOpacity(1.0)
+                        viewer.raise_()
+                        viewer.activateWindow()
+
+                flight._animation.finished.connect(reveal)
+                flight.start()
+
+            # Native maximize/resize notifications can arrive after the first
+            # queued callback. Allow two display frames for that handoff.
+            QTimer.singleShot(32, viewer, begin_restore)
+            return
+        if (animate_restore and session.window_geometry is not None
+                and not session.window_maximized):
+            viewer.show()
+        else:
+            viewer.showMaximized()
+        viewer.raise_()
+        viewer.activateWindow()
+
+
+    def _editor_finished(self, viewer, session):
+        viewer._teardown_player()
+        viewer.deleteLater()
+        was_active = self._active_clip_viewer is viewer
+        if was_active:
+            self._active_clip_viewer = None
+            self._active_editor_session = None
+        if getattr(self, '_shutdown_requested', False):
+            return
+        if session.state is None:
+            self._remove_editor_session(session)
+            if was_active:
+                self._set_main_page(self.main_stack.currentIndex())
+
+
+    def _navigate_editor_clip(self, viewer, step):
+        if viewer is not self._active_clip_viewer or viewer._closing:
+            return
+        destination = self.clip_grid.adjacent_clip(viewer.clip_path, step)
+        if destination is not None:
+            session = self._active_editor_session
+            existing = next((other for other in self._editor_sessions
+                             if other is not session
+                             and os.path.normcase(other.clip_path) == os.path.normcase(destination)), None)
+            state = existing.state if existing is not None else None
+            if not viewer.replace_clip(
+                    destination, session_state=state,
+                    navigation_step=step,
+                    thumb_pixmap=QPixmap(),
+                    linked_import=self.clip_grid.is_linked_import(destination)):
+                return
+            if existing is not None:
+                self._remove_editor_session(session)
+                session = existing
+            else:
+                session.clip_path = destination
+            session.state = None
+            self._active_editor_session = session
+            viewer.editor_session = session
+            self._refresh_editor_sidebar()
+
 
 
 # Settings page — shared layout helpers
 
 def _flat_section_header(title: str) -> QWidget:
-    """Accent uppercase label with a thin extending line to the right."""
+    """Natural-case heading with a quiet rule separating settings sections."""
     row = QWidget()
     row.setStyleSheet('background: transparent;')
     hl = QHBoxLayout(row)
     hl.setContentsMargins(0, 0, 0, 0)
-    hl.setSpacing(10)
-    lbl = QLabel(title.upper())
+    hl.setSpacing(Sizes.ROW_GAP)
+    lbl = QLabel(title)
     set_theme_style(lbl,
-        lambda: (f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY_L}px; font-weight: 700;'
-        f' letter-spacing: 2px; background: transparent; border: none;'
+        lambda: (f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_H3}px; font-weight: 600;'
+        f' letter-spacing: 0px; background: transparent; border: none;'
         f' font-family: {Fonts.DISPLAY};'))
     hl.addWidget(lbl)
     line = QFrame()
@@ -8666,7 +9492,7 @@ def _settings_vsep() -> QFrame:
 class SlidingStackedWidget(QWidget):
     """QStackedWidget-compatible container that lays out only the selected page.
 
-    Instant changes avoid moving two full settings trees on each animation tick.
+    Horizontal transitions paint snapshots without moving live settings trees.
     """
 
     def __init__(self, parent=None):
@@ -8674,6 +9500,7 @@ class SlidingStackedWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._pages = []
         self._current = -1
+        self._slide = None
 
     # API mirrors QStackedWidget
 
@@ -8690,11 +9517,35 @@ class SlidingStackedWidget(QWidget):
             widget.hide()
         return idx
 
-    def setCurrentIndex(self, new_idx):
+    def replaceWidget(self, index, widget):
+        self._finish_slide()
+        old = self._pages[index]
+        old.hide()
+        self._pages[index] = widget
+        widget.setParent(self)
+        widget.setGeometry(0, 0, self.width(), self.height())
+        widget.setVisible(index == self._current)
+        old.deleteLater()
+
+    def _finish_slide(self):
+        if self._slide is not None:
+            self._slide.animation.stop()
+            self._slide.hide()
+            self._slide.deleteLater()
+            self._slide = None
+
+    def setCurrentIndex(self, new_idx, *, direction=None):
         if new_idx < 0 or new_idx >= len(self._pages):
             return
+        ensure = self.__dict__.get('_ensure_page')
+        if ensure is not None:
+            ensure(new_idx)
         if new_idx == self._current:
             return
+        previous = self._current
+        animate = self.isVisible() and previous >= 0 and not reduce_motion(self)
+        self._finish_slide()
+        outgoing = self.grab() if animate else None
         if self._current >= 0:
             self._pages[self._current].hide()
         self._current = new_idx
@@ -8702,6 +9553,18 @@ class SlidingStackedWidget(QWidget):
         page.setGeometry(0, 0, self.width(), self.height())
         page.show()
         page.raise_()
+        if animate:
+            if page.layout() is not None:
+                page.layout().activate()
+            self._slide = SnapshotSlide(
+                self, outgoing, page.grab(),
+                direction if direction is not None else (1 if new_idx > previous else -1),
+                horizontal=True, use_gpu=False,
+            )
+            self._slide.show()
+            self._slide.raise_()
+            self._slide.animation.finished.connect(self._finish_slide)
+            self._slide.animation.start()
 
     def currentIndex(self):
         return self._current
@@ -8713,6 +9576,9 @@ class SlidingStackedWidget(QWidget):
 
     def widget(self, idx):
         if 0 <= idx < len(self._pages):
+            ensure = self.__dict__.get('_ensure_page')
+            if ensure is not None:
+                ensure(idx)
             return self._pages[idx]
         return None
 
@@ -8734,10 +9600,15 @@ class SlidingStackedWidget(QWidget):
         return s
 
     def resizeEvent(self, event):
+        self._finish_slide()
         super().resizeEvent(event)
         if self._current >= 0:
             w, h = self.width(), self.height()
             self._pages[self._current].setGeometry(0, 0, w, h)
+
+    def hideEvent(self, event):
+        self._finish_slide()
+        super().hideEvent(event)
 
 
 # Full-screen settings page (embedded in main content stack)
@@ -8802,13 +9673,18 @@ class _SettingsSlider(QSlider):
 
 class _SettingsPage(QWidget):
     close_requested           = Signal()
+    camera_unavailable        = Signal(str)
+    _camera_start_result      = Signal(int, int, bool, str)
+    _camera_devices_result   = Signal(object, str)
     clips_directory_changed  = Signal(str)
     imported_folders_changed  = Signal()
     gary_settings_changed     = Signal()
+    _playback_inventory_ready = Signal(object)
     notification_monitor_changed = Signal()
     error_notifications_changed = Signal(bool)
     upload_connection_failed = Signal(str)
     close_to_tray_changed        = Signal(bool)
+    kofi_widget_changed = Signal(bool)
     encoder_config_changed    = Signal()
     audio_capture_changed     = Signal(bool)
     audio_capture_mode_changed = Signal(str)
@@ -8816,6 +9692,129 @@ class _SettingsPage(QWidget):
     background_ui_pause_changed = Signal(bool)
     encoder_capabilities_ready = Signal(object)
     diagnostic_export_requested = Signal()
+
+    _lazy_control_categories = {
+        '_camera_preview_timer': 3,
+        '_customize_page': 4,
+        '_import_folders_container': 1,
+        '_import_folders_layout': 1,
+        '_keyboard_preview_timer': 3,
+        '_mic_combo_connected': 2,
+        '_scan_btn': 1,
+        '_scan_pending': 1,
+        '_scan_results_container': 1,
+        '_scan_results_layout': 1,
+        'active_encoder_lbl': 1,
+        'audio_capture_check': 2,
+        'audio_separation_check': 2,
+        'camera_check': 3,
+        'camera_device_combo': 3,
+        'clear_image_overlays_btn': 3,
+        'clips_directory_edit': 1,
+        'codec_combo': 1,
+        'encoder_apply_btn': 1,
+        'encoder_combo': 1,
+        'encoder_detection_lbl': 1,
+        'encoder_preset_combo': 1,
+        'encoder_preset_row': 1,
+        'encoder_refresh_btn': 1,
+        'gary_enabled_check': 2,
+        'gary_preview': 2,
+        'hide_deleted_timeline_segments_check': 1,
+        'grid_show_edited_duration_check': 1,
+        'image_overlay_check': 3,
+        'image_overlay_count': 3,
+        'image_overlay_fit': 3,
+        'image_overlay_opacity': 3,
+        'image_overlay_opacity_value': 3,
+        'image_overlay_selector': 3,
+        'input_overlay_preview_background_path': 3,
+        'input_overlay_preview_source': 3,
+        'keyboard_color_swatch': 3,
+        'keyboard_color_value': 3,
+        'keyboard_intensity': 3,
+        'keyboard_intensity_value': 3,
+        'keyboard_overlay_check': 3,
+        'keyboard_pick_color': 3,
+        'keyboard_source_preview': 3,
+        'keyboard_window_combo': 3,
+        'mic_combo': 2,
+        'mic_gain_label': 2,
+        'mic_gain_warning': 2,
+        'mic_level_meter': 2,
+        'mic_loopback_check': 2,
+        'mic_mono_check': 2,
+        'mic_vol_slider': 2,
+        'mic_vol_value': 2,
+        'notif_monitor_combo': 2,
+        'notification_sounds_check': 2,
+        'performance_audio_check': 5,
+        'performance_background_pause_check': 5,
+        'performance_clip_preview_check': 5,
+        'performance_encoder_apply_btn': 5,
+        'performance_encoder_preset_combo': 5,
+        'performance_encoder_preset_row': 5,
+        'performance_encoder_section': 5,
+        'playback_combo': 2,
+        'recording_directory_edit': 1,
+        'reduce_ui_animations_check': 5,
+        'remove_image_overlay_btn': 3,
+        'separate_audio_check': 2,
+        'shortcut_settings': 6,
+        'sound_sliders': 2,
+        'sound_value_labels': 2,
+        'timeline_preview_strip_enabled_check': 1,
+        'unified_overlay_editor': 3,
+        'watermark_check': 1,
+    }
+
+    def __getattr__(self, name):
+        # Explicit access by older integrations still materializes its category.
+        # Internal lifecycle guards must use __dict__ to remain non-creating.
+        index = self._lazy_control_categories.get(name)
+        if (index is not None and '_loaded_categories' in self.__dict__
+                and index not in self._loaded_categories
+                and index not in self._building_categories):
+            self._ensure_category(index)
+            if name in self.__dict__:
+                return self.__dict__[name]
+        raise AttributeError(name)
+
+    def _ensure_category(self, index):
+        if index in self._loaded_categories or index in self._building_categories:
+            return
+        self._building_categories.add(index)
+        try:
+            builders = {
+                0: self._make_general_page, 1: self._make_clip_page,
+                2: self._make_audio_page, 3: self._make_visuals_page,
+                4: self._make_customize_page, 5: self._make_performance_page,
+                6: self._make_shortcuts_page,
+            }
+            page = builders[index]()
+            self.stack.replaceWidget(index, page)
+            self._loaded_categories.add(index)
+            if index == 2:
+                self._load_audio_settings()
+            if index in (1, 5):
+                if index == 1 and self._encoder_inventory_ready:
+                    self._on_encoder_capabilities_ready(self._encoder_capabilities)
+                else:
+                    self._sync_encoder_controls(mark_dirty=False, refresh_clip=index == 1)
+            page.ensurePolished()
+        finally:
+            self._building_categories.discard(index)
+
+    def _make_customize_page(self):
+        from ui.customize_page import CustomizePage
+        self._customize_page = CustomizePage(self.sm)
+        self._customize_page.theme_applied.connect(self._on_theme_applied)
+        return self._customize_page
+
+    def _make_shortcuts_page(self):
+        from ui.keyboard_navigation import KeyboardShortcutSettings
+        self.shortcut_settings = KeyboardShortcutSettings(self.navigation_bindings)
+        return self.shortcut_settings
 
     def _init_autostart_checkbox(self):
         from core.windows_autostart import is_packaged_launch, read_enabled
@@ -8839,6 +9838,11 @@ class _SettingsPage(QWidget):
         self.autostart_check.blockSignals(False)
         print('[Lifecycle] Autostart registration could not be changed')
 
+    def _on_kofi_widget_toggled(self, enabled):
+        self.sm.set('show_kofi_widget', bool(enabled))
+        self.sm.save_settings()
+        self.kofi_widget_changed.emit(bool(enabled))
+
     def _on_close_to_tray_toggled(self, enabled: bool) -> None:
         if self.sm is None or sys.platform != 'win32':
             return
@@ -8859,9 +9863,13 @@ class _SettingsPage(QWidget):
                  keyboard_capture: ThirdPartyKeyboardCapture | None = None):
         super().__init__(parent)
         self.sm = settings_manager
+        from core.navigation_bindings import navigation_bindings_for
+        self.navigation_bindings = navigation_bindings_for(settings_manager)
         self._keyboard_capture = keyboard_capture
         self._keyboard_windows: list[dict] = []
         self._background_ui_paused = False
+        self._camera_start_generation = 0
+        self._camera_pending_device_index: int | None = None
         self.setObjectName('settingsPage')
         self._loopback_stream = None
         self._mic_discovery_generation = 0
@@ -8875,6 +9883,7 @@ class _SettingsPage(QWidget):
         self._encoder_capabilities: tuple[EncoderCapability, ...] = ()
         self._encoder_probe_started = False
         self._encoder_probe_from_cache = False
+        self._encoder_inventory_ready = False
         self._audio_preview_timer = QTimer(self)
         self._audio_preview_timer.setSingleShot(True)
         self._audio_preview_timer.setInterval(180)
@@ -8883,14 +9892,19 @@ class _SettingsPage(QWidget):
         self._pending_category_index = 0
         self._category_switch_timer = QTimer(self)
         self._category_switch_timer.setSingleShot(True)
-        self._category_switch_timer.setInterval(60)
+        self._category_switch_timer.setInterval(0)
         self._category_switch_timer.timeout.connect(
             self._apply_pending_category)
         self.encoder_capabilities_ready.connect(
             self._on_encoder_capabilities_ready)
+        self._camera_start_result.connect(self._on_camera_start_result)
+        self._camera_devices_result.connect(self._on_camera_devices_result)
+        self._loaded_categories = set()
+        self._building_categories = set()
+        self._pending_encoder_preset = None
+        self._encoder_dirty = False
         self._setup_ui()
         self._apply_styles()
-        self._load_audio_settings()
 
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -8906,7 +9920,7 @@ class _SettingsPage(QWidget):
         tab_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
 
         self._cat_titles = [
-            'General', 'Clip', 'Audio', 'Visuals', 'Customize', 'Performance']
+            'General', 'Clip', 'Audio', 'Visuals', 'Customize', 'Performance', 'Shortcuts']
         _tab_icons = [
             'settings(general).png',
             'clip.png',
@@ -8914,6 +9928,7 @@ class _SettingsPage(QWidget):
             'visuals.png',
             'personalize.png',
             'performance.png',
+            'shortcuts.png',
         ]
 
         self._tab_buttons: list = []
@@ -8926,7 +9941,7 @@ class _SettingsPage(QWidget):
         for i, (title, icon_file) in enumerate(
                 zip(self._cat_titles, _tab_icons, strict=False)):
             btn = QToolButton()
-            btn.setText(title.upper())
+            btn.setText(title)
             btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             icon = _load_icon(icon_file, 36)
             btn.setIcon(icon)
@@ -8954,18 +9969,16 @@ class _SettingsPage(QWidget):
         content.setObjectName('settingsContent')
         self._settings_content = content
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(36, 22, 36, 22)
+        # The viewport reaches the window edge; bottom padding belongs to the
+        # scrollable page so controls do not vanish above a fixed empty strip.
+        content_layout.setContentsMargins(Sizes.PAGE_INSET, Sizes.PAGE_INSET, Sizes.PAGE_INSET, 0)
         content_layout.setSpacing(0)
 
         self.stack = SlidingStackedWidget()
-        self.stack.addWidget(self._make_general_page())     # 0: General (includes upload)
-        self.stack.addWidget(self._make_clip_page())        # 1: Clip
-        self.stack.addWidget(self._make_audio_page())       # 2: Audio
-        self.stack.addWidget(self._make_visuals_page())     # 3: Visuals
-        self._customize_page = CustomizePage(self.sm)
-        self._customize_page.theme_applied.connect(self._on_theme_applied)
-        self.stack.addWidget(self._customize_page)          # 4: Customize
-        self.stack.addWidget(self._make_performance_page()) # 5: Performance
+        self.stack._ensure_page = self._ensure_category
+        for _ in self._cat_titles:
+            self.stack.addWidget(QWidget())
+        self._ensure_category(0)
         content_layout.addWidget(self.stack, stretch=1)
 
         main_layout.addWidget(content, stretch=1)
@@ -8978,23 +9991,32 @@ class _SettingsPage(QWidget):
         if idx < 0 or idx >= self.stack.count():
             return
         self._pending_category_index = idx
+        self._pending_category_direction = None
         self._audio_preview_timer.stop()
-        if idx != 2 and hasattr(self, 'mic_level_meter'):
+        if idx != 2 and 'mic_level_meter' in self.__dict__:
             self.mic_level_meter.stop()
             self._stop_loopback()
-        if idx != 3 and hasattr(self, '_keyboard_preview_timer'):
+        if idx != 3 and '_keyboard_preview_timer' in self.__dict__:
             self._keyboard_preview_timer.stop()
         self._category_switch_timer.start()
+
+    def navigate_category(self, step):
+        idx = (self._pending_category_index + step) % self.stack.count()
+        self._tab_buttons[idx].setChecked(True)
+        self._on_category_changed(idx)
+        self._pending_category_direction = 1 if step > 0 else -1
 
     def _apply_pending_category(self):
         if getattr(self, '_background_ui_paused', False):
             return
         idx = self._pending_category_index
-        self.stack.setCurrentIndex(idx)
+        self._ensure_category(idx)
+        self.stack.setCurrentIndex(
+            idx, direction=getattr(self, '_pending_category_direction', None))
         if idx in (1, 5):
             self._start_encoder_probe()
         # Audio sub-page is index 2 — start the live meter only there
-        if hasattr(self, 'mic_level_meter'):
+        if 'mic_level_meter' in self.__dict__:
             self._audio_preview_timer.stop()
             if (idx == 2 and self.isVisible()
                     and not getattr(self, '_background_ui_paused', False)):
@@ -9004,11 +10026,16 @@ class _SettingsPage(QWidget):
             else:
                 self.mic_level_meter.stop()
                 self._stop_loopback()
-                if hasattr(self, 'mic_loopback_check'):
+                if 'mic_loopback_check' in self.__dict__:
                     self.mic_loopback_check.blockSignals(True)
                     self.mic_loopback_check.setChecked(False)
                     self.mic_loopback_check.blockSignals(False)
-        if hasattr(self, '_keyboard_preview_timer'):
+        if '_camera_preview_timer' in self.__dict__:
+            if idx == 3 and self.isVisible() and self.sm.get('camera_enabled', False):
+                self._camera_preview_timer.start()
+            else:
+                self._camera_preview_timer.stop()
+        if '_keyboard_preview_timer' in self.__dict__:
             if (idx == 3 and self.isVisible()
                     and not getattr(self, '_background_ui_paused', False)):
                 self._keyboard_preview_timer.start()
@@ -9016,12 +10043,14 @@ class _SettingsPage(QWidget):
                 self._keyboard_preview_timer.stop()
 
     def _start_audio_preview_if_current(self) -> None:
-        if (not self.isVisible() or not hasattr(self, 'mic_level_meter')
+        if (not self.isVisible() or 'mic_level_meter' not in self.__dict__
                 or self.stack.currentIndex() != 2
                 or getattr(self, '_background_ui_paused', False)):
             return
         self.mic_level_meter.set_gain(self.mic_vol_slider.value() / 100.0)
         self.mic_level_meter.start(self._selected_mic_index())
+        if self.mic_loopback_check.isChecked() and self._loopback_stream is None:
+            self._start_loopback(self._selected_mic_index())
 
     def _set_settings_content_surface(self) -> None:
         """Keep the settings canvas on the selected background token."""
@@ -9037,20 +10066,17 @@ class _SettingsPage(QWidget):
         page.setStyleSheet('background: transparent;')
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setContentsMargins(0, 0, 16, 32)
+        layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
         layout.setSpacing(0)
 
         # System --
         layout.addWidget(_flat_section_header('System'))
         layout.addSpacing(12)
         self.autostart_check = QCheckBox('Autostart with Windows')
-        if sys.platform != 'win32':
-            self.autostart_check.setVisible(False)
+        pass
         layout.addWidget(self.autostart_check)
-        if sys.platform == 'win32':
-            self._init_autostart_checkbox()
-        if sys.platform == 'win32':
-            self.autostart_check.stateChanged.connect(self._on_autostart_changed)
+        self._init_autostart_checkbox()
+        self.autostart_check.stateChanged.connect(self._on_autostart_changed)
         layout.addSpacing(8)
 
         self.close_to_tray_check = QCheckBox(
@@ -9067,6 +10093,12 @@ class _SettingsPage(QWidget):
         layout.addWidget(self.close_to_tray_check)
         layout.addSpacing(6)
 
+        self.kofi_widget_check = QCheckBox('Show Ko-fi donation widget')
+        set_theme_style(self.kofi_widget_check, checkbox_qss)
+        self.kofi_widget_check.setChecked(bool(self.sm.get('show_kofi_widget', True)))
+        self.kofi_widget_check.toggled.connect(self._on_kofi_widget_toggled)
+        layout.addWidget(self.kofi_widget_check)
+
         # Notifications --
         layout.addSpacing(24)
         layout.addWidget(_flat_section_header('Notifications'))
@@ -9082,6 +10114,25 @@ class _SettingsPage(QWidget):
         self.error_notifications_check.toggled.connect(
             self._on_error_notifications_toggled)
         layout.addWidget(self.error_notifications_check)
+
+        layout.addSpacing(12)
+        layout.addWidget(QLabel('Capture card'))
+        self.capture_card_mode_combo = QComboBox()
+        set_theme_style(self.capture_card_mode_combo, combo_qss)
+        for label, mode in (
+                ('All notifications', 'all'),
+                ('Clips, recordings and screenshots only', 'capture'),
+                ('Game detection / window switching only', 'detection'),
+                ('Off', 'off')):
+            self.capture_card_mode_combo.addItem(label, mode)
+        saved_mode = self.sm.get('capture_card_mode', None)
+        if saved_mode is None:
+            saved_mode = 'all' if self.sm.get('capture_card_enabled', True) else 'off'
+        self.capture_card_mode_combo.setCurrentIndex(max(
+            0, self.capture_card_mode_combo.findData(saved_mode)))
+        self.capture_card_mode_combo.currentIndexChanged.connect(
+            self._on_capture_card_mode_changed)
+        layout.addWidget(self.capture_card_mode_combo)
 
         # Upload --
         layout.addSpacing(24)
@@ -9114,7 +10165,7 @@ class _SettingsPage(QWidget):
         set_theme_style(diagnostic_hint, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_BODY)))
         layout.addWidget(diagnostic_hint)
         layout.addSpacing(8)
-        self.export_diagnostic_btn = QPushButton('EXPORT DIAGNOSTIC REPORT')
+        self.export_diagnostic_btn = QPushButton('Export diagnostic report')
         set_theme_style(self.export_diagnostic_btn, button_outline_qss)
         self.export_diagnostic_btn.setCursor(
             QCursor(Qt.CursorShape.PointingHandCursor))
@@ -9157,19 +10208,19 @@ class _SettingsPage(QWidget):
         self._refresh_preset_combo()
         preset_row.addWidget(self.preset_combo, 1)
 
-        load_btn = QPushButton('LOAD')
+        load_btn = QPushButton('Load')
         set_theme_style(load_btn, button_primary_qss)
         load_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         load_btn.clicked.connect(self._on_preset_load)
         preset_row.addWidget(load_btn)
 
-        save_btn = QPushButton('SAVE')
+        save_btn = QPushButton('Save')
         set_theme_style(save_btn, button_outline_qss)
         save_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         save_btn.clicked.connect(self._on_preset_save)
         preset_row.addWidget(save_btn)
 
-        del_btn = QPushButton('DELETE')
+        del_btn = QPushButton('Delete')
         set_theme_style(del_btn, button_outline_qss)
         del_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         del_btn.clicked.connect(self._on_preset_delete)
@@ -9253,13 +10304,13 @@ class _SettingsPage(QWidget):
         path_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         rl.addWidget(path_lbl, 1)
 
-        remove_btn = QPushButton('×')
+        remove_btn = IconButton('close.png', label='Close')
         remove_btn.setFixedSize(22, 22)
         remove_btn.setToolTip('Remove this folder')
         remove_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         set_theme_style(remove_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT_DIM};'
-            f' font-size: 14px; font-weight: bold; }}'
+            f' font-size: 14px; font-weight: 600; }}'
             f' QPushButton:hover {{ border-color: {Colors.ERROR}; color: {Colors.ERROR}; }}'))
         remove_btn.clicked.connect(lambda _, p=path: self._remove_import_folder(p))
         rl.addWidget(remove_btn)
@@ -9295,42 +10346,170 @@ class _SettingsPage(QWidget):
     def _on_clips_folder_browse(self):
         if self.sm is None:
             return
-        current = str(clips_directory_from(self.sm))
+        current_error = None
+        try:
+            current = str(clips_directory_from(self.sm))
+        except StoragePathError as error:
+            current_error = error
+            # This is only the chooser's starting location. It is never saved
+            # as a replacement storage root unless the user selects it.
+            current = str(Path.home())
+            self._report_storage_change_failure(error)
         folder = QFileDialog.getExistingDirectory(
             self, 'Select Clips Storage Folder', current,
             QFileDialog.Option.ShowDirsOnly,
         )
         if not folder:
+            if current_error is not None:
+                print(f'[Storage] Clips folder selection cancelled: {current_error}')
             return
-        resolved = str(Path(folder).expanduser().resolve(strict=False))
-        self.sm.set('clips_directory', resolved)
-        self.sm.save_settings()
+
+        self._commit_clips_directory(folder)
+
+    def _on_clips_folder_use_default(self):
+        if self.sm is None:
+            return
+        try:
+            default = default_clips_directory()
+        except StoragePathError as error:
+            self._report_storage_change_failure(error)
+            return
+        self._commit_clips_directory(default)
+
+    def _report_storage_change_failure(self, error) -> None:
+        detail = str(error)
+        emit_event('storage', 'directory_change_failed', state='FAILED',
+                   detail=detail)
+        FthrMessageDialog.warning(self, 'Storage location unavailable', detail)
+
+    def _commit_clips_directory(self, directory) -> bool:
+        """Prepare and persist a new root before changing the visible library."""
+        if self.sm is None:
+            return False
+        old_settings = getattr(self.sm, 'settings', None)
+        missing = object()
+        old_recording_value = self.sm.get('recording_directory', missing)
+        if old_recording_value is missing or old_recording_value is None:
+            recording_is_derived = True
+            preserved_recording_value = None
+        else:
+            recording_is_derived = False
+            preserved_recording_value = old_recording_value
+        try:
+            try:
+                old_root = clips_directory_from(self.sm)
+            except StoragePathError:
+                old_root = None
+            if not recording_is_derived:
+                try:
+                    old_recording = recording_directory_from(self.sm)
+                except StoragePathError:
+                    old_recording = None
+                if (old_root is not None and old_recording is not None
+                        and old_recording == old_root / 'Recordings'):
+                    recording_is_derived = True
+            new_root = prepare_clips_storage(directory, probe_writable=True)
+            new_recording = (new_root / 'Recordings' if recording_is_derived
+                             else preserved_recording_value)
+
+            previous = {}
+            if isinstance(old_settings, dict):
+                for key in ('clips_directory', 'recording_directory'):
+                    previous[key] = (key in old_settings, old_settings.get(key))
+
+            self.sm.set('clips_directory', str(new_root))
+            recording_to_store = (str(new_recording) if recording_is_derived
+                                  else preserved_recording_value)
+            self.sm.set('recording_directory', recording_to_store)
+            if not self.sm.save_settings():
+                if isinstance(old_settings, dict):
+                    for key, (was_present, old_value) in previous.items():
+                        if was_present:
+                            old_settings[key] = old_value
+                        else:
+                            old_settings.pop(key, None)
+                error = StoragePathError(
+                    'FTHR could not save the new storage location. Your current '
+                    'library remains selected; choose a writable settings folder '
+                    'and try again. No files were moved.')
+                self._report_storage_change_failure(error)
+                return False
+        except (OSError, TypeError, ValueError) as error:
+            self._report_storage_change_failure(
+                error if isinstance(error, StoragePathError) else StoragePathError(
+                    'FTHR could not use the selected storage folder. Choose a '
+                    'valid writable folder in Settings. No files were moved.'))
+            return False
+
+        resolved = str(new_root)
         self.clips_directory_edit.setText(resolved)
+        recording_edit = self.__dict__.get('recording_directory_edit', None)
+        if recording_is_derived and recording_edit is not None:
+            recording_edit.setText(str(new_recording))
         self.clips_directory_changed.emit(resolved)
+        return True
 
     def _on_recording_folder_browse(self):
-        current = str(self.sm.get(
-            'recording_directory', clips_directory_from(self.sm) / 'Recordings'))
+        if self.sm is None:
+            return
+        current_error = None
+        try:
+            current = str(recording_directory_from(self.sm))
+        except StoragePathError as error:
+            current_error = error
+            current = str(Path.home())
+            self._report_storage_change_failure(error)
         folder = QFileDialog.getExistingDirectory(
             self, 'Select Manual Recording Folder', current,
             QFileDialog.Option.ShowDirsOnly,
         )
         if not folder:
+            if current_error is not None:
+                print(f'[Storage] Recording folder selection cancelled: {current_error}')
             return
-        resolved = str(Path(folder).expanduser().resolve(strict=False))
-        self.sm.set('recording_directory', resolved)
-        owned_root = clips_directory_from(self.sm)
         try:
+            resolved = str(ensure_storage_directory(folder, probe_writable=True))
+        except StoragePathError as error:
+            self._report_storage_change_failure(error)
+            return
+        try:
+            owned_root = clips_directory_from(self.sm)
+        except StoragePathError:
+            # The recording folder is still repairable even when the library
+            # root is unavailable; treat this choice as a separate import root.
+            owned_root = None
+        old_settings = getattr(self.sm, 'settings', None)
+        previous = {}
+        if isinstance(old_settings, dict):
+            for key in ('recording_directory', 'imported_clip_folders'):
+                previous[key] = (key in old_settings, old_settings.get(key))
+        self.sm.set('recording_directory', resolved)
+        external_roots = None
+        try:
+            if owned_root is None:
+                raise ValueError('clips storage root is unavailable')
             Path(resolved).relative_to(owned_root)
         except ValueError:
             # External recording directories are linked into the library so
             # recordings remain editable after restarting FTHR.
             roots = add_import_root(
                 self.sm.get('imported_clip_folders', []), resolved)
+            external_roots = roots
             self.sm.set('imported_clip_folders', roots)
+        if not self.sm.save_settings():
+            if isinstance(old_settings, dict):
+                for key, (was_present, old_value) in previous.items():
+                    if was_present:
+                        old_settings[key] = old_value
+                    else:
+                        old_settings.pop(key, None)
+            self._report_storage_change_failure(StoragePathError(
+                'FTHR could not save the manual recording folder. Your current '
+                'folder remains selected. No files were moved.'))
+            return
+        if external_roots is not None:
             self._refresh_import_folders_list()
             self.imported_folders_changed.emit()
-        self.sm.save_settings()
         self.recording_directory_edit.setText(resolved)
 
     def _on_import_folder_scan(self):
@@ -9402,13 +10581,13 @@ class _SettingsPage(QWidget):
             f' border: 1px solid {Colors.BORDER}; }}'))
         rl = QHBoxLayout(row)
         rl.setContentsMargins(10, 8, 8, 8)
-        rl.setSpacing(10)
+        rl.setSpacing(Sizes.ROW_GAP)
 
         info = QVBoxLayout()
         info.setSpacing(1)
         name_lbl = QLabel(software_name)
         set_theme_style(name_lbl, lambda: (f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY}px;'
-            f' font-family: {Fonts.DISPLAY}; font-weight: bold;'
+            f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
             f' background: transparent;'))
         path_lbl = QLabel(path)
         set_theme_style(path_lbl, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_LABEL)))
@@ -9416,14 +10595,14 @@ class _SettingsPage(QWidget):
         info.addWidget(path_lbl)
         rl.addLayout(info, 1)
 
-        add_btn = QPushButton('ADD')
+        add_btn = QPushButton('Add')
         add_btn.setFixedWidth(60)
         add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         set_theme_style(add_btn, button_primary_qss)
         add_btn.clicked.connect(lambda _, n=software_name, p=path: self._scan_add(n, p))
         rl.addWidget(add_btn)
 
-        dismiss_btn = QPushButton('DISMISS')
+        dismiss_btn = QPushButton('Dismiss')
         dismiss_btn.setFixedWidth(76)
         dismiss_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         set_theme_style(dismiss_btn, button_outline_qss)
@@ -9446,17 +10625,28 @@ class _SettingsPage(QWidget):
         self._scan_pending = [(n, p) for n, p in self._scan_pending if p != path]
         self._rebuild_scan_results()
 
+    def _storage_path_for_display(self, setting_key, resolver) -> str:
+        """Display the resolved path, or the saved invalid value for repair."""
+        try:
+            return str(resolver(self.sm))
+        except StoragePathError as error:
+            emit_event('storage', 'settings_path_invalid', state='INVALID',
+                       setting=setting_key, detail=str(error))
+            raw_value = self.sm.get(setting_key, '')
+            return '' if raw_value is None else str(raw_value)
+
     def _make_clip_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setContentsMargins(0, 0, 16, 32)
+        layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
         layout.setSpacing(0)
 
         layout.addWidget(_flat_section_header('Clip Settings'))
         layout.addSpacing(12)
 
-        def _folder_row(label_text, current, browse_text, slot):
+        def _folder_row(label_text, current, browse_text, slot,
+                        default_slot=None):
             row_widget = QWidget()
             row_widget.setStyleSheet('background: transparent;')
             row = QHBoxLayout(row_widget)
@@ -9479,20 +10669,29 @@ class _SettingsPage(QWidget):
             browse.setToolTip(browse_text)
             browse.clicked.connect(slot)
             row.addWidget(browse)
+            if default_slot is not None:
+                use_default = QPushButton('USE DEFAULT')
+                set_theme_style(use_default, button_outline_qss)
+                use_default.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                use_default.setToolTip('Use the platform default clips folder.')
+                use_default.clicked.connect(default_slot)
+                row.addWidget(use_default)
             return row_widget, edit
 
         # Folders --
         layout.addWidget(_flat_section_header('Folders'))
         layout.addSpacing(12)
         storage_row, self.clips_directory_edit = _folder_row(
-            'CLIPS STORAGE FOLDER', clips_directory_from(self.sm),
+            'CLIPS STORAGE FOLDER', self._storage_path_for_display(
+                'clips_directory', clips_directory_from),
             'Choose where FTHR stores clips, screenshots, exports, and shares.',
-            self._on_clips_folder_browse)
+            self._on_clips_folder_browse,
+            self._on_clips_folder_use_default)
         layout.addWidget(storage_row)
         layout.addSpacing(8)
         recording_row, self.recording_directory_edit = _folder_row(
-            'MANUAL RECORDING FOLDER', self.sm.get(
-                'recording_directory', clips_directory_from(self.sm) / 'Recordings'),
+            'MANUAL RECORDING FOLDER', self._storage_path_for_display(
+                'recording_directory', recording_directory_from),
             'Choose where manual recordings are written.',
             self._on_recording_folder_browse)
         layout.addWidget(recording_row)
@@ -9505,13 +10704,13 @@ class _SettingsPage(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        add_btn = QPushButton('ADD FOLDER')
+        add_btn = QPushButton('Add folder')
         set_theme_style(add_btn, button_outline_qss)
         add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         add_btn.clicked.connect(self._on_import_folder_add)
         btn_row.addWidget(add_btn)
 
-        self._scan_btn = QPushButton('SCAN FOR CLIPS')
+        self._scan_btn = QPushButton('Scan for clips')
         set_theme_style(self._scan_btn, button_secondary_qss)
         self._scan_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._scan_btn.clicked.connect(self._on_import_folder_scan)
@@ -9549,7 +10748,7 @@ class _SettingsPage(QWidget):
             row_widget.setStyleSheet('background: transparent;')
             row = QHBoxLayout(row_widget)
             row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(10)
+            row.setSpacing(Sizes.ROW_GAP)
             lbl = QLabel(label_text)
             lbl.setFixedWidth(140)
             set_theme_style(lbl,
@@ -9562,14 +10761,14 @@ class _SettingsPage(QWidget):
         self.encoder_combo.addItem('Detecting available encoders…', 'auto')
         self.encoder_combo.setEnabled(False)
         set_theme_style(self.encoder_combo, combo_qss)
-        layout.addWidget(_encoding_row('ENCODER', self.encoder_combo))
+        layout.addWidget(_encoding_row('Encoder', self.encoder_combo))
         layout.addSpacing(8)
 
         self.codec_combo = _DropdownCombo()
         self.codec_combo.addItem('Automatic', 'auto')
         self.codec_combo.setEnabled(False)
         set_theme_style(self.codec_combo, combo_qss)
-        layout.addWidget(_encoding_row('CODEC', self.codec_combo))
+        layout.addWidget(_encoding_row('Codec', self.codec_combo))
         layout.addSpacing(8)
 
         self.encoder_preset_combo = _DropdownCombo()
@@ -9580,7 +10779,7 @@ class _SettingsPage(QWidget):
         self.encoder_preset_combo.setCurrentIndex(
             max(0, min(6, saved_preset - 1)))
         self.encoder_preset_row = _encoding_row(
-            'NVIDIA PRESET', self.encoder_preset_combo)
+            'NVIDIA preset', self.encoder_preset_combo)
         self.encoder_preset_row.setVisible(False)
         layout.addWidget(self.encoder_preset_row)
         layout.addSpacing(8)
@@ -9588,17 +10787,17 @@ class _SettingsPage(QWidget):
         self.active_encoder_lbl = QLabel('—')
         set_theme_style(self.active_encoder_lbl,
             lambda: (label_body(Colors.ACCENT, Fonts.SIZE_BODY)))
-        layout.addWidget(_encoding_row('ACTIVE ENCODER', self.active_encoder_lbl))
+        layout.addWidget(_encoding_row('Active encoder', self.active_encoder_lbl))
         layout.addSpacing(10)
 
         encoder_actions = QHBoxLayout()
-        encoder_actions.setSpacing(10)
-        self.encoder_apply_btn = QPushButton('APPLY')
+        encoder_actions.setSpacing(Sizes.ROW_GAP)
+        self.encoder_apply_btn = QPushButton('Apply')
         set_theme_style(self.encoder_apply_btn, button_primary_qss)
         self.encoder_apply_btn.setVisible(False)
         self.encoder_apply_btn.clicked.connect(self._on_encoder_apply)
         encoder_actions.addWidget(self.encoder_apply_btn)
-        self.encoder_refresh_btn = QPushButton('REDETECT')
+        self.encoder_refresh_btn = QPushButton('Redetect')
         set_theme_style(self.encoder_refresh_btn, button_outline_qss)
         self.encoder_refresh_btn.setToolTip(
             'Recheck the GPU drivers after a hardware or driver change.')
@@ -9631,6 +10830,25 @@ class _SettingsPage(QWidget):
         layout.addWidget(self.watermark_check)
         layout.addSpacing(10)
 
+        layout.addSpacing(18)
+        layout.addWidget(_flat_section_header('Clip Editor'))
+        layout.addSpacing(12)
+        for key, text, tip in (
+                ('timeline_preview_strip_enabled', 'Seek bar preview',
+                 'Off: the app will no longer generate preview images in the timeline.'),
+                ('hide_deleted_timeline_segments', 'Hide deleted segments in the editor seek bar',
+                 'Collapse deleted sections out of the timeline. Turn off to view and restore them.'),
+                ('grid_show_edited_duration', 'Show clip length excluding deleted segments in the grid',
+                 'Use saved trim boundaries and kept segments for the duration badge.')):
+            check = QCheckBox(text)
+            check.setToolTip(tip)
+            set_theme_style(check, checkbox_qss)
+            check.setChecked(bool(self.sm.get(key, key == 'timeline_preview_strip_enabled')))
+            check.toggled.connect(lambda enabled, setting=key: self._save_clip_display_setting(setting, enabled))
+            setattr(self, key + '_check', check)
+            layout.addWidget(check)
+            layout.addSpacing(10)
+
         layout.addStretch()
 
         scroll = QScrollArea()
@@ -9651,6 +10869,19 @@ class _SettingsPage(QWidget):
         self._refresh_import_folders_list()
         return wrapper
 
+    def _save_clip_display_setting(self, key, enabled):
+        self.sm.set(key, bool(enabled))
+        self.sm.save_settings()
+        if key == 'timeline_preview_strip_enabled':
+            from ui.clip_viewer import ClipViewer, _TIMELINE_IMAGE_CACHE, _TIMELINE_CACHE_LOCK
+            for viewer in QApplication.instance().allWidgets():
+                if isinstance(viewer, ClipViewer) and viewer.sm is self.sm:
+                    viewer.set_timeline_preview_enabled(enabled)
+            if not enabled:
+                with _TIMELINE_CACHE_LOCK:
+                    _TIMELINE_IMAGE_CACHE.clear()
+        self._sync_ui_performance_controls()
+
     def _make_audio_page(self):
         page = QWidget()
         outer = QVBoxLayout(page)
@@ -9668,7 +10899,7 @@ class _SettingsPage(QWidget):
         left.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 28, 0)
+        left_layout.setContentsMargins(0, 0, Sizes.SECTION_GAP, 0)
         left_layout.setSpacing(0)
         left_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -9694,21 +10925,35 @@ class _SettingsPage(QWidget):
             refresh.setIconSize(QSize(13, 13))
             _register_icon_widget(refresh, 'refresh.png', 13)
         else:
-            refresh.setText('↻')
+            refresh.setText('Refresh')
         refresh.clicked.connect(self._populate_mic_devices)
         dev_row.addWidget(refresh)
         left_layout.addLayout(dev_row)
         left_layout.addSpacing(8)
 
+        self.mic_mono_check = QCheckBox('Downmix stereo microphone to mono')
+        set_theme_style(self.mic_mono_check, checkbox_qss)
+        self.mic_mono_check.setChecked(bool(self.sm.get('mic_downmix_mono', False)))
+        self.mic_mono_check.setToolTip('Center your microphone in both speakers when recording.')
+        self.mic_mono_check.toggled.connect(self._on_mic_mono_changed)
+        left_layout.addWidget(self.mic_mono_check)
+        left_layout.addSpacing(12)
+
         # Volume row
         vol_row = QHBoxLayout()
         vol_row.setSpacing(8)
-        vol_lbl = QLabel('Loudness')
-        vol_lbl.setFixedWidth(100)
-        vol_row.addWidget(vol_lbl)
+        self.mic_gain_label = QLabel('Microphone gain')
+        self.mic_gain_label.setFixedWidth(100)
+        vol_row.addWidget(self.mic_gain_label)
         self.mic_vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.mic_vol_slider.setRange(0, 200)
         self.mic_vol_slider.setValue(100)
+        self.mic_vol_slider.setToolTip(
+            'Microphone gain: 100% is unity (no digital boost). Values above '
+            '100% apply a digital boost to newly captured microphone audio and '
+            'can cause over-range or distortion on loud input. Windows audio '
+            'enhancements are independent of this control. On Windows, restart '
+            'capture for a changed engine gain to take effect.')
         vol_row.addWidget(self.mic_vol_slider, 1)
         self.mic_vol_value = QLabel('100%')
         self.mic_vol_value.setFixedWidth(42)
@@ -9716,6 +10961,15 @@ class _SettingsPage(QWidget):
         self.mic_vol_slider.valueChanged.connect(self._on_mic_volume_changed)
         vol_row.addWidget(self.mic_vol_value)
         left_layout.addLayout(vol_row)
+        self.mic_gain_warning = QLabel(
+            '⚠ Above 100% applies a digital boost and may distort loud input. '
+            'Restart capture for Windows engine gain changes to take effect.')
+        self.mic_gain_warning.setObjectName('micGainWarning')
+        self.mic_gain_warning.setWordWrap(True)
+        set_theme_style(self.mic_gain_warning,
+                        lambda: (label_body(Colors.WARNING, Fonts.SIZE_MICRO)))
+        left_layout.addWidget(self.mic_gain_warning)
+        self._update_mic_gain_warning(self.mic_vol_slider.value())
         left_layout.addSpacing(8)
 
         # Live level meter row
@@ -9764,13 +11018,13 @@ class _SettingsPage(QWidget):
             self.gary_enabled_check, 0, Qt.AlignmentFlag.AlignVCenter)
         gary_layout.addStretch()
 
-        choose_image = QPushButton('CHOOSE')
+        choose_image = QPushButton('Choose')
         choose_image.setObjectName('garyImageButton')
         choose_image.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         choose_image.clicked.connect(self._choose_gary_image)
         gary_layout.addWidget(
             choose_image, 0, Qt.AlignmentFlag.AlignVCenter)
-        reset_image = QPushButton('DEFAULT')
+        reset_image = QPushButton('Default')
         reset_image.setObjectName('garyImageButton')
         reset_image.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         reset_image.clicked.connect(self._reset_gary_image)
@@ -9780,7 +11034,7 @@ class _SettingsPage(QWidget):
 
         if not _SD_AVAILABLE:
             warn = QLabel(
-                '⚠  Mic features need the "sounddevice" Python package.\n'
+                'Mic features need the "sounddevice" Python package.\n'
                 '   Install it from your venv:  pip install sounddevice numpy')
             set_theme_style(warn, lambda: (label_body(Colors.ERROR, Fonts.SIZE_BODY)))
             left_layout.addSpacing(6)
@@ -9798,7 +11052,7 @@ class _SettingsPage(QWidget):
         right.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(28, 0, 0, 0)
+        right_layout.setContentsMargins(Sizes.SECTION_GAP, 0, 0, 0)
         right_layout.setSpacing(0)
         right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -9835,7 +11089,7 @@ class _SettingsPage(QWidget):
         right_layout.addLayout(mon_row)
 
         right_layout.addSpacing(18)
-        volume_heading = QLabel('NOTIFICATION VOLUME')
+        volume_heading = QLabel('Notification volume')
         set_theme_style(volume_heading,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         right_layout.addWidget(volume_heading)
@@ -9849,6 +11103,7 @@ class _SettingsPage(QWidget):
             ('upload_successful', 'Upload successful'),
             ('upload_failed', 'Upload failed'),
         )
+        notification_sounds = (('master', 'Master volume'),) + notification_sounds
         for key, label_text in notification_sounds:
             sound_row = QHBoxLayout()
             sound_row.setSpacing(8)
@@ -9900,6 +11155,33 @@ class _SettingsPage(QWidget):
         self.audio_capture_check.toggled.connect(self._on_audio_capture_toggled)
         outer.addWidget(self.audio_capture_check)
         outer.addSpacing(12)
+
+        playback_row = QHBoxLayout()
+        playback_row.setContentsMargins(0, 0, 0, 0)
+        playback_row.setSpacing(Sizes.ROW_GAP)
+        playback_label = QLabel('Playback device to capture')
+        playback_label.setObjectName('playbackDeviceLabel')
+        playback_row.addWidget(playback_label)
+        self.playback_combo = QComboBox()
+        self.playback_combo.setMinimumWidth(0)
+        self.playback_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        set_theme_style(self.playback_combo, combo_qss)
+        self.playback_combo.addItem('Windows default', '')
+        self.playback_combo.currentIndexChanged.connect(self._on_playback_device_changed)
+        playback_row.addWidget(self.playback_combo, 1)
+        refresh_playback = QPushButton('Refresh')
+        refresh_playback.setObjectName('playbackDeviceRefresh')
+        set_theme_style(refresh_playback, button_outline_qss)
+        refresh_playback.clicked.connect(self._populate_playback_devices)
+        playback_row.addWidget(refresh_playback)
+        outer.addLayout(playback_row)
+        outer.addSpacing(Sizes.SPACE_3)
+        hint = QLabel('If this device disconnects, capture switches to the Windows default.')
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
+        outer.addSpacing(12)
+        self._playback_inventory_ready.connect(self._apply_playback_devices)
+        QTimer.singleShot(0, self._populate_playback_devices)
 
         self.separate_audio_check = QCheckBox(
             'Keep system and microphone audio as separate tracks')
@@ -9959,12 +11241,12 @@ class _SettingsPage(QWidget):
         """Keep Audio and Performance views backed by one audio setting."""
         audio_enabled = bool(self.sm.get('audio_capture_enabled', True))
         for name in ('audio_capture_check', 'performance_audio_check'):
-            control = getattr(self, name, None)
+            control = self.__dict__.get(name)
             if control is not None:
                 control.blockSignals(True)
                 control.setChecked(audio_enabled)
                 control.blockSignals(False)
-        separate = getattr(self, 'separate_audio_check', None)
+        separate = self.__dict__.get('separate_audio_check', None)
         if separate is not None:
             separate.setEnabled(audio_enabled)
 
@@ -9988,49 +11270,79 @@ class _SettingsPage(QWidget):
                 main_win.bridge.resume_recording()
 
     def _populate_camera_devices(self):
-        from core.camera_recorder import CameraRecorder
-        signals_were_blocked = self.camera_device_combo.blockSignals(True)
+        # Device discovery can launch FFmpeg and open up to eight cameras.
+        # Keep that work outside page construction and the Qt event loop.
+        worker = self.__dict__.get('_camera_device_scan_thread')
+        if worker is not None and worker.is_alive():
+            return
+        combo = self.camera_device_combo
+        blocked = combo.blockSignals(True)
+        combo.clear()
+        combo.addItem('Scanning cameras…')
+        combo.setEnabled(False)
+        combo.blockSignals(blocked)
+
+        def discover():
+            try:
+                from core.camera_recorder import CameraRecorder
+                available = CameraRecorder.is_available()
+                devices = CameraRecorder.list_devices() if available else []
+                error = '' if available else 'Camera capture unavailable'
+            except Exception:
+                devices, error = [], 'Camera discovery failed; try Refresh'
+            try:
+                self._camera_devices_result.emit(devices, error)
+            except RuntimeError:
+                # The page may have been destroyed while a driver was scanning.
+                pass
+
+        self._camera_device_scan_thread = threading.Thread(
+            target=discover, daemon=True, name='fthr-camera-device-scan')
+        self._camera_device_scan_thread.start()
+
+    @Slot(object, str)
+    def _on_camera_devices_result(self, devices, error):
+        combo = self.camera_device_combo
+        blocked = combo.blockSignals(True)
         try:
-            self.camera_device_combo.clear()
-            if not CameraRecorder.is_available():
-                self.camera_device_combo.addItem('cv2 not available')
-                self.camera_device_combo.setEnabled(False)
-                return
-            devices = CameraRecorder.list_devices()
-            if not devices:
-                self.camera_device_combo.addItem('No cameras detected')
-                self.camera_device_combo.setEnabled(False)
-                return
-            self.camera_device_combo.setEnabled(True)
-            for device in devices:
-                self.camera_device_combo.addItem(
-                    str(device['name']), int(device['index']))
-            saved = int(self.sm.get('camera_device_index', 0) or 0)
-            saved_index = self.camera_device_combo.findData(saved)
-            self.camera_device_combo.setCurrentIndex(
-                saved_index if saved_index >= 0 else 0)
+            self._apply_camera_devices(devices, error)
         finally:
-            self.camera_device_combo.blockSignals(signals_were_blocked)
+            combo.blockSignals(blocked)
+
+    def _apply_camera_devices(self, devices, error):
+        self.camera_device_combo.clear()
+        if not devices:
+            self.camera_device_combo.addItem(error or 'No cameras detected')
+            self.camera_device_combo.setEnabled(False)
+            return
+        self.camera_device_combo.setEnabled(True)
+        for device in devices:
+            self.camera_device_combo.addItem(
+                str(device['name']), int(device['index']))
+        saved = int(self.sm.get('camera_device_index', 0) or 0)
+        saved_index = self.camera_device_combo.findData(saved)
+        self.camera_device_combo.setCurrentIndex(
+            saved_index if saved_index >= 0 else 0)
 
     def _on_camera_toggled(self, checked: bool):
-        self.sm.set('camera_enabled', checked)
-        self.sm.save_settings()
-        if hasattr(self, 'unified_overlay_editor'):
-            self.unified_overlay_editor.set_overlay_enabled('camera', checked)
-        elif hasattr(self, 'camera_overlay_editor'):
-            self.camera_overlay_editor.set_enabled(checked)
         from core.camera_recorder import CameraRecorder
-        if checked and CameraRecorder.is_available():
+
+        if checked:
+            self.sm.set('camera_enabled', True)
+            self.sm.save_settings()
             idx = int(self.sm.get('camera_device_index', 0) or 0)
-            CameraRecorder().start_async(idx)   # blocking open would freeze the UI
-            self._camera_preview_timer.start()
-        else:
-            CameraRecorder().stop()
-            self._camera_preview_timer.stop()
-            if hasattr(self, 'unified_overlay_editor'):
-                self.unified_overlay_editor.set_camera_pixmap(QPixmap())
-            elif hasattr(self, 'camera_overlay_editor'):
-                self.camera_overlay_editor.set_frame(QPixmap())
+            self._set_camera_overlay_enabled(False)
+            self._start_camera_open(idx)
+            return
+
+        self._camera_start_generation += 1
+        self._camera_pending_device_index = None
+        self.sm.set('camera_enabled', False)
+        self.sm.save_settings()
+        CameraRecorder().stop()
+        self._camera_preview_timer.stop()
+        self._set_camera_overlay_enabled(False)
+        self._clear_camera_preview()
 
     def _on_camera_device_changed(self, combo_index: int):
         if combo_index < 0:
@@ -10042,8 +11354,91 @@ class _SettingsPage(QWidget):
         self.sm.set('camera_device_index', int(device_index))
         self.sm.save_settings()
         if self.sm.get('camera_enabled', False):
-            from core.camera_recorder import CameraRecorder
-            CameraRecorder().start_async(idx)   # blocking open would freeze the UI
+            self._start_camera_open(idx)
+
+    def _start_camera_open(self, device_index: int) -> None:
+        """Open a camera asynchronously and marshal its result to this page."""
+        from core.camera_recorder import CameraRecorder
+
+        self._camera_start_generation += 1
+        generation = self._camera_start_generation
+        device_index = int(device_index)
+        self._camera_pending_device_index = device_index
+        self._camera_preview_timer.stop()
+        self._clear_camera_preview()
+
+        try:
+            available = CameraRecorder.is_available()
+        except Exception as exc:
+            self._camera_start_result.emit(
+                generation, device_index, False, str(exc)[:80])
+            return
+        if not available:
+            self._camera_start_result.emit(
+                generation, device_index, False,
+                'Camera capture is unavailable in this installation.')
+            return
+
+        def on_result(ok: bool) -> None:
+            # CameraRecorder invokes this on its worker thread. Emitting a Qt
+            # signal is the only action here; all widget/settings work is
+            # performed by _on_camera_start_result on the page's UI thread.
+            self._camera_start_result.emit(
+                generation, device_index, bool(ok), '')
+
+        try:
+            CameraRecorder().start_async(device_index, on_result=on_result)
+        except Exception as exc:
+            self._camera_start_result.emit(
+                generation, device_index, False, str(exc)[:80])
+
+    @Slot(int, int, bool, str)
+    def _on_camera_start_result(self, generation: int, device_index: int,
+                                ok: bool, diagnostic: str) -> None:
+        current_device = int(self.sm.get('camera_device_index', 0) or 0)
+        if (generation != self._camera_start_generation
+                or device_index != self._camera_pending_device_index
+                or device_index != current_device
+                or not self.sm.get('camera_enabled', False)):
+            return
+
+        self._camera_pending_device_index = None
+        if ok:
+            self._set_camera_overlay_enabled(True)
+            if not self._background_ui_paused:
+                self._camera_preview_timer.start()
+            return
+
+        self.sm.set('camera_enabled', False)
+        self.sm.save_settings()
+        if 'camera_check' in self.__dict__:
+            was_blocked = self.camera_check.blockSignals(True)
+            self.camera_check.setChecked(False)
+            self.camera_check.blockSignals(was_blocked)
+        self._camera_preview_timer.stop()
+        self._set_camera_overlay_enabled(False)
+        self._clear_camera_preview()
+        detail = (
+            f'Could not open camera device {device_index}. Confirm it is '
+            'connected and not in use by another app. The camera overlay '
+            'was turned off; choose another camera or try again.'
+        )
+        diagnostic = ' '.join(str(diagnostic or '').split())[:80]
+        if diagnostic:
+            detail = f'{detail} ({diagnostic})'
+        self.camera_unavailable.emit(detail[:240])
+
+    def _set_camera_overlay_enabled(self, enabled: bool) -> None:
+        if 'unified_overlay_editor' in self.__dict__:
+            self.unified_overlay_editor.set_overlay_enabled('camera', enabled)
+        elif hasattr(self, 'camera_overlay_editor'):
+            self.camera_overlay_editor.set_enabled(enabled)
+
+    def _clear_camera_preview(self) -> None:
+        if 'unified_overlay_editor' in self.__dict__:
+            self.unified_overlay_editor.set_camera_pixmap(QPixmap())
+        elif hasattr(self, 'camera_overlay_editor'):
+            self.camera_overlay_editor.set_frame(QPixmap())
 
     def _on_camera_overlay_rect_changed(self, rect: dict):
         self.sm.set('camera_overlay_rect', clamp_overlay_rect(rect))
@@ -10060,7 +11455,13 @@ class _SettingsPage(QWidget):
         self.sm.save_settings()
 
     def _update_camera_preview(self):
-        preview = getattr(self, 'unified_overlay_editor', None)
+        sm = getattr(self, 'sm', None)
+        if sm is not None and not sm.get('settings_visual_previews_enabled', True):
+            timer = self.__dict__.get('_camera_preview_timer')
+            if timer is not None:
+                timer.stop()
+            return
+        preview = self.__dict__.get('unified_overlay_editor', None)
         if preview is None:
             preview = getattr(self, 'camera_overlay_editor', None)
         if preview is None or not preview.isVisible():
@@ -10088,7 +11489,7 @@ class _SettingsPage(QWidget):
         # display-bounded pixmap avoids both a full-resolution GUI allocation
         # and another temporary scaled pixmap on every 100 ms preview tick.
         pix = _QPixmap.fromImage(qi)
-        if hasattr(self, 'unified_overlay_editor'):
+        if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_camera_pixmap(pix)
         elif hasattr(self, 'camera_overlay_editor'):
             self.camera_overlay_editor.set_frame(pix)
@@ -10105,7 +11506,8 @@ class _SettingsPage(QWidget):
             candidates.append(preferred)
         candidates.append(self._default_overlay_preview_background_path())
         for image_path in candidates:
-            pixmap = QPixmap(str(image_path))
+            from ui.camera_overlay_editor import _cached_overlay_pixmap
+            pixmap = _cached_overlay_pixmap(str(image_path), QSize(820, 500))
             if not pixmap.isNull():
                 return pixmap
         return QPixmap()
@@ -10114,15 +11516,15 @@ class _SettingsPage(QWidget):
         path = str(path or '')
         self.sm.set('input_overlay_preview_background', path)
         self.sm.save_settings()
-        if hasattr(self, 'input_overlay_preview_background_path'):
+        if 'input_overlay_preview_background_path' in self.__dict__:
             self.input_overlay_preview_background_path.setText(
                 path or 'DEFAULT · DESKTOP SCREENSHOT')
-        if hasattr(self, 'input_overlay_preview_source'):
+        if 'input_overlay_preview_source' in self.__dict__:
             self.input_overlay_preview_source.setText(
                 Path(path).name if path else 'DEFAULT · DESKTOP')
-        if hasattr(self, 'unified_overlay_editor'):
-            self.unified_overlay_editor.set_background(
-                self._load_overlay_preview_background(path))
+        if 'unified_overlay_editor' in self.__dict__:
+            self.unified_overlay_editor.set_background_paths([
+                path, str(self._default_overlay_preview_background_path())])
 
     def _choose_input_overlay_preview_background(self) -> bool:
         current = str(self.sm.get(
@@ -10153,7 +11555,7 @@ class _SettingsPage(QWidget):
                 checked = False
         self.sm.set('image_overlay_enabled', checked)
         self.sm.save_settings()
-        if hasattr(self, 'unified_overlay_editor'):
+        if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_overlay_enabled('image', checked)
 
     def _stored_image_layers(self) -> list[dict]:
@@ -10183,7 +11585,7 @@ class _SettingsPage(QWidget):
         self._selected_image_index = (
             max(0, min(int(selected), len(layers) - 1)) if layers else -1)
 
-        if hasattr(self, 'image_overlay_selector'):
+        if 'image_overlay_selector' in self.__dict__:
             self.image_overlay_selector.blockSignals(True)
             self.image_overlay_selector.clear()
             for index, layer in enumerate(layers):
@@ -10198,11 +11600,11 @@ class _SettingsPage(QWidget):
             self.image_overlay_selector.setEnabled(bool(layers))
             self.image_overlay_selector.blockSignals(False)
 
-        if hasattr(self, 'remove_image_overlay_btn'):
+        if 'remove_image_overlay_btn' in self.__dict__:
             self.remove_image_overlay_btn.setEnabled(bool(layers))
-        if hasattr(self, 'clear_image_overlays_btn'):
+        if 'clear_image_overlays_btn' in self.__dict__:
             self.clear_image_overlays_btn.setEnabled(bool(layers))
-        if hasattr(self, 'image_overlay_count'):
+        if 'image_overlay_count' in self.__dict__:
             count = len(layers)
             self.image_overlay_count.setText(
                 f'{count} IMAGE LAYER{"S" if count != 1 else ""}')
@@ -10210,14 +11612,14 @@ class _SettingsPage(QWidget):
         selected_layer = (
             layers[self._selected_image_index] if self._selected_image_index >= 0
             else None)
-        if hasattr(self, 'image_overlay_fit'):
+        if 'image_overlay_fit' in self.__dict__:
             self.image_overlay_fit.blockSignals(True)
             fit_index = self.image_overlay_fit.findData(
                 selected_layer.get('fit', 'fit') if selected_layer else 'fit')
             self.image_overlay_fit.setCurrentIndex(max(0, fit_index))
             self.image_overlay_fit.setEnabled(selected_layer is not None)
             self.image_overlay_fit.blockSignals(False)
-        if hasattr(self, 'image_overlay_opacity'):
+        if 'image_overlay_opacity' in self.__dict__:
             self.image_overlay_opacity.blockSignals(True)
             self.image_overlay_opacity.setValue(
                 int(selected_layer.get('opacity', 100)) if selected_layer else 100)
@@ -10225,7 +11627,7 @@ class _SettingsPage(QWidget):
             self.image_overlay_opacity.blockSignals(False)
             self.image_overlay_opacity_value.setText(
                 f'{self.image_overlay_opacity.value()}%')
-        if hasattr(self, 'unified_overlay_editor'):
+        if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_image_layers(
                 image_overlay_layers(self.sm))
             self.unified_overlay_editor.set_selected_image(
@@ -10341,13 +11743,9 @@ class _SettingsPage(QWidget):
                 third_party_keyboard_settings(self.sm))
 
     def _refresh_keyboard_windows(self) -> None:
-        if not hasattr(self, 'keyboard_window_combo'):
+        if 'keyboard_window_combo' not in self.__dict__:
             return
-        if sys.platform != 'win32':
-            self.keyboard_window_combo.clear()
-            self.keyboard_window_combo.addItem('Windows only')
-            self.keyboard_window_combo.setEnabled(False)
-            return
+        pass
 
         self._keyboard_windows = enumerate_keyboard_windows()
         config = third_party_keyboard_settings(self.sm)
@@ -10384,7 +11782,7 @@ class _SettingsPage(QWidget):
         self._sync_keyboard_overlay_controls()
 
     def _on_keyboard_window_changed(self, index: int) -> None:
-        if index < 0 or not hasattr(self, 'keyboard_window_combo'):
+        if index < 0 or 'keyboard_window_combo' not in self.__dict__:
             return
         value = self.keyboard_window_combo.itemData(index)
         if value is None:
@@ -10405,7 +11803,7 @@ class _SettingsPage(QWidget):
         self.keyboard_overlay_check.setChecked(True)
         self.keyboard_overlay_check.blockSignals(False)
         self._save_keyboard_config(config)
-        if hasattr(self, 'unified_overlay_editor'):
+        if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_overlay_enabled('keyboard', True)
         self._sync_keyboard_overlay_controls()
 
@@ -10419,7 +11817,7 @@ class _SettingsPage(QWidget):
             return
         config['enabled'] = bool(checked)
         self._save_keyboard_config(config)
-        if hasattr(self, 'unified_overlay_editor'):
+        if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_overlay_enabled(
                 'keyboard', bool(checked))
             if not checked:
@@ -10427,7 +11825,7 @@ class _SettingsPage(QWidget):
         self._sync_keyboard_overlay_controls()
 
     def _sync_keyboard_color_swatch(self, color: str) -> None:
-        if not hasattr(self, 'keyboard_color_swatch'):
+        if 'keyboard_color_swatch' not in self.__dict__:
             return
         color = str(color or DEFAULT_KEYBOARD_COLOR).lower()
         set_theme_style(self.keyboard_color_swatch,
@@ -10437,7 +11835,7 @@ class _SettingsPage(QWidget):
         self.keyboard_color_value.setText(color.upper())
 
     def _start_keyboard_color_picker(self) -> None:
-        if not hasattr(self, 'keyboard_source_preview'):
+        if 'keyboard_source_preview' not in self.__dict__:
             return
         self.keyboard_source_preview.set_pick_mode(True)
 
@@ -10457,7 +11855,7 @@ class _SettingsPage(QWidget):
         self._update_keyboard_preview()
 
     def _sync_keyboard_overlay_controls(self) -> None:
-        if not hasattr(self, 'keyboard_overlay_check'):
+        if 'keyboard_overlay_check' not in self.__dict__:
             return
         config = third_party_keyboard_settings(self.sm)
         has_source = bool(config['hwnd'])
@@ -10468,18 +11866,33 @@ class _SettingsPage(QWidget):
         self.keyboard_color_swatch.setEnabled(windows and has_source)
         self.keyboard_source_preview.setEnabled(windows and has_source)
         self._sync_keyboard_color_swatch(config['color'])
-        if hasattr(self, 'unified_overlay_editor'):
+        if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_overlay_enabled(
                 'keyboard', config['enabled'])
 
     def _update_keyboard_preview(self) -> None:
-        if sys.platform != 'win32' or self._keyboard_capture is None:
+        sm = getattr(self, 'sm', None)
+        if sm is not None and not sm.get('settings_visual_previews_enabled', True):
+            timer = self.__dict__.get('_keyboard_preview_timer')
+            if timer is not None:
+                timer.stop()
             return
-        preview = getattr(self, 'unified_overlay_editor', None)
-        source_preview = getattr(self, 'keyboard_source_preview', None)
+        if self._keyboard_capture is None:
+            return
+        preview = self.__dict__.get('unified_overlay_editor', None)
+        source_preview = self.__dict__.get('keyboard_source_preview', None)
         if preview is None or source_preview is None:
             return
-        frame, _timestamp = self._keyboard_capture.latest_frame()
+        if not preview.isVisible() and not source_preview.isVisible():
+            return
+        frame, timestamp = self._keyboard_capture.latest_frame()
+        config = third_party_keyboard_settings(self.sm)
+        key = (timestamp, config['hwnd'], config['color'], config['intensity'])
+        if (frame is not None and key == getattr(self, '_keyboard_preview_key', None)
+                and not source_preview._image.isNull()
+                and not preview._keyboard_pixmap.isNull()):
+            return
+        self._keyboard_preview_key = None
         if frame is None:
             error = self._keyboard_capture.last_error
             source_preview.set_empty_text(
@@ -10502,9 +11915,8 @@ class _SettingsPage(QWidget):
         raw_image = QImage(
             rgb.tobytes(), w, h, ch * w,
             QImage.Format.Format_RGB888).copy()
-        source_preview.set_image(raw_image)
+        source_preview.set_image(raw_image, share_owned=True)
 
-        config = third_party_keyboard_settings(self.sm)
         rgba = chroma_key_rgba(
             frame, config['color'], config['intensity'])
         if rgba is None:
@@ -10514,6 +11926,7 @@ class _SettingsPage(QWidget):
             rgba.tobytes(), w, h, 4 * w,
             QImage.Format.Format_RGBA8888).copy()
         preview.set_keyboard_pixmap(QPixmap.fromImage(keyed_image))
+        self._keyboard_preview_key = key
 
     def _refresh_preset_combo(self):
         self.preset_combo.blockSignals(True)
@@ -10574,12 +11987,65 @@ class _SettingsPage(QWidget):
 
     # Microphone helpers --
 
+    def _on_mic_mono_changed(self, enabled):
+        self.sm.set('mic_downmix_mono', bool(enabled))
+        self.sm.save_settings()
+        self.audio_capture_changed.emit(True)
+
+    def _on_playback_device_changed(self, _index):
+        self.sm.set('playback_device_id', self.playback_combo.currentData() or '')
+        self.sm.set('playback_device_name', self.playback_combo.currentText())
+        self.sm.save_settings()
+        self.audio_capture_changed.emit(True)
+
+    def _populate_playback_devices(self):
+        if getattr(self, '_playback_scan_running', False):
+            return
+        self._playback_scan_running = True
+        engine = getattr(self.window(), 'engine_path', None)
+        def scan():
+            result = []
+            try:
+                from core.windows_microphone_devices import parse_microphone_inventory
+                if engine:
+                    completed = subprocess.run(
+                        [str(engine), '--list-playback-devices'], capture_output=True,
+                        text=True, encoding='utf-8', timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW)
+                    if completed.returncode == 0:
+                        result = [endpoint for endpoint in parse_microphone_inventory(completed.stdout)
+                                  if endpoint.is_active]
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
+            self._playback_inventory_ready.emit(result)
+        threading.Thread(target=scan, daemon=True, name='FTHRPlaybackInventory').start()
+
+    def _apply_playback_devices(self, endpoints):
+        self._playback_scan_running = False
+        saved = self.sm.get('playback_device_id', '')
+        self.playback_combo.blockSignals(True)
+        try:
+            self.playback_combo.clear()
+            self.playback_combo.addItem('Windows default', '')
+            for endpoint in endpoints:
+                self.playback_combo.addItem(endpoint.display_name, endpoint.endpoint_id)
+            index = self.playback_combo.findData(saved)
+            if saved and index < 0:
+                name = self.sm.get('playback_device_name', 'Selected device')
+                self.playback_combo.addItem(f'{name} (unavailable; using Windows default)', saved)
+                index = self.playback_combo.count() - 1
+            self.playback_combo.setCurrentIndex(max(0, index))
+        finally:
+            self.playback_combo.blockSignals(False)
+
     def _populate_mic_devices(self):
         """Discover microphones on a worker and apply results on the Qt thread.
 
         Native and PortAudio queries can block in drivers; generation checks discard
         stale results before updating widgets or settings.
         """
+        if 'mic_combo' not in self.__dict__:
+            return
         self._cancel_mic_discovery()
         self._mic_discovery_generation += 1
         generation = self._mic_discovery_generation
@@ -10588,11 +12054,10 @@ class _SettingsPage(QWidget):
         previous_name = self.mic_combo.currentText() if self.mic_combo.count() else None
 
         engine_path = None
-        if sys.platform == 'win32':
-            main_window = self.window()
-            candidate = getattr(main_window, 'engine_path', None)
-            if candidate and Path(candidate).is_file():
-                engine_path = candidate
+        main_window = self.window()
+        candidate = getattr(main_window, 'engine_path', None)
+        if candidate and Path(candidate).is_file():
+            engine_path = candidate
 
         # Use native WASAPI inventory on Windows so IDs match the capture engine.
         # PortAudio queries can block in uncancellable host APIs; reserve them for
@@ -10684,7 +12149,7 @@ class _SettingsPage(QWidget):
         if result.legacy_error:
             print(f'[Mic] Legacy endpoint scan failed: {result.legacy_error}')
 
-        if sys.platform == 'win32' and not saved_id:
+        if not saved_id:
             migrated_id = migrate_legacy_microphone_name(saved_name, native_endpoints)
             if migrated_id and self.sm is not None:
                 self.sm.set('mic_device_id', migrated_id)
@@ -10724,7 +12189,7 @@ class _SettingsPage(QWidget):
         # produces a clear native failure instead of silently following
         # Default. This also prevents a stale worker result from selecting
         # the first newly discovered endpoint.
-        if (sys.platform == 'win32' and saved_id
+        if (saved_id
                 and saved_id not in active_ids):
             self.mic_combo.addItem(
                 f'{saved_name or "Selected microphone"} (unavailable)',
@@ -10760,7 +12225,7 @@ class _SettingsPage(QWidget):
         self.mic_combo.blockSignals(True)
         self.mic_vol_slider.blockSignals(True)
         self.mic_loopback_check.blockSignals(True)
-        if hasattr(self, 'separate_audio_check'):
+        if 'separate_audio_check' in self.__dict__:
             self.separate_audio_check.blockSignals(True)
         self.notif_monitor_combo.blockSignals(True)
         for slider in self.sound_sliders.values():
@@ -10782,6 +12247,7 @@ class _SettingsPage(QWidget):
             self.mic_vol_slider.setValue(vol)
             self.mic_vol_value.setText(f'{vol}%')
             self.mic_level_meter.set_gain(vol / 100.0)
+            self._update_mic_gain_warning(vol)
             self.mic_loopback_check.setChecked(bool(self.sm.get('mic_loopback', False)))
             self.separate_audio_check.setChecked(
                 normalize_audio_capture_mode(self.sm.get(
@@ -10804,7 +12270,7 @@ class _SettingsPage(QWidget):
             self.mic_combo.blockSignals(False)
             self.mic_vol_slider.blockSignals(False)
             self.mic_loopback_check.blockSignals(False)
-            if hasattr(self, 'separate_audio_check'):
+            if 'separate_audio_check' in self.__dict__:
                 self.separate_audio_check.blockSignals(False)
             self.notif_monitor_combo.blockSignals(False)
             for slider in self.sound_sliders.values():
@@ -10813,7 +12279,7 @@ class _SettingsPage(QWidget):
         self._load_gary_settings()
 
     def _load_gary_settings(self):
-        if self.sm is None or not hasattr(self, 'gary_enabled_check'):
+        if self.sm is None or 'gary_enabled_check' not in self.__dict__:
             return
         low, high = clamp_thresholds(
             self.sm.get('gary_min_level', DEFAULT_MIN_LEVEL),
@@ -10904,7 +12370,7 @@ class _SettingsPage(QWidget):
             ))
         else:
             self.gary_preview.clear()
-            self.gary_preview.setText('NO IMAGE')
+            self.gary_preview.setText('No image')
         self.gary_preview.setToolTip(str(path))
 
     def _on_notif_monitor_changed(self, _idx: int):
@@ -10922,29 +12388,13 @@ class _SettingsPage(QWidget):
         endpoint_id = data.get('endpoint_id') if isinstance(data, dict) else None
         display_name = data.get('display_name') if isinstance(data, dict) else None
         self.sm.set('mic_device_id', endpoint_id)
-        legacy_linux_selection = (
-            sys.platform.startswith('linux') and isinstance(data, dict)
-            and data.get('legacy_index') is not None
-        )
-        self.sm.set(
-            'mic_device_name',
-            display_name if endpoint_id or legacy_linux_selection else None)
+        self.sm.set('mic_device_name', display_name if endpoint_id else None)
         self.sm.set('mic_volume', self.mic_vol_slider.value())
         self.sm.set('mic_loopback', self.mic_loopback_check.isChecked())
         self.sm.save_settings()
         # Linux still owns its temporary legacy recorder. Windows applies the
         # requested endpoint/input gain only on the next engine generation.
-        if sys.platform == 'win32':
-            return
-        try:
-            from core.mic_recorder import MicRecorder
-            if MicRecorder.is_available():
-                rec = MicRecorder()
-                rec.set_gain(self.mic_vol_slider.value() / 100.0)
-                rec.start(self._selected_mic_index(),
-                          gain=self.mic_vol_slider.value() / 100.0)
-        except Exception as e:
-            print(f'[Mic] settings push failed: {e}')
+        return
 
     def _selected_mic_index(self):
         data = self.mic_combo.currentData() if self.mic_combo.count() else None
@@ -10957,10 +12407,16 @@ class _SettingsPage(QWidget):
     def _on_mic_volume_changed(self, v: int):
         self.mic_vol_value.setText(f'{v}%')
         self.mic_level_meter.set_gain(v / 100.0)
+        self._update_mic_gain_warning(v)
         if self._loopback_stream is not None:
             # Volume is read live by the loopback callback closure
             pass
         self._save_audio_settings()
+
+    def _update_mic_gain_warning(self, value: int) -> None:
+        """Show the distortion/restart warning only for digital boost values."""
+        if 'mic_gain_warning' in self.__dict__:
+            self.mic_gain_warning.setVisible(int(value) > 100)
 
     def _on_sound_volume_changed(self, key: str, v: int):
         if self.sm is None:
@@ -10985,23 +12441,6 @@ class _SettingsPage(QWidget):
 
     def _on_mic_device_changed(self, _idx: int):
         idx = self._selected_mic_index()
-        if sys.platform.startswith('linux'):
-            # Tear down every old reader before MicRecorder replaces its stream.
-            # The meter can share the recorder only after the new stream is live.
-            self.mic_level_meter.stop()
-            loopback_enabled = self.mic_loopback_check.isChecked()
-            if loopback_enabled:
-                self._stop_loopback()
-            self._save_audio_settings()
-            if (self.isVisible() and self.stack.currentIndex() == 2
-                    and not getattr(self, '_background_ui_paused', False)):
-                self.mic_level_meter.set_gain(
-                    self.mic_vol_slider.value() / 100.0)
-                self.mic_level_meter.start(idx)
-            if loopback_enabled:
-                self._start_loopback(idx)
-            return
-
         # Restart meter on the new device
         self.mic_level_meter.stop()
         if (self.isVisible() and self.stack.currentIndex() == 2
@@ -11013,15 +12452,13 @@ class _SettingsPage(QWidget):
             self._stop_loopback()
             self._start_loopback(idx)
         self._save_audio_settings()
-        if sys.platform == 'win32':
-            # Explicit/default microphone changes intentionally create a new
-            # capture generation. A running native source is never silently
-            # rebound to another endpoint or clock domain.
-            self.audio_capture_changed.emit(True)
+        self.audio_capture_changed.emit(True)
 
     def _start_loopback(self, device_index):
         self._stop_loopback()
-        if not _SD_AVAILABLE:
+        if (not _SD_AVAILABLE or not self.isVisible()
+                or self.stack.currentIndex() != 2
+                or self._background_ui_paused):
             return
         try:
             out_dev = None
@@ -11081,20 +12518,24 @@ class _SettingsPage(QWidget):
         if (hasattr(self, 'stack') and self.stack.currentIndex() == 2
                 and not getattr(self, '_background_ui_paused', False)):
             self._audio_preview_timer.start()
-        if (hasattr(self, '_keyboard_preview_timer')
+        if ('_keyboard_preview_timer' in self.__dict__
                 and hasattr(self, 'stack')
                 and self.stack.currentIndex() == 3
                 and not getattr(self, '_background_ui_paused', False)):
             self._keyboard_preview_timer.start()
 
     def hideEvent(self, event):
+        self._camera_start_generation += 1
+        self._camera_pending_device_index = None
+        if '_camera_preview_timer' in self.__dict__:
+            self._camera_preview_timer.stop()
         self._category_switch_timer.stop()
         self._audio_preview_timer.stop()
         self._cancel_mic_discovery()
         self._stop_loopback()
-        if hasattr(self, 'mic_level_meter'):
+        if 'mic_level_meter' in self.__dict__:
             self.mic_level_meter.stop()
-        if hasattr(self, '_keyboard_preview_timer'):
+        if '_keyboard_preview_timer' in self.__dict__:
             self._keyboard_preview_timer.stop()
         super().hideEvent(event)
 
@@ -11105,10 +12546,12 @@ class _SettingsPage(QWidget):
         if paused:
             self._category_switch_timer.stop()
             self._audio_preview_timer.stop()
-            if hasattr(self, 'mic_level_meter'):
+            self._cancel_mic_discovery()
+            self._stop_loopback()
+            if 'mic_level_meter' in self.__dict__:
                 self.mic_level_meter.stop()
             for name in ('_camera_preview_timer', '_keyboard_preview_timer'):
-                timer = getattr(self, name, None)
+                timer = self.__dict__.get(name)
                 if timer is not None:
                     timer.stop()
             return
@@ -11119,29 +12562,26 @@ class _SettingsPage(QWidget):
             self._category_switch_timer.start()
             return
         idx = self.stack.currentIndex()
-        if idx == 2 and hasattr(self, 'mic_level_meter'):
+        if idx == 2 and 'mic_level_meter' in self.__dict__:
             self._audio_preview_timer.start()
         if (idx == 3
                 and self.sm.get('camera_enabled', False)
-                and hasattr(self, '_camera_preview_timer')):
+                and '_camera_preview_timer' in self.__dict__):
             self._camera_preview_timer.start()
-        if idx == 3 and hasattr(self, '_keyboard_preview_timer'):
+        if idx == 3 and '_keyboard_preview_timer' in self.__dict__:
             self._keyboard_preview_timer.start()
 
     def _make_visuals_page_unified_legacy(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 16, 32)
+        layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
         layout.setSpacing(0)
 
         preview_background_path = str(self.sm.get(
             'input_overlay_preview_background', '') or '')
-        preview_background = self._load_overlay_preview_background(
-            preview_background_path)
 
         layout.addWidget(_flat_section_header('Visual Overlays'))
-        layout.addSpacing(8)
-        layout.addSpacing(2)
+        layout.addSpacing(Sizes.ROW_GAP)
 
         columns = QHBoxLayout()
         columns.setSpacing(16)
@@ -11150,14 +12590,13 @@ class _SettingsPage(QWidget):
         options.setObjectName('overlayOptionsPanel')
         options.setFixedWidth(380)
         set_theme_style(options,
-            lambda: (f'QFrame#overlayOptionsPanel {{ background: {Colors.SURFACE_1}; '
-            f'border: 1px solid {Colors.BORDER}; }}'))
+            lambda: ('QFrame#overlayOptionsPanel { background: transparent; border: none; }'))
         options_layout = QVBoxLayout(options)
-        options_layout.setContentsMargins(16, 14, 16, 16)
+        options_layout.setContentsMargins(0, 0, Sizes.ROW_GAP, 0)
         options_layout.setSpacing(0)
 
         def option_header(text: str) -> None:
-            label = QLabel(text.upper())
+            label = QLabel(text)
             set_theme_style(label, lambda: (label_uppercase(Colors.ACCENT, Fonts.SIZE_MICRO, 2)))
             options_layout.addWidget(label)
             options_layout.addSpacing(8)
@@ -11172,8 +12611,8 @@ class _SettingsPage(QWidget):
         options_layout.addSpacing(8)
 
         cam_dev_row = QHBoxLayout()
-        cam_dev_row.setSpacing(6)
-        cam_label = QLabel('DEVICE')
+        cam_dev_row.setSpacing(Sizes.SPACE_3)
+        cam_label = QLabel('Device')
         set_theme_style(cam_label,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         cam_label.setFixedWidth(58)
@@ -11184,7 +12623,7 @@ class _SettingsPage(QWidget):
         self.camera_device_combo.currentIndexChanged.connect(
             self._on_camera_device_changed)
         cam_dev_row.addWidget(self.camera_device_combo, 1)
-        refresh = QPushButton('↻')
+        refresh = IconButton('refresh.png', label='Refresh')
         refresh.setObjectName('micRefreshBtn')
         refresh.setFixedSize(26, 26)
         refresh.setToolTip('Re-scan video devices')
@@ -11224,18 +12663,18 @@ class _SettingsPage(QWidget):
 
         image_actions = QHBoxLayout()
         image_actions.setSpacing(8)
-        choose_image = QPushButton('ADD IMAGES')
+        choose_image = QPushButton('Add images')
         set_theme_style(choose_image, button_primary_qss)
         choose_image.setMinimumHeight(36)
         choose_image.clicked.connect(self._choose_image_overlay)
         image_actions.addWidget(choose_image, 1)
-        self.remove_image_overlay_btn = QPushButton('REMOVE')
+        self.remove_image_overlay_btn = QPushButton('Remove')
         set_theme_style(self.remove_image_overlay_btn, button_outline_qss)
         self.remove_image_overlay_btn.setMinimumHeight(36)
         self.remove_image_overlay_btn.clicked.connect(
             self._remove_selected_image_overlay)
         image_actions.addWidget(self.remove_image_overlay_btn)
-        self.clear_image_overlays_btn = QPushButton('CLEAR ALL')
+        self.clear_image_overlays_btn = QPushButton('Clear all')
         set_theme_style(self.clear_image_overlays_btn, button_secondary_qss)
         self.clear_image_overlays_btn.setMinimumHeight(36)
         self.clear_image_overlays_btn.clicked.connect(self._clear_image_overlay)
@@ -11244,8 +12683,8 @@ class _SettingsPage(QWidget):
         options_layout.addSpacing(12)
 
         image_controls = QHBoxLayout()
-        image_controls.setSpacing(6)
-        fit_label = QLabel('FIT')
+        image_controls.setSpacing(Sizes.SPACE_3)
+        fit_label = QLabel('Fit')
         set_theme_style(fit_label,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         fit_label.setFixedWidth(30)
@@ -11257,7 +12696,7 @@ class _SettingsPage(QWidget):
         self.image_overlay_fit.currentIndexChanged.connect(
             self._on_image_overlay_fit_changed)
         image_controls.addWidget(self.image_overlay_fit, 1)
-        opacity_label = QLabel('OPACITY')
+        opacity_label = QLabel('Opacity')
         set_theme_style(opacity_label,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         opacity_label.setFixedWidth(52)
@@ -11295,8 +12734,8 @@ class _SettingsPage(QWidget):
         options_layout.addSpacing(8)
 
         keyboard_window_row = QHBoxLayout()
-        keyboard_window_row.setSpacing(6)
-        keyboard_window_label = QLabel('WINDOW')
+        keyboard_window_row.setSpacing(Sizes.SPACE_3)
+        keyboard_window_label = QLabel('Window')
         set_theme_style(keyboard_window_label,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         keyboard_window_label.setFixedWidth(58)
@@ -11306,7 +12745,7 @@ class _SettingsPage(QWidget):
         self.keyboard_window_combo.currentIndexChanged.connect(
             self._on_keyboard_window_changed)
         keyboard_window_row.addWidget(self.keyboard_window_combo, 1)
-        keyboard_refresh = QPushButton('↻')
+        keyboard_refresh = IconButton('refresh.png', label='Refresh')
         keyboard_refresh.setObjectName('micRefreshBtn')
         keyboard_refresh.setFixedSize(26, 26)
         keyboard_refresh.setToolTip('Re-scan external keyboard windows')
@@ -11325,8 +12764,8 @@ class _SettingsPage(QWidget):
         options_layout.addSpacing(8)
 
         keyboard_color_row = QHBoxLayout()
-        keyboard_color_row.setSpacing(6)
-        keyboard_color_label = QLabel('KEY COLOR')
+        keyboard_color_row.setSpacing(Sizes.SPACE_3)
+        keyboard_color_label = QLabel('Key color')
         set_theme_style(keyboard_color_label,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         keyboard_color_label.setFixedWidth(58)
@@ -11341,7 +12780,7 @@ class _SettingsPage(QWidget):
             lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
         keyboard_color_row.addWidget(self.keyboard_color_value)
         keyboard_color_row.addStretch()
-        self.keyboard_pick_color = QPushButton('PICK FROM PREVIEW')
+        self.keyboard_pick_color = QPushButton('Pick from preview')
         set_theme_style(self.keyboard_pick_color, button_outline_qss)
         self.keyboard_pick_color.setMinimumHeight(30)
         self.keyboard_pick_color.clicked.connect(
@@ -11351,8 +12790,8 @@ class _SettingsPage(QWidget):
         options_layout.addSpacing(8)
 
         keyboard_intensity_row = QHBoxLayout()
-        keyboard_intensity_row.setSpacing(6)
-        keyboard_intensity_label = QLabel('INTENSITY')
+        keyboard_intensity_row.setSpacing(Sizes.SPACE_3)
+        keyboard_intensity_label = QLabel('Intensity')
         set_theme_style(keyboard_intensity_label,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         keyboard_intensity_label.setFixedWidth(58)
@@ -11380,17 +12819,7 @@ class _SettingsPage(QWidget):
         keyboard_hint.setWordWrap(True)
         set_theme_style(keyboard_hint, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
         options_layout.addWidget(keyboard_hint)
-        if sys.platform != 'win32':
-            keyboard_platform_hint = QLabel('WINDOWS ONLY')
-            set_theme_style(keyboard_platform_hint,
-                lambda: (label_uppercase(Colors.TEXT_MUTED, Fonts.SIZE_MICRO, 1)))
-            options_layout.addWidget(keyboard_platform_hint)
-            for control in (
-                    self.keyboard_overlay_check, self.keyboard_window_combo,
-                    keyboard_refresh, self.keyboard_source_preview,
-                    self.keyboard_color_swatch, self.keyboard_pick_color,
-                    self.keyboard_intensity):
-                control.setEnabled(False)
+        pass
         self._refresh_keyboard_windows()
         self._sync_keyboard_color_swatch(keyboard_config['color'])
         self._sync_keyboard_overlay_controls()
@@ -11407,14 +12836,14 @@ class _SettingsPage(QWidget):
         options_layout.addWidget(self.input_overlay_preview_background_path)
         options_layout.addSpacing(6)
         source_buttons = QHBoxLayout()
-        source_buttons.setSpacing(6)
-        choose_preview = QPushButton('CHOOSE IMAGE')
+        source_buttons.setSpacing(Sizes.SPACE_3)
+        choose_preview = QPushButton('Choose image')
         set_theme_style(choose_preview, button_outline_qss)
         choose_preview.setMinimumHeight(36)
         choose_preview.clicked.connect(
             self._choose_input_overlay_preview_background)
         source_buttons.addWidget(choose_preview)
-        newest_preview = QPushButton('USE DEFAULT')
+        newest_preview = QPushButton('Use default')
         set_theme_style(newest_preview, button_secondary_qss)
         newest_preview.setMinimumHeight(36)
         newest_preview.clicked.connect(
@@ -11427,13 +12856,12 @@ class _SettingsPage(QWidget):
         preview_panel = QFrame()
         preview_panel.setObjectName('overlayPreviewPanel')
         set_theme_style(preview_panel,
-            lambda: (f'QFrame#overlayPreviewPanel {{ background: {Colors.SURFACE_1}; '
-            f'border: 1px solid {Colors.BORDER}; }}'))
+            lambda: ('QFrame#overlayPreviewPanel { background: transparent; border: none; }'))
         preview_layout = QVBoxLayout(preview_panel)
-        preview_layout.setContentsMargins(14, 14, 14, 14)
+        preview_layout.setContentsMargins(Sizes.ROW_GAP, 0, 0, 0)
         preview_layout.setSpacing(8)
         preview_header = QHBoxLayout()
-        preview_title = QLabel('COMPOSITE PREVIEW')
+        preview_title = QLabel('Composite preview')
         set_theme_style(preview_title, lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_LABEL, 2)))
         preview_header.addWidget(preview_title)
         preview_header.addStretch()
@@ -11450,7 +12878,8 @@ class _SettingsPage(QWidget):
 
         self.unified_overlay_editor = UnifiedOverlayPreview()
         self.unified_overlay_editor.setObjectName('unifiedOverlayPreview')
-        self.unified_overlay_editor.set_background(preview_background)
+        self.unified_overlay_editor.set_background_paths([
+            preview_background_path, str(self._default_overlay_preview_background_path())])
         self.unified_overlay_editor.set_rects({
             'camera': self.sm.get('camera_overlay_rect', DEFAULT_OVERLAY_RECT),
             'keyboard': keyboard_config['rect'],
@@ -11504,7 +12933,7 @@ class _SettingsPage(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setContentsMargins(0, 0, 16, 32)
+        layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
         layout.setSpacing(0)
         preview_background = self._load_overlay_preview_background()
 
@@ -11521,7 +12950,7 @@ class _SettingsPage(QWidget):
 
         cam_dev_row = QHBoxLayout()
         cam_dev_row.setSpacing(8)
-        _dev_lbl = QLabel('DEVICE')
+        _dev_lbl = QLabel('Device')
         set_theme_style(_dev_lbl,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         _dev_lbl.setFixedWidth(80)
@@ -11531,7 +12960,7 @@ class _SettingsPage(QWidget):
         self._populate_camera_devices()
         self.camera_device_combo.currentIndexChanged.connect(self._on_camera_device_changed)
         cam_dev_row.addWidget(self.camera_device_combo, 1)
-        refresh = QPushButton('↻')
+        refresh = IconButton('refresh.png', label='Refresh')
         refresh.setObjectName('micRefreshBtn')
         refresh.setFixedSize(26, 26)
         refresh.setToolTip('Re-scan video devices')
@@ -11571,7 +13000,7 @@ class _SettingsPage(QWidget):
 
         image_row = QHBoxLayout()
         image_row.setSpacing(8)
-        image_label = QLabel('IMAGE')
+        image_label = QLabel('Image')
         set_theme_style(image_label,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         image_label.setFixedWidth(80)
@@ -11581,11 +13010,11 @@ class _SettingsPage(QWidget):
         self.image_overlay_path.setPlaceholderText('No image selected')
         set_theme_style(self.image_overlay_path, combo_qss)
         image_row.addWidget(self.image_overlay_path, 1)
-        choose_image = QPushButton('CHOOSE IMAGE')
+        choose_image = QPushButton('Choose image')
         set_theme_style(choose_image, button_outline_qss)
         choose_image.clicked.connect(self._choose_image_overlay)
         image_row.addWidget(choose_image)
-        clear_image = QPushButton('CLEAR')
+        clear_image = QPushButton('Clear')
         set_theme_style(clear_image, button_secondary_qss)
         clear_image.clicked.connect(self._clear_image_overlay)
         image_row.addWidget(clear_image)
@@ -11594,7 +13023,7 @@ class _SettingsPage(QWidget):
 
         image_controls = QHBoxLayout()
         image_controls.setSpacing(8)
-        fit_label = QLabel('PLACEMENT')
+        fit_label = QLabel('Placement')
         set_theme_style(fit_label,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         fit_label.setFixedWidth(80)
@@ -11609,7 +13038,7 @@ class _SettingsPage(QWidget):
         self.image_overlay_fit.currentIndexChanged.connect(
             self._on_image_overlay_fit_changed)
         image_controls.addWidget(self.image_overlay_fit, 1)
-        opacity_label = QLabel('OPACITY')
+        opacity_label = QLabel('Opacity')
         set_theme_style(opacity_label,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
         opacity_label.setFixedWidth(72)
@@ -11690,8 +13119,8 @@ class _SettingsPage(QWidget):
         for token, value in colors.items():
             if hasattr(C, token):
                 setattr(C, token, value)
-        retarget_widget_font_styles(
-            self.window(), old_display=old_display, old_body=old_body)
+        C.BAR_BG, C.BAR_FG = C.SHELL_BG, C.TEXT
+        C.BAR_FG_DIM, C.BAR_HAIRLINE = C.TEXT_DIM, C.SHELL_DIVIDER
         _COMBO_STYLE = combo_qss()
         _LABEL_STYLE = label_uppercase(
             Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)
@@ -11701,14 +13130,18 @@ class _SettingsPage(QWidget):
         # Re-apply styles for this settings page
         self._apply_styles()
         self._set_settings_content_surface()
-        refresh_theme_styles(self.window())
-        for combo in self.findChildren(_DropdownCombo):
-            combo.refresh_theme_palette()
-        # Rebuild the customize controls so their local QSS is generated from
-        # the newly applied tokens. The preview remains the one intentional
-        # pure-black sample of the customization surface.
-        self._customize_page.refresh_theme()
-        if hasattr(self, 'keyboard_color_swatch'):
+        # Detached editors, popups and dialogs are also part of the live UI.
+        for surface in (app.topLevelWidgets() if app is not None else [self.window()]):
+            retarget_widget_font_styles(
+                surface, old_display=old_display, old_body=old_body)
+            refresh_theme_styles(surface)
+            for combo in surface.findChildren(_DropdownCombo):
+                combo.refresh_theme_palette()
+            surface.update()
+        # Refresh samples in place, preserving controls, expansion and scroll.
+        if '_customize_page' in self.__dict__:
+            self._customize_page.refresh_theme()
+        if 'keyboard_color_swatch' in self.__dict__:
             self._sync_keyboard_color_swatch(
                 third_party_keyboard_settings(self.sm)['color'])
         # Signal the main window to rebuild its stylesheet
@@ -11723,30 +13156,85 @@ class _SettingsPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        layout.addWidget(_flat_section_header('Background Activity'))
+        layout.addWidget(_flat_section_header('Clip exports'))
         layout.addSpacing(12)
+        self.parallel_exports_check = QCheckBox('Allow simultaneous exports')
+        self.parallel_exports_check.setChecked(bool(self.sm.get('parallel_exports', False)))
+        set_theme_style(self.parallel_exports_check, checkbox_qss)
+        layout.addWidget(self.parallel_exports_check)
+        self.parallel_export_limit_combo = _DropdownCombo()
+        self.parallel_export_limit_combo.setAccessibleName('Maximum simultaneous exports')
+        for count in (2, 3, 4):
+            self.parallel_export_limit_combo.addItem(f'{count} exports at once', count)
+        self.parallel_export_limit_combo.setCurrentIndex(max(0,
+            self.parallel_export_limit_combo.findData(self.sm.get('parallel_export_limit', 2))))
+        self.parallel_export_limit_combo.setEnabled(self.parallel_exports_check.isChecked())
+        set_theme_style(self.parallel_export_limit_combo, combo_qss)
+        layout.addWidget(self.parallel_export_limit_combo)
+        export_hint = QLabel('Off by default: clips export one at a time. You can keep browsing and queue more clips. '
+                            'Simultaneous exports use more CPU, GPU, memory and disk bandwidth and can affect recording or games. '
+                            'Lowering the limit lets running jobs finish before starting more.')
+        export_hint.setWordWrap(True)
+        set_theme_style(export_hint, lambda: label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(export_hint)
+        from ui.export_jobs import show_export_jobs
+        jobs_button = QPushButton('View export jobs')
+        set_theme_style(jobs_button, button_primary_qss)
+        jobs_button.clicked.connect(show_export_jobs)
+        layout.addWidget(jobs_button)
+        def save_export_performance(*_):
+            enabled = self.parallel_exports_check.isChecked()
+            self.parallel_export_limit_combo.setEnabled(enabled)
+            self.sm.set('parallel_exports', enabled)
+            self.sm.set('parallel_export_limit', self.parallel_export_limit_combo.currentData())
+            self.sm.save_settings()
+            from core.export_queue import configure
+            configure(self.sm)
+        self.parallel_exports_check.toggled.connect(save_export_performance)
+        self.parallel_export_limit_combo.currentIndexChanged.connect(save_export_performance)
+        layout.addSpacing(20)
 
-        self.performance_background_pause_check = QCheckBox(
-            'Pause non-essential UI while in background')
-        set_theme_style(self.performance_background_pause_check, checkbox_qss)
-        self.performance_background_pause_check.setChecked(bool(
-            self.sm.get('pause_ui_in_background', True)))
-        self.performance_background_pause_check.setToolTip(
-            'Pauses library refreshes and settings previews while FTHR is not '
-            'active. Capture, save handling, capture cards, and notification '
-            'sounds continue with their existing settings.')
-        self.performance_background_pause_check.toggled.connect(
-            self._on_background_ui_pause_toggled)
-        layout.addWidget(self.performance_background_pause_check)
-
-        background_hint = QLabel(
-            'Capture keeps running normally. Capture-card visibility and each '
-            'notification volume remain controlled by their own options.')
-        background_hint.setWordWrap(True)
-        set_theme_style(background_hint, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
-        layout.addWidget(background_hint)
-
-        layout.addSpacing(28)
+        from core.ui_performance import PRESETS, UI_OPTIONS
+        layout.addWidget(_flat_section_header('Interface performance'))
+        layout.addSpacing(12)
+        self.ui_performance_preset_combo = _DropdownCombo()
+        self.ui_performance_preset_combo.setAccessibleName('Interface performance preset')
+        self.ui_performance_preset_combo.addItems([*PRESETS, 'Custom'])
+        set_theme_style(self.ui_performance_preset_combo, combo_qss)
+        layout.addWidget(self.ui_performance_preset_combo)
+        hint = QLabel(
+            'Choose a preset, or adjust the options below to suit your PC. '
+            'Impact shows how much each option may help your PC run more smoothly; '
+            'results depend on how you use the app. These settings do not change '
+            'recording or export quality.')
+        hint.setWordWrap(True)
+        set_theme_style(hint, lambda: label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        layout.addWidget(hint)
+        layout.addSpacing(12)
+        self._ui_performance_checks = {}
+        aliases = {'pause_ui_in_background': 'performance_background_pause_check',
+                   'reduce_ui_animations': 'reduce_ui_animations_check',
+                   'clip_editor_live_preview': 'performance_clip_preview_check'}
+        for key, default, title, impact, tip in UI_OPTIONS:
+            check = QCheckBox(f'{title} · {impact} impact')
+            check.setObjectName(key + '_performance_check')
+            check.setToolTip(tip)
+            set_theme_style(check, checkbox_qss)
+            check.setChecked(bool(self.sm.get(key, default)))
+            check.toggled.connect(
+                lambda checked, setting=key: self._set_ui_performance_option(setting, checked))
+            self._ui_performance_checks[key] = check
+            if key in aliases:
+                setattr(self, aliases[key], check)
+            layout.addWidget(check)
+            detail = QLabel(tip)
+            detail.setWordWrap(True)
+            set_theme_style(detail, lambda: label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+            layout.addWidget(detail)
+            layout.addSpacing(12)
+        self._sync_ui_performance_controls()
+        self.ui_performance_preset_combo.currentTextChanged.connect(self._apply_ui_performance_preset)
+        layout.addSpacing(16)
         layout.addWidget(_settings_hsep())
         layout.addSpacing(20)
 
@@ -11754,7 +13242,7 @@ class _SettingsPage(QWidget):
         layout.addSpacing(12)
 
         self.performance_audio_check = QCheckBox(
-            'Enable audio capture')
+            'Enable audio capture · Medium impact')
         set_theme_style(self.performance_audio_check, checkbox_qss)
         self.performance_audio_check.toggled.connect(
             self._on_audio_capture_toggled)
@@ -11762,21 +13250,6 @@ class _SettingsPage(QWidget):
         layout.addSpacing(8)
 
         self._sync_audio_controls()
-
-        layout.addWidget(_flat_section_header('Capture Card'))
-        layout.addSpacing(12)
-
-        self.performance_capture_card_check = QCheckBox(
-            'Enable capture card')
-        set_theme_style(self.performance_capture_card_check, checkbox_qss)
-        self.performance_capture_card_check.setChecked(bool(
-            self.sm.get('capture_card_enabled', True)))
-        self.performance_capture_card_check.setToolTip(
-            'Disable the animated card while keeping capture sounds enabled.')
-        self.performance_capture_card_check.toggled.connect(
-            self._on_capture_card_toggled)
-        layout.addWidget(self.performance_capture_card_check)
-        layout.addSpacing(8)
 
         # Keep the NVIDIA quality/performance choice available from the
         # performance-oriented settings tab as well as Clip. Both controls
@@ -11796,8 +13269,8 @@ class _SettingsPage(QWidget):
         performance_encoder_row.setStyleSheet('background: transparent;')
         performance_encoder_row_layout = QHBoxLayout(performance_encoder_row)
         performance_encoder_row_layout.setContentsMargins(0, 0, 0, 0)
-        performance_encoder_row_layout.setSpacing(10)
-        performance_encoder_label = QLabel('NVIDIA PRESET')
+        performance_encoder_row_layout.setSpacing(Sizes.ROW_GAP)
+        performance_encoder_label = QLabel('NVIDIA preset')
         performance_encoder_label.setFixedWidth(140)
         set_theme_style(performance_encoder_label,
             lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
@@ -11818,8 +13291,8 @@ class _SettingsPage(QWidget):
 
         performance_encoder_actions = QHBoxLayout()
         performance_encoder_actions.setContentsMargins(0, 8, 0, 0)
-        performance_encoder_actions.setSpacing(10)
-        self.performance_encoder_apply_btn = QPushButton('APPLY')
+        performance_encoder_actions.setSpacing(Sizes.ROW_GAP)
+        self.performance_encoder_apply_btn = QPushButton('Apply')
         set_theme_style(self.performance_encoder_apply_btn, button_primary_qss)
         self.performance_encoder_apply_btn.setVisible(False)
         self.performance_encoder_apply_btn.clicked.connect(
@@ -11837,29 +13310,74 @@ class _SettingsPage(QWidget):
         layout.addWidget(_settings_hsep())
         layout.addSpacing(20)
 
-        layout.addWidget(_flat_section_header('Clip Editor'))
-        layout.addSpacing(12)
-
-        self.performance_clip_preview_check = QCheckBox(
-            'Show clip edits in real time')
-        set_theme_style(self.performance_clip_preview_check, checkbox_qss)
-        self.performance_clip_preview_check.setChecked(bool(
-            self.sm.get('clip_editor_live_preview', True)))
-        self.performance_clip_preview_check.toggled.connect(
-            self._on_clip_editor_preview_toggled)
-        layout.addWidget(self.performance_clip_preview_check)
-        self.performance_clip_autoplay_check = QCheckBox(
-            'Autoplay clip when opening the editor')
-        set_theme_style(self.performance_clip_autoplay_check, checkbox_qss)
-        self.performance_clip_autoplay_check.setChecked(bool(
-            self.sm.get('clip_viewer_autoplay', True)))
-        self.performance_clip_autoplay_check.toggled.connect(
-            self._on_clip_viewer_autoplay_toggled)
-        layout.addWidget(self.performance_clip_autoplay_check)
-        layout.addSpacing(6)
-
         layout.addStretch()
-        return page
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        set_theme_style(scroll, scrollbar_qss)
+        layout.setContentsMargins(0, 0, 12, 20)
+        scroll.setWidget(page)
+        return scroll
+
+    def _sync_ui_performance_controls(self):
+        from core.ui_performance import DEFAULTS, matching_preset
+        for key, check in self.__dict__.get('_ui_performance_checks', {}).items():
+            check.blockSignals(True)
+            check.setChecked(bool(self.sm.get(key, DEFAULTS[key])))
+            check.blockSignals(False)
+        combo = self.__dict__.get('ui_performance_preset_combo')
+        if combo is not None:
+            combo.blockSignals(True)
+            combo.setCurrentText(matching_preset(self.sm))
+            combo.blockSignals(False)
+        check = self.__dict__.get('timeline_preview_strip_enabled_check')
+        if check is not None:
+            check.blockSignals(True)
+            check.setChecked(bool(self.sm.get('timeline_preview_strip_enabled', True)))
+            check.blockSignals(False)
+
+    def _apply_ui_performance_preset(self, name):
+        from core.ui_performance import PRESETS
+        if name not in PRESETS:
+            return
+        for key, value in PRESETS[name].items():
+            self.sm.set(key, value)
+        self.sm.save_settings()
+        self._apply_ui_performance_runtime()
+
+    def _set_ui_performance_option(self, key, enabled):
+        self.sm.set(key, bool(enabled))
+        self.sm.save_settings()
+        self._apply_ui_performance_runtime()
+
+    def _apply_ui_performance_runtime(self):
+        from ui.clip_viewer import ClipViewer, _TIMELINE_IMAGE_CACHE, _TIMELINE_CACHE_LOCK
+        set_reduce_motion(self.sm.get('reduce_ui_animations', False))
+        self.background_ui_pause_changed.emit(bool(self.sm.get('pause_ui_in_background', True)))
+        timeline = bool(self.sm.get('timeline_preview_strip_enabled', True))
+        for widget in QApplication.instance().allWidgets():
+            if isinstance(widget, ClipViewer) and widget.sm is self.sm:
+                widget._live_clip_preview = bool(self.sm.get('clip_editor_live_preview', True))
+                widget.set_timeline_preview_enabled(timeline)
+                widget._refresh_live_preview(immediate=True)
+        if not timeline:
+            with _TIMELINE_CACHE_LOCK:
+                _TIMELINE_IMAGE_CACHE.clear()
+        grid = getattr(self.window(), 'clip_grid', None)
+        if grid is not None:
+            grid.apply_thumbnail_preference()
+        if not self.sm.get('settings_visual_previews_enabled', True):
+            for name in ('_camera_preview_timer', '_keyboard_preview_timer'):
+                timer = self.__dict__.get(name)
+                if timer is not None:
+                    timer.stop()
+        self._sync_ui_performance_controls()
+
+    def _on_reduce_ui_animations_toggled(self, checked: bool):
+        self.sm.set('reduce_ui_animations', bool(checked))
+        self.sm.save_settings()
+        set_reduce_motion(checked)
 
     def _on_background_ui_pause_toggled(self, checked: bool):
         if self.sm is None:
@@ -11875,11 +13393,12 @@ class _SettingsPage(QWidget):
         self.sm.set('clip_editor_live_preview', bool(checked))
         self.sm.save_settings()
 
-    def _on_clip_viewer_autoplay_toggled(self, checked: bool):
-        if self.sm is None:
-            return
-        self.sm.set('clip_viewer_autoplay', bool(checked))
+    def _on_capture_card_mode_changed(self, _index):
+        mode = self.capture_card_mode_combo.currentData()
+        self.sm.set('capture_card_mode', mode)
+        self.sm.set('capture_card_enabled', mode != 'off')
         self.sm.save_settings()
+        self.capture_card_changed.emit(mode != 'off')
 
     def _on_capture_card_toggled(self, checked: bool):
         if self.sm is None:
@@ -11901,10 +13420,11 @@ class _SettingsPage(QWidget):
                 return
 
         self._encoder_probe_from_cache = False
-        self.encoder_detection_lbl.setText('Checking this device…')
-        self.encoder_refresh_btn.setEnabled(False)
-        self.encoder_combo.setEnabled(False)
-        self.codec_combo.setEnabled(False)
+        if 'encoder_combo' in self.__dict__:
+            self.encoder_detection_lbl.setText('Checking this device…')
+            self.encoder_refresh_btn.setEnabled(False)
+            self.encoder_combo.setEnabled(False)
+            self.codec_combo.setEnabled(False)
 
         def _probe():
             capabilities = probe_encoder_capabilities()
@@ -11921,6 +13441,10 @@ class _SettingsPage(QWidget):
 
     def _on_encoder_capabilities_ready(self, capabilities):
         self._encoder_capabilities = tuple(capabilities)
+        self._encoder_inventory_ready = True
+        if 'encoder_combo' not in self.__dict__:
+            self._sync_encoder_controls(mark_dirty=False)
+            return
         self.encoder_refresh_btn.setEnabled(True)
         saved_encoder = str(self.sm.get('encoder_pref', 'auto'))
         self.encoder_combo.blockSignals(True)
@@ -11943,62 +13467,88 @@ class _SettingsPage(QWidget):
                 'No usable encoder was detected; Automatic remains available.')
         self._sync_encoder_controls(mark_dirty=False)
 
-    def _sync_encoder_controls(self, *, mark_dirty: bool):
-        encoder = self.encoder_combo.currentData() or 'auto'
-        supported_codecs = available_codecs(
-            self._encoder_capabilities, str(encoder))
-        saved_codec = str(self.sm.get('codec_pref', 'auto'))
-        previous_codec = (
-            self.codec_combo.currentData() if mark_dirty else saved_codec)
-        previous_codec = previous_codec or 'auto'
-        self.codec_combo.blockSignals(True)
-        self.codec_combo.clear()
-        self.codec_combo.addItem('Automatic', 'auto')
-        codec_labels = {'h264': 'H.264', 'hevc': 'HEVC', 'av1': 'AV1'}
-        for codec in supported_codecs:
-            self.codec_combo.addItem(codec_labels[codec], codec)
-        selected = self.codec_combo.findData(previous_codec)
-        self.codec_combo.setCurrentIndex(max(0, selected))
-        self.codec_combo.setEnabled(True)
-        self.codec_combo.blockSignals(False)
+    def _sync_encoder_controls(self, *, mark_dirty: bool, refresh_clip=True):
+        clip_loaded = 'encoder_combo' in self.__dict__
+        encoder = (self.encoder_combo.currentData() or 'auto' if clip_loaded
+                   else self.sm.get('encoder_pref', 'auto'))
+        if mark_dirty:
+            self._encoder_dirty = True
+        if clip_loaded and refresh_clip:
+            supported_codecs = available_codecs(self._encoder_capabilities, str(encoder))
+            saved_codec = str(self.sm.get('codec_pref', 'auto'))
+            previous_codec = (self.codec_combo.currentData() if mark_dirty else saved_codec)
+            self.codec_combo.blockSignals(True)
+            self.codec_combo.clear()
+            self.codec_combo.addItem('Automatic', 'auto')
+            codec_labels = {'h264': 'H.264', 'hevc': 'HEVC', 'av1': 'AV1'}
+            for codec in supported_codecs:
+                self.codec_combo.addItem(codec_labels[codec], codec)
+            selected = self.codec_combo.findData(previous_codec or 'auto')
+            self.codec_combo.setCurrentIndex(max(0, selected))
+            self.codec_combo.setEnabled(True)
+            self.codec_combo.blockSignals(False)
 
         supports_presets = str(encoder) == 'nvenc'
-        self.encoder_preset_row.setVisible(supports_presets)
-        self.encoder_preset_combo.setEnabled(supports_presets)
-        self.performance_encoder_section.setVisible(supports_presets)
-        self.performance_encoder_preset_row.setVisible(supports_presets)
-        self.performance_encoder_preset_combo.blockSignals(True)
-        self.performance_encoder_preset_combo.setCurrentIndex(
-            self.encoder_preset_combo.currentIndex())
-        self.performance_encoder_preset_combo.setEnabled(supports_presets)
-        self.performance_encoder_preset_combo.blockSignals(False)
-        if mark_dirty:
-            self.encoder_apply_btn.setVisible(True)
-            self.performance_encoder_apply_btn.setVisible(True)
+        preset = (self._pending_encoder_preset if self._pending_encoder_preset is not None
+                  else int(self.sm.get('encoder_preset', 4)))
+        if clip_loaded:
+            self.encoder_preset_row.setVisible(supports_presets)
+            self.encoder_preset_combo.setEnabled(supports_presets)
+            if self._pending_encoder_preset is not None:
+                self.encoder_preset_combo.blockSignals(True)
+                self.encoder_preset_combo.setCurrentIndex(
+                    max(0, self.encoder_preset_combo.findData(preset)))
+                self.encoder_preset_combo.blockSignals(False)
+            preset = int(self.encoder_preset_combo.currentData() or 4)
+        if 'performance_encoder_section' in self.__dict__:
+            self.performance_encoder_section.setVisible(supports_presets)
+            self.performance_encoder_preset_row.setVisible(supports_presets)
+            self.performance_encoder_preset_combo.blockSignals(True)
+            self.performance_encoder_preset_combo.setCurrentIndex(
+                max(0, self.performance_encoder_preset_combo.findData(preset)))
+            self.performance_encoder_preset_combo.setEnabled(supports_presets)
+            self.performance_encoder_preset_combo.blockSignals(False)
+        for name in ('encoder_apply_btn', 'performance_encoder_apply_btn'):
+            control = self.__dict__.get(name)
+            if control is not None and (self._encoder_dirty or self._pending_encoder_preset is not None):
+                control.setVisible(True)
 
     def _on_performance_encoder_preset_changed(self, index: int):
-        """Route the duplicate preset control through the Clip control."""
-        self.encoder_preset_combo.blockSignals(True)
-        self.encoder_preset_combo.setCurrentIndex(index)
-        self.encoder_preset_combo.blockSignals(False)
+        self._pending_encoder_preset = int(
+            self.performance_encoder_preset_combo.itemData(index) or 4)
         self._sync_encoder_controls(mark_dirty=True)
 
     def _on_encoder_setting_changed(self, _idx: int):
+        self._pending_encoder_preset = int(self.encoder_preset_combo.currentData() or 4)
         self._sync_encoder_controls(mark_dirty=True)
 
     def _on_codec_setting_changed(self, _idx: int):
-        self.encoder_apply_btn.setVisible(True)
+        self._encoder_dirty = True
+        for name in ('encoder_apply_btn', 'performance_encoder_apply_btn'):
+            control = self.__dict__.get(name)
+            if control is not None:
+                control.setVisible(True)
 
     def _on_encoder_apply(self):
-        encoder = str(self.encoder_combo.currentData() or 'auto')
-        codec = str(self.codec_combo.currentData() or 'auto')
-        preset = int(self.encoder_preset_combo.currentData() or 4)
+        clip_loaded = 'encoder_combo' in self.__dict__
+        encoder = str(self.encoder_combo.currentData() or 'auto' if clip_loaded
+                      else self.sm.get('encoder_pref', 'auto'))
+        codec = str(self.codec_combo.currentData() or 'auto' if clip_loaded
+                    else self.sm.get('codec_pref', 'auto'))
+        preset = (int(self.encoder_preset_combo.currentData() or 4) if clip_loaded
+                  else self._pending_encoder_preset)
+        if preset is None:
+            preset = int(self.sm.get('encoder_preset', 4))
         self.sm.set('encoder_pref', encoder)
         self.sm.set('codec_pref', codec)
         self.sm.set('encoder_preset', preset)
         self.sm.save_settings()
-        self.encoder_apply_btn.setVisible(False)
-        self.performance_encoder_apply_btn.setVisible(False)
+        self._pending_encoder_preset = None
+        self._encoder_dirty = False
+        for name in ('encoder_apply_btn', 'performance_encoder_apply_btn'):
+            control = self.__dict__.get(name)
+            if control is not None:
+                control.setVisible(False)
         self.encoder_config_changed.emit()
 
     def _apply_styles(self):
@@ -12027,7 +13577,7 @@ class _SettingsPage(QWidget):
                 font-size: {Fonts.SIZE_LABEL}px;
                 font-family: {Fonts.DISPLAY};
                 letter-spacing: {Fonts.TRACK_LABEL}px;
-                font-weight: bold;
+                font-weight: 400;
                 padding: 14px 20px 10px 20px;
                 min-width: 72px;
             }}
@@ -12036,7 +13586,8 @@ class _SettingsPage(QWidget):
                 color: {Colors.TEXT};
             }}
             QToolButton#settingsTabBtn:checked {{
-                color: {Colors.ACCENT};
+                color: {Colors.TEXT};
+                font-weight: 600;
                 border-bottom: 2px solid {Colors.ACCENT};
                 background-color: transparent;
             }}
@@ -12047,7 +13598,7 @@ class _SettingsPage(QWidget):
                 border-radius: {Sizes.RADIUS_MD}px;
                 color: {Colors.TEXT};
                 font-size: 14px;
-                font-weight: bold;
+                font-weight: 600;
             }}
             QPushButton#micRefreshBtn:hover {{
                 border-color: {Colors.ACCENT};
@@ -12061,19 +13612,21 @@ class _SettingsPage(QWidget):
             QLabel#garyPreview {{
                 background-color: {Colors.BG};
                 border: 1px solid {Colors.BORDER_HI};
+                border-radius: {Sizes.RADIUS_MD}px;
                 color: {Colors.TEXT_DIM};
                 font-family: {Fonts.DISPLAY};
                 font-size: {Fonts.SIZE_LABEL}px;
-                letter-spacing: 1px;
+                letter-spacing: 0px;
             }}
             QPushButton#garyImageButton {{
                 background-color: transparent;
                 border: 1px solid {Colors.BORDER_HI};
+                border-radius: {Sizes.RADIUS_MD}px;
                 color: {Colors.TEXT};
                 font-family: {Fonts.DISPLAY};
                 font-size: {Fonts.SIZE_MICRO}px;
-                font-weight: bold;
-                letter-spacing: 1px;
+                font-weight: 600;
+                letter-spacing: 0px;
                 padding: 5px 7px;
             }}
             QPushButton#garyImageButton:hover {{
@@ -12119,6 +13672,7 @@ class _SettingsPage(QWidget):
             QFrame#colorPreview {{
                 background-color: {Colors.BG};
                 border: 1px solid {Colors.BORDER};
+                border-radius: {Sizes.RADIUS_CARD}px;
             }}
         '''))
 
@@ -12157,21 +13711,17 @@ def _prewarm_heavy_modules():
     except Exception as e:
         print(f'[Prewarm] ffmpeg unavailable: {e}')
 
-    if sys.platform == 'win32':
-        try:
-            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-            # Pays the one-time cost of MediaFoundation init on Windows.
-            _warm_player = QMediaPlayer()
-            _warm_audio  = QAudioOutput()
-            _warm_player.setAudioOutput(_warm_audio)
-        except Exception as e:
-            print(f'[Prewarm] Qt multimedia init failed: {e}')
+    try:
+        from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+        # Pays the one-time cost of MediaFoundation init on Windows.
+        _warm_player = QMediaPlayer()
+        _warm_audio  = QAudioOutput()
+        _warm_player.setAudioOutput(_warm_audio)
+    except Exception as e:
+        print(f'[Prewarm] Qt multimedia init failed: {e}')
 
 
 def main():
-    # Children (engine, ffmpeg, grim, hyprctl) must see the host's
-    # library path, not PyInstaller's _internal; see linux_runtime.
-    linux_runtime.restore_library_search_path_for_children()
     # When the frozen Windows exe is relaunched as the capture-card subprocess,
     # route into the card process instead of the main application.
     if '--card-process' in sys.argv:
@@ -12183,8 +13733,7 @@ def main():
     print(f'Main.py successfully initiated background={background_start}')
 
     # Log resolved helper paths so missing tools and PATH overrides are diagnosable.
-    if sys.platform != 'win32':
-        print(linux_tools.report())
+    pass
 
     # A second instance is destructive, not just redundant: two capture
     # engines fight over NVENC and over the single-writer shared-memory
@@ -12194,10 +13743,9 @@ def main():
     instance_guard = SingleInstance()
     if not instance_guard.acquire():
         print('[FTHR] Another instance is already running — exiting.')
-        configure_qt_for_linux_ui()
+        configure_qt_style()
         _app = QApplication(sys.argv)
-        if sys.platform != 'win32':
-            _app.setDesktopFileName('fthr-clips')
+        pass
         from core.instance_activation import request_existing_instance_activation
         if request_existing_instance_activation():
             print('[Lifecycle] ExistingInstanceActivated')
@@ -12217,17 +13765,10 @@ def main():
 
     diagnostic_session = start_diagnostic_session(APP_VERSION)
     diagnostic_session.collect_hardware_async()
-    if HotkeyManager.uses_portal_shortcuts():
-        # QApplication registers its app id with the host portal as it
-        # starts, which xdg-desktop-portal refuses until fthr-clips.desktop
-        # exists; install it first so the very first launch is identified too.
-        linux_runtime.ensure_desktop_entry()
-    configure_qt_for_linux_ui()
+    configure_qt_style()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    if sys.platform != 'win32':
-        # Match the installed desktop entry for Wayland taskbar/icon grouping.
-        app.setDesktopFileName('fthr-clips')
+    pass
     app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)
     app_icon = _load_icon('favicon.ico', 32)
@@ -12244,12 +13785,38 @@ def main():
     activation_server = InstanceActivationServer(parent=app)
     activation_server.start()
 
-    window = MainWindow(background_start=background_start)
+    try:
+        window = MainWindow(background_start=background_start)
+    except StoragePathError as error:
+        settings_file = Path.home() / '.fthr' / 'settings.json'
+        detail = (
+            f'{error}\n\nTo continue, restore access to the configured clips '
+            f'folder, or edit the clips_directory entry in:\n{settings_file}\n'
+            'Then relaunch FTHR. The settings file will not be rewritten and '
+            'media will not be moved automatically.')
+        emit_event('storage', 'startup_storage_failed', state='FAILED',
+                   detail=detail)
+        print(f'[Storage] Startup stopped: {detail}')
+        if not background_start:
+            FthrMessageDialog('Storage location unavailable', detail).exec()
+        activation_server.stop()
+        instance_guard.release()
+        end_diagnostic_session(clean=True)
+        return 1
     activation_server.activation_requested.connect(window.restore_main_window)
     if not background_start:
-        window.showMaximized()
+        if window._desired_maximized:
+            window.showMaximized()
+        else:
+            window.showNormal()
     else:
         print('[Lifecycle] BackgroundStartup')
+    diagnostic_window = None if background_start else window
+    emit_event(
+        'ui', 'startup_display_snapshot',
+        startup_mode=('background' if background_start else 'interactive'),
+        displays=qt_display_snapshot(app, diagnostic_window),
+        dpi_awareness=dpi_awareness_snapshot(diagnostic_window))
 
     try:
         return app.exec()

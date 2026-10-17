@@ -1,18 +1,14 @@
 # Shared-memory command/status bridge to the native capture engine.
-# Windows uses kernel32 mappings and UTF-16 strings; Linux uses /dev/shm and
-# UTF-8 buffers. Each layout must match its native shared_memory.h byte for byte.
+# Uses kernel32 mappings and UTF-16 strings matching shared_memory.h byte for byte.
 # Frames remain in the engine; only commands and status cross this boundary.
 
-import sys
 import ctypes
 from ctypes import Structure, c_uint32, c_bool, c_float, c_uint64
 from enum import IntEnum
-import os
+import threading
 
-from core.capture_health import CaptureHealthFlag
 
-if sys.platform == 'win32':
-    from ctypes import c_wchar
+from ctypes import c_wchar
 
 
 # Keep wire command/response values aligned with the native enums.
@@ -42,80 +38,43 @@ class ResponseType(IntEnum):
     MANUAL_RECORDING_ERROR = 7
 
 
-# Windows strings use c_wchar; Linux uses c_char with larger UTF-8 buffers.
+# Strings use c_wchar with the native Windows UTF-16 buffer sizes.
 # Field order, sizes, and alignment must match the platform C++ layout.
-if sys.platform == 'win32':
-    class SharedMemoryLayout(Structure):
-        _fields_ = [
-            ('ui_command',        c_uint32),
-            ('ui_param1',         c_uint32),
-            ('ui_param2',         c_uint32),
-            ('ui_param3',         c_uint32),
-            ('ui_string',         c_wchar * 256),
-            ('engine_response',   c_uint32),
-            ('engine_param1',     c_uint32),
-            ('engine_param2',     c_uint32),
-            ('engine_param3',     c_float),
-            ('engine_string',     c_wchar * 512),
-            ('is_recording',      c_bool),
-            ('is_initialized',    c_bool),
-            ('frames_captured',   c_uint64),
-            ('bytes_written',     c_uint64),
-            ('cfg_bitrate_kbps',  c_uint32),
-            ('cfg_target_width',  c_uint32),
-            ('cfg_target_height', c_uint32),
-            ('nvenc_active',      c_bool),
-            # v2 fields — must match shared_memory.h byte-for-byte
-            ('cfg_codec_pref',    c_uint32),
-            ('cfg_preset',        c_uint32),
-            ('active_codec',      ctypes.c_char * 64),
-            # v3 fields
-            ('multiband_enabled',     c_bool),
-            ('active_audio_mappings', ctypes.c_char * 1024),
-            # v4 capture/content health fields
-            ('capture_health_flags',       c_uint32),
-            ('capture_generation',         c_uint32),
-            ('content_sample_sequence',    c_uint32),
-            ('content_suspicious_streak',  c_uint32),
-            ('content_luma_mean',           c_float),
-            ('content_luma_variance',       c_float),
-        ]
-else:
-    class SharedMemoryLayout(Structure):
-        _fields_ = [
-            ('ui_command',        c_uint32),
-            ('ui_param1',         c_uint32),
-            ('ui_param2',         c_uint32),
-            ('ui_param3',         c_uint32),
-            ('ui_string',         ctypes.c_char * 1024),
-            ('engine_response',   c_uint32),
-            ('engine_param1',     c_uint32),
-            ('engine_param2',     c_uint32),
-            ('engine_param3',     c_float),
-            ('engine_string',     ctypes.c_char * 2048),
-            ('is_recording',      c_bool),
-            ('is_initialized',    c_bool),
-            ('frames_captured',   c_uint64),
-            ('bytes_written',     c_uint64),
-            ('cfg_bitrate_kbps',  c_uint32),
-            ('cfg_target_width',  c_uint32),
-            ('cfg_target_height', c_uint32),
-            ('nvenc_active',      c_bool),
-            # v2 fields — must match shared_memory.h byte-for-byte
-            ('cfg_codec_pref',    c_uint32),
-            ('cfg_preset',        c_uint32),
-            ('active_codec',      ctypes.c_char * 64),
-            # v3 fields
-            ('multiband_enabled',     c_bool),
-            ('active_audio_mappings', ctypes.c_char * 1024),
-            # v4 capture/content health fields
-            ('capture_health_flags',       c_uint32),
-            ('capture_generation',         c_uint32),
-            ('content_sample_sequence',    c_uint32),
-            ('content_suspicious_streak',  c_uint32),
-            ('content_luma_mean',           c_float),
-            ('content_luma_variance',       c_float),
-        ]
+class SharedMemoryLayout(Structure):
+    _fields_ = [
+        ('ui_command',        c_uint32),
+        ('ui_param1',         c_uint32),
+        ('ui_param2',         c_uint32),
+        ('ui_param3',         c_uint32),
+        ('ui_string',         c_wchar * 256),
+        ('engine_response',   c_uint32),
+        ('engine_param1',     c_uint32),
+        ('engine_param2',     c_uint32),
+        ('engine_param3',     c_float),
+        ('engine_string',     c_wchar * 512),
+        ('is_recording',      c_bool),
+        ('is_initialized',    c_bool),
+        ('frames_captured',   c_uint64),
+        ('bytes_written',     c_uint64),
+        ('cfg_bitrate_kbps',  c_uint32),
+        ('cfg_target_width',  c_uint32),
+        ('cfg_target_height', c_uint32),
+        ('nvenc_active',      c_bool),
+        # v2 fields — must match shared_memory.h byte-for-byte
+        ('cfg_codec_pref',    c_uint32),
+        ('cfg_preset',        c_uint32),
+        ('active_codec',      ctypes.c_char * 64),
+        # v3 fields
+        ('multiband_enabled',     c_bool),
+        ('active_audio_mappings', ctypes.c_char * 1024),
+        # v4 capture/content health fields
+        ('capture_health_flags',       c_uint32),
+        ('capture_generation',         c_uint32),
+        ('content_sample_sequence',    c_uint32),
+        ('content_suspicious_streak',  c_uint32),
+        ('content_luma_mean',           c_float),
+        ('content_luma_variance',       c_float),
+    ]
 
 
 class CaptureBridge:
@@ -134,8 +93,8 @@ class CaptureBridge:
             cls._instance._mem_handle = None
             cls._instance._win_map_ptr = None
             cls._instance._layout = None
-            cls._instance._linux_mmap = None
             cls._instance._logged_read_errors = set()
+            cls._instance._mapping_lock = threading.RLock()
         return cls._instance
 
     def _log_read_error_once(self, where: str, e: Exception):
@@ -147,71 +106,14 @@ class CaptureBridge:
 
 
     def initialize(self) -> bool:
-        if self._initialized:
-            return True
-        if sys.platform == 'win32':
+        with self._mapping_lock:
+            if self._initialized:
+                return True
             return self._initialize_windows()
-        else:
-            return self._initialize_linux()
 
 
-    def _initialize_linux(self) -> bool:
-        import mmap as _mmap
-        shm_path = f'/dev/shm/{self.SHARED_MEM_NAME}'
-        try:
-            fd = os.open(shm_path, os.O_RDWR)
-        except OSError:
-            print('Failed to open shared memory - is Linux engine running?')
-            return False
 
-        size = ctypes.sizeof(SharedMemoryLayout)
 
-        # Reject a size mismatch before mapping. This catches layout changes made
-        # without updating the versioned mapping name.
-        try:
-            actual = os.fstat(fd).st_size
-        except OSError:
-            actual = -1
-        if actual >= 0 and actual != size:
-            os.close(fd)
-            print(
-                f'[Bridge] Shared-memory layout mismatch on {shm_path}: the '
-                f'engine created {actual} bytes, this UI expects {size} bytes '
-                f'for {self.SHARED_MEM_NAME}.\n'
-                f'[Bridge] The running engine was built from a different '
-                f'shared_memory.h. Rebuild the Linux engine from this source '
-                f'tree (see CONTRIBUTING.md, "The shared-memory contract"). '
-                f'Refusing to map it — reading it would return garbage.'
-            )
-            return False
-
-        try:
-            self._linux_mmap = _mmap.mmap(fd, size, access=_mmap.ACCESS_WRITE)
-        except Exception as e:
-            # No close() here: the finally below owns it. Closing in both places
-            # made the second close raise EBADF *out of the finally*, replacing
-            # the intended `return False` with an exception.
-            print(f'mmap failed: {e}')
-            return False
-        finally:
-            os.close(fd)  # The mmap retains the mapping after the descriptor closes.
-
-        # from_buffer maps the structure directly onto shared memory without a copy.
-        self._layout = SharedMemoryLayout.from_buffer(self._linux_mmap)
-
-        if not self._layout.is_initialized:
-            print('Linux engine not initialized yet')
-            # Drop the from_buffer view first: closing an mmap that still has
-            # an exported pointer raises BufferError, which killed the caller's
-            # connect loop whenever it polled before the engine was ready.
-            self._layout = None
-            self._linux_mmap.close()
-            self._linux_mmap = None
-            return False
-
-        self._initialized = True
-        print('Connected to Linux capture engine')
-        return True
 
 
     def _initialize_windows(self) -> bool:
@@ -253,14 +155,8 @@ class CaptureBridge:
     def shutdown(self):
         # Release the acknowledgement's layout reference before unmapping.
         self._save_acknowledged_layout = None
-        if sys.platform != 'win32':
-            # Release the ctypes from_buffer reference before closing the mmap;
-            # otherwise Python raises BufferError for the exported pointer.
-            self._layout = None
-            if self._linux_mmap is not None:
-                self._linux_mmap.close()
-                self._linux_mmap = None
-        else:
+
+        with self._mapping_lock:
             if self._layout:
                 ctypes.windll.kernel32.UnmapViewOfFile(
                     ctypes.c_void_p(getattr(self, '_win_map_ptr', None) or 0))
@@ -269,8 +165,9 @@ class CaptureBridge:
             if self._mem_handle:
                 ctypes.windll.kernel32.CloseHandle(self._mem_handle)
                 self._mem_handle = None
-        self._initialized = False
-        CaptureBridge._instance = None
+            self._initialized = False
+            if CaptureBridge._instance is self:
+                CaptureBridge._instance = None
 
 
     def is_connected(self) -> bool:
@@ -294,20 +191,11 @@ class CaptureBridge:
             print('Not connected to capture engine')
             return False
 
-        # Send command — Linux uses c_char (bytes), Windows uses c_wchar (str)
-        if sys.platform != 'win32':
-            # Encode and truncate at a char boundary so we never split a multi-byte
-            # UTF-8 sequence. The buffer is 1024 bytes; leave 1 for the null terminator.
-            encoded = output_path.encode('utf-8')
-            if len(encoded) > 1023:
-                encoded = output_path.encode('utf-8')[:1023].decode('utf-8', errors='ignore').encode('utf-8')
-            self._layout.ui_string = encoded
-        else:
-            # Buffer is c_wchar * 256 — a longer path raises ValueError mid-save.
-            if len(output_path) > 255:
-                print(f'save_clip: path too long ({len(output_path)} chars), refusing')
-                return False
-            self._layout.ui_string = output_path
+        # Send a Windows UTF-16 command string.
+        if len(output_path) > 255:
+            print(f'save_clip: path too long ({len(output_path)} chars), refusing')
+            return False
+        self._layout.ui_string = output_path
         self._layout.ui_param1 = duration
         self._save_acknowledged_layout = None
         # Write the command code LAST. The engine polls ui_command, so once this
@@ -330,7 +218,7 @@ class CaptureBridge:
 
     def start_manual_recording(self, output_path: str) -> bool:
         """Start the native Windows continuous recorder asynchronously."""
-        if sys.platform != 'win32' or not self.is_connected():
+        if not self.is_connected():
             return False
         if not output_path or len(output_path) > 255:
             print('[CaptureBridge] Manual-recording path is empty or too long')
@@ -340,7 +228,7 @@ class CaptureBridge:
         return True
 
     def stop_manual_recording(self) -> bool:
-        if sys.platform != 'win32' or not self.is_connected():
+        if not self.is_connected():
             return False
         self._layout.ui_command = CommandType.STOP_RECORDING
         return True
@@ -458,8 +346,7 @@ class CaptureBridge:
             return False
 
     def _read_engine_string(self) -> str:
-        """Read engine_string across both layouts (wchar on Windows, bytes on
-        Linux) without letting a garbled buffer raise into the caller."""
+        """Read engine_string without letting a garbled buffer raise into the caller."""
         try:
             raw = self._layout.engine_string
             if isinstance(raw, bytes):
@@ -483,16 +370,7 @@ class CaptureBridge:
                 'content_suspicious_streak': int(self._layout.content_suspicious_streak),
                 'content_luma_mean': float(self._layout.content_luma_mean),
                 'content_luma_variance': float(self._layout.content_luma_variance),
-                # The Linux engine writes the reason into engine_string before
-                # it publishes BACKEND_FAILED; no engine_response accompanies
-                # it because that channel carries save and recording results.
-                # The Windows engine does not write it, and there the string
-                # would still hold the last save error.
-                'capture_failure_detail': (
-                    self._read_engine_string()
-                    if sys.platform != 'win32' and
-                    int(self._layout.capture_health_flags) & CaptureHealthFlag.BACKEND_FAILED
-                    else ''),
+                'capture_failure_detail': '',
             }
         except Exception as e:
             self._log_read_error_once('get_status', e)

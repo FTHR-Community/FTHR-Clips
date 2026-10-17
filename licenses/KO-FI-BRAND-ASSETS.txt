@@ -1,0 +1,20 @@
+Ko-fi promotional brand asset
+============================
+
+FTHR_UI/assets/icons/kofi_symbol.png contains Ko-fi's cup symbol and is used
+only on the donation button linking to https://ko-fi.com/fthrclips.
+Copyright and trademarks belong to Ko-fi / Ko-fi Labs Limited.
+This asset is separately licensed and is not covered by FTHR's GPL licence.
+
+Ko-fi's official creator kit offers its logos, buttons and cups for promotion
+of a creator's Ko-fi page. Its official help article confirms this permission,
+subject to the Ko-fi content guidelines:
+
+https://more.ko-fi.com/brand-assets
+https://help.ko-fi.com/hc/en-us/articles/360007169493-Can-I-use-the-Ko-fi-logo-to-promote-my-page
+https://help.ko-fi.com/hc/en-us/articles/360007937553-Ko-fi-Content-Guidelines
+
+Verified on 2026-10-13. The existing PNG was compared visually with the cup
+symbol published in the official creator kit. Its original acquisition URL
+was not recorded; this notice does not claim it was downloaded directly from
+Ko-fi or place it under an open-source licence.

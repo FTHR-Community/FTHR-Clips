@@ -1,6 +1,8 @@
 #include "audio_timeline.h"
+#include "audio_signal_metrics.h"
 #include "windows_microphone_audio_provider.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 
@@ -100,6 +102,97 @@ void TimelineContinuityBoundsGapAndOverlap() {
             "of creating unbounded work or collapsing media time");
 }
 
+void ProcessingDiagnosticsUseExplicitTimestampAndBufferThresholds() {
+    using fthr::WindowsMicrophoneProcessingDiagnosticsAccumulator;
+    CheckMicrophone(
+        WindowsMicrophoneProcessingDiagnosticsAccumulator::CaptureBufferDuration100ns(
+            480, 48000) == 100'000,
+        "480 frames at 48 kHz have a 10 ms capture-buffer duration");
+    CheckMicrophone(
+        WindowsMicrophoneProcessingDiagnosticsAccumulator::CaptureBufferDuration100ns(
+            0, 48000) == 0,
+        "an unavailable capture buffer has no derived duration");
+    CheckMicrophone(
+        WindowsMicrophoneProcessingDiagnosticsAccumulator::ProcessingDurationMeetsBuffer(
+            100'000, 100'000),
+        "processing exactly one buffer duration meets the diagnostic threshold");
+    CheckMicrophone(
+        !WindowsMicrophoneProcessingDiagnosticsAccumulator::ProcessingDurationMeetsBuffer(
+            99'999, 100'000),
+        "processing below one buffer duration does not meet the threshold");
+    CheckMicrophone(
+        !WindowsMicrophoneProcessingDiagnosticsAccumulator::ProcessingDurationMeetsBuffer(
+            100'000, 0),
+        "an unavailable buffer duration cannot imply a deadline observation");
+
+    WindowsMicrophoneProcessingDiagnosticsAccumulator diagnostics;
+    diagnostics.ConfigureCaptureBuffer(480, 48000);
+    diagnostics.ObservePacket(false, 99'999);
+    diagnostics.ObservePacket(true, 100'000);
+    diagnostics.ObservePacket(true, 100'001);
+    const auto snapshot = diagnostics.Snapshot();
+    CheckMicrophone(snapshot.capture_buffer_frames == 480
+            && snapshot.capture_buffer_duration_100ns == 100'000,
+        "capture-buffer topology is retained in the bounded snapshot");
+    CheckMicrophone(snapshot.timestamp_error_count == 2,
+        "only packets carrying the timestamp-error flag are counted");
+    CheckMicrophone(snapshot.max_packet_processing_duration_100ns == 100'001,
+        "maximum packet processing duration is monotonic");
+    CheckMicrophone(
+        snapshot.packet_processing_at_or_above_buffer_duration_count == 2,
+        "at-or-above-buffer processing threshold counts equality and overshoot");
+
+    diagnostics.Reset();
+    const auto reset = diagnostics.Snapshot();
+    CheckMicrophone(reset.capture_buffer_frames == 0
+            && reset.capture_buffer_duration_100ns == 0
+            && reset.timestamp_error_count == 0
+            && reset.max_packet_processing_duration_100ns == 0
+            && reset.packet_processing_at_or_above_buffer_duration_count == 0,
+        "processing diagnostics reset with a new capture generation");
+}
+
+void InputGainPreservesIntentionalOverRangeSemantics() {
+    const float source[] = {0.75f, -0.75f};
+    float unity[] = {source[0], source[1]};
+    fthr::ApplyWindowsMicrophoneInputGain(unity, 2, 1.0f);
+    CheckMicrophone(unity[0] == source[0] && unity[1] == source[1],
+        "100 percent microphone gain leaves samples unchanged");
+
+    float one_fifty[] = {source[0], source[1]};
+    fthr::ApplyWindowsMicrophoneInputGain(one_fifty, 2, 1.5f);
+    CheckMicrophone(std::fabs(one_fifty[0] - 1.125f) < 0.000001f
+            && std::fabs(one_fifty[1] + 1.125f) < 0.000001f,
+        "150 percent microphone gain multiplies samples without limiting");
+
+    float two_hundred[] = {source[0], source[1]};
+    fthr::ApplyWindowsMicrophoneInputGain(two_hundred, 2, 2.0f);
+    CheckMicrophone(std::fabs(two_hundred[0] - 1.5f) < 0.000001f
+            && std::fabs(two_hundred[1] + 1.5f) < 0.000001f,
+        "200 percent microphone gain multiplies samples without limiting");
+
+    fthr::AudioSignalMetrics metrics;
+    metrics.Observe(two_hundred, 2, 1);
+    const auto snapshot = metrics.Snapshot();
+    CheckMicrophone(snapshot.peak == 1.5 && snapshot.clipping_samples == 2,
+        "post-gain over-range samples remain visible to signal diagnostics");
+}
+
+void MonoDownmixCentersStereoWithoutClamping() {
+    float samples[] = {1.0f, 0.0f, 0.25f, 0.75f, -0.5f, -1.0f, 2.0f, 2.0f};
+    fthr::DownmixWindowsMicrophoneToMono(samples, 8);
+    CheckMicrophone(samples[0] == 0.5f && samples[1] == 0.5f,
+        "single-channel microphone is centered in both speakers");
+    CheckMicrophone(samples[2] == 0.5f && samples[3] == 0.5f
+            && samples[4] == -0.75f && samples[5] == -0.75f,
+        "stereo microphone channels are averaged per frame");
+    CheckMicrophone(samples[6] == 2.0f && samples[7] == 2.0f,
+        "mono downmix preserves diagnostic over-range samples");
+    fthr::ApplyWindowsMicrophoneInputGain(samples, 8, 1.5f);
+    CheckMicrophone(samples[0] == 0.75f && samples[1] == 0.75f,
+        "capture gain is applied once after mono downmix");
+}
+
 }  // namespace
 
 int RunWindowsMicrophoneAudioProviderTests() {
@@ -108,6 +201,9 @@ int RunWindowsMicrophoneAudioProviderTests() {
     DriftCorrectionIsSmallAndBounded();
     ExplicitEndpointIdentityIsNotManifestIdentity();
     TimelineContinuityBoundsGapAndOverlap();
+    ProcessingDiagnosticsUseExplicitTimestampAndBufferThresholds();
+    InputGainPreservesIntentionalOverRangeSemantics();
+    MonoDownmixCentersStereoWithoutClamping();
     std::cout << "AUDIT-050 Windows microphone provider tests: "
               << microphone_checks << " checks passed" << std::endl;
     return microphone_checks;

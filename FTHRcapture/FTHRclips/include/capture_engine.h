@@ -38,8 +38,11 @@
 #include "audio_ring_buffer.h"   // AudioRingBuffer (raw float32 PCM)
 #include "shared_memory.h"       // typed v4 capture-health flags
 #include "windows_capture_border_policy.h"
+#include "windows_capture_backend_policy.h"
 #include "windows_dxgi_recovery.h"
 #include "windows_monitor_resolver.h"
+#include "dxgi_replay_cadence.h"
+#include "replay_pause_clock.h"
 
 
 namespace fthr {
@@ -69,6 +72,8 @@ namespace fthr {
         enum class CaptureModeEnum : uint32_t { DESKTOP = 0, WINDOW = 1 };
         CaptureModeEnum capture_mode = CaptureModeEnum::DESKTOP;
         uintptr_t       target_hwnd  = 0;  // non-zero only when capture_mode == WINDOW
+        WindowsCaptureBackendPreference capture_backend_preference =
+            WindowsCaptureBackendPreference::Auto;
 
         // How to fit non-native target resolutions in the encoded clip.
         //   STRETCH = scale to target dims, may distort if aspect differs (legacy default).
@@ -87,6 +92,8 @@ namespace fthr {
         // back to another microphone.
         std::wstring microphone_endpoint_id;
         uint32_t microphone_gain_percent = 100;
+        std::wstring playback_endpoint_id;
+        bool microphone_mono = false;
 
         // Optional per-game crop in normalized source coordinates. It is
         // resolved to safe pixel geometry after the capture source opens and
@@ -156,6 +163,9 @@ namespace fthr {
         ReplayStartupError GetLastStartupErrorCode() const {
             return last_startup_error_code_;
         }
+        const std::string& GetStartupCaptureBackend() const {
+            return startup_capture_backend_;
+        }
         const ActiveReplayCapability& GetActiveReplayCapability() const {
             return active_replay_capability_;
         }
@@ -202,6 +212,8 @@ namespace fthr {
         void ShutdownWGC();
         bool InitializeD3D11();           // DXGI fallback for the resolved adapter/output
         void ShutdownD3D11();
+        void InvalidateDxgiReplayCache() noexcept;
+        bool EnsureDxgiReplayTexture(const D3D11_TEXTURE2D_DESC& source);
         bool RecoverDxgiDuplication(
             const char* api_call, HRESULT trigger);
         dxgi::RecoveryAttemptResult TryRecreateDxgiDuplication(
@@ -243,6 +255,8 @@ namespace fthr {
         ID3D11Texture2D*        staging_texture_;  // null on WGC+NVENC path
         ID3D11Texture2D*        crop_texture_;     // encoder-sized GPU crop
         ID3D11Texture2D*        health_staging_texture_; // 16x9 grid, sampled ~1 Hz
+        ID3D11Texture2D*        dxgi_replay_texture_ = nullptr; // owned latest DXGI image
+        dxgi_replay::Cadence    dxgi_replay_cadence_;
 
         // Legacy cross-adapter resources. They remain null under the final alpha
         // policy; automatic cross-adapter replay is deliberately unsupported.
@@ -272,17 +286,17 @@ namespace fthr {
         uint32_t  crop_width_;
         uint32_t  crop_height_;
         uintptr_t target_hwnd_;  // 0 = desktop mode; non-zero = window capture mode
-
-        // Focus gate: when true, CaptureThreadWGC drops every frame where
-        // GetForegroundWindow() != target_hwnd_. Used for anti-cheat games
-        // captured via WGC monitor — we still capture the whole monitor (the
-        // path Vanguard allows), but only encode while the protected game is
-        // foreground so we don't bake the user's desktop into clips.
-        bool focus_gated_;
+        bool focus_gated_ = false;
+        std::shared_ptr<ReplayPauseClock> replay_pause_clock_;
+        std::atomic<int64_t> replay_audio_origin_100ns_{0};
 
         // Config
         uint32_t fps_;
         uint32_t buffer_seconds_;
+        CaptureConfig::CaptureModeEnum capture_mode_ =
+            CaptureConfig::CaptureModeEnum::DESKTOP;
+        uint32_t configured_target_width_ = 0;
+        uint32_t configured_target_height_ = 0;
         uint32_t target_width_;
         uint32_t target_height_;
         uint32_t bitrate_kbps_;
@@ -359,7 +373,23 @@ namespace fthr {
         std::atomic<uint64_t> capture_timeouts_{0};
         std::atomic<uint64_t> capture_frames_released_{0};
         std::atomic<uint64_t> pointer_only_frames_{0};
+        // DXGI reports how many desktop presents were coalesced into an
+        // acquired frame.  Keep this as evidence only; it never changes
+        // scheduler or ownership behavior.
+        std::atomic<uint64_t> dxgi_coalesced_extra_frames_{0};
         std::atomic<uint64_t> source_textures_received_{0};
+        std::atomic<uint64_t> dxgi_held_presentations_{0};
+        std::atomic<uint64_t> dxgi_resampled_presentations_{0};
+        std::atomic<bool> dxgi_replay_cache_armed_{false};
+        // Set only after an AcquireNextFrame call actually completes. It is
+        // separate from acquire-attempt progress so a blocked call cannot
+        // impersonate live API evidence in health snapshots.
+        std::atomic<int64_t> last_dxgi_completed_qpc_{0};
+        std::atomic<int64_t> last_dxgi_pointer_only_completed_qpc_{0};
+        std::atomic<int64_t> last_dxgi_presentation_qpc_{0};
+        // WGC publishes only changed images.  Count cadence samples that had
+        // to reuse the last owned image; DXGI leaves this at zero.
+        std::atomic<uint64_t> wgc_repeated_frame_observations_{0};
         std::atomic<uint64_t> conversion_submissions_{0};
         std::atomic<uint64_t> conversion_completions_{0};
         std::atomic<uint64_t> video_packets_produced_{0};
@@ -371,7 +401,19 @@ namespace fthr {
         std::atomic<uint32_t> capture_restart_count_{0};
         std::atomic<uint32_t> capture_recovery_attempts_{0};
         std::atomic<uint32_t> capture_recovery_failures_{0};
-        dxgi::RecentDxgiEvidence<> dxgi_recent_evidence_;
+        // O(1) monotonic evidence sampled at existing capture/encoder
+        // boundaries. These values are save-time diagnostics only.
+        std::atomic<int64_t> capture_start_qpc_{0};
+        std::atomic<int64_t> generation_start_qpc_{0};
+        std::atomic<int64_t> last_source_frame_qpc_{0};
+        std::atomic<int64_t> last_encoder_submission_qpc_{0};
+        std::atomic<int64_t> last_encoded_output_qpc_{0};
+        std::atomic<int64_t> last_ring_insertion_qpc_{0};
+        std::atomic<uint64_t> encoder_failure_count_{0};
+        // Retain enough bounded evidence to cover a short replay-save window.
+        // The snapshot is emitted only at a failure boundary, while Record()
+        // remains a fixed-cost in-memory write on the capture thread.
+        dxgi::RecentDxgiEvidence<512> dxgi_recent_evidence_;
         mutable std::mutex dxgi_context_mutex_;
         RECT resolved_desktop_coordinates_{};
         bool resolved_desktop_coordinates_available_ = false;

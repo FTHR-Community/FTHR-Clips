@@ -1,5 +1,10 @@
 from __future__ import annotations
+
+from ui.style import set_theme_style
+
+from ui.icons import IconButton
 from collections import deque
+import sys
 
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton
 
@@ -25,59 +30,50 @@ class ErrorBar(QFrame):
         self._layout.setContentsMargins(Sizes.SPACE_6, 0, Sizes.SPACE_6, 0)
         self._layout.setSpacing(10)
 
-        self._icon = QLabel('⚠')
+        self._icon = QLabel('Notice')
         self._layout.addWidget(self._icon)
 
         self._title = QLabel()
         self._layout.addWidget(self._title)
 
         sep = QLabel('—')
-        sep.setStyleSheet(f'background: transparent; color: {Colors.TEXT};')
+        set_theme_style(sep, lambda: (f'background: transparent; color: {Colors.TEXT};'))
         self._separator = sep
         self._layout.addWidget(sep)
 
         self._detail = QLabel()
-        self._detail.setStyleSheet(
-            f'font-size: {Fonts.SIZE_BODY}px; font-family: {Fonts.BODY};'
-            f' background: transparent; color: {Colors.TEXT};'
-        )
+        set_theme_style(self._detail, lambda: (f'font-size: {Fonts.SIZE_BODY}px; font-family: {Fonts.BODY};'
+            f' background: transparent; color: {Colors.TEXT};'))
         self._layout.addWidget(self._detail)
 
         self._layout.addStretch()
 
         self._more_lbl = QLabel()
-        self._more_lbl.setStyleSheet(
-            f'font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' letter-spacing: 1px; background: transparent; color: {Colors.TEXT_DIM};'
-        )
+        set_theme_style(self._more_lbl, lambda: (f'font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
+            f' letter-spacing: 0px; background: transparent; color: {Colors.TEXT_DIM};'))
         self._more_lbl.setVisible(False)
         self._layout.addWidget(self._more_lbl)
 
         # Dismiss button — always last; action buttons inserted before it
-        self._dismiss_btn = QPushButton('✕')
+        self._dismiss_btn = IconButton('close.png', label='Close')
         self._dismiss_btn.setFixedWidth(28)
-        self._dismiss_btn.setStyleSheet(
-            'QPushButton { background: transparent; border: none;'
+        set_theme_style(self._dismiss_btn, lambda: ('QPushButton { background: transparent; border: none;'
             f' color: {Colors.TEXT_DIM}; font-size: 14px; }}'
-            f'QPushButton:hover {{ color: {Colors.TEXT}; }}'
-        )
-        self._dismiss_btn.clicked.connect(self.dismiss_current)
+            f'QPushButton:hover {{ color: {Colors.TEXT}; }}'))
+        self._dismiss_btn.setToolTip('Dismiss all messages' if sys.platform == 'win32' else 'Dismiss message')
+        self._dismiss_btn.clicked.connect(self.clear if sys.platform == 'win32' else self.dismiss_current)
         self._layout.addWidget(self._dismiss_btn)
 
     def refresh_theme(self) -> None:
         """Refresh both idle chrome and any currently displayed error."""
-        self._separator.setStyleSheet(
-            f'background: transparent; color: {Colors.TEXT};')
-        self._detail.setStyleSheet(
-            f'font-size: {Fonts.SIZE_BODY}px; font-family: {Fonts.BODY};'
-            f' background: transparent; color: {Colors.TEXT};')
-        self._more_lbl.setStyleSheet(
-            f'font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' letter-spacing: 1px; background: transparent; color: {Colors.TEXT_DIM};')
-        self._dismiss_btn.setStyleSheet(
-            'QPushButton { background: transparent; border: none;'
+        set_theme_style(self._separator, lambda: (f'background: transparent; color: {Colors.TEXT};'))
+        set_theme_style(self._detail, lambda: (f'font-size: {Fonts.SIZE_BODY}px; font-family: {Fonts.BODY};'
+            f' background: transparent; color: {Colors.TEXT};'))
+        set_theme_style(self._more_lbl, lambda: (f'font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
+            f' letter-spacing: 0px; background: transparent; color: {Colors.TEXT_DIM};'))
+        set_theme_style(self._dismiss_btn, lambda: ('QPushButton { background: transparent; border: none;'
             f' color: {Colors.TEXT_DIM}; font-size: 14px; }}'
-            f'QPushButton:hover {{ color: {Colors.TEXT}; }}')
+            f'QPushButton:hover {{ color: {Colors.TEXT}; }}'))
         if self._current is not None:
             self._show(self._current)
 
@@ -85,14 +81,27 @@ class ErrorBar(QFrame):
 
     def push(self, title: str, detail: str,
              level: str = 'error',
-             actions: list[tuple[str, callable]] | None = None) -> None:
-        """Add an error to the queue. Shows immediately if bar is idle."""
+             actions: list[tuple[str, callable]] | None = None,
+             *, key: str | None = None,
+             dismiss_on_action: bool = True) -> None:
+        """Add or update an error; an optional key identifies one incident."""
         entry = {
             'title':   title,
             'detail':  detail,
             'level':   level,
             'actions': list(actions or []),
+            'key': key,
+            'dismiss_on_action': bool(dismiss_on_action),
         }
+        if key is not None:
+            if self._current is not None and self._current.get('key') == key:
+                self._show(entry)
+                return
+            for index, queued in enumerate(self._queue):
+                if queued.get('key') == key:
+                    self._queue[index] = entry
+                    self._update_more_label()
+                    return
         if self._current is None:
             self._show(entry)
         else:
@@ -115,13 +124,34 @@ class ErrorBar(QFrame):
         self._current = None
         self._clear_action_buttons()
         self.setVisible(False)
+        self._update_more_label()
+
+    def remove_by_key(self, key: str) -> bool:
+        """Remove exactly one keyed incident without disturbing other errors."""
+        if self._current is not None and self._current.get('key') == key:
+            self.dismiss_current()
+            return True
+
+        remaining = [entry for entry in self._queue
+                     if entry.get('key') != key]
+        removed = len(remaining) != len(self._queue)
+        if removed:
+            self._queue = deque(remaining)
+            self._update_more_label()
+        return removed
 
     # Internal helpers (also called from tests)
 
-    def _fire_action(self, callback: callable) -> None:
-        """Execute the given callback then dismiss the current error."""
+    def _fire_action(self, callback: callable, entry: dict | None = None) -> None:
+        """Run an action and dismiss only the same entry if still current."""
+        acted_entry = self._current if entry is None else entry
+        if entry is not None and self._current is not entry:
+            return
         callback()
-        self.dismiss_current()
+        if (acted_entry is not None
+                and self._current is acted_entry
+                and acted_entry.get('dismiss_on_action', True)):
+            self.dismiss_current()
 
     def _show(self, entry: dict) -> None:
         self._current = entry
@@ -132,18 +162,18 @@ class ErrorBar(QFrame):
             'warning': Colors.WARNING,
         }.get(entry['level'], Colors.ERROR)
 
-        self.setStyleSheet(f'''
+        set_theme_style(self, lambda color=color: (f'''
             QFrame {{
                 background-color: {Colors.SURFACE_1};
                 border-top: 1px solid {color};
             }}
-        ''')
+        '''))
         self._icon.setStyleSheet(
             f'font-size: {Fonts.SIZE_BODY}px; background: transparent; color: {color};'
         )
         self._title.setStyleSheet(
             f'font-size: {Fonts.SIZE_BODY}px; font-family: {Fonts.DISPLAY};'
-            f' font-weight: bold; letter-spacing: 1px;'
+            f' font-weight: 600; letter-spacing: 0px;'
             f' background: transparent; color: {color};'
         )
         self._title.setText(entry['title'])
@@ -156,7 +186,7 @@ class ErrorBar(QFrame):
         self._clear_action_buttons()
         for label, callback in actions[:2]:
             btn = QPushButton(label)
-            btn.setStyleSheet(f'''
+            set_theme_style(btn, lambda color=color: (f'''
                 QPushButton {{
                     background-color: transparent;
                     border: 1px solid {color};
@@ -164,16 +194,17 @@ class ErrorBar(QFrame):
                     font-size: {Fonts.SIZE_LABEL}px;
                     font-family: {Fonts.DISPLAY};
                     letter-spacing: {Fonts.TRACK_LABEL}px;
-                    font-weight: bold;
+                    font-weight: 600;
                     padding: 3px 10px;
                 }}
                 QPushButton:hover {{
                     background-color: {color};
                     color: {Colors.TEXT};
                 }}
-            ''')
+            '''))
             cb = callback
-            btn.clicked.connect(lambda _checked, c=cb: self._fire_action(c))
+            btn.clicked.connect(
+                lambda _checked, c=cb, e=self._current: self._fire_action(c, e))
             # Insert before dismiss button (last widget)
             self._layout.insertWidget(self._layout.count() - 1, btn)
             self._action_buttons.append(btn)

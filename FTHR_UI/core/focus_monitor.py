@@ -1,47 +1,12 @@
-import json
-import subprocess
 import threading
 from PySide6.QtCore import QObject, QTimer, Signal
-from core.compositor import detect_compositor
-from core import linux_tools
 
 
 def _get_active_window_title() -> str | None:
-    """Return the active window title, or None if unavailable.
-
-    - Hyprland: hyprctl activewindow -j
-    - All others: xdotool getactivewindow + getwindowname (covers XWayland games)
-    Returns None if the tool is unavailable or call fails.
-    """
-    comp = detect_compositor()
-
-    if comp == 'hyprland':
-        try:
-            r = subprocess.run(
-                [linux_tools.require('hyprctl'), 'activewindow', '-j'],
-                capture_output=True, timeout=1,
-            )
-            data = json.loads(r.stdout.decode(errors='replace'))
-            return data.get('title', '') or data.get('class', '') or None
-        except Exception:
-            return None
-
-    if not linux_tools.available('xdotool'):
-        return None
-
-    try:
-        r = subprocess.run([linux_tools.require('xdotool'), 'getactivewindow'],
-                           capture_output=True, timeout=1)
-        if r.returncode != 0:
-            return None
-        wid = r.stdout.decode().strip()
-        r2 = subprocess.run([linux_tools.require('xdotool'), 'getwindowname', wid],
-                            capture_output=True, timeout=1)
-        if r2.returncode != 0:
-            return None
-        return r2.stdout.decode().strip() or None
-    except Exception:
-        return None
+    """Read the foreground window title through the native Windows detector."""
+    from core.game_detector import get_foreground_window
+    window = get_foreground_window()
+    return window.title if window else None
 
 
 class FocusMonitor(QObject):
@@ -56,8 +21,7 @@ class FocusMonitor(QObject):
         self._poll_running = False
         self._timer   = QTimer(self)
         self._timer.setInterval(2000)
-        # The title lookup shells out to xdotool/hyprctl (blocking, up to 2s
-        # worst case) — run it off the Qt main thread.
+        # Keep foreground-window lookup off the Qt main thread.
         self._timer.timeout.connect(self._start_poll)
         self._title_polled.connect(self._apply_title)
 

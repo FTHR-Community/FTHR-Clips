@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <sstream>
+#include <iostream>
 #include <utility>
 
 namespace fthr::monitor {
@@ -20,6 +21,7 @@ struct MonitorHandleEntry {
     std::wstring gdi_name;
     uintptr_t handle = 0;
     bool primary = false;
+    RECT bounds{};
 };
 
 struct MonitorHandleCollection {
@@ -37,7 +39,7 @@ BOOL CALLBACK CollectMonitorHandle(
         collection->entries.push_back({
             info.szDevice,
             reinterpret_cast<uintptr_t>(monitor),
-            (info.dwFlags & MONITORINFOF_PRIMARY) != 0});
+            (info.dwFlags & MONITORINFOF_PRIMARY) != 0, info.rcMonitor});
     } else if (!collection->failed) {
         collection->first_error = GetLastError();
         collection->failed = true;
@@ -118,116 +120,202 @@ std::wstring NormalizeMonitorDevicePath(const std::wstring& device_path) {
     return normalized;
 }
 
-TopologyQueryResult WindowsMonitorTopologySource::QueryActiveTopology() {
-    UINT32 path_count = 0;
-    UINT32 mode_count = 0;
-    LONG status = GetDisplayConfigBufferSizes(
-        QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count);
-    if (status != ERROR_SUCCESS) {
-        return {MonitorResolveError::MonitorTopologyChanged, {},
-                Win32Diagnostic("GetDisplayConfigBufferSizes", status)};
-    }
+std::wstring DesktopMonitorIdentity(const MonitorTopologyEntry& monitor) {
+    auto name = NormalizeMonitorDevicePath(monitor.source_gdi_name);
+    if (name.rfind(L"\\\\.\\", 0) == 0) name.erase(0, 4);
+    if (!monitor.hmonitor || name.rfind(L"display", 0) != 0
+        || name.size() <= 7
+        || name.find_first_not_of(L"0123456789", 7) != std::wstring::npos) return {};
+    std::wostringstream identity;
+    identity << L"fthr-monitor:" << std::hex << monitor.hmonitor << L':' << name;
+    return identity.str();
+}
 
+bool MatchesMonitorSelection(const MonitorTopologyEntry& monitor, const std::wstring& selection) {
+    const auto normalized = NormalizeMonitorDevicePath(selection);
+    return !normalized.empty()
+        && (NormalizeMonitorDevicePath(monitor.monitor_device_path) == normalized
+            || DesktopMonitorIdentity(monitor) == normalized);
+}
+
+TopologyQueryResult BuildLiveMonitorTopology(
+    const std::vector<MonitorTopologyEntry>& desktop_monitors,
+    const std::vector<MonitorTopologyEntry>& display_paths,
+    const std::vector<DxgiOutputIdentity>& outputs) {
+    TopologyQueryResult result;
+    for (auto entry : desktop_monitors) {
+        if (!entry.active || !entry.hmonitor || !entry.width || !entry.height) continue;
+        std::vector<const MonitorTopologyEntry*> paths;
+        for (const auto& path : display_paths) {
+            if (EqualInsensitive(path.source_gdi_name, entry.source_gdi_name)) paths.push_back(&path);
+        }
+        if (!paths.empty()) {
+            const auto& first = *paths.front();
+            const bool one_source = std::all_of(paths.begin(), paths.end(), [&](const auto* path) {
+                return path->adapter_luid == first.adapter_luid && path->source_id == first.source_id;
+            });
+            if (!one_source) {
+                return {MonitorResolveError::MonitorTopologyChanged, {},
+                    "live desktop monitor maps to multiple display sources"};
+            }
+            entry.adapter_luid = first.adapter_luid;
+            entry.adapter_luid_available = true;
+            entry.source_id = first.source_id;
+            entry.target_id = first.target_id;
+            if (paths.size() == 1 && entry.monitor_device_path.empty()) {
+                entry.monitor_device_path = first.monitor_device_path;
+                entry.friendly_name = first.friendly_name;
+            }
+        }
+        // CCD can disappear while a disabled PnP monitor is still being driven.
+        // DXGI is an optional source of adapter identity, not a WGC prerequisite.
+        const DxgiOutputIdentity* matched_output = nullptr;
+        for (const auto& output : outputs) {
+            if (output.hmonitor != entry.hmonitor
+                || !EqualInsensitive(output.source_gdi_name, entry.source_gdi_name)) continue;
+            if (matched_output && matched_output->adapter_luid != output.adapter_luid) {
+                return {MonitorResolveError::MonitorTopologyChanged, {},
+                    "live desktop monitor maps to multiple DXGI adapters"};
+            }
+            matched_output = &output;
+        }
+        if (matched_output) {
+            if (entry.adapter_luid_available && entry.adapter_luid != matched_output->adapter_luid) {
+                return {MonitorResolveError::MonitorTopologyChanged, {},
+                    "CCD and DXGI disagree about the live monitor adapter"};
+            }
+            entry.adapter_luid = matched_output->adapter_luid;
+            entry.adapter_luid_available = true;
+        }
+        // Monitor availability is established by the live HMONITOR and bounds,
+        // not by PnP ACTIVE/targetAvailable, which can be false in stretched modes.
+        if (entry.monitor_device_path.empty()) entry.monitor_device_path = DesktopMonitorIdentity(entry);
+        if (!entry.monitor_device_path.empty()) result.monitors.push_back(std::move(entry));
+    }
+    result.topology_generation = TopologyGeneration(result.monitors);
+    for (auto& entry : result.monitors) entry.topology_generation = result.topology_generation;
+    return result;
+}
+
+TopologyQueryResult WindowsMonitorTopologySource::QueryActiveTopology() {
+    MonitorHandleCollection handles;
+    if (!EnumDisplayMonitors(nullptr, nullptr, CollectMonitorHandle,
+            reinterpret_cast<LPARAM>(&handles)) || handles.failed) {
+        return {MonitorResolveError::MonitorTopologyChanged, {},
+            Win32Diagnostic("EnumDisplayMonitors/GetMonitorInfoW",
+                handles.failed ? handles.first_error : GetLastError())};
+    }
+    std::vector<MonitorTopologyEntry> desktops;
+    for (const auto& handle : handles.entries) {
+        MonitorTopologyEntry entry;
+        entry.source_gdi_name = handle.gdi_name;
+        entry.hmonitor = handle.handle;
+        entry.primary = handle.primary;
+        entry.active = true;
+        entry.adapter_luid_available = false;
+        entry.left = handle.bounds.left; entry.top = handle.bounds.top;
+        entry.width = handle.bounds.right - handle.bounds.left;
+        entry.height = handle.bounds.bottom - handle.bounds.top;
+        std::vector<DISPLAY_DEVICEW> children, active_children;
+        for (DWORD index = 0;; ++index) {
+            DISPLAY_DEVICEW child{}; child.cb = sizeof(child);
+            if (!EnumDisplayDevicesW(handle.gdi_name.c_str(), index, &child,
+                    EDD_GET_DEVICE_INTERFACE_NAME)) break;
+            children.push_back(child);
+            if (child.StateFlags & DISPLAY_DEVICE_ACTIVE) active_children.push_back(child);
+        }
+        const auto& candidates = active_children.empty() ? children : active_children;
+        if (candidates.size() == 1) {
+            const auto path = NormalizeMonitorDevicePath(candidates[0].DeviceID);
+            if (path.rfind(L"\\\\?\\display#", 0) == 0) entry.monitor_device_path = path;
+            entry.friendly_name = candidates[0].DeviceString;
+        }
+        desktops.push_back(std::move(entry));
+    }
+    UINT32 path_count = 0, mode_count = 0;
+    LONG status = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count);
     std::vector<DISPLAYCONFIG_PATH_INFO> paths;
     std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-    do {
+    for (int attempt = 0; status == ERROR_SUCCESS && attempt < 4; ++attempt) {
+        paths.resize(path_count); modes.resize(mode_count);
+        status = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(),
+            &mode_count, modes.data(), nullptr);
+        if (status != ERROR_INSUFFICIENT_BUFFER) break;
+        status = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count);
+        if (attempt == 3) status = ERROR_INSUFFICIENT_BUFFER;
+    }
+    std::vector<MonitorTopologyEntry> display_paths;
+    if (status == ERROR_SUCCESS) {
         paths.resize(path_count);
-        modes.resize(mode_count);
-        status = QueryDisplayConfig(
-            QDC_ONLY_ACTIVE_PATHS,
-            &path_count,
-            paths.data(),
-            &mode_count,
-            modes.data(),
-            nullptr);
-        if (status == ERROR_INSUFFICIENT_BUFFER) {
-            status = GetDisplayConfigBufferSizes(
-                QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count);
-            if (status != ERROR_SUCCESS) break;
+        for (const auto& path : paths) {
+            if (!(path.flags & DISPLAYCONFIG_PATH_ACTIVE)) continue;
+            DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+            source.header = {DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, sizeof(source),
+                path.sourceInfo.adapterId, path.sourceInfo.id};
+            if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS) continue;
+            MonitorTopologyEntry entry;
+            entry.source_gdi_name = source.viewGdiDeviceName;
+            entry.adapter_luid = ToAdapterLuid(path.sourceInfo.adapterId);
+            entry.source_id = path.sourceInfo.id; entry.target_id = path.targetInfo.id;
+            DISPLAYCONFIG_TARGET_DEVICE_NAME target{};
+            target.header = {DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, sizeof(target),
+                path.targetInfo.adapterId, path.targetInfo.id};
+            if (DisplayConfigGetDeviceInfo(&target.header) == ERROR_SUCCESS) {
+                entry.monitor_device_path = NormalizeMonitorDevicePath(target.monitorDevicePath);
+                entry.friendly_name = target.monitorFriendlyDeviceName;
+            }
+            display_paths.push_back(std::move(entry));
         }
-    } while (status == ERROR_INSUFFICIENT_BUFFER);
-
-    if (status != ERROR_SUCCESS) {
-        return {MonitorResolveError::MonitorTopologyChanged, {},
-                Win32Diagnostic("QueryDisplayConfig", status)};
+    } else {
+        std::cerr << "[Monitor] Optional CCD metadata unavailable: "
+                  << Win32Diagnostic("QueryDisplayConfig", status) << std::endl;
     }
-    paths.resize(path_count);
-
-    MonitorHandleCollection handle_collection;
-    if (!EnumDisplayMonitors(
-            nullptr, nullptr, CollectMonitorHandle,
-            reinterpret_cast<LPARAM>(&handle_collection))) {
-        return {MonitorResolveError::MonitorTopologyChanged, {},
-                Win32Diagnostic("EnumDisplayMonitors", GetLastError())};
-    }
-    if (handle_collection.failed) {
-        return {MonitorResolveError::MonitorTopologyChanged, {},
-                Win32Diagnostic("GetMonitorInfoW",
-                                handle_collection.first_error)};
-    }
-    const auto& handles = handle_collection.entries;
-
-    TopologyQueryResult result;
-    for (const auto& path : paths) {
-        if ((path.flags & DISPLAYCONFIG_PATH_ACTIVE) == 0) continue;
-
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name{};
-        source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-        source_name.header.size = sizeof(source_name);
-        source_name.header.adapterId = path.sourceInfo.adapterId;
-        source_name.header.id = path.sourceInfo.id;
-        const LONG source_status = DisplayConfigGetDeviceInfo(
-            &source_name.header);
-        if (source_status != ERROR_SUCCESS) {
-            return {MonitorResolveError::MonitorTopologyChanged, {},
-                    Win32Diagnostic(
-                        "DisplayConfigGetDeviceInfo(GET_SOURCE_NAME)",
-                        source_status)};
+    std::vector<DxgiOutputIdentity> outputs;
+    IDXGIFactory1* factory = nullptr;
+    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
+        for (UINT index = 0;; ++index) {
+            IDXGIAdapter1* adapter = nullptr;
+            if (FAILED(factory->EnumAdapters1(index, &adapter))) break;
+            DXGI_ADAPTER_DESC1 desc{};
+            if (SUCCEEDED(adapter->GetDesc1(&desc))) {
+                for (UINT output_index = 0;; ++output_index) {
+                    IDXGIOutput* output = nullptr;
+                    if (FAILED(adapter->EnumOutputs(output_index, &output))) break;
+                    DXGI_OUTPUT_DESC info{};
+                    if (SUCCEEDED(output->GetDesc(&info)) && info.AttachedToDesktop) {
+                        outputs.push_back({ToAdapterLuid(desc.AdapterLuid),
+                            reinterpret_cast<uintptr_t>(info.Monitor), info.DeviceName, output_index});
+                    }
+                    output->Release();
+                }
+            }
+            adapter->Release();
         }
-
-        DISPLAYCONFIG_TARGET_DEVICE_NAME target_name{};
-        target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-        target_name.header.size = sizeof(target_name);
-        target_name.header.adapterId = path.targetInfo.adapterId;
-        target_name.header.id = path.targetInfo.id;
-        const LONG target_status = DisplayConfigGetDeviceInfo(
-            &target_name.header);
-        if (target_status != ERROR_SUCCESS) {
-            return {MonitorResolveError::MonitorTopologyChanged, {},
-                    Win32Diagnostic(
-                        "DisplayConfigGetDeviceInfo(GET_TARGET_NAME)",
-                        target_status)};
-        }
-        if (target_name.monitorDevicePath[0] == L'\0') continue;
-
-        MonitorTopologyEntry entry;
-        entry.monitor_device_path = NormalizeMonitorDevicePath(
-            target_name.monitorDevicePath);
-        entry.adapter_luid = ToAdapterLuid(path.sourceInfo.adapterId);
-        entry.source_id = path.sourceInfo.id;
-        entry.target_id = path.targetInfo.id;
-        entry.source_gdi_name = source_name.viewGdiDeviceName;
-        entry.friendly_name = target_name.monitorFriendlyDeviceName;
-        entry.active = path.targetInfo.targetAvailable != FALSE;
-
-        const auto handle = std::find_if(handles.begin(), handles.end(),
-            [&](const MonitorHandleEntry& candidate) {
-                return EqualInsensitive(candidate.gdi_name, entry.source_gdi_name);
-            });
-        if (handle != handles.end()) {
-            entry.hmonitor = handle->handle;
-            entry.primary = handle->primary;
-        } else {
-            entry.active = false;
-        }
-        result.monitors.push_back(std::move(entry));
+        factory->Release();
     }
+    return BuildLiveMonitorTopology(desktops, display_paths, outputs);
+}
 
-    result.topology_generation = TopologyGeneration(result.monitors);
-    for (auto& monitor : result.monitors) {
-        monitor.topology_generation = result.topology_generation;
+bool OpenSelectedDxgiAdapter(IDXGIFactory1* factory, const MonitorTopologyEntry& monitor,
+    IDXGIAdapter1** adapter, std::string& diagnostic) {
+    if (!factory || !adapter || !monitor.adapter_luid_available) {
+        diagnostic = "selected live monitor has no unambiguous adapter LUID";
+        return false;
     }
-    return result;
+    *adapter = nullptr;
+    for (UINT index = 0;; ++index) {
+        IDXGIAdapter1* candidate = nullptr;
+        if (FAILED(factory->EnumAdapters1(index, &candidate))) break;
+        DXGI_ADAPTER_DESC1 desc{};
+        if (SUCCEEDED(candidate->GetDesc1(&desc))
+            && ToAdapterLuid(desc.AdapterLuid) == monitor.adapter_luid) {
+            *adapter = candidate;
+            return true;
+        }
+        candidate->Release();
+    }
+    diagnostic = "selected live monitor adapter LUID is not present in DXGI";
+    return false;
 }
 
 MonitorResolveResult MonitorResolver::Resolve(
@@ -245,7 +333,7 @@ MonitorResolveResult MonitorResolver::Resolve(
 
     const MonitorTopologyEntry* match = nullptr;
     for (const auto& entry : topology.monitors) {
-        if (NormalizeMonitorDevicePath(entry.monitor_device_path) != selected) continue;
+        if (!MatchesMonitorSelection(entry, selected)) continue;
         if (match) {
             return {MonitorResolveError::MonitorTopologyChanged, {},
                     "monitor device path appears more than once in active topology"};
@@ -260,7 +348,10 @@ MonitorResolveResult MonitorResolver::Resolve(
         return {MonitorResolveError::MonitorDisconnected, {},
                 "selected monitor has no active HMONITOR"};
     }
-    return {MonitorResolveError::None, *match, {}};
+    auto resolved = *match;
+    // Retain the selection key across metadata becoming available/unavailable.
+    resolved.monitor_device_path = selected;
+    return {MonitorResolveError::None, resolved, {}};
 }
 
 bool MonitorResolver::IsCurrent(
@@ -280,7 +371,7 @@ DxgiOutputResolveResult ResolveDxgiOutput(
         const bool exact_name = !selected_monitor.source_gdi_name.empty()
             && EqualInsensitive(output.source_gdi_name,
                                 selected_monitor.source_gdi_name);
-        if (!exact_handle && !exact_name) continue;
+        if (!exact_handle || !exact_name) continue;
         if (match && match->output_index != output.output_index) {
             return {MonitorResolveError::OutputResolutionFailed, UINT32_MAX,
                     "selected monitor matched multiple DXGI outputs"};
@@ -301,7 +392,7 @@ bool OpenSelectedDxgiOutput(
     IDXGIOutput** output,
     DxgiOutputIdentity* output_identity,
     std::string& diagnostic) {
-    if (!factory || !adapter || !output) {
+    if (!factory || !adapter || !output || !selected_monitor.adapter_luid_available) {
         diagnostic = "invalid DXGI output resolver arguments";
         return false;
     }

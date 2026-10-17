@@ -17,8 +17,10 @@ def test_new_defaults_present(tmp_path, monkeypatch):
     assert sm.get('recording_bitrate_level') == 'medium'
     assert sm.get('error_notifications_enabled') is True
     assert sm.get('audio_capture_mode') == 'combined'
-    assert sm.get('clip_viewer_autoplay') is True
-    assert sm.get('clips_directory') == str(tmp_path / 'FTHR_Clips')
+    expected_clips = (tmp_path / 'Videos' / 'FTHR Clips'
+                      if sys.platform == 'win32'
+                      else tmp_path / 'FTHR_Clips')
+    assert sm.get('clips_directory') == str(expected_clips)
 
 
 def test_configured_clips_directory_is_resolved(tmp_path, monkeypatch):
@@ -75,18 +77,6 @@ def test_codec_preference_persists_across_restart(tmp_path, monkeypatch, codec):
     assert restarted.get('codec_pref') == codec
 
 
-def test_clip_viewer_autoplay_preference_persists_across_restart(
-        tmp_path, monkeypatch):
-    monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
-
-    first_run = SettingsManager()
-    first_run.set('clip_viewer_autoplay', False)
-    assert first_run.save_settings() is True
-
-    restarted = SettingsManager()
-    assert restarted.get('clip_viewer_autoplay') is False
-
-
 def test_extended_clips_are_not_in_defaults(tmp_path, monkeypatch):
     monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
     sm = SettingsManager()
@@ -135,3 +125,13 @@ def test_recording_and_library_paths_expand_environment(tmp_path, monkeypatch):
         assert recording_directory_from(sm) == (tmp_path / 'Recordings').resolve()
     settings['recording_directory'] = None
     assert recording_directory_from(sm) == (tmp_path / 'Library/Recordings').resolve()
+
+
+def test_missing_recording_directory_derives_from_clips_directory(tmp_path):
+    from types import SimpleNamespace
+    from core.settings_manager import recording_directory_from
+
+    settings = {'clips_directory': str(tmp_path / 'Library')}
+    manager = SimpleNamespace(get=lambda key, default=None: settings.get(key, default))
+
+    assert recording_directory_from(manager) == (tmp_path / 'Library' / 'Recordings')

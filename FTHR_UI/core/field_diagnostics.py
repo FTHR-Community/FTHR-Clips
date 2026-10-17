@@ -46,6 +46,11 @@ class DiagnosticError(str, Enum):
 
     ENGINE_START_FAILED = 'ENGINE_START_FAILED'
     ENGINE_HANDSHAKE_TIMEOUT = 'ENGINE_HANDSHAKE_TIMEOUT'
+    MONITOR_SELECTION_NOT_CONFIGURED = 'MONITOR_SELECTION_NOT_CONFIGURED'
+    MONITOR_SELECTION_STALE = 'MONITOR_SELECTION_STALE'
+    MONITOR_SELECTION_AMBIGUOUS = 'MONITOR_SELECTION_AMBIGUOUS'
+    MONITOR_SELECTION_NO_DISPLAYS = 'MONITOR_SELECTION_NO_DISPLAYS'
+    MONITOR_PERSIST_FAILED = 'MONITOR_PERSIST_FAILED'
     CAPTURE_OUTPUT_OPEN_FAILED = 'CAPTURE_OUTPUT_OPEN_FAILED'
     CAPTURE_DXGI_INIT_FAILED = 'CAPTURE_DXGI_INIT_FAILED'
     CAPTURE_WGC_INIT_FAILED = 'CAPTURE_WGC_INIT_FAILED'
@@ -248,45 +253,33 @@ def _cpu_model() -> str:
     model = platform.processor().strip()
     if model:
         return model
-    if sys.platform == 'win32':
-        return os.environ.get('PROCESSOR_IDENTIFIER', '').strip() or 'unavailable'
-    try:
-        for line in Path('/proc/cpuinfo').read_text(
-                encoding='utf-8', errors='replace').splitlines():
-            if line.lower().startswith('model name'):
-                return line.partition(':')[2].strip()
-    except OSError:
-        # CPU identity is optional support context; preserve the explicit
-        # unavailable value when procfs cannot be read.
-        pass
-    return 'unavailable'
+    return os.environ.get('PROCESSOR_IDENTIFIER', '').strip() or 'unavailable'
 
 
 def _memory_snapshot() -> dict[str, int | str]:
-    if sys.platform == 'win32':
-        class MemoryStatus(ctypes.Structure):
-            _fields_ = [
-                ('length', ctypes.c_ulong), ('memory_load', ctypes.c_ulong),
-                ('total_physical', ctypes.c_ulonglong),
-                ('available_physical', ctypes.c_ulonglong),
-                ('total_page_file', ctypes.c_ulonglong),
-                ('available_page_file', ctypes.c_ulonglong),
-                ('total_virtual', ctypes.c_ulonglong),
-                ('available_virtual', ctypes.c_ulonglong),
-                ('available_extended_virtual', ctypes.c_ulonglong),
-            ]
-        status = MemoryStatus()
-        status.length = ctypes.sizeof(status)
-        try:
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                return {
-                    'total_physical_bytes': int(status.total_physical),
-                    'available_physical_bytes': int(status.available_physical),
-                }
-        except (AttributeError, OSError):
-            # Older/non-Windows runtimes may not expose this ctypes API; the
-            # portable sysconf probe below remains available.
-            pass
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [
+            ('length', ctypes.c_ulong), ('memory_load', ctypes.c_ulong),
+            ('total_physical', ctypes.c_ulonglong),
+            ('available_physical', ctypes.c_ulonglong),
+            ('total_page_file', ctypes.c_ulonglong),
+            ('available_page_file', ctypes.c_ulonglong),
+            ('total_virtual', ctypes.c_ulonglong),
+            ('available_virtual', ctypes.c_ulonglong),
+            ('available_extended_virtual', ctypes.c_ulonglong),
+        ]
+    status = MemoryStatus()
+    status.length = ctypes.sizeof(status)
+    try:
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return {
+                'total_physical_bytes': int(status.total_physical),
+                'available_physical_bytes': int(status.available_physical),
+            }
+    except (AttributeError, OSError):
+        # Older/non-Windows runtimes may not expose this ctypes API; the
+        # portable sysconf probe below remains available.
+        pass
     try:
         page_size = os.sysconf('SC_PAGE_SIZE')
         return {
@@ -309,8 +302,6 @@ def _windows_version() -> dict[str, Any]:
         'edition': 'unavailable',
         'architecture': platform.machine() or platform.architecture()[0],
     }
-    if sys.platform != 'win32':
-        return result
     try:
         import winreg
         path = r'SOFTWARE\Microsoft\Windows NT\CurrentVersion'
@@ -413,38 +404,37 @@ def collect_hardware_snapshot(
 
 def process_memory_bytes() -> int | str:
     """Best-effort resident/private working set for bounded library snapshots."""
-    if sys.platform == 'win32':
-        class ProcessMemoryCounters(ctypes.Structure):
-            _fields_ = [
-                ('cb', ctypes.c_ulong), ('page_fault_count', ctypes.c_ulong),
-                ('peak_working_set_size', ctypes.c_size_t),
-                ('working_set_size', ctypes.c_size_t),
-                ('quota_peak_paged_pool_usage', ctypes.c_size_t),
-                ('quota_paged_pool_usage', ctypes.c_size_t),
-                ('quota_peak_non_paged_pool_usage', ctypes.c_size_t),
-                ('quota_non_paged_pool_usage', ctypes.c_size_t),
-                ('pagefile_usage', ctypes.c_size_t),
-                ('peak_pagefile_usage', ctypes.c_size_t),
-            ]
-        counters = ProcessMemoryCounters()
-        counters.cb = ctypes.sizeof(counters)
-        try:
-            kernel32 = ctypes.windll.kernel32
-            psapi = ctypes.windll.psapi
-            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-            psapi.GetProcessMemoryInfo.argtypes = [
-                ctypes.c_void_p, ctypes.POINTER(ProcessMemoryCounters),
-                ctypes.c_ulong,
-            ]
-            psapi.GetProcessMemoryInfo.restype = ctypes.c_int
-            handle = kernel32.GetCurrentProcess()
-            if psapi.GetProcessMemoryInfo(
-                    handle, ctypes.byref(counters), counters.cb):
-                return int(counters.working_set_size)
-        except (AttributeError, OSError):
-            # psapi is unavailable outside a compatible Windows runtime; the
-            # portable resource fallback below still provides best effort.
-            pass
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ('cb', ctypes.c_ulong), ('page_fault_count', ctypes.c_ulong),
+            ('peak_working_set_size', ctypes.c_size_t),
+            ('working_set_size', ctypes.c_size_t),
+            ('quota_peak_paged_pool_usage', ctypes.c_size_t),
+            ('quota_paged_pool_usage', ctypes.c_size_t),
+            ('quota_peak_non_paged_pool_usage', ctypes.c_size_t),
+            ('quota_non_paged_pool_usage', ctypes.c_size_t),
+            ('pagefile_usage', ctypes.c_size_t),
+            ('peak_pagefile_usage', ctypes.c_size_t),
+        ]
+    counters = ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(counters)
+    try:
+        kernel32 = ctypes.windll.kernel32
+        psapi = ctypes.windll.psapi
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        psapi.GetProcessMemoryInfo.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ProcessMemoryCounters),
+            ctypes.c_ulong,
+        ]
+        psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+        handle = kernel32.GetCurrentProcess()
+        if psapi.GetProcessMemoryInfo(
+                handle, ctypes.byref(counters), counters.cb):
+            return int(counters.working_set_size)
+    except (AttributeError, OSError):
+        # psapi is unavailable outside a compatible Windows runtime; the
+        # portable resource fallback below still provides best effort.
+        pass
     try:
         import resource
         value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
@@ -453,8 +443,12 @@ def process_memory_bytes() -> int | str:
         return 'unavailable'
 
 
-def qt_display_snapshot(app: Any) -> list[dict[str, Any]]:
-    """Collect non-serial display facts exposed by Qt."""
+def qt_display_snapshot(app: Any, window: Any = None) -> list[dict[str, Any]]:
+    """Collect bounded logical display facts exposed by Qt.
+
+    Qt geometry is logical/DIP geometry.  The physical size is explicitly an
+    estimate based on the screen DPR; it is not used for capture selection.
+    """
     if app is None:
         return []
     try:
@@ -468,7 +462,12 @@ def qt_display_snapshot(app: Any) -> list[dict[str, Any]]:
     for index, screen in enumerate(screens[:32]):
         try:
             geometry = screen.geometry()
+            available_getter = getattr(screen, 'availableGeometry', None)
+            available = (available_getter() if callable(available_getter)
+                         else geometry)
             name = str(screen.name() or f'display-{index}')
+            dpr = round(float(screen.devicePixelRatio()), 3)
+            logical_dpi = round(float(screen.logicalDotsPerInch()), 3)
             result.append({
                 'index': index,
                 'name': name[:128],
@@ -478,10 +477,23 @@ def qt_display_snapshot(app: Any) -> list[dict[str, Any]]:
                 'desktop_coordinates': {
                     'x': int(geometry.x()), 'y': int(geometry.y()),
                 },
+                'logical_geometry': {
+                    'x': int(geometry.x()), 'y': int(geometry.y()),
+                    'width': int(geometry.width()), 'height': int(geometry.height()),
+                },
+                'logical_available_geometry': {
+                    'x': int(available.x()), 'y': int(available.y()),
+                    'width': int(available.width()), 'height': int(available.height()),
+                },
                 'refresh_hz': round(float(screen.refreshRate()), 3),
                 'primary': screen is primary,
-                'device_pixel_ratio': round(float(screen.devicePixelRatio()), 3),
-                'logical_dpi': round(float(screen.logicalDotsPerInch()), 3),
+                'device_pixel_ratio': dpr,
+                'logical_dpi': logical_dpi,
+                'physical_size_estimate': {
+                    'width': round(float(geometry.width()) * dpr),
+                    'height': round(float(geometry.height()) * dpr),
+                    'basis': 'logical_geometry × device_pixel_ratio estimate',
+                },
                 'hdr': unavailable('not_exposed_by_qt'),
                 'owning_adapter': unavailable('engine_mapping_required'),
             })
@@ -490,6 +502,20 @@ def qt_display_snapshot(app: Any) -> list[dict[str, Any]]:
                 'index': index,
                 'status': unavailable(type(error).__name__.lower()),
             })
+    # Awareness is a window/process property rather than a screen property.
+    # Keep it on each display record for compatibility with simple JSONL
+    # consumers, but only query it when a realized window was supplied.
+    if window is not None:
+        try:
+            from core.windows_dpi import dpi_awareness_snapshot
+            awareness = dpi_awareness_snapshot(window)
+            for display in result:
+                if isinstance(display, dict):
+                    display['windows_dpi_awareness'] = awareness
+        except Exception:
+            # Diagnostic enrichment is best-effort and must never prevent an
+            # explicitly requested support bundle from being exported.
+            pass
     return _sanitize(result)
 
 
