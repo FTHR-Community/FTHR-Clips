@@ -305,7 +305,7 @@ def _load_xinput_get_state():
             get_state.restype = ctypes.c_uint
             return get_state
         except Exception:
-            continue
+            continue  # This XInput version is absent; try the next one.
     return None
 
 
@@ -643,7 +643,7 @@ class HotkeyManager(QObject):
                 if tmp.exists():
                     tmp.unlink()
             except OSError:
-                pass
+                pass  # The save failure above is already reported; a stray tmp is harmless.
             return False
     
     def set_hotkey(self, action: str, key: str, device: str = 'keyboard'):
@@ -921,7 +921,7 @@ class HotkeyManager(QObject):
             with open(self._portal_cleared_file(), encoding='utf-8') as f:
                 data = json.load(f)
         except FileNotFoundError:
-            return
+            return  # Nothing was ever cleared on this desktop.
         except (OSError, ValueError) as exc:
             print(f'[Hotkey] Ignoring unreadable cleared-shortcut list: {exc}')
             return
@@ -1083,7 +1083,6 @@ class HotkeyManager(QObject):
                            for action in self.hotkeys)
             print('[Hotkey] Native Windows registrations '
                   f'{len(self._windows_hotkey_combos)}/{expected}')
-
 
         self._ensure_controller_polling()
 
@@ -1528,16 +1527,6 @@ class HotkeyManager(QObject):
         self._controller_active_actions = matching
 
 
-
-
-
-
-
-
-
-
-
-
     def _warn_if_linux_hotkeys_dead(self):
         """The keyboard fallback may lack Linux input permissions. Compositor
         socket binds need separate setup, so report when neither path is usable.
@@ -1551,7 +1540,7 @@ class HotkeyManager(QObject):
             from core.compositor import detect_compositor
             comp = detect_compositor()
         except Exception:
-            pass
+            pass  # Unknown desktop: fall through to the generic setup advice.
         if comp == 'hyprland':
             return   # binds are auto-written; hotkeys work via the socket
         # Be specific about which desktop this is and what to actually do.
@@ -1669,7 +1658,7 @@ class HotkeyManager(QObject):
                 if _FTHR_HYPR_CONF.read_text() == text:
                     return False
             except OSError:
-                pass
+                pass  # No readable previous file: write a fresh one below.
             _FTHR_HYPR_CONF.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(text)
             os.replace(str(tmp), str(_FTHR_HYPR_CONF))
@@ -1680,7 +1669,7 @@ class HotkeyManager(QObject):
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
-                pass
+                pass  # The write failure is already logged; a stray tmp is harmless.
             return False
 
     def _write_hyprland_lua_config(self, path: Path | None = None) -> bool:
@@ -1732,7 +1721,7 @@ class HotkeyManager(QObject):
         try:
             content = _HYPR_CONF.read_text()
         except Exception:
-            return
+            return  # No readable hyprland.conf: never create or edit one blindly.
         # Already sourced, or user has manual FTHR binds — either way, skip.
         if ('fthr-hotkeys.conf' in content or 'fthr_hotkey.sock' in content
                 or 'hotkey.sock' in content):
@@ -1753,7 +1742,7 @@ class HotkeyManager(QObject):
             from core.compositor import detect_compositor
             comp = detect_compositor()
         except Exception:
-            return
+            return  # Unknown desktop: compositor binds are Hyprland-only.
         if comp != 'hyprland':
             return
         if _HYPR_CUSTOM_LUA.exists() or _HYPR_LUA_CONF.exists():
@@ -1827,6 +1816,7 @@ class HotkeyManager(QObject):
 
         self._socket_path = sock_path
 
+        srv = None
         try:
             srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             # Owner-only from the moment the node appears. The directory is
@@ -1848,6 +1838,9 @@ class HotkeyManager(QObject):
             srv.settimeout(1.0)
         except Exception as e:
             print(f"[Hotkey] Socket server failed to start: {e}")
+            if srv is not None:
+                # Do not leak the descriptor of a socket that never served.
+                srv.close()
             self.error_occurred.emit(
                 'HOTKEY SERVER FAILED',
                 'Port in use or permission denied. Hotkeys will not work.',
@@ -1872,9 +1865,9 @@ class HotkeyManager(QObject):
                 try:
                     conn, _ = srv.accept()
                 except socket.timeout:
-                    continue
+                    continue  # Wake up to re-check _socket_running.
                 except Exception:
-                    break
+                    break  # Socket closed under us (shutdown); stop serving.
                 with conn:
                     try:
                         # Single recv — all commands fit in 256 bytes.
@@ -1901,7 +1894,7 @@ class HotkeyManager(QObject):
             try:
                 os.unlink(sock_path)
             except FileNotFoundError:
-                pass
+                pass  # Already removed; nothing left to clean up.
 
         self._socket_thread = threading.Thread(target=_serve, daemon=True, name='fthr-hotkey-socket')
         self._socket_thread.start()
