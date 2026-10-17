@@ -2831,9 +2831,13 @@ class HotkeyPopup(_PopupPanel):
             ('SCREENSHOT', 'save_screenshot'),
             ('CONFIRM GAME', 'confirm_game_detection'),
             ('DISMISS GAME', 'dismiss_game_detection'),
-            ('START RECORDING', 'start_recording'),
-            ('STOP RECORDING', 'stop_recording'),
         ]
+        if sys.platform == 'win32':
+            # The Linux engine has no manual recorder yet.
+            actions.extend([
+                ('START RECORDING', 'start_recording'),
+                ('STOP RECORDING', 'stop_recording'),
+            ])
         from core.hotkey_manager import custom_clip_seconds
         custom_actions = sorted(
             (custom_clip_seconds(action), action)
@@ -3758,7 +3762,10 @@ class MainWindow(QMainWindow):
             'Start a manual recording while replay capture stays active')
         set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(False)))
         self.record_btn.clicked.connect(self._toggle_manual_recording)
-        pass
+        if sys.platform != 'win32':
+            self.record_btn.setEnabled(False)
+            self.record_btn.setToolTip(
+                'Manual recording currently requires the Windows capture engine')
         mc.insertWidget(0, self.record_btn, 1)
 
         self.hotkey_popup = HotkeyPopup(self.hotkey_manager, self)
@@ -6165,7 +6172,10 @@ class MainWindow(QMainWindow):
             self._stop_manual_recording()
 
     def _start_manual_recording(self):
-        pass
+        if sys.platform != 'win32':
+            # The Linux engine has no continuous recorder; never ask it for a
+            # recording it cannot write.
+            return
         if self._save_state.is_busy():
             self.push_error(
                 'WAIT FOR CLIP SAVE',
