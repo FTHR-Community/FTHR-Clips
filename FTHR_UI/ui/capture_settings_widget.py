@@ -83,9 +83,8 @@ def _enumerate_capturable_windows():
     is_game is a borderless/fullscreen heuristic.
     """
     if sys.platform != 'win32':
-        # Per-window targeting does not exist on Linux; Linux window listing
-        # for game detection comes back with the game-detection port.
-        return []
+        from core.game_detector import _enumerate_linux_windows
+        return _enumerate_linux_windows()
 
     user32 = ctypes.windll.user32
     GWL_STYLE    = -16
