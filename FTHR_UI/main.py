@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import threading
+from html import escape
 from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime
@@ -110,6 +111,7 @@ from PySide6.QtCore import (
     QPropertyAnimation, QEasingCurve,
 )
 from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, QColor, QIcon, QBrush, QPolygonF, QPalette, QAction
+from ui.window_preview import WindowPreview
 
 from core import crash_logging
 crash_logging.install_qt_message_handler()
@@ -1813,6 +1815,10 @@ class SourcePopup(_PopupPanel):
         win_row.addWidget(self.refresh_btn)
         layout.addLayout(win_row)
 
+        self.window_preview = WindowPreview(self)
+        self.window_preview.setVisible(self.cur_mode == 'window')
+        layout.addWidget(self.window_preview)
+
         # Monitor selector (desktop mode only)
         self.monitor_combo = _DropdownCombo()
         self.monitor_combo.setStyleSheet(_COMBO_STYLE)
@@ -1887,6 +1893,7 @@ class SourcePopup(_PopupPanel):
         show = (self.cur_mode == 'window')
         self.window_combo.setVisible(show)
         self.refresh_btn.setVisible(show)
+        self.window_preview.setVisible(show)
         self.monitor_combo.setVisible(not show)
         self._fit_to_visible_content()
 
@@ -1894,9 +1901,27 @@ class SourcePopup(_PopupPanel):
         layout = self.layout()
         if layout is None:
             return
+        if self.cur_mode == 'window':
+            self.window_preview.set_compact_for_short_screen(False)
+            self.window_preview.set_preferred_height(180)
         layout.invalidate()
         layout.activate()
         hint = self.sizeHint()
+        screen = (QApplication.screenAt(self.frameGeometry().center())
+                  or QApplication.primaryScreen())
+        if screen is not None and self.cur_mode == 'window':
+            available_height = max(120, screen.availableGeometry().height() - 16)
+            if hint.height() > available_height:
+                self.window_preview.set_compact_for_short_screen(True)
+                layout.invalidate()
+                layout.activate()
+                hint = self.sizeHint()
+                natural_preview = self.window_preview.maximumHeight()
+                self.window_preview.set_preferred_height(
+                    max(88, natural_preview - (hint.height() - available_height) - 4))
+                layout.invalidate()
+                layout.activate()
+                hint = self.sizeHint()
         self.setMinimumWidth(300)
         self.resize(max(300, hint.width()), hint.height())
 
@@ -1918,6 +1943,7 @@ class SourcePopup(_PopupPanel):
             }}
         ''')
         self.restart_btn.setStyleSheet(button_primary_qss())
+        self.window_preview.refresh_theme()
 
     def show_below(self, button: QWidget):
         self._fit_to_visible_content()
@@ -1954,17 +1980,25 @@ class SourcePopup(_PopupPanel):
                 self.window_combo.addItem(w['icon'], label)
             else:
                 self.window_combo.addItem(label)
+            self.window_combo.setItemData(
+                i, escape(str(w.get('title', '') or '')),
+                Qt.ItemDataRole.ToolTipRole)
             if w['hwnd'] == self.cur_hwnd:
                 select_idx = i
         if self._window_list:
             self.window_combo.setCurrentIndex(select_idx)
             self.cur_hwnd = self._window_list[select_idx]['hwnd']
             self.sm.set('target_hwnd', self.cur_hwnd)
+            self.window_preview.set_window(
+                self._window_list[select_idx], force_refresh=True)
+        else:
+            self.window_preview.set_window(None)
         self.window_combo.blockSignals(False)
 
     def _on_window_selected(self, idx):
         if 0 <= idx < len(self._window_list):
             self.cur_hwnd = self._window_list[idx]['hwnd']
+            self.window_preview.set_window(self._window_list[idx])
             self.sm.set('target_window_name',
                         self._window_list[idx].get('display_name', ''))
             self.sm.set('target_hwnd', self.cur_hwnd)
@@ -1998,6 +2032,9 @@ class SourcePopup(_PopupPanel):
                 self.window_combo.addItem(icon, label)
             else:
                 self.window_combo.addItem(label)
+            self.window_combo.setItemData(
+                existing, escape(str(window.get('title', '') or '')),
+                Qt.ItemDataRole.ToolTipRole)
 
         self.cur_mode = 'window'
         self.cur_hwnd = hwnd
@@ -2008,6 +2045,10 @@ class SourcePopup(_PopupPanel):
         self.window_combo.blockSignals(True)
         self.window_combo.setCurrentIndex(existing)
         self.window_combo.blockSignals(False)
+        self.window_combo.setItemData(
+            existing, escape(str(self._window_list[existing].get('title', '') or '')),
+            Qt.ItemDataRole.ToolTipRole)
+        self.window_preview.set_window(self._window_list[existing])
 
         self.sm.set('capture_mode', 'window')
         self.sm.set('target_hwnd', hwnd)
@@ -2021,6 +2062,7 @@ class SourcePopup(_PopupPanel):
         """Switch the persisted capture source back to the desktop."""
         self.cur_mode = 'desktop'
         self.cur_hwnd = 0
+        self.window_preview.set_window(None)
         self.mode_combo.blockSignals(True)
         self.mode_combo.setCurrentIndex(0)
         self.mode_combo.blockSignals(False)
