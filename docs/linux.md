@@ -287,13 +287,13 @@ launch adds a `===== FTHR Clips <version> started` line.
 - **No new start line:** the AppImage failed before the app ran. Check FUSE
   with `command -v fusermount3 fusermount; ls -l /dev/fuse`, or bypass it with
   `APPIMAGE_EXTRACT_AND_RUN=1 ./FTHRClips-<version>-x86_64.AppImage`.
-- **A start line followed by `[Qt fatal]` or `Fatal Python error`:** the
-  graphics stack failed. Qt messages and native crash tracebacks are written
-  to this log. On Wayland the app falls back to XWayland when the Wayland
+- **A start line followed by `[Qt fatal]`, or a traceback in
+  `~/.fthr/logs/fthr-crash.log`:** the graphics stack failed. Qt messages are
+  written to `fthr.log`; native crash tracebacks go to `fthr-crash.log`. On Wayland the app falls back to XWayland when the Wayland
   plugin cannot load; to force XWayland, run
   `QT_QPA_PLATFORM=xcb ./FTHRClips-<version>-x86_64.AppImage`.
 
-Attach `fthr.log` and, if capture started, the newest
+Attach `fthr.log`, `fthr-crash.log` if it exists and, if capture started, the newest
 `~/.fthr/diagnostics/<session>/engine.log` to a bug report.
 
 ### No video

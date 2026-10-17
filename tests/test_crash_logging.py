@@ -52,6 +52,10 @@ def test_enable_fault_handler_without_a_log_file_is_a_no_op():
     assert crash_logging.enable_fault_handler(None) is False
 
 
+def test_enable_fault_handler_with_an_unwritable_path_is_a_no_op(tmp_path):
+    assert crash_logging.enable_fault_handler(tmp_path / 'missing' / 'crash.log') is False
+
+
 def test_qt_warning_reaches_the_python_stderr_tee(tmp_path):
     pytest.importorskip('PySide6.QtCore')
     log = tmp_path / 'fthr.log'
@@ -65,14 +69,19 @@ def test_qt_warning_reaches_the_python_stderr_tee(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='POSIX signal crash')
-def test_segfault_leaves_a_traceback_in_the_log(tmp_path):
+def test_segfault_leaves_a_traceback_in_the_crash_log(tmp_path):
+    # A file of its own: fthr.log is renamed by the RotatingFileHandler, which
+    # would leave faulthandler's descriptor on fthr.log.1 or an unlinked file.
     log = tmp_path / 'fthr.log'
-    result = _run("""
-        assert crash_logging.enable_fault_handler(sys.stderr._log)
+    crash = tmp_path / 'fthr-crash.log'
+    result = _run(f"""
+        from pathlib import Path
+        assert crash_logging.enable_fault_handler(Path({str(crash)!r}))
         import ctypes
         ctypes.string_at(0)
     """, log)
     assert result.returncode != 0
-    text = log.read_text(encoding='utf-8')
+    text = crash.read_text(encoding='utf-8')
+    assert '===== started' in text
     assert 'Fatal Python error' in text
     assert 'Segmentation fault' in text

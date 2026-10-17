@@ -4,13 +4,21 @@ Python's stdout/stderr tee only sees text written through ``sys.stderr``.
 Qt writes its warnings and fatal errors (for example "could not load the Qt
 platform plugin") straight to file descriptor 2, and a segfault in native code
 prints nothing at all, so a launch that dies before the window appears left
-the log ending at the start banner. Both hooks write to the same file.
+the log ending at the start banner.
+
+Qt messages go through the fthr.log tee. Crash tracebacks go to their own
+fthr-crash.log: faulthandler writes through a raw file descriptor, and fthr.log
+is renamed by the diagnostics RotatingFileHandler, after which that descriptor
+would point at fthr.log.1 or at an unlinked file.
 """
 
 from __future__ import annotations
 
 import faulthandler
+import os
 import sys
+from datetime import datetime
+from pathlib import Path
 
 _QT_LEVELS = {
     'QtDebugMsg': 'debug',
@@ -23,20 +31,32 @@ _QT_LEVELS = {
 # faulthandler writes through the file descriptor at crash time; keep the
 # file object alive for the life of the process.
 _fault_file = None
+_CRASH_LOG_MAX_BYTES = 1024 * 1024
 
 
-def enable_fault_handler(log_file) -> bool:
-    """Dump Python tracebacks for SIGSEGV/SIGABRT/SIGBUS/SIGFPE/SIGILL."""
+def enable_fault_handler(crash_log: Path | None) -> bool:
+    """Dump Python and C tracebacks for SIGSEGV/SIGABRT/SIGBUS/SIGFPE/SIGILL.
+
+    ``crash_log`` is owned by this module alone; it is rotated only here, at
+    startup, so the descriptor faulthandler holds never goes stale.
+    """
     global _fault_file
-    if log_file is None:
+    if crash_log is None:
         return False
     try:
-        faulthandler.enable(file=log_file, all_threads=True)
+        crash_log = Path(crash_log)
+        if crash_log.exists() and crash_log.stat().st_size > _CRASH_LOG_MAX_BYTES:
+            crash_log.replace(crash_log.with_suffix('.log.old'))
+        handle = open(crash_log, 'a', encoding='utf-8', errors='replace')
+        handle.write(f'===== started {datetime.now():%Y-%m-%d %H:%M:%S} '
+                     f'pid {os.getpid()} =====\n')
+        handle.flush()
+        faulthandler.enable(file=handle, all_threads=True)
     except (AttributeError, OSError, ValueError, RuntimeError):
-        # No usable file descriptor (closed log, frozen GUI build without a
-        # real file): crash tracebacks are a diagnostic extra, not required.
+        # No writable log directory or no usable descriptor: crash
+        # tracebacks are a diagnostic extra, not required to run.
         return False
-    _fault_file = log_file
+    _fault_file = handle
     return True
 
 

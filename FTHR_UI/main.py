@@ -87,7 +87,7 @@ def _setup_file_logging():
         from core import diagnostics
         diagnostics.configure(log_file=log_file)
         from core import crash_logging
-        crash_logging.enable_fault_handler(getattr(sys.stderr, '_log', None))
+        crash_logging.enable_fault_handler(log_dir / 'fthr-crash.log')
     except Exception as e:
         # Log setup failed - report on stderr before redirection
         print(f'[Startup] File logging unavailable: {type(e).__name__}: {e}',

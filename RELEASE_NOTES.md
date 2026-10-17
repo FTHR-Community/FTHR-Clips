@@ -1,8 +1,8 @@
 # Unreleased (Linux)
 
 - A launch that fails before the window appears now explains itself:
-  Qt's warnings and fatal errors and native crash tracebacks are written to
-  `~/.fthr/logs/fthr.log`, and on Wayland the AppImage falls back to XWayland
+  Qt's warnings and fatal errors are written to `~/.fthr/logs/fthr.log` and
+  native crash tracebacks to `~/.fthr/logs/fthr-crash.log`, and on Wayland the AppImage falls back to XWayland
   when Qt's Wayland plugin cannot load instead of exiting (#77).
 
 # FTHR Clips 1.1.3-alpha
