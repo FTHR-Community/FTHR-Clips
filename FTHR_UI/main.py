@@ -32,7 +32,9 @@ _BACKGROUND_NO_WINDOW = {
 # Windows playback path is Media Foundation; it delivers every source frame in
 # the same smoke clip and reaches a stable handle/memory plateau. Keep an
 # explicit environment override available for backend diagnostics.
-os.environ.setdefault('QT_MEDIA_BACKEND', 'windows')
+# Linux has no Media Foundation backend; Qt keeps its FFmpeg plugin there.
+if sys.platform == 'win32':
+    os.environ.setdefault('QT_MEDIA_BACKEND', 'windows')
 
 
 # File logging - all output also goes to ~/.fthr/logs/fthr.log
@@ -90,6 +92,10 @@ def _setup_file_logging():
         # Structured logging uses the same file; print() still works
         from core import diagnostics
         diagnostics.configure(log_file=log_file)
+        if sys.platform != 'win32':
+            # Native crashes (Qt, drivers) leave a Python stack here (#79).
+            from core import crash_logging
+            crash_logging.enable_fault_handler(log_dir / 'fthr-crash.log')
     except Exception as e:
         # Log setup failed - report on stderr before redirection
         print(f'[Startup] File logging unavailable: {type(e).__name__}: {e}',
@@ -112,6 +118,19 @@ from PySide6.QtCore import (QUrl,
     QPropertyAnimation, QEasingCurve, Slot,
 )
 from PySide6.QtGui import QDesktopServices, QImage, QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, QColor, QIcon, QBrush, QPalette, QAction
+
+if sys.platform != 'win32':
+    # Route Qt warnings and fatals into the log next to the fault handler.
+    from core import crash_logging
+    crash_logging.install_qt_message_handler()
+    from core import linux_runtime, linux_tools
+    from core.compositor import detect_compositor
+    from core.x11_monitor import (
+        X11MonitorError,
+        is_native_x11_session,
+        resolve_x11_capture_target,
+    )
+    from ui.frameless_window_linux import install_resize_filter
 
 from version import __version__ as APP_VERSION, APP_NAME
 from core.capture_bridge import CaptureBridge
@@ -13711,17 +13730,22 @@ def _prewarm_heavy_modules():
     except Exception as e:
         print(f'[Prewarm] ffmpeg unavailable: {e}')
 
-    try:
-        from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-        # Pays the one-time cost of MediaFoundation init on Windows.
-        _warm_player = QMediaPlayer()
-        _warm_audio  = QAudioOutput()
-        _warm_player.setAudioOutput(_warm_audio)
-    except Exception as e:
-        print(f'[Prewarm] Qt multimedia init failed: {e}')
+    if sys.platform == 'win32':
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+            # Pays the one-time cost of MediaFoundation init on Windows.
+            _warm_player = QMediaPlayer()
+            _warm_audio  = QAudioOutput()
+            _warm_player.setAudioOutput(_warm_audio)
+        except Exception as e:
+            print(f'[Prewarm] Qt multimedia init failed: {e}')
 
 
 def main():
+    if sys.platform != 'win32':
+        # Children (engine, ffmpeg, grim, hyprctl) must see the host's
+        # library path, not PyInstaller's _internal; see linux_runtime.
+        linux_runtime.restore_library_search_path_for_children()
     # When the frozen Windows exe is relaunched as the capture-card subprocess,
     # route into the card process instead of the main application.
     if '--card-process' in sys.argv:
@@ -13733,7 +13757,8 @@ def main():
     print(f'Main.py successfully initiated background={background_start}')
 
     # Log resolved helper paths so missing tools and PATH overrides are diagnosable.
-    pass
+    if sys.platform != 'win32':
+        print(linux_tools.report())
 
     # A second instance is destructive, not just redundant: two capture
     # engines fight over NVENC and over the single-writer shared-memory
@@ -13745,7 +13770,8 @@ def main():
         print('[FTHR] Another instance is already running — exiting.')
         configure_qt_style()
         _app = QApplication(sys.argv)
-        pass
+        if sys.platform != 'win32':
+            _app.setDesktopFileName('fthr-clips')
         from core.instance_activation import request_existing_instance_activation
         if request_existing_instance_activation():
             print('[Lifecycle] ExistingInstanceActivated')
@@ -13765,10 +13791,17 @@ def main():
 
     diagnostic_session = start_diagnostic_session(APP_VERSION)
     diagnostic_session.collect_hardware_async()
+    if HotkeyManager.uses_portal_shortcuts():
+        # QApplication registers its app id with the host portal as it
+        # starts, which xdg-desktop-portal refuses until fthr-clips.desktop
+        # exists; install it first so the very first launch is identified too.
+        linux_runtime.ensure_desktop_entry()
     configure_qt_style()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    pass
+    if sys.platform != 'win32':
+        # Match the installed desktop entry for Wayland taskbar/icon grouping.
+        app.setDesktopFileName('fthr-clips')
     app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)
     app_icon = _load_icon('favicon.ico', 32)
