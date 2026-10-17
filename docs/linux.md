@@ -135,8 +135,12 @@ screen capture on a real desktop.
 
 ## Audio
 
-FTHR records desktop audio from the default PulseAudio sink's monitor source.
-This works with PipeWire's PulseAudio compatibility layer. The default
+FTHR records desktop audio from the default PulseAudio sink's monitor source,
+and follows the default when it changes (headphones, Bluetooth). When a
+playback device is chosen in Settings, the engine records that sink's monitor
+instead and stays on it; if the sink no longer exists it logs this and uses the
+default. `FTHRclips --list-playback-devices` prints the sinks it can see. This
+works with PipeWire's PulseAudio compatibility layer. The default
 microphone/source is not used as desktop audio.
 
 If the audio service cannot be opened, video capture may continue without audio.
