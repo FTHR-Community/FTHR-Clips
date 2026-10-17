@@ -285,9 +285,11 @@ jobs:
         run: python tools/build_optional_uploaders.py
 
       - name: Test built optional upload packages
+        # The python matrix has no sealed package, so the frozen-executable
+        # tests (including a real SFTP round trip) run here, after the build.
         run: >
-          python -m pytest tests/test_uploader_plugin_boundary.py
-          -k "test_built_" --tb=short
+          python -m pytest tests/test_uploader_plugin_boundary.py tests/test_sftp_provider.py
+          -k "test_built_ or test_frozen_" --tb=short
 
       - name: Build and verify the Windows bundle
         shell: pwsh

@@ -392,7 +392,14 @@ def test_core_never_persists_password(tmp_path, monkeypatch):
     assert 'secret' not in (tmp_path / 'settings.json').read_text()
 
 
+_BUILT_WINDOWS_UPLOADER = (
+    Path(__file__).resolve().parents[1] / 'plugin-packages' / 'FTHR-Uploader.fthrplugin')
+
+
 @pytest.mark.skipif(sys.platform != 'win32', reason='Windows frozen uploader')
+@pytest.mark.skipif(
+    not _BUILT_WINDOWS_UPLOADER.is_file(),
+    reason='build the package with tools/build_optional_uploaders.py first')
 def test_frozen_extension_connects_to_real_sftp(server, tmp_path, monkeypatch):
     from core import upload_manager
     from test_uploader_plugin_boundary import _CoreSettings
