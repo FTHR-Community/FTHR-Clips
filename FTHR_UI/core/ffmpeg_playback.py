@@ -163,7 +163,7 @@ class _AudioPullDevice(QIODevice):
 
 
 def _bridge_candidates() -> tuple[Path, ...]:
-    suffix = 'FTHRPlaybackMixer.dll'
+    suffix = 'FTHRPlaybackMixer.dll' if sys.platform == 'win32' else 'libFTHRPlaybackMixer.so'
     candidates: list[Path] = []
     bundle = getattr(sys, '_MEIPASS', None)
     if bundle:
@@ -179,6 +179,7 @@ def _bridge_candidates() -> tuple[Path, ...]:
         root / 'FTHRcapture' / 'FTHRPlaybackMixer' / 'x64' / 'Upgrade' / suffix,
         root / 'FTHRcapture' / 'FTHRPlaybackMixer' / 'x64' / 'Release' / suffix,
         root / 'FTHRcapture' / 'x64' / 'Release' / suffix,
+        root / 'FTHRcapture_linux' / 'build' / suffix,
     )
 
     def _modified(path: Path) -> int:
@@ -198,7 +199,7 @@ def _load_bridge() -> ctypes.CDLL:
         if not path.is_file():
             continue
         try:
-            if hasattr(os, 'add_dll_directory'):
+            if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
                 # The bridge and FFmpeg runtime are either together in the
                 # frozen ``engine`` directory or beside the development engine.
                 for directory in (path.parent,

@@ -1,12 +1,60 @@
+import json
+import subprocess
+import sys
 import threading
 from PySide6.QtCore import QObject, QTimer, Signal
 
 
 def _get_active_window_title() -> str | None:
-    """Read the foreground window title through the native Windows detector."""
+    """Return the active window title, or None if unavailable."""
+    if sys.platform != 'win32':
+        return _get_linux_active_window_title()
     from core.game_detector import get_foreground_window
     window = get_foreground_window()
     return window.title if window else None
+
+
+def _get_linux_active_window_title() -> str | None:
+    """Return the active window title on Linux, or None if unavailable.
+
+    - Hyprland: hyprctl activewindow -j
+    - All others: xdotool getactivewindow + getwindowname (covers XWayland games)
+    Returns None if the tool is unavailable or call fails.
+    """
+    from core import linux_tools
+    from core.compositor import detect_compositor
+
+    comp = detect_compositor()
+
+    if comp == 'hyprland':
+        try:
+            r = subprocess.run(
+                [linux_tools.require('hyprctl'), 'activewindow', '-j'],
+                capture_output=True, timeout=1,
+            )
+            data = json.loads(r.stdout.decode(errors='replace'))
+            return data.get('title', '') or data.get('class', '') or None
+        except Exception:
+            # Missing hyprctl, a timeout or non-JSON output: focus unknown.
+            return None
+
+    if not linux_tools.available('xdotool'):
+        return None
+
+    try:
+        r = subprocess.run([linux_tools.require('xdotool'), 'getactivewindow'],
+                           capture_output=True, timeout=1)
+        if r.returncode != 0:
+            return None
+        wid = r.stdout.decode().strip()
+        r2 = subprocess.run([linux_tools.require('xdotool'), 'getwindowname', wid],
+                            capture_output=True, timeout=1)
+        if r2.returncode != 0:
+            return None
+        return r2.stdout.decode().strip() or None
+    except Exception:
+        # xdotool vanished or hung past the timeout: focus unknown.
+        return None
 
 
 class FocusMonitor(QObject):
