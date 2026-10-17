@@ -64,7 +64,111 @@ def _bundle(
     return path
 
 
-def test_uploader_installs_only_after_consent(tmp_path):
+def test_linux_uploader_spec_uses_linux_bundle_and_entrypoint(monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    spec = core_uploader._uploader_spec()
+    assert spec.filename == 'FTHR-Uploader-linux.fthrplugin'
+    assert spec.entrypoint == 'FTHR-Uploader'
+    assert spec.expected_sha256 == core_uploader.EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256
+
+
+def test_windows_uploader_spec_is_unchanged(monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'win32')
+    spec = core_uploader._uploader_spec()
+    assert spec.filename == 'FTHR-Uploader.fthrplugin'
+    assert spec.entrypoint == 'FTHR Uploader.exe'
+    assert spec.expected_sha256 == core_uploader.EXPECTED_UPLOADER_BUNDLE_SHA256
+
+
+def test_platform_data_root_uses_xdg_data_home_on_linux(monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    monkeypatch.setenv('XDG_DATA_HOME', '/tmp/fthr-xdg-data')
+    monkeypatch.delenv('LOCALAPPDATA', raising=False)
+    assert core_uploader._platform_data_root() == Path('/tmp/fthr-xdg-data')
+
+
+def test_platform_data_root_defaults_to_local_share_on_linux(monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    monkeypatch.delenv('XDG_DATA_HOME', raising=False)
+    assert core_uploader._platform_data_root() == Path.home() / '.local' / 'share'
+
+
+def test_linux_manifest_without_linux_binding_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    bundle = _bundle(
+        tmp_path,
+        filename='FTHR-Uploader-linux.fthrplugin',
+        plugin_id=core_uploader.UPLOADER_PLUGIN_ID,
+        plugin_version=core_uploader.UPLOADER_PLUGIN_VERSION,
+        entrypoint='FTHR-Uploader',
+        legal_versions={
+            'terms_version': core_uploader.UPLOADER_TERMS_VERSION,
+            'privacy_version': core_uploader.UPLOADER_PRIVACY_VERSION,
+        },
+    )
+    uploader_root = tmp_path / 'installed-uploader'
+    manager = core_uploader.UploadManager(_CoreSettings())
+    with (
+            patch.object(manager, 'bundle_path', return_value=bundle),
+            patch.object(core_uploader, 'EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256', ''),
+            patch.object(core_uploader, '_UPLOADER_ROOT', uploader_root),
+            patch.object(
+                core_uploader, '_UPLOADER_ACTIVATION_FILE',
+                uploader_root / 'activation.json'),
+            patch.object(core_uploader, '_SETTINGS_FILE', tmp_path / 'settings.json')):
+        with pytest.raises(RuntimeError, match='no verified Linux'):
+            manager.uploader_legal_text()
+        ok, message = manager.activate_plugin(
+            core_uploader.UPLOADER_TERMS_VERSION,
+            core_uploader.UPLOADER_PRIVACY_VERSION,
+        )
+    assert not ok
+    assert 'no verified Linux' in message
+    assert not uploader_root.exists() or not any(uploader_root.iterdir())
+
+
+def test_linux_activation_restores_uploader_executable_bit(tmp_path, monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
+    uploader_bundle = _bundle(
+        tmp_path,
+        filename='FTHR-Uploader-linux.fthrplugin',
+        plugin_id=core_uploader.UPLOADER_PLUGIN_ID,
+        plugin_version=core_uploader.UPLOADER_PLUGIN_VERSION,
+        entrypoint='FTHR-Uploader',
+        legal_versions={
+            'terms_version': core_uploader.UPLOADER_TERMS_VERSION,
+            'privacy_version': core_uploader.UPLOADER_PRIVACY_VERSION,
+        },
+    )
+    uploader_root = tmp_path / 'installed-uploader'
+    manager = core_uploader.UploadManager(_CoreSettings())
+    with (
+            patch.object(manager, 'bundle_path', return_value=uploader_bundle),
+            patch.object(
+                core_uploader, 'EXPECTED_UPLOADER_LINUX_BUNDLE_SHA256',
+                _sha256(uploader_bundle)),
+            patch.object(core_uploader, '_UPLOADER_ROOT', uploader_root),
+            patch.object(
+                core_uploader, '_UPLOADER_ACTIVATION_FILE',
+                uploader_root / 'activation.json'),
+            patch.object(core_uploader, '_SETTINGS_FILE', tmp_path / 'settings.json'),
+            patch.object(core_uploader, '_HISTORY_FILE', tmp_path / 'history.json'),
+            patch.object(
+                core_uploader, '_LEGACY_HISTORY_FILE', tmp_path / 'legacy.json')):
+        ok, message = manager.activate_plugin(
+            core_uploader.UPLOADER_TERMS_VERSION,
+            core_uploader.UPLOADER_PRIVACY_VERSION,
+        )
+        assert ok, message
+        assert manager.is_plugin_installed()
+    executable = uploader_root / core_uploader.UPLOADER_PLUGIN_VERSION / 'FTHR-Uploader'
+    assert executable.stat().st_mode & 0o111 == 0o111
+    receipt = json.loads((uploader_root / 'activation.json').read_text(encoding='utf-8'))
+    assert receipt['executable'] == str(executable)
+
+
+def test_uploader_installs_only_after_consent(tmp_path, monkeypatch):
+    monkeypatch.setattr(core_uploader.sys, 'platform', 'win32')
     uploader_bundle = _bundle(
         tmp_path,
         filename='FTHR-Uploader.fthrplugin',
