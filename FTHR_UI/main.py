@@ -5316,8 +5316,15 @@ class MainWindow(QMainWindow):
 
     def _apply_active_audio_state(self, config: CaptureConfig) -> None:
         # Windows captures microphones natively; Python recording is for Linux.
-        MicRecorder().stop()
-        return
+        if sys.platform == 'win32':
+            MicRecorder().stop()
+            return
+        recorder = MicRecorder()
+        if config.audio_enabled:
+            if not recorder.is_running():
+                self._start_mic_recorder()
+        else:
+            recorder.stop()
 
     # Engine lifecycle
 
@@ -6124,7 +6131,32 @@ class MainWindow(QMainWindow):
     # Microphone recorder
 
     def _start_mic_recorder(self):
-        return
+        if sys.platform == 'win32':
+            # Native WASAPI capture starts with the engine so microphone and
+            # video share one generation-local QPC timeline. Do not create a
+            # second PortAudio ring that could later post-mix stale audio.
+            return
+        if not MicRecorder.is_available():
+            print('[Mic] sounddevice not installed — mic-in-clips disabled')
+            self.push_error(
+                'MIC NOT FOUND',
+                'No recording device detected. Check audio settings or permissions.',
+                level='warning',
+                actions=[('OPEN AUDIO SETTINGS', self._toggle_settings_page)],
+            )
+            return
+        device_index = self._resolved_mic_device_index()
+        gain = float(self.settings_manager.get('mic_volume', 100)) / 100.0
+        if MicRecorder().start(device_index, gain=gain):
+            print(f'[Mic] Recorder started (device={device_index}, gain={gain:.2f})')
+        else:
+            print('[Mic] Recorder failed to start — clips will have no mic audio')
+            self.push_error(
+                'MIC NOT FOUND',
+                'Microphone failed to start. Clips will have no mic audio.',
+                level='warning',
+                actions=[('OPEN AUDIO SETTINGS', self._toggle_settings_page)],
+            )
 
     def _resolved_mic_device_index(self):
         """Translate the saved mic_device_name into a sounddevice index, or None."""
@@ -6135,11 +6167,26 @@ class MainWindow(QMainWindow):
             return None
         try:
             import sounddevice as _sd
+            if sys.platform.startswith('linux'):
+                matches = [
+                    i for i, dev in enumerate(_sd.query_devices())
+                    if dev.get('max_input_channels', 0) > 0
+                    and dev.get('name') == name
+                ]
+                if len(matches) == 1:
+                    return matches[0]
+                if len(matches) > 1:
+                    print('[Mic] Saved microphone name is ambiguous; using system default')
+                else:
+                    print('[Mic] Saved microphone name was not found; using system default')
+                return None
             for i, dev in enumerate(_sd.query_devices()):
                 if dev.get('max_input_channels', 0) > 0 and dev.get('name') == name:
                     return i
-        except Exception:
-            # Device enumeration is optional; no match means mic capture stays off.
+        except Exception as e:
+            # Device enumeration is optional; a missing match uses system default.
+            if sys.platform.startswith('linux'):
+                print(f'[Mic] Device lookup failed; using system default: {e}')
             pass
         return None
 
@@ -6178,9 +6225,12 @@ class MainWindow(QMainWindow):
             recorder_running = (MicRecorder.is_available()
                                  and MicRecorder().is_running())
             if restart_recorder or not recorder_running:
-                if recorder_running and self._gary_recorder_active:
-                    MicRecorder().stop()
-                self._start_gary_mic_recorder()
+                if sys.platform == 'win32':
+                    if recorder_running and self._gary_recorder_active:
+                        MicRecorder().stop()
+                    self._start_gary_mic_recorder()
+                elif not recorder_running:
+                    self._start_mic_recorder()
         else:
             self._gary_current_intensity = 0.0
             self._gary_overlay.set_intensity(0.0)
@@ -7316,19 +7366,34 @@ class MainWindow(QMainWindow):
             audio_mode if audio_mode is not None
             else self.settings_manager.get(
                 'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED))
-        if audio_mode == AUDIO_CAPTURE_MODE_COMBINED:
-            self._spawn_mux_thread(
-                target=self._combine_native_audio_worker,
-                args=(clip_path, duration_seconds, mic_end_time,
-                      clip_ready, crop_profile),
-            )
-        else:
-            # Separated Windows clips are already published as distinct
-            # native audio streams with a matching FTHR manifest. The
-            # normal route selector sends visual-only work to finalize.
-            if clip_ready is not None:
-                clip_ready.set()
-        return
+        if sys.platform == 'win32':
+            if audio_mode == AUDIO_CAPTURE_MODE_COMBINED:
+                self._spawn_mux_thread(
+                    target=self._combine_native_audio_worker,
+                    args=(clip_path, duration_seconds, mic_end_time,
+                          clip_ready, crop_profile),
+                )
+            else:
+                # Separated Windows clips are already published as distinct
+                # native audio streams with a matching FTHR manifest. The
+                # normal route selector sends visual-only work to finalize.
+                if clip_ready is not None:
+                    clip_ready.set()
+            return
+
+        if not MicRecorder.is_available() or not MicRecorder().is_running():
+            self._record_finalization_warning(
+                clip_path, 'Microphone capture stopped before finalization; '
+                'the base clip was retained.')
+            self._complete_clip_finalization(clip_path, duration_seconds)
+            return
+
+        self._spawn_mux_thread(
+            target=self._mic_mux_worker,
+            args=(clip_path, duration_seconds, mic_end_time, clip_ready,
+                  crop_profile,
+                  audio_mode == AUDIO_CAPTURE_MODE_SEPARATED),
+        )
 
 
     def _spawn_mux_thread(self, target, args):
@@ -12581,13 +12646,29 @@ class _SettingsPage(QWidget):
         endpoint_id = data.get('endpoint_id') if isinstance(data, dict) else None
         display_name = data.get('display_name') if isinstance(data, dict) else None
         self.sm.set('mic_device_id', endpoint_id)
-        self.sm.set('mic_device_name', display_name if endpoint_id else None)
+        legacy_linux_selection = (
+            sys.platform.startswith('linux') and isinstance(data, dict)
+            and data.get('legacy_index') is not None
+        )
+        self.sm.set(
+            'mic_device_name',
+            display_name if endpoint_id or legacy_linux_selection else None)
         self.sm.set('mic_volume', self.mic_vol_slider.value())
         self.sm.set('mic_loopback', self.mic_loopback_check.isChecked())
         self.sm.save_settings()
         # Linux still owns its temporary legacy recorder. Windows applies the
         # requested endpoint/input gain only on the next engine generation.
-        return
+        if sys.platform == 'win32':
+            return
+        try:
+            from core.mic_recorder import MicRecorder
+            if MicRecorder.is_available():
+                rec = MicRecorder()
+                rec.set_gain(self.mic_vol_slider.value() / 100.0)
+                rec.start(self._selected_mic_index(),
+                          gain=self.mic_vol_slider.value() / 100.0)
+        except Exception as e:
+            print(f'[Mic] settings push failed: {e}')
 
     def _selected_mic_index(self):
         data = self.mic_combo.currentData() if self.mic_combo.count() else None
@@ -12634,6 +12715,23 @@ class _SettingsPage(QWidget):
 
     def _on_mic_device_changed(self, _idx: int):
         idx = self._selected_mic_index()
+        if sys.platform.startswith('linux'):
+            # Tear down every old reader before MicRecorder replaces its stream.
+            # The meter can share the recorder only after the new stream is live.
+            self.mic_level_meter.stop()
+            loopback_enabled = self.mic_loopback_check.isChecked()
+            if loopback_enabled:
+                self._stop_loopback()
+            self._save_audio_settings()
+            if (self.isVisible() and self.stack.currentIndex() == 2
+                    and not getattr(self, '_background_ui_paused', False)):
+                self.mic_level_meter.set_gain(
+                    self.mic_vol_slider.value() / 100.0)
+                self.mic_level_meter.start(idx)
+            if loopback_enabled:
+                self._start_loopback(idx)
+            return
+
         # Restart meter on the new device
         self.mic_level_meter.stop()
         if (self.isVisible() and self.stack.currentIndex() == 2
@@ -12645,7 +12743,11 @@ class _SettingsPage(QWidget):
             self._stop_loopback()
             self._start_loopback(idx)
         self._save_audio_settings()
-        self.audio_capture_changed.emit(True)
+        if sys.platform == 'win32':
+            # Explicit/default microphone changes intentionally create a new
+            # capture generation. A running native source is never silently
+            # rebound to another endpoint or clock domain.
+            self.audio_capture_changed.emit(True)
 
     def _start_loopback(self, device_index):
         self._stop_loopback()
