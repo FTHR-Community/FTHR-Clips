@@ -440,3 +440,75 @@ def test_portal_client_registers_only_with_a_desktop_entry(
 
     assert hotkeys.HotkeyManager()._ensure_portal() is True
     assert created == [app_id]
+
+
+def test_clear_holds_although_the_desktop_keeps_the_key(tmp_path, monkeypatch):
+    manager, fake = _linux_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr(manager, '_apply_compositor_config', lambda: None)
+    manager._on_portal_bound({'save_clip': 'F9', 'save_screenshot': 'F12'})
+    fired = []
+    manager.save_screenshot_triggered.connect(lambda: fired.append('shot'))
+
+    assert manager.set_hotkey('save_screenshot', '') is True
+    assert fake.bound_payloads[-1]['save_screenshot'] == ('Save screenshot', '')
+    # The portal has no unbind: the desktop answers with its old key and
+    # still delivers it. Neither may undo the clear.
+    manager._on_portal_bound({'save_clip': 'F9', 'save_screenshot': 'F12'})
+    manager._on_portal_activated('save_screenshot')
+    assert manager.get_hotkey('save_screenshot') == ''
+    assert manager.get_hotkey('save_clip') == 'F9'
+    assert fired == []
+
+    # A restart keeps the clear.
+    restarted = hotkeys.HotkeyManager()
+    restarted._portal = _FakePortal()
+    restarted._on_portal_bound({'save_screenshot': 'F12'})
+    restarted._on_portal_activated('save_screenshot')
+    assert restarted.get_hotkey('save_screenshot') == ''
+
+    # Assigning a key in FTHR makes the action live again.
+    assert manager.set_hotkey('save_screenshot', 'F11') is True
+    manager._last_emit_at = {}
+    manager._on_portal_activated('save_screenshot')
+    assert fired == ['shot']
+
+
+def test_custom_clip_actions_reach_portal_and_hyprland(tmp_path, monkeypatch):
+    manager, fake = _linux_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr(manager, '_start_socket_server', lambda: None)
+    monkeypatch.setattr(manager, '_apply_compositor_config', lambda: None)
+    manager.configure_custom_clips([60])
+    action = hotkeys.custom_clip_action(60)
+
+    assert fake.bound_payloads[-1][action] == ('Save 60-second clip', '')
+    manager.set_hotkey(action, 'F6')
+    assert action in manager._hyprland_bind_actions()
+
+    seconds = []
+    manager.custom_clip_triggered.connect(seconds.append)
+    manager._on_portal_activated(action)
+    assert seconds == [60]
+
+
+def test_register_all_starts_the_socket_server_once(tmp_path, monkeypatch):
+    if sys.platform == 'win32':
+        pytest.skip('Linux hotkey socket')
+    monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
+    monkeypatch.setattr(portal, 'is_available', lambda: False)
+    manager = hotkeys.HotkeyManager()
+    monkeypatch.setattr(manager, '_apply_compositor_config', lambda: None)
+    monkeypatch.setattr(manager, '_warn_if_linux_hotkeys_dead', lambda: None)
+    monkeypatch.setattr(hotkeys.linux_runtime, 'hotkey_socket_path',
+                        lambda create_dir=True: str(tmp_path / 'hotkey.sock'))
+    errors = []
+    manager.error_occurred.connect(lambda *args: errors.append(args))
+    try:
+        manager.register_all()
+        assert manager._socket_running
+        # Every shortcut capture ends in register_all(); the live socket from
+        # the first call must not be reported as "in use by another instance".
+        manager.begin_input_capture()
+        manager.end_input_capture()
+        assert errors == []
+    finally:
+        manager.cleanup()
