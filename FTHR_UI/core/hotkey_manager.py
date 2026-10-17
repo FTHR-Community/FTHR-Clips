@@ -1683,11 +1683,14 @@ class HotkeyManager(QObject):
                 pass
             return False
 
-    def _write_hyprland_lua_config(self, path: Path = _HYPR_CUSTOM_LUA) -> bool:
+    def _write_hyprland_lua_config(self, path: Path | None = None) -> bool:
         """Add/update bindings in a Lua-based Hyprland custom keybind file.
 
         Returns True when the file content changed.
         """
+        # Resolve the default at call time, not at definition time, so the
+        # module path can be redirected (tests must never edit the real one).
+        path = _HYPR_CUSTOM_LUA if path is None else path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             original = path.read_text() if path.exists() else ''

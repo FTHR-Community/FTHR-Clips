@@ -32,3 +32,32 @@ def _isolate_windows_videos_storage(monkeypatch, tmp_path):
     monkeypatch.setattr(
         settings_manager, '_windows_videos_directory',
         lambda: tmp_path / 'Videos', raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_linux_desktop_hotkeys(monkeypatch, tmp_path):
+    """Keep Linux hotkey tests away from the developer's real desktop.
+
+    HotkeyManager writes Hyprland binds to paths fixed at import time,
+    runs `hyprctl reload` and binds the private hotkey socket. Any test that
+    reaches set_hotkey() or register_all() on a Hyprland session would
+    otherwise rewrite ~/.config/hypr and reload the live compositor.
+    """
+    if sys.platform == 'win32':
+        return
+    monkeypatch.delenv('HYPRLAND_INSTANCE_SIGNATURE', raising=False)
+    hypr = tmp_path / 'hypr'
+    for name in ('core.hotkey_manager', 'FTHR_UI.core.hotkey_manager'):
+        module = sys.modules.get(name)
+        if module is None:
+            if name != 'core.hotkey_manager':
+                continue
+            import core.hotkey_manager as module
+        monkeypatch.setattr(module, '_FTHR_HYPR_CONF', hypr / 'fthr-hotkeys.conf')
+        monkeypatch.setattr(module, '_HYPR_CONF', hypr / 'hyprland.conf')
+        monkeypatch.setattr(module, '_HYPR_LUA_CONF', hypr / 'hyprland.lua')
+        monkeypatch.setattr(
+            module, '_HYPR_CUSTOM_LUA', hypr / 'custom' / 'keybinds.lua')
+        monkeypatch.setattr(
+            module.linux_runtime, 'hotkey_socket_path',
+            lambda create_dir=True: str(tmp_path / 'hotkey.sock'))
