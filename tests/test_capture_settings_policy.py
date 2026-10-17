@@ -109,3 +109,23 @@ def test_engine_exit_clears_the_active_process_snapshot():
     assert tracker.active is None
     assert tracker.requested == old
     assert tracker.error == 'engine exited'
+
+
+def test_linux_ring_budget_follows_bitrate_and_buffer():
+    from core.capture_settings import (
+        LINUX_RING_BUDGET_MAX_MB, LINUX_RING_BUDGET_MIN_MB, linux_ring_budget_mb)
+
+    big_machine = 256 * 1024
+    # 15 minutes at 50 Mbps needs ~5.4 GiB; the budget must cover it.
+    expected_mb = 50_000 * 1000 // 8 * 905 / (1024 * 1024)
+    budget = linux_ring_budget_mb(50_000, 900, total_memory_mb=big_machine)
+    assert budget >= expected_mb > 2048
+    # Short buffers stay small, never below the engine's minimum.
+    assert linux_ring_budget_mb(500, 5, total_memory_mb=big_machine) == LINUX_RING_BUDGET_MIN_MB
+    # 900 s at 200 Mbps exceeds the engine's maximum.
+    assert linux_ring_budget_mb(200_000, 900, total_memory_mb=big_machine) == (
+        LINUX_RING_BUDGET_MAX_MB)
+    # Never more than half of physical memory.
+    assert linux_ring_budget_mb(200_000, 900, total_memory_mb=8192) == 4096
+    # An unknown memory size does not cap the budget.
+    assert linux_ring_budget_mb(50_000, 900, total_memory_mb=0) == budget

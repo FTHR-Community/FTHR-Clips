@@ -167,6 +167,7 @@ from core.capture_settings import (
     validate_fps,
     validate_normal_clip_length,
     custom_clip_lengths,
+    linux_ring_budget_mb,
 )
 from core.encoder_capabilities import (
     EncoderCapability,
@@ -5567,6 +5568,10 @@ class MainWindow(QMainWindow):
         frames_needed   = launch_config.buffer_seconds * launch_config.fps
         mb_needed       = max(64, (frames_needed * bytes_per_frame + (1024*1024-1)) // (1024*1024))
         max_buffer_mb   = min(int(mb_needed) + 64, 2048)   # hard 2 GB ceiling
+        if sys.platform != 'win32':
+            # The Linux engine enforces argv[6] on its compressed ring.
+            max_buffer_mb = linux_ring_budget_mb(
+                launch_config.bitrate_kbps, launch_config.buffer_seconds)
 
         capture_mode    = self.settings_manager.get('capture_mode',    'desktop')
         target_hwnd     = self.settings_manager.get('target_hwnd',     0)
