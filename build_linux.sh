@@ -168,8 +168,9 @@ echo ">>> Building optional Linux upload extension..."
 # builder refuses to freeze an executable without paramiko and friends.
 "$PYTHON_BIN" "$SCRIPT_DIR/tools/build_linux_uploader.py" --python "$PYTHON_BIN"
 UPLOADER_PAYLOAD_ELF="$SCRIPT_DIR/build/optional-uploader-linux/payload-elf"
-[ -d "$UPLOADER_PAYLOAD_ELF" ] || {
-    echo "ERROR: the uploader build left no unpacked payload for the glibc gate." >&2
+UPLOADER_EXECUTABLE="$SCRIPT_DIR/build/optional-uploader-linux/dist/FTHR-Uploader"
+[ -d "$UPLOADER_PAYLOAD_ELF" ] && [ -x "$UPLOADER_EXECUTABLE" ] || {
+    echo "ERROR: the uploader build left no executable or unpacked payload for the glibc gate." >&2
     exit 1
 }
 
@@ -430,12 +431,14 @@ cp "$NATIVE_OUTPUT" "$OUTPUT"
 echo ""
 echo ">>> Verifying Linux glibc baseline..."
 # The optional uploader's one-file payload is compressed inside its
-# .fthrplugin, so tools/build_linux_uploader.py unpacks its ELF members for
-# this gate; the plugin runs on the same hosts as the AppImage.
+# .fthrplugin, so check the executable (its bootloader) and the ELF members
+# tools/build_linux_uploader.py unpacks from it; the plugin runs on the same
+# hosts as the AppImage.
 if ! "$PYTHON_BIN" "$SCRIPT_DIR/tools/verify_linux_glibc.py" \
     --manifest "$GLIBC_MANIFEST" \
     --target "$APPDIR" \
     --target "$OUTPUT" \
+    --target "$UPLOADER_EXECUTABLE" \
     --target "$UPLOADER_PAYLOAD_ELF"; then
     rm -f "$NATIVE_OUTPUT" "$OUTPUT" "$OUTPUT.sha256"
     echo "ERROR: Linux glibc baseline verification failed; refusing to publish the AppImage." >&2

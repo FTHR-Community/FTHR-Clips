@@ -36,6 +36,7 @@ def test_optional_uploader_builds_install_the_uploader_lock() -> None:
     for job in (windows_job, appimage_job):
         assert "-r requirements-uploader.txt" in job
     assert "build/optional-uploader-linux/payload-elf" in appimage_job
+    assert "build/optional-uploader-linux/dist/FTHR-Uploader" in appimage_job
 
 
 def test_windows_bundle_is_built_only_after_the_engine() -> None:
