@@ -23,6 +23,15 @@ python -m pip install -r requirements-alpha.txt -r requirements-dev.txt
 `requirements-alpha.txt` is the lock and the only file a release build installs
 from.
 
+Building the optional uploader package (`tools/build_optional_uploaders.py` on
+Windows, `tools/build_linux_uploader.py`, which `build_linux.sh` runs, on
+Linux) also needs its own lock in the same environment. Both builders refuse
+to run without it:
+
+```bash
+python -m pip install -r requirements-uploader.txt
+```
+
 > **Do not install `imageio-ffmpeg`.** It bundles a GPLv3 FFmpeg build. Having it
 > in the environment risks PyInstaller pulling it into the bundle and placing the
 > whole artifact under the GPL (AUDIT-005). It is excluded in `FTHR.spec` and
