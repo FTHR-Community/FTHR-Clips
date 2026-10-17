@@ -227,7 +227,10 @@ CaptureEngine::GenerationEnd CaptureEngine::RunCaptureGeneration(
             backend_.reset();
             return GenerationEnd::Failed;
         }
-        nvenc_active_.store(codec_used.find("nvenc") != std::string::npos);
+        // Legacy ABI name: nvenc_active means "a compressed replay encoder
+        // is open", hardware or an explicitly chosen software encoder. The
+        // 2.0 UI reads the codec name to tell the two apart.
+        nvenc_active_.store(true);
         ++encoder_generation_;
         encoder_.SetGeneration(encoder_generation_);
         {

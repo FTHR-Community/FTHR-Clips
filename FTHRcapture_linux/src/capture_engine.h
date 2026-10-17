@@ -61,6 +61,8 @@ public:
     bool SaveClip(const std::string& path, uint32_t duration_sec,
                   SharedMemoryLayout* shm, std::string* error_message);
 
+    // True while a compressed replay encoder is open (any backend, software
+    // included); published as SharedMemoryLayout::nvenc_active.
     bool     IsNvencActive()  const { return nvenc_active_.load(); }
     bool     IsCapturing()    const { return running_.load(); }
     void SetPaused(bool p) { paused_.store(p); }

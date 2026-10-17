@@ -74,7 +74,7 @@ bool ApplyPreset(AVCodecContext* ctx, const char* codec_name, int p) {
         av_opt_set(ctx->priv_data, "preset", kKvz[p - 1], 0);
     } else if (strstr(codec_name, "libx26")) {
         // Retained for distro FFmpeg builds that still ship x264/x265. FTHR
-        // never selects these itself (see BuildCodecList) — this branch only
+        // never selects these itself (see EncoderCandidates) — this branch only
         // matters if a downstream packager re-adds them deliberately.
         static const char* kX26x[] = {
             "ultrafast","superfast","veryfast","fast","medium","slow","veryslow"};
@@ -178,62 +178,11 @@ bool Encoder::TryOpen(const char* codec_name, const EncoderConfig& cfg) {
     return true;
 }
 
-// Build priority list for Open()
-
-static void BuildCodecList(
-    CodecPref codec_pref,
-    EncoderPref encoder_pref,
-    std::vector<const char*>& out) {
-    auto codec_allowed = [&](CodecPref codec) {
-        return codec_pref == CodecPref::Auto || codec_pref == codec;
-    };
-    auto backend_allowed = [&](EncoderPref backend) {
-        return encoder_pref == EncoderPref::Auto || encoder_pref == backend;
-    };
-    auto add_backend = [&](EncoderPref backend) {
-        if (!backend_allowed(backend)) return;
-        if (backend == EncoderPref::Nvidia) {
-            if (codec_allowed(CodecPref::H264)) out.push_back("h264_nvenc");
-            if (codec_allowed(CodecPref::HEVC)) out.push_back("hevc_nvenc");
-            if (codec_allowed(CodecPref::AV1)) out.push_back("av1_nvenc");
-        } else if (backend == EncoderPref::Amd) {
-            // VA-API is the native Linux AMD path. AMF remains a fallback for
-            // systems that provide AMD's separate AMF runtime.
-            if (codec_allowed(CodecPref::H264)) out.push_back("h264_vaapi");
-            if (codec_allowed(CodecPref::HEVC)) out.push_back("hevc_vaapi");
-            if (codec_allowed(CodecPref::AV1)) out.push_back("av1_vaapi");
-            if (codec_allowed(CodecPref::H264)) out.push_back("h264_amf");
-            if (codec_allowed(CodecPref::HEVC)) out.push_back("hevc_amf");
-            if (codec_allowed(CodecPref::AV1)) out.push_back("av1_amf");
-        } else if (backend == EncoderPref::Intel) {
-            if (codec_allowed(CodecPref::H264)) out.push_back("h264_qsv");
-            if (codec_allowed(CodecPref::HEVC)) out.push_back("hevc_qsv");
-            if (codec_allowed(CodecPref::AV1)) out.push_back("av1_qsv");
-        } else if (backend == EncoderPref::Software) {
-            // LGPL-compatible software fallbacks only.
-            if (codec_allowed(CodecPref::H264)) out.push_back("libopenh264");
-            if (codec_allowed(CodecPref::HEVC)) out.push_back("libkvazaar");
-            if (codec_allowed(CodecPref::AV1)) {
-                out.push_back("libsvtav1");
-                out.push_back("libaom-av1");
-                out.push_back("librav1e");
-            }
-        }
-    };
-
-    // Auto is backend-first so a working hardware H.264 encoder wins over a
-    // much slower software AV1 encoder discovered earlier by codec family.
-    add_backend(EncoderPref::Nvidia);
-    add_backend(EncoderPref::Amd);
-    add_backend(EncoderPref::Intel);
-    add_backend(EncoderPref::Software);
-}
-
 // Open — try codecs in priority order
 
 bool Encoder::Open(const EncoderConfig& cfg, std::string& codec_used_out) {
-    std::vector<const char*> candidates;
-    BuildCodecList(cfg.codec_pref, cfg.encoder_pref, candidates);
+    const std::vector<const char*> candidates =
+        EncoderCandidates(cfg.codec_pref, cfg.encoder_pref);
 
     for (const char* name : candidates) {
         std::cout << "[Encoder] Trying codec: " << name << std::endl;
@@ -249,7 +198,11 @@ bool Encoder::Open(const EncoderConfig& cfg, std::string& codec_used_out) {
     }
 
     if (!codec_ctx_) {
-        std::cerr << "[Encoder] All codecs failed — no encoder available" << std::endl;
+        std::cerr << "[Encoder] All codecs failed — no encoder available"
+                  << (cfg.encoder_pref == EncoderPref::Software
+                          ? "" : " (no automatic software fallback; "
+                                 "choose Software explicitly to use one)")
+                  << std::endl;
         return false;
     }
 

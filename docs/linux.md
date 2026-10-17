@@ -168,7 +168,9 @@ refresh. These fixes do not establish camera/audio synchronization.
 
 ## AMD VA-API encoding
 
-Linux `auto` mode prefers these VA-API encoders when they are available:
+Linux `auto` mode tries the hardware encoders only, in this order: NVENC,
+VA-API (then AMD AMF, if its runtime is installed), Intel QSV. On AMD that
+means these VA-API encoders:
 
 - `h264_vaapi`
 - `hevc_vaapi`
@@ -187,10 +189,13 @@ vainfo
 ls -l /dev/dri/renderD*
 ```
 
-If VA-API initialization fails, the application falls back to software encoding.
-That fallback keeps recording available but does not qualify hardware encoding.
-The current Linux qualification does not claim NVIDIA NVENC or Intel hardware
-encoding.
+There is no automatic software fallback, matching the Windows 2.0 engine. If
+no hardware encoder initializes, the engine log ends with `All codecs failed`
+and the application shows **HARDWARE ENCODING UNAVAILABLE**. A software encoder
+(`libopenh264` for H.264) is used only when **Software** is chosen as the
+encoder in Settings; it costs noticeably more CPU and does not qualify hardware
+encoding. The current Linux qualification does not claim NVIDIA NVENC or Intel
+hardware encoding.
 
 ## Hotkeys
 
