@@ -6,6 +6,7 @@ on collection order.
 
 import os
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -46,9 +47,6 @@ def _isolate_linux_desktop_hotkeys(monkeypatch, tmp_path):
     if sys.platform == 'win32':
         return
     monkeypatch.delenv('HYPRLAND_INSTANCE_SIGNATURE', raising=False)
-    # The hotkey socket lives under $XDG_RUNTIME_DIR/fthr; keep it private
-    # to the test so a running FTHR keeps its socket.
-    monkeypatch.setenv('XDG_RUNTIME_DIR', str(tmp_path / 'xdg-runtime'))
     hypr = tmp_path / 'hypr'
     for name in ('core.hotkey_manager', 'FTHR_UI.core.hotkey_manager'):
         module = sys.modules.get(name)
@@ -61,3 +59,16 @@ def _isolate_linux_desktop_hotkeys(monkeypatch, tmp_path):
         monkeypatch.setattr(module, '_HYPR_LUA_CONF', hypr / 'hyprland.lua')
         monkeypatch.setattr(
             module, '_HYPR_CUSTOM_LUA', hypr / 'custom' / 'keybinds.lua')
+        # Bind the hotkey server on a private socket, seen only through the
+        # hotkey module, so a running FTHR keeps its socket. Path queries
+        # (create_dir=False, used for displayed commands) still go to the
+        # real resolver, and XDG_RUNTIME_DIR itself must stay: Wayland
+        # clients (the engine tests) find the compositor through it.
+        real_runtime = module.linux_runtime
+        runtime = types.ModuleType(real_runtime.__name__)
+        runtime.__getattr__ = lambda name, _real=real_runtime: getattr(_real, name)
+        runtime.hotkey_socket_path = (
+            lambda create_dir=True, _real=real_runtime:
+            str(tmp_path / 'hotkey.sock') if create_dir
+            else _real.hotkey_socket_path(create_dir=False))
+        monkeypatch.setattr(module, 'linux_runtime', runtime)
