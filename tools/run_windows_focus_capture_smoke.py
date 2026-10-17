@@ -1,4 +1,4 @@
-"""Exercise real WGC focus pauses/resumes using two temporary test windows.
+"""Verify WGC focus pauses preserve replay using two temporary test windows.
 
 Temporarily changes foreground focus. Build artifacts and three short clips
 stay in --output, which must be outside the repository. No game is required.
@@ -54,13 +54,15 @@ def main():
             str(ffmpeg / 'ffprobe.exe'), '-v', 'error', '-show_format',
             '-of', 'json', str(clip)], creationflags=subprocess.CREATE_NO_WINDOW))
         duration = float(probe['format']['duration'])
-        if not 0.5 <= duration <= 2.5:
-            raise RuntimeError(f'Unexpected post-focus partial duration: {duration}')
+        if not 3.0 <= duration <= 12.0:
+            raise RuntimeError(f'Unexpected paused replay duration: {duration}')
+        if results and not 0.7 <= duration - results[-1]['actual_duration_seconds'] <= 3.0:
+            raise RuntimeError(f'Replay history was lost across a focus change: {duration}')
         results.append({'cycle': cycle, 'saved': True, 'full_decode': True,
                         'actual_duration_seconds': duration,
                         'requested_duration_seconds': 30})
     (output / 'result.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
-    print(f'3 focus pause/resume/save/decode cycles passed. Evidence: {output}')
+    print(f'3 replay-preserving focus pause/resume/save/decode cycles passed. Evidence: {output}')
 
 
 if __name__ == '__main__':

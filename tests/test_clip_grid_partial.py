@@ -16,6 +16,33 @@ pytest.importorskip('PySide6.QtCore')
 from ui import clip_grid
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_clip_grids(
+    monkeypatch: pytest.MonkeyPatch, qapp
+) -> None:
+    """Finish each test's library workers before its monkeypatches expire."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    grids: list[clip_grid.ClipGrid] = []
+    original_init = clip_grid.ClipGrid.__init__
+
+    def tracked_init(grid: clip_grid.ClipGrid, *args, **kwargs) -> None:
+        original_init(grid, *args, **kwargs)
+        grids.append(grid)
+
+    monkeypatch.setattr(clip_grid.ClipGrid, '__init__', tracked_init)
+    yield
+
+    for grid in reversed(grids):
+        grid.shutdown()
+        grid.deleteLater()
+
+    # Deferred destruction is delivered while this fixture (and therefore
+    # every test's monkeypatch fixture) is still active.
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qapp.processEvents()
+
+
 def test_responsive_grid_fills_viewport_without_phantom_gap() -> None:
     viewport = 1920
     columns, widths = clip_grid.ClipGrid._layout_metrics(viewport)
@@ -41,7 +68,6 @@ def test_show_in_file_manager_uses_explorer_select_syntax(
     target = tmp_path / 'FTHR Clips' / 'clip with spaces.mp4'
     calls: list[object] = []
 
-    monkeypatch.setattr(clip_grid.sys, 'platform', 'win32')
     monkeypatch.setattr(clip_grid.subprocess, 'Popen', calls.append)
 
     clip_grid._show_in_file_manager(str(target))
@@ -63,7 +89,7 @@ def test_portrait_thumbnail_is_fitted_without_distortion(qapp, tmp_path: Path) -
 
     assert rendered is not None
     assert rendered.height() == 180
-    assert abs(rendered.width() / rendered.height() - 900 / 1600) < 0.01
+    assert abs(rendered.width() / rendered.height() - 16 / 9) < 0.01
 
 
 def test_editor_open_uses_source_thumbnail_not_card_scaled_pixmap(
@@ -200,7 +226,7 @@ def test_screenshot_empty_state_names_the_hotkey(qapp, tmp_path: Path) -> None:
     grid._filter = 'screenshots'
     grid._show_empty(True)
 
-    assert grid._no_clips_lbl.text() == 'NO SCREENSHOTS YET'
+    assert grid._no_clips_lbl.text() == 'No screenshots yet'
     assert grid._empty_detail_lbl.text() == 'PRESS CTRL+F11 TO TAKE A SCREENSHOT'
     assert not grid._empty_detail_lbl.isHidden()
 

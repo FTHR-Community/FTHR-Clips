@@ -19,6 +19,12 @@ installs were AUDIT-009 and made UI bug reports irreproducible:
 python -m pip install -r requirements-alpha.txt -r requirements-dev.txt
 ```
 
+To build the optional uploader or run its SFTP integration tests, also install
+`python -m pip install -r requirements-uploader.txt`. These SSH/keyring
+dependencies remain outside the Core runtime lock. On Windows, run
+`python tools/build_optional_uploaders.py` before the full test suite so the
+frozen uploader test exercises the real sealed package.
+
 `requirements.in` is the human-edited list of direct dependencies;
 `requirements-alpha.txt` is the lock and the only file a release build installs
 from.
@@ -123,9 +129,15 @@ Output: `dist\FTHRClips\`. The spec generates the Windows VERSIONINFO resource
 from `FTHR_UI/version.py`, so the `.exe` reports its version in Explorer →
 Properties → Details.
 
-The first command independently freezes and seals the optional uploader and
-Lustful Hardware Identity packages, then binds both archive hashes into Core.
-`FTHR.spec` refuses to build if either dormant package is missing. The normal
+Run `powershell -ExecutionPolicy Bypass -File tools/update_latest_build_shortcut.ps1`
+to create **FTHR Clips - Latest Build** on the Desktop and in the Start menu.
+It opens this workspace's packaged output at its stable path, including later
+rebuilds. Quit an already-running installed or development instance before
+opening it; the app permits only one instance per user session.
+
+The first command independently freezes and seals the optional uploader
+package, then binds its archive hash into Core.
+`FTHR.spec` refuses to build if the dormant package is missing. The normal
 installer build entrypoint runs this command automatically.
 
 Optional size reduction:
@@ -134,8 +146,11 @@ Optional size reduction:
 $int = "dist\FTHRClips\_internal"
 Remove-Item "$int\libopencv_dnn*","$int\libopencv_ml*","$int\libopencv_calib3d*", `
             "$int\libopencv_features2d*","$int\libopencv_stitching*", `
-            "$int\Qt6Quick*","$int\Qt6Qml*","$int\Qt6Pdf*" -ErrorAction SilentlyContinue
+            "$int\Qt6Pdf*" -ErrorAction SilentlyContinue
 ```
+
+Do not remove Qt Quick, QML, Quick Widgets or the `ui/qml` directory: the
+video preview uses them even though most of the interface uses Qt Widgets.
 
 ### 3. Create the installer
 
@@ -147,7 +162,7 @@ python tools/build_windows_installer.py
 
 It verifies the Microsoft VC++ redistributable, the bundle licence manifest,
 and the Windows lifecycle contract before invoking Inno Setup. Output:
-`Output\FTHRClips-Setup-1.1.0-alpha-x64.exe` for the current version.
+`Output\FTHRClips-Setup-2.0.0-alpha-x64.exe` for the current version.
 
 The frameless, app-style setup starts with a required Privacy Policy checkbox
 linking to `https://policies.fthrclips.com`, then presents the application and
@@ -204,21 +219,30 @@ pip cannot supply these.
 
 ```bash
 # Debian / Ubuntu
-sudo apt install build-essential cmake pkg-config \
+sudo apt install build-essential cmake pkg-config binutils \
   libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev libavdevice-dev \
   libswscale-dev libswresample-dev \
   libwayland-dev wayland-protocols libwayland-bin \
+  libpipewire-0.3-dev libdbus-1-dev patchelf \
   libpulse-dev libportaudio2 \
   libegl1 libxcb-cursor0 libxkbcommon-x11-0
 
 # Arch
-sudo pacman -S base-devel cmake pkgconf ffmpeg wayland wayland-protocols \
-  libpulse portaudio
+sudo pacman -S base-devel cmake pkgconf binutils ffmpeg wayland wayland-protocols \
+  pipewire dbus libpulse portaudio patchelf
 
 # Fedora
 sudo dnf install gcc-c++ cmake pkgconf ffmpeg-devel wayland-devel \
-  wayland-protocols-devel pulseaudio-libs-devel portaudio
+  wayland-protocols-devel pipewire-devel dbus-devel pulseaudio-libs-devel \
+  portaudio patchelf
 ```
+
+The PipeWire and D-Bus development packages provide headers for the ScreenCast
+portal backend. The engine resolves `libpipewire-0.3.so.0` and
+`libdbus-1.so.3` at runtime with `dlopen`; neither runtime library is copied
+into the AppImage. Use `-DFTHR_PORTAL_BACKEND=OFF` only for a deliberately
+reduced developer build. `patchelf` repairs the pinned FFmpeg CLI tools to use
+their adjacent `$ORIGIN/../lib` runtime.
 
 `libportaudio2` is easy to miss: `sounddevice` imports fine without it and then
 fails at runtime with `OSError: PortAudio library not found`. `pip install
@@ -292,8 +316,13 @@ FTHRclips <fps> <buffer_s> <w> <h> <bitrate_kbps> <_> <_> <_> <scaling>
 FTHRcapture_linux/build/FTHRclips 30 10 1280 720 6000 0 0 0 0 "" 0 4 0 1
 ```
 
-The alpha build tries `wlr-screencopy` and then
-`ext-image-copy-capture`. FFmpeg `x11grab` is compiled out by default because
+The alpha build tries `wlr-screencopy`, then `ext-image-copy-capture`, then the
+`org.freedesktop.portal.ScreenCast` portal with PipeWire. The portal may show a
+desktop-controlled picker on first use and stores its owner-only restore token
+at `~/.fthr/portal_screencast_token`. Declining the picker publishes one
+terminal capture reason and is not retried. The portal chooses the screen; it
+does not change the separate `grim` screenshot path. FFmpeg `x11grab` is
+compiled out by default because
 AUDIT-044 has no proven bounded-cancellation path. Unsupported sessions fail
 clearly after bounded recovery instead of falling back to X11. Developers can
 compile the known-unbounded backend only with
@@ -321,7 +350,44 @@ bash build_linux.sh
 
 Steps: dependency check → engine build → PyInstaller bundle → strip unused
 libraries → smoke test → assemble AppDir → **licence verification** →
-`appimagetool`. The filename carries the version from `FTHR_UI/version.py`.
+`appimagetool` → glibc-baseline gate → checksum. The filename carries the
+version from `FTHR_UI/version.py`. The checksum and success banner are created
+only after the portability gate passes. `appimagetool` and the type-2 runtime
+are fetched through the pinned manifest in
+[`tools/appimage_tool_manifest.json`](tools/appimage_tool_manifest.json), with
+size/SHA-256 verification and atomic cache replacement. The runtime is passed
+explicitly with `--runtime-file`; the build never downloads a mutable
+`continuous` runtime.
+
+#### Portable glibc baseline (issue #28)
+
+Linux release artifacts are built on the exact `ubuntu-22.04` runner declared
+in [`tools/linux_release_baseline.json`](tools/linux_release_baseline.json).
+That is the x86_64 release baseline and permits at most `GLIBC_2.35`.
+`tools/verify_linux_glibc.py` scans every real ELF in the AppDir and the final
+AppImage with `readelf --version-info --wide`; it fails closed on missing
+targets, `readelf` errors, no ELF files, or any requirement above the ceiling.
+`GLIBCXX_*` and `GLIBC_PRIVATE` are not glibc requirements and are ignored.
+If GitHub retires that runner label, the release job must fail and be migrated
+to a digest-/image-pinned Ubuntu 22.04 environment; never silently substitute
+`ubuntu-latest`, because that would invalidate the glibc guarantee.
+
+The ceiling cannot currently be lowered to an older distribution baseline:
+the pinned PySide6 6.11.1 x86_64 wheel declares `manylinux_2_34`, so the
+release build must retain a compatible glibc floor. This gate proves the
+artifact is no newer than the declared ceiling; it does not replace physical
+launch qualification on older distributions. Fedora/KDE, Wayland/X11,
+FUSE/extract-and-run, and hardware capture qualification remain pending, so
+issue #28 is not considered resolved solely by a green CI run.
+
+To run the same check against an existing build:
+
+```bash
+python tools/verify_linux_glibc.py \
+  --manifest tools/linux_release_baseline.json \
+  --target build_output/AppDir \
+  --target build_output/FTHRClips-<version>-x86_64.AppImage
+```
 
 #### The licence gate (AUDIT-014)
 
@@ -343,9 +409,11 @@ FFmpeg at all:
 
 If it does fail, it is telling you something real. Do not add exceptions to it.
 
-### Verified build state
+### Historical build state
 
-Ubuntu 24.04 / WSL2, 2026-08-06:
+The following is historical Ubuntu 24.04 / WSL2 evidence from 2026-08-06;
+it is not release evidence for the current commit and does not satisfy the
+Ubuntu 22.04 glibc baseline or the physical qualification matrix:
 
 | Step | Result |
 |---|---|

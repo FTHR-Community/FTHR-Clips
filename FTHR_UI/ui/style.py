@@ -1,91 +1,91 @@
 """Shared color, font, and spacing tokens for FTHR widgets.
 
-Defaults use black and neutral grays, a teal accent, Oswald, square corners,
-and an 8px spacing grid. Imported themes can override fonts and colors.
+Near-black green surfaces, a bright mint accent, and a clear type hierarchy.
+Imported themes can override fonts and colors.
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 from PySide6.QtCore import Qt, QRect
-from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import QComboBox, QPushButton, QWidget
 
-from core.theme_manager import ThemeManager
+from core.theme_manager import DEFAULT_COLORS, DEFAULT_FONTS
 
 
 # Palette
 class Colors:
-    # Body canvas — pure black, matching fthrclips.com
-    BG          = '#000000'
-    SURFACE_1   = '#0a0a0a'   # raised — card body, panels
-    SURFACE_2   = '#111111'   # raised more — popups, dialogs
-    SURFACE_3   = '#1c1c1c'   # hover state, sub-panels
+    BG          = DEFAULT_COLORS['BG']
+    SURFACE_1   = DEFAULT_COLORS['SURFACE_1']
+    SURFACE_2   = DEFAULT_COLORS['SURFACE_2']
+    SURFACE_3   = DEFAULT_COLORS['SURFACE_3']
 
     # Shell surfaces (top bar + status row + filter row).
-    SHELL_BG    = '#000000'
-    SHELL_BG_2  = '#0a0a0a'   # status row tint, slightly raised
-    SHELL_DIVIDER = '#222222'
+    SHELL_BG    = DEFAULT_COLORS['SHELL_BG']
+    SHELL_BG_2  = DEFAULT_COLORS['SHELL_BG_2']
+    SHELL_DIVIDER = DEFAULT_COLORS['SHELL_DIVIDER']
 
     # Card surfaces (clip cards in the grid)
-    CARD_BG     = '#0a0a0a'
-    CARD_BG_HI  = '#111111'   # hover
-    CARD_BORDER = '#222222'
+    CARD_BG     = DEFAULT_COLORS['CARD_BG']
+    CARD_BG_HI  = DEFAULT_COLORS['CARD_BG_HI']
+    CARD_BORDER = DEFAULT_COLORS['CARD_BORDER']
 
     # Hairlines and borders
-    HAIRLINE    = '#111111'
-    BORDER      = '#222222'
-    BORDER_HI   = '#333333'
+    HAIRLINE    = DEFAULT_COLORS['HAIRLINE']
+    BORDER      = DEFAULT_COLORS['BORDER']
+    BORDER_HI   = DEFAULT_COLORS['BORDER_HI']
 
     # Text
-    TEXT        = '#ffffff'
-    TEXT_DIM    = '#888888'   # secondary copy on dark
-    TEXT_MUTED  = '#555555'   # tertiary / timestamps
-    TEXT_GHOST  = '#222222'   # empty-state mark
+    TEXT        = DEFAULT_COLORS['TEXT']
+    TEXT_DIM    = DEFAULT_COLORS['TEXT_DIM']
+    TEXT_MUTED  = DEFAULT_COLORS['TEXT_MUTED']
+    TEXT_GHOST  = DEFAULT_COLORS['TEXT_GHOST']
 
     # Brand accent (FTHR teal)
-    ACCENT      = '#00ffaa'
-    ACCENT_DIM  = '#00aa72'
-    ACCENT_SOFT = '#0a2218'   # quiet teal background tint for pills
+    ACCENT      = DEFAULT_COLORS['ACCENT']
+    ACCENT_DIM  = DEFAULT_COLORS['ACCENT_DIM']
+    ACCENT_SOFT = DEFAULT_COLORS['ACCENT_SOFT']
 
     # Functional states
-    ERROR       = '#cc0000'
-    ERROR_SOFT  = '#240606'
-    WARNING     = '#E8871A'
-    SUCCESS     = '#00aa00'
-    DELETE      = '#cc0000'
+    ERROR       = DEFAULT_COLORS['ERROR']
+    ERROR_SOFT  = DEFAULT_COLORS['ERROR_SOFT']
+    WARNING     = DEFAULT_COLORS['WARNING']
+    SUCCESS     = DEFAULT_COLORS['SUCCESS']
+    DELETE      = DEFAULT_COLORS['DELETE']
 
     # Legacy — kept for files that import it.
-    BAR_BG      = '#000000'
-    BAR_FG      = '#ffffff'
-    BAR_FG_DIM  = '#888888'
-    BAR_HAIRLINE = '#222222'
+    BAR_BG      = SHELL_BG
+    BAR_FG      = TEXT
+    BAR_FG_DIM  = TEXT_DIM
+    BAR_HAIRLINE = SHELL_DIVIDER
 
 
 # Type
 class Fonts:
-    # Display face — Oswald is bundled in fonts/.  The leading family in each
-    # stack is themeable; the remaining families are deliberate fallbacks.
-    DEFAULT_DISPLAY_FAMILY = 'Oswald'
-    DEFAULT_BODY_FAMILY = 'Oswald'
+    # Bundled Oswald Regular, SemiBold, and Bold provide the full hierarchy.
+    # Qt resolves the platform fallbacks if an imported font is unavailable.
+    BRAND = '"Oswald", "Bahnschrift", sans-serif'
+    DEFAULT_DISPLAY_FAMILY = DEFAULT_FONTS['display']
+    DEFAULT_BODY_FAMILY = DEFAULT_FONTS['body']
     DISPLAY_FAMILY = DEFAULT_DISPLAY_FAMILY
     BODY_FAMILY = DEFAULT_BODY_FAMILY
-    DISPLAY = '"Oswald", "DejaVu Sans Condensed", "Bahnschrift", "Segoe UI", sans-serif'
-    BODY    = '"Oswald", "DejaVu Sans", "Segoe UI", sans-serif'
+    DISPLAY = '"Oswald", "Segoe UI", "Noto Sans", "DejaVu Sans", sans-serif'
+    BODY    = '"Oswald", "Segoe UI", "Noto Sans", "DejaVu Sans", sans-serif'
 
-    # Modular scale, ratio ≈1.2, anchored at 11px body
-    SIZE_MICRO  = 9
-    SIZE_LABEL  = 10
-    SIZE_BODY   = 11
-    SIZE_BODY_L = 13
-    SIZE_H3     = 16
-    SIZE_H2     = 22
-    SIZE_H1     = 32
+    # Compact desktop scale, with hierarchy carried by size and weight.
+    SIZE_MICRO  = 12
+    SIZE_LABEL  = 14
+    SIZE_BODY   = 15
+    SIZE_BODY_L = 17
+    SIZE_TOOLBAR = 15
+    SIZE_H3     = 20
+    SIZE_H2     = 26
+    SIZE_H1     = 36
 
     # Tracking presets (px)
-    TRACK_LABEL   = 2
-    TRACK_DISPLAY = 4
-    TRACK_HEADING = 6
+    TRACK_LABEL   = 0
+    TRACK_DISPLAY = 0
+    TRACK_HEADING = 0
 
     @classmethod
     def configure(cls, display_family: str = '', body_family: str = '') -> None:
@@ -97,44 +97,19 @@ class Fonts:
             return '"' + family.replace('"', '') + '"'
 
         cls.DISPLAY = (
-            f'{_quoted(cls.DISPLAY_FAMILY)}, "Oswald", '
-            '"DejaVu Sans Condensed", "Bahnschrift", "Segoe UI", sans-serif'
+            f'{_quoted(cls.DISPLAY_FAMILY)}, "Segoe UI", '
+            '"Noto Sans", "DejaVu Sans", sans-serif'
         )
         cls.BODY = (
-            f'{_quoted(cls.BODY_FAMILY)}, "DejaVu Sans", "Noto Sans", '
-            '"Ubuntu", "Cantarell", "Segoe UI", sans-serif'
+            f'{_quoted(cls.BODY_FAMILY)}, "Segoe UI", "Noto Sans", '
+            '"DejaVu Sans", "Ubuntu", "Cantarell", sans-serif'
         )
 
 
 def themed_dropdown_pixmap(size: int = 14) -> QPixmap:
     """Return the current themed dropdown arrow at the requested size."""
-    theme = ThemeManager()
-    custom = theme.get_custom_icon_path('dropdown.png')
-    path = (custom or Path(__file__).parent.parent / 'assets' / 'icons'
-            / 'dropdown.png')
-    pixmap = QPixmap(str(path)) if path.exists() else QPixmap()
-    if pixmap.isNull():
-        return pixmap
-
-    # The bundled asset is recolored from the shared icon tint. Imported
-    # icons retain their authored colors, matching the rest of the icon system.
-    if custom is None:
-        tinted = QPixmap(pixmap.size())
-        tinted.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(tinted)
-        painter.drawPixmap(0, 0, pixmap)
-        painter.setCompositionMode(
-            QPainter.CompositionMode.CompositionMode_SourceIn)
-        painter.fillRect(tinted.rect(), QColor(
-            theme.get_icon_tint('dropdown.png')))
-        painter.end()
-        pixmap = tinted
-
-    return pixmap.scaled(
-        size, size,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
+    from ui.icons import icon_pixmap
+    return icon_pixmap('dropdown.png', size)
 
 
 def paint_dropdown_arrow(
@@ -247,6 +222,8 @@ class WheelSafeComboBox(QComboBox):
 
 def retarget_widget_font_styles(root, old_display: str, old_body: str) -> None:
     """Refresh already-created inline QSS after a theme font change."""
+    if old_display == Fonts.DISPLAY and old_body == Fonts.BODY:
+        return
     widgets = [root, *root.findChildren(QWidget)] if root is not None else []
     for widget in widgets:
         style_getter = getattr(widget, 'styleSheet', None)
@@ -269,14 +246,18 @@ def set_theme_style(widget: QWidget, factory) -> None:
     share a color. Re-evaluate the recipe instead, preserving widget state.
     """
     widget._theme_style_factory = factory
-    widget.setStyleSheet(factory())
+    sheet = factory()
+    if widget.styleSheet() != sheet:
+        widget.setStyleSheet(sheet)
 
 
 def refresh_theme_styles(root: QWidget) -> None:
     for widget in [root, *root.findChildren(QWidget)]:
         factory = getattr(widget, '_theme_style_factory', None)
         if factory is not None:
-            widget.setStyleSheet(factory())
+            sheet = factory()
+            if widget.styleSheet() != sheet:
+                widget.setStyleSheet(sheet)
 
 
 # Geometry
@@ -295,19 +276,26 @@ class Sizes:
     TOP_BAR_H   = 52
     HEADER_H    = 60   # logo + community + account row
     STATUS_H    = 48   # capture-status row
-    UNIFIED_BAR_H = 56 # unified top bar that merges header + status row
-    FILTER_H    = 52   # all-clips / filter / sort row
+    TITLE_BAR_H = 36
+    CAPTURE_BAR_H = 64
+    CAPTURE_CONTROL_H = 44
+    UNIFIED_BAR_H = TITLE_BAR_H  # compatibility for window controls
+    FILTER_H    = 60
     STATS_BAR_H = 28
-    BUTTON_H    = 32
-    INPUT_H     = 32
+    BUTTON_H    = 38
+    INPUT_H     = 38
     HW_BAR_H    = 36
 
-    # Radius — sharp corners everywhere, matching fthrclips.com
-    RADIUS      = 0
-    RADIUS_SM   = 0
-    RADIUS_MD   = 0
-    RADIUS_CARD = 0
-    RADIUS_PILL = 0
+    # Subtle rounding keeps dense controls and cards easy to distinguish.
+    RADIUS      = 6
+    RADIUS_SM   = 4
+    RADIUS_MD   = 6
+    RADIUS_CARD = 8
+    RADIUS_PILL = 6
+
+    PAGE_INSET = SPACE_7
+    ROW_GAP = SPACE_4
+    SECTION_GAP = SPACE_7
 
     # Borders
     BORDER_W   = 1
@@ -316,36 +304,39 @@ class Sizes:
 
 # Inline label helpers
 def label_display(
-    color: str = Colors.TEXT,
+    color: str | None = None,
     size: int = Fonts.SIZE_H2,
     tracking: int = Fonts.TRACK_DISPLAY,
 ) -> str:
-    """Oswald display label — for page titles and brand marks."""
+    """Semibold page title with natural spacing."""
+    color = Colors.TEXT if color is None else color
     return (
-        f'color: {color}; font-size: {size}px; font-weight: bold;'
+        f'color: {color}; font-size: {size}px; font-weight: 600;'
         f' font-family: {Fonts.DISPLAY}; letter-spacing: {tracking}px;'
         f' background: transparent;'
     )
 
 
 def label_uppercase(
-    color: str = Colors.TEXT,
+    color: str | None = None,
     size: int = Fonts.SIZE_LABEL,
     tracking: int = Fonts.TRACK_LABEL,
 ) -> str:
-    """Oswald uppercase tracking label — for group titles, section headers."""
+    """Compact semibold label. Kept under its old name for existing imports."""
+    color = Colors.TEXT if color is None else color
     return (
-        f'color: {color}; font-size: {size}px; font-weight: bold;'
-        f' font-family: {Fonts.DISPLAY}; letter-spacing: {tracking}px;'
+        f'color: {color}; font-size: {size}px; font-weight: 600;'
+        f' font-family: {Fonts.BODY}; letter-spacing: 0px;'
         f' background: transparent;'
     )
 
 
-def label_body(color: str = Colors.TEXT, size: int = Fonts.SIZE_BODY) -> str:
-    """Segoe UI body text."""
+def label_body(color: str | None = None, size: int = Fonts.SIZE_BODY) -> str:
+    """Regular-weight interface text in the chosen theme font."""
+    color = Colors.TEXT if color is None else color
     return (
         f'color: {color}; font-size: {size}px;'
-        f' font-family: {Fonts.BODY};'
+        f' font-family: {Fonts.BODY}; font-weight: 400; letter-spacing: 0px;'
         f' background: transparent;'
     )
 
@@ -353,8 +344,8 @@ def label_body(color: str = Colors.TEXT, size: int = Fonts.SIZE_BODY) -> str:
 # Capture status text (shown in the top bar)
 def _status_text_base() -> str:
     return (
-        f'font-size: {Fonts.SIZE_MICRO}px; font-family: {Fonts.DISPLAY};'
-        f' letter-spacing: 1px; font-weight: bold;'
+        f'font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.BODY};'
+        f' letter-spacing: 0px; font-weight: normal;'
         f' background: transparent; border: none; padding: 0 2px;'
     )
 
@@ -372,12 +363,12 @@ def status_warning_qss() -> str:
 # Reusable QSS fragments
 def combo_qss(background: str | None = None) -> str:
     """Return the shared combo style, with an optional non-default surface."""
-    combo_background = background or Colors.SURFACE_2
+    combo_background = background or Colors.SURFACE_3
     return f'''
     QComboBox {{
         combobox-popup: 0;
         background-color: {combo_background};
-        border: {Sizes.BORDER_W}px solid {Colors.BORDER};
+        border: 1px solid {Colors.BORDER};
         border-radius: {Sizes.RADIUS_MD}px;
         padding: 6px 12px;
         color: {Colors.TEXT};
@@ -387,18 +378,19 @@ def combo_qss(background: str | None = None) -> str:
         min-height: 22px;
     }}
     QComboBox:hover {{
-        border-color: {Colors.ACCENT};
+        background-color: {Colors.SURFACE_3};
         color: {Colors.TEXT};
     }}
     QComboBox:focus {{
-        border-color: {Colors.ACCENT};
+        background-color: {Colors.SURFACE_3};
         outline: none;
     }}
     QComboBox::drop-down {{ border: none; width: 22px; }}
     QComboBox::down-arrow {{ image: none; width: 0; height: 0; border: none; }}
     QComboBox QAbstractItemView {{
         background-color: {combo_background};
-        border: {Sizes.BORDER_W}px solid {Colors.BORDER_HI};
+        border: none;
+        border-radius: {Sizes.RADIUS_MD}px;
         color: {Colors.TEXT};
         font-size: {Fonts.SIZE_BODY}px;
         font-family: {Fonts.BODY};
@@ -434,7 +426,7 @@ def button_primary_qss() -> str:
         color: {Colors.BG};
         font-size: {Fonts.SIZE_LABEL}px;
         font-family: {Fonts.DISPLAY};
-        font-weight: bold;
+        font-weight: 600;
         letter-spacing: {Fonts.TRACK_LABEL}px;
         padding: 10px 18px;
     }}
@@ -461,7 +453,7 @@ def button_outline_qss() -> str:
         color: {Colors.TEXT};
         font-size: {Fonts.SIZE_LABEL}px;
         font-family: {Fonts.DISPLAY};
-        font-weight: bold;
+        font-weight: 600;
         letter-spacing: {Fonts.TRACK_LABEL}px;
         padding: 9px 16px;
     }}
@@ -486,7 +478,7 @@ def button_secondary_qss() -> str:
         color: {Colors.TEXT};
         font-size: {Fonts.SIZE_LABEL}px;
         font-family: {Fonts.DISPLAY};
-        font-weight: bold;
+        font-weight: 600;
         letter-spacing: {Fonts.TRACK_LABEL}px;
         padding: 10px 18px;
     }}
@@ -509,7 +501,7 @@ def button_pill_qss() -> str:
         color: {Colors.ACCENT};
         font-size: {Fonts.SIZE_LABEL}px;
         font-family: {Fonts.DISPLAY};
-        font-weight: bold;
+        font-weight: 600;
         letter-spacing: {Fonts.TRACK_LABEL}px;
         padding: 7px 16px;
     }}
@@ -529,7 +521,7 @@ def button_pill_ghost_qss() -> str:
         color: {Colors.TEXT_DIM};
         font-size: {Fonts.SIZE_LABEL}px;
         font-family: {Fonts.DISPLAY};
-        font-weight: bold;
+        font-weight: 600;
         letter-spacing: {Fonts.TRACK_LABEL}px;
         padding: 7px 14px;
     }}
@@ -548,7 +540,7 @@ def button_ghost_qss() -> str:
         color: {Colors.TEXT};
         font-size: {Fonts.SIZE_LABEL}px;
         font-family: {Fonts.DISPLAY};
-        font-weight: bold;
+        font-weight: 600;
         letter-spacing: {Fonts.TRACK_LABEL}px;
         padding: 6px 10px;
     }}
@@ -575,7 +567,7 @@ def slider_qss() -> str:
         width: 12px; height: 12px;
         margin: -5px 0;
         border: none;
-        border-radius: 0px;
+        border-radius: {Sizes.RADIUS_SM}px;
     }}
     QSlider::handle:horizontal:hover {{ background: {Colors.TEXT}; }}
     QSlider::handle:horizontal:pressed {{ background: {Colors.TEXT}; }}
@@ -595,7 +587,7 @@ def checkbox_qss() -> str:
         width: 14px; height: 14px;
         border: {Sizes.BORDER_W}px solid {Colors.TEXT};
         background-color: {Colors.BG};
-        border-radius: 0px;
+        border-radius: {Sizes.RADIUS_SM}px;
     }}
     QCheckBox::indicator:hover {{
         border-color: {Colors.ACCENT};
@@ -617,7 +609,7 @@ def groupbox_qss() -> str:
         padding: 22px 18px 16px 18px;
         color: {Colors.TEXT};
         font-size: {Fonts.SIZE_LABEL}px;
-        font-weight: bold;
+        font-weight: 600;
         font-family: {Fonts.DISPLAY};
         letter-spacing: {Fonts.TRACK_LABEL}px;
     }}
@@ -643,13 +635,24 @@ def scrollbar_qss() -> str:
     QScrollBar::handle:vertical {{
         background-color: {Colors.BORDER_HI};
         min-height: 32px;
-        border-radius: 0px;
+        border-radius: {Sizes.RADIUS_SM}px;
     }}
     QScrollBar::handle:vertical:hover {{ background-color: {Colors.ACCENT}; }}
     QScrollBar::add-line:vertical,
     QScrollBar::sub-line:vertical {{ height: 0px; background: none; border: none; }}
     QScrollBar::add-page:vertical,
     QScrollBar::sub-page:vertical {{ background: none; }}
+    QScrollBar:horizontal {{
+        background-color: {Colors.SHELL_BG_2};
+        height: 8px;
+        border: none;
+    }}
+    QScrollBar::handle:horizontal {{ background: {Colors.BORDER_HI}; min-width: 48px; border-radius: {Sizes.RADIUS_SM}px; }}
+    QScrollBar::handle:horizontal:hover {{ background: {Colors.ACCENT}; }}
+    QScrollBar::add-line:horizontal,
+    QScrollBar::sub-line:horizontal {{ width: 0; background: none; border: none; }}
+    QScrollBar::add-page:horizontal,
+    QScrollBar::sub-page:horizontal {{ background: none; }}
 '''
 
 
@@ -680,7 +683,7 @@ def details_panel_qss() -> str:
         color: {Colors.TEXT};
         font-size: {Fonts.SIZE_LABEL}px;
         font-family: {Fonts.DISPLAY};
-        font-weight: bold;
+        font-weight: 600;
         letter-spacing: {Fonts.TRACK_LABEL}px;
         padding: 12px 14px;
         text-align: left;

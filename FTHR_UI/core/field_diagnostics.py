@@ -46,6 +46,11 @@ class DiagnosticError(str, Enum):
 
     ENGINE_START_FAILED = 'ENGINE_START_FAILED'
     ENGINE_HANDSHAKE_TIMEOUT = 'ENGINE_HANDSHAKE_TIMEOUT'
+    MONITOR_SELECTION_NOT_CONFIGURED = 'MONITOR_SELECTION_NOT_CONFIGURED'
+    MONITOR_SELECTION_STALE = 'MONITOR_SELECTION_STALE'
+    MONITOR_SELECTION_AMBIGUOUS = 'MONITOR_SELECTION_AMBIGUOUS'
+    MONITOR_SELECTION_NO_DISPLAYS = 'MONITOR_SELECTION_NO_DISPLAYS'
+    MONITOR_PERSIST_FAILED = 'MONITOR_PERSIST_FAILED'
     CAPTURE_OUTPUT_OPEN_FAILED = 'CAPTURE_OUTPUT_OPEN_FAILED'
     CAPTURE_DXGI_INIT_FAILED = 'CAPTURE_DXGI_INIT_FAILED'
     CAPTURE_WGC_INIT_FAILED = 'CAPTURE_WGC_INIT_FAILED'
@@ -453,8 +458,12 @@ def process_memory_bytes() -> int | str:
         return 'unavailable'
 
 
-def qt_display_snapshot(app: Any) -> list[dict[str, Any]]:
-    """Collect non-serial display facts exposed by Qt."""
+def qt_display_snapshot(app: Any, window: Any = None) -> list[dict[str, Any]]:
+    """Collect bounded logical display facts exposed by Qt.
+
+    Qt geometry is logical/DIP geometry.  The physical size is explicitly an
+    estimate based on the screen DPR; it is not used for capture selection.
+    """
     if app is None:
         return []
     try:
@@ -468,7 +477,12 @@ def qt_display_snapshot(app: Any) -> list[dict[str, Any]]:
     for index, screen in enumerate(screens[:32]):
         try:
             geometry = screen.geometry()
+            available_getter = getattr(screen, 'availableGeometry', None)
+            available = (available_getter() if callable(available_getter)
+                         else geometry)
             name = str(screen.name() or f'display-{index}')
+            dpr = round(float(screen.devicePixelRatio()), 3)
+            logical_dpi = round(float(screen.logicalDotsPerInch()), 3)
             result.append({
                 'index': index,
                 'name': name[:128],
@@ -478,10 +492,23 @@ def qt_display_snapshot(app: Any) -> list[dict[str, Any]]:
                 'desktop_coordinates': {
                     'x': int(geometry.x()), 'y': int(geometry.y()),
                 },
+                'logical_geometry': {
+                    'x': int(geometry.x()), 'y': int(geometry.y()),
+                    'width': int(geometry.width()), 'height': int(geometry.height()),
+                },
+                'logical_available_geometry': {
+                    'x': int(available.x()), 'y': int(available.y()),
+                    'width': int(available.width()), 'height': int(available.height()),
+                },
                 'refresh_hz': round(float(screen.refreshRate()), 3),
                 'primary': screen is primary,
-                'device_pixel_ratio': round(float(screen.devicePixelRatio()), 3),
-                'logical_dpi': round(float(screen.logicalDotsPerInch()), 3),
+                'device_pixel_ratio': dpr,
+                'logical_dpi': logical_dpi,
+                'physical_size_estimate': {
+                    'width': round(float(geometry.width()) * dpr),
+                    'height': round(float(geometry.height()) * dpr),
+                    'basis': 'logical_geometry × device_pixel_ratio estimate',
+                },
                 'hdr': unavailable('not_exposed_by_qt'),
                 'owning_adapter': unavailable('engine_mapping_required'),
             })
@@ -490,6 +517,20 @@ def qt_display_snapshot(app: Any) -> list[dict[str, Any]]:
                 'index': index,
                 'status': unavailable(type(error).__name__.lower()),
             })
+    # Awareness is a window/process property rather than a screen property.
+    # Keep it on each display record for compatibility with simple JSONL
+    # consumers, but only query it when a realized window was supplied.
+    if window is not None:
+        try:
+            from core.windows_dpi import dpi_awareness_snapshot
+            awareness = dpi_awareness_snapshot(window)
+            for display in result:
+                if isinstance(display, dict):
+                    display['windows_dpi_awareness'] = awareness
+        except Exception:
+            # Diagnostic enrichment is best-effort and must never prevent an
+            # explicitly requested support bundle from being exported.
+            pass
     return _sanitize(result)
 
 

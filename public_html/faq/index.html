@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTHRClips FAQ</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="icon" type="image/png" sizes="96x96" href="favicon-96x96.png">
+    <link rel="shortcut icon" href="favicon.ico">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+    <link rel="manifest" href="site.webmanifest">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <canvas class="dot-field" id="dotField" aria-hidden="true"></canvas>
+
+    <nav class="site-nav">
+        <a class="logo" href="https://fthrclips.com" aria-label="Back to FTHRClips">
+            <img src="assets/logo.png" alt="FTHR">
+        </a>
+        <div class="nav-links" aria-label="Primary">
+            <a href="https://fthrclips.com">Main Site</a>
+            <a href="https://socials.fthrclips.com">Socials</a>
+            <a href="https://about.fthrclips.com" target="_blank" rel="noopener noreferrer">Legal Notice</a>
+        </div>
+        <button class="nav-hc-btn" id="hcToggle" aria-label="Toggle high contrast mode" title="High contrast mode">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/>
+            </svg>
+            HC
+        </button>
+    </nav>
+
+    <main class="faq-page">
+        <section class="faq-shell animate-in" aria-labelledby="pageTitle">
+            <aside class="identity-panel">
+                <a class="brand-mark" href="https://fthrclips.com" aria-label="Visit FTHRClips main site">
+                    <img src="assets/logo.png" alt="FTHR">
+                </a>
+                <div>
+                    <p class="label">Support Index</p>
+                    <h1 id="pageTitle">FAQ</h1>
+                    <p class="intro">All the popular questions you may have.</p>
+                </div>
+                <div class="status-strip">
+                    <span>System Status</span>
+                    <strong>Closed Development</strong>
+                </div>
+            </aside>
+
+            <section class="faq-panel" aria-label="Frequently asked questions">
+                <article class="faq-item">
+                    <span class="faq-number">01</span>
+                    <div class="faq-copy">
+                        <h2>What is FTHRClips?</h2>
+                        <p>FTHRClips is privacy-first clipping software made by us FTHR-Software for saving gameplay moments locally with high performance and no social platform attached.</p>
+                    </div>
+                </article>
+
+                <article class="faq-item">
+                    <span class="faq-number">02</span>
+                    <div class="faq-copy">
+                        <h2>Is FTHRClips available yet?</h2>
+                        <p>Not publicly. The project is in closed development, with progress updates shared through the main site and Discord. Alpha release scheduled for Q3 of 2026.</p>
+                    </div>
+                </article>
+
+                <article class="faq-item">
+                    <span class="faq-number">03</span>
+                    <div class="faq-copy">
+                        <h2>Does it collect data?</h2>
+                        <p>No. FTHRClips is designed around local capture, local files, no accounts, no telemetry, and no background network calls.</p>
+                    </div>
+                </article>
+
+                <article class="faq-item">
+                    <span class="faq-number">04</span>
+                    <div class="faq-copy">
+                        <h2>Where are clips stored?</h2>
+                        <p>Clips are saved to your own machine. The exact folder can be configured in the app once the public build is available.</p>
+                    </div>
+                </article>
+
+                <article class="faq-item">
+                    <span class="faq-number">05</span>
+                    <div class="faq-copy">
+                        <h2>Will it support high framerates and resolutions?</h2>
+                        <p>Yes. FTHRClips is built to follow what your hardware can handle instead of enforcing artificial capture caps.</p>
+                    </div>
+                </article>
+
+                <article class="faq-item">
+                    <span class="faq-number">06</span>
+                    <div class="faq-copy">
+                        <h2>Which GPUs are planned?</h2>
+                        <p>The capture pipeline targets hardware encoders from NVIDIA, AMD, and Intel, with software fallback for systems without compatible hardware encoding.</p>
+                    </div>
+                </article>
+
+                <article class="faq-item">
+                    <span class="faq-number">07</span>
+                    <div class="faq-copy">
+                        <h2>Will there be a subscription?</h2>
+                        <p>The site positions FTHRClips against subscription-locked basics. Core clipping should not require paying for unnecessary platform features.</p>
+                    </div>
+                </article>
+
+                <article class="faq-item">
+                    <span class="faq-number">08</span>
+                    <div class="faq-copy">
+                        <h2>What platforms will be supported?</h2>
+                        <p>We will support Windows 10/11 as well as these Linux Distros: <br>
+Ubuntu Family <br>
+- Ubuntu 24.04+ <br>
+- Kubuntu 24.04+ <br>
+- Xubuntu 24.04+ <br>
+- Lubuntu 24.04+ <br>
+- Ubuntu MATE 24.04+ <br>
+- Ubuntu Budgie 24.04+ <br>
+- Ubuntu Cinnamon 24.04+ <br>
+- Ubuntu Studio 24.04+ <br>
+- Linux Mint 22+ <br>
+- Pop!_OS 24.04+ <br>
+- Zorin OS 18+ <br>
+- elementary OS 8+ <br>
+<br>
+Debian Family <br>
+- Debian 13+ <br>
+- Debian Testing <br>
+- Debian Sid <br>
+- Kali Linux <br>
+<br>
+Fedora / Red Hat <br>
+- Fedora 40+ <br>
+- Fedora Silverblue 40+ <br>
+- Fedora Kinoite 40+ <br>
+- Fedora Atomic 40+ <br>
+- Nobara <br>
+- Bazzite <br>
+- Universal Blue <br>
+- RHEL 10+ <br>
+- Rocky Linux 10+ <br>
+- AlmaLinux 10+ <br>
+- CentOS Stream 10+ <br>
+- Oracle Linux 10+ <br>
+<br>
+Arch Family  <br>
+- Arch Linux <br>
+- EndeavourOS <br>
+- Manjaro <br>
+- CachyOS <br>
+- Garuda Linux <br>
+- Artix Linux (glibc) <br>
+- RebornOS <br>
+- Archcraft <br>
+<br>
+openSUSE <br>
+- Tumbleweed <br>
+- Slowroll <br>
+- Leap 16+ <br>
+ <br>
+Other <br>
+- Gentoo (glibc 2.39+) <br>
+- Void Linux (glibc) <br>
+- Solus <br>
+- All other x86-64-Distros given they are  glibc ≥ 2.39 <br>
+
+</p>
+                    </div>
+                </article>
+
+                <article class="faq-item">
+                    <span class="faq-number">09</span>
+                    <div class="faq-copy">
+                        <h2>Can clips upload somewhere?</h2>
+                        <p>Planned upload support is focused on letting you connect your own server or services like catbox.</p>
+                    </div>
+                </article>
+            </section>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <a href="https://fthrclips.com">Back to FTHR</a>
+        <span>©2026 FTHR-Software // ALL RIGHTS RESERVED</span>
+    </footer>
+
+    <script src="script.js" defer></script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 """Detect foreground game windows using platform-specific APIs.
 
 Windows filters launchers, browsers, and tools, consults Game Bar, and
-requires stable candidates. Linux uses compositor-specific enumeration.
+requires stable candidates.
 """
 
 from __future__ import annotations
@@ -28,16 +28,16 @@ def _enumerate_via_hyprctl() -> list:
     """List windows on Hyprland via hyprctl clients -j."""
     try:
         hyprctl = linux_tools.require('hyprctl')
-        r = subprocess.run([hyprctl, 'clients', '-j'],
-                           capture_output=True, timeout=2)
-        clients = json.loads(r.stdout.decode(errors='replace'))
+        result = subprocess.run([hyprctl, 'clients', '-j'],
+                                capture_output=True, timeout=2)
+        clients = json.loads(result.stdout.decode(errors='replace'))
         windows = []
-        for c in clients:
-            title = c.get('title') or c.get('class') or ''
+        for client in clients:
+            title = client.get('title') or client.get('class') or ''
             if not title:
                 continue
-            hwnd    = int(c.get('address', '0x0'), 16) & 0xFFFFFFFF
-            is_game = bool(c.get('fullscreen')) or c.get('fullscreenMode', 0) > 0
+            hwnd = int(client.get('address', '0x0'), 16) & 0xFFFFFFFF
+            is_game = bool(client.get('fullscreen')) or client.get('fullscreenMode', 0) > 0
             windows.append({'hwnd': hwnd, 'display_name': title,
                             'title': title, 'is_game': is_game})
         return windows
@@ -46,46 +46,45 @@ def _enumerate_via_hyprctl() -> list:
 
 
 def _enumerate_via_xdotool() -> list:
-    """List visible windows via xdotool + xprop. Works for XWayland and X11.
-    Covers Steam/Proton games and most Linux native games."""
+    """List visible windows via xdotool + xprop on X11/XWayland."""
     if not linux_tools.available('xdotool'):
         return []
     try:
-        r = subprocess.run(
+        result = subprocess.run(
             [linux_tools.require('xdotool'), 'search', '--all',
              '--onlyvisible', '--maxdepth', '2', ''],
             capture_output=True, timeout=3)
-        if r.returncode != 0:
+        if result.returncode != 0:
             return []
-        wids = [w.strip() for w in r.stdout.decode().splitlines() if w.strip()]
+        window_ids = [value.strip() for value in result.stdout.decode().splitlines()
+                      if value.strip()]
     except Exception:
         return []
 
     windows = []
-    for wid in wids[:50]:  # cap to avoid slow scans
+    for window_id in window_ids[:50]:
         try:
-            r_name = subprocess.run([linux_tools.require('xdotool'),
-                                     'getwindowname', wid],
-                                    capture_output=True, timeout=1)
-            title = r_name.stdout.decode().strip()
+            result_name = subprocess.run(
+                [linux_tools.require('xdotool'), 'getwindowname', window_id],
+                capture_output=True, timeout=1)
+            title = result_name.stdout.decode().strip()
             if not title:
                 continue
 
             is_game = False
             xprop = linux_tools.path('xprop')
-            r_prop = subprocess.run([xprop, '-id', wid, '_NET_WM_STATE'],
-                                    capture_output=True, timeout=1)
-            if r_prop.returncode == 0:
-                is_game = '_NET_WM_STATE_FULLSCREEN' in r_prop.stdout.decode()
+            result_prop = subprocess.run(
+                [xprop, '-id', window_id, '_NET_WM_STATE'],
+                capture_output=True, timeout=1)
+            if result_prop.returncode == 0:
+                is_game = '_NET_WM_STATE_FULLSCREEN' in result_prop.stdout.decode()
 
             windows.append({
-                'hwnd':         int(wid) & 0xFFFFFFFF,
+                'hwnd': int(window_id) & 0xFFFFFFFF,
                 'display_name': title,
-                'title':        title,
-                'is_game':      is_game,
+                'title': title,
+                'is_game': is_game,
             })
-        # Window enumeration is an optional Linux integration; fail closed if
-        # a compositor returns malformed data or is unavailable mid-poll.
         except Exception:
             continue
     return windows
@@ -93,8 +92,8 @@ def _enumerate_via_xdotool() -> list:
 
 def _enumerate_linux_windows() -> list:
     """Pick the right backend for the current compositor."""
-    comp = detect_compositor()
-    if comp == 'hyprland':
+    compositor = detect_compositor()
+    if compositor == 'hyprland':
         return _enumerate_via_hyprctl()
     return _enumerate_via_xdotool()
 
@@ -117,7 +116,6 @@ class GameDetector(QObject):
         self._poll_running = False          # skip ticks while worker is busy
         self._timer = QTimer(self)
         self._timer.setInterval(3000)
-        # Enumeration shells out to xdotool/xprop on X11 (dozens of blocking
         # subprocess calls) — never run that on the Qt main thread. The worker
         # thread enumerates; results come back via queued signal.
         self._timer.timeout.connect(self._start_poll)
@@ -482,10 +480,10 @@ def is_probable_game(window: Optional[GameWindow],
     """Apply conservative, deterministic game heuristics to a window."""
     if window is None or not window.hwnd or not window.pid:
         return False
-    if window.width < 640 or window.height < 360:
-        return False
     if is_user_configured_game(window, custom_game_rules):
         return True
+    if window.width < 640 or window.height < 360:
+        return False
 
     title = window.title.casefold()
     if any(marker in title for marker in _EXCLUDED_WINDOW_TITLE_MARKERS):
@@ -670,8 +668,15 @@ def get_foreground_window(own_pid: Optional[int] = None) -> Optional[GameWindow]
     """Read the current foreground window using fast Win32 calls only."""
     if _USER32 is None:
         return None
+    return get_window_info(int(_USER32.GetForegroundWindow() or 0), own_pid)
+
+
+def get_window_info(hwnd: int, own_pid: Optional[int] = None) -> Optional[GameWindow]:
+    """Inspect a running capture window without changing foreground focus."""
+    if _USER32 is None:
+        return None
     try:
-        hwnd = int(_USER32.GetForegroundWindow() or 0)
+        hwnd = int(hwnd or 0)
         if not hwnd or not _USER32.IsWindowVisible(hwnd):
             return None
         title = _window_text(hwnd)
@@ -740,6 +745,7 @@ class ForegroundGameDetector(QObject):
         stable_polls: int = 2,
         window_provider: WindowProvider = get_foreground_window,
         custom_game_rules: object = (),
+        blacklist_rules: object = (),
     ):
         super().__init__(parent)
         self.interval_seconds = max(0.2, float(interval_seconds))
@@ -751,6 +757,7 @@ class ForegroundGameDetector(QObject):
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._custom_game_rules = normalise_custom_game_rules(custom_game_rules)
+        self._blacklist_rules = normalise_custom_game_rules(blacklist_rules)
         self._observed_identity: Optional[tuple[int, int]] = None
         self._observed_capture_signature: tuple | None = None
         self._observed_count = 0
@@ -802,6 +809,10 @@ class ForegroundGameDetector(QObject):
         with self._lock:
             self._custom_game_rules = normalise_custom_game_rules(rules)
 
+    def set_blacklist_rules(self, rules: object):
+        with self._lock:
+            self._blacklist_rules = normalise_custom_game_rules(rules)
+
     def _reset_observation_locked(self):
         self._observed_identity = None
         self._observed_capture_signature = None
@@ -818,7 +829,8 @@ class ForegroundGameDetector(QObject):
                 window = self._window_provider(self._own_pid)
                 with self._lock:
                     rules = self._custom_game_rules
-                if not is_probable_game(window, rules):
+                    blocked = self._blacklist_rules
+                if (window is not None and matching_custom_game_rule(window, blocked)) or not is_probable_game(window, rules):
                     window = None
                 self._observe(window)
             # Detection is a best-effort background service; one bad poll
@@ -888,6 +900,7 @@ __all__ = [
     'GameDetector',
     'GameWindow',
     'get_foreground_window',
+    'get_window_info',
     'is_capture_window_valid',
     'is_probable_game',
     'matching_custom_game_rule',

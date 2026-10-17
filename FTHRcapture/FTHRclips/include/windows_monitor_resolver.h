@@ -52,6 +52,9 @@ struct MonitorTopologyEntry {
     bool primary = false;
     bool active = false;
     uint64_t topology_generation = 0;
+    bool adapter_luid_available = true;
+    int32_t left = 0, top = 0;
+    uint32_t width = 0, height = 0;
 
     friend bool operator==(
         const MonitorTopologyEntry& left,
@@ -62,7 +65,8 @@ struct MonitorTopologyEntry {
             && left.source_id == right.source_id
             && left.target_id == right.target_id
             && left.hmonitor == right.hmonitor
-            && left.source_gdi_name == right.source_gdi_name;
+            && left.source_gdi_name == right.source_gdi_name
+            && left.adapter_luid_available == right.adapter_luid_available;
     }
 };
 
@@ -111,6 +115,17 @@ struct DxgiOutputIdentity {
     std::wstring source_gdi_name;
     uint32_t output_index = UINT32_MAX;
 };
+
+// Explicit, transient selection for a live desktop output whose PnP identity
+// is unavailable. Never use a bare display index/name as a native argument.
+std::wstring DesktopMonitorIdentity(const MonitorTopologyEntry& monitor);
+bool MatchesMonitorSelection(const MonitorTopologyEntry&, const std::wstring&);
+TopologyQueryResult BuildLiveMonitorTopology(
+    const std::vector<MonitorTopologyEntry>& desktop_monitors,
+    const std::vector<MonitorTopologyEntry>& display_paths,
+    const std::vector<DxgiOutputIdentity>& outputs);
+bool OpenSelectedDxgiAdapter(
+    IDXGIFactory1*, const MonitorTopologyEntry&, IDXGIAdapter1**, std::string&);
 
 struct DxgiOutputResolveResult {
     MonitorResolveError error = MonitorResolveError::None;

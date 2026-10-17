@@ -7,6 +7,7 @@ main-process finalization and library scans.
 import os
 import sys
 import subprocess
+import threading
 from pathlib import Path
 
 # Development launches the helper script with the current Python interpreter.
@@ -20,7 +21,6 @@ else:
     _LAUNCH_CMD = [sys.executable, str(_PROCESS_SCRIPT)]
 
 # Prevent a console window from flashing when the helper starts on Windows.
-# This flag is not used on Linux.
 _CREATE_NO_WINDOW = 0x08000000
 _NO_WINDOW = {'creationflags': _CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
 
@@ -43,11 +43,7 @@ class CaptureCardClient:
             # Python child otherwise decodes redirected stdin with the Windows
             # locale (e.g. cp1252), corrupting names such as KovaaK’s.
             env['PYTHONIOENCODING'] = 'utf-8'
-            # Force XWayland only on Linux. Windows must retain its native Qt
             # platform plugin; setting xcb there makes the card process exit.
-            if sys.platform != 'win32' and os.environ.get('WAYLAND_DISPLAY'):
-                env['QT_QPA_PLATFORM'] = 'xcb'
-                env['DISPLAY'] = os.environ.get('DISPLAY', ':0')
             monitor = self._sm.get('notification_monitor', 'auto') if self._sm else 'auto'
             env['FTHR_CARD_SCREEN_NAME'] = monitor
             env['FTHR_CARD_VISUALS_ENABLED'] = (
@@ -67,14 +63,24 @@ class CaptureCardClient:
             self._proc = None
 
     def restart(self):
-        """Terminate the card subprocess; it will relaunch on the next show call."""
-        if self._proc and self._proc.poll() is None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
+        """Replace the card helper without waiting for its exit on the UI thread."""
+        retired = self._proc
         self._proc = None
+        if retired and retired.poll() is None:
+            retired.terminate()
+
+            def reap():
+                try:
+                    retired.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    retired.kill()
+                    retired.wait()
+                finally:
+                    if retired.stdin is not None:
+                        retired.stdin.close()
+
+            threading.Thread(
+                target=reap, daemon=True, name='fthr-card-reaper').start()
         self._launch()
 
     def set_visuals_enabled(self, enabled: bool) -> None:
@@ -83,6 +89,16 @@ class CaptureCardClient:
         self._send(f'visuals|{1 if self._visuals_enabled else 0}')
 
     def _send(self, cmd: str) -> None:
+        if self._sm is not None:
+            event = cmd.split('|', 1)[0]
+            if event not in {'visuals', 'background_hide', 'quit', 'startup'}:
+                mode = self._sm.get('capture_card_mode', None)
+                if mode is not None:
+                    capture = event in {'clip', 'screenshot', 'recording_saved', 'error'}
+                    detection = event in {'prompt', 'capturing'}
+                    visible = (mode == 'all' or (mode == 'capture' and capture)
+                               or (mode == 'detection' and detection))
+                    self.set_visuals_enabled(visible)
         # A broken helper must not permanently disable notifications. Retry
         # the exact event once on a fresh process; later events can also
         # relaunch after a previous launch failure.

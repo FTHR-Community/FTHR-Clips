@@ -48,7 +48,7 @@ class DiagnosticReportFile(QPushButton):
             self._dragged = True
             self.setDown(False)
             if self._path is None or not self._path.is_file():
-                self.setText('ZIP NO LONGER AVAILABLE — EXPORT AGAIN')
+                self.setText('Zip no longer available — export again')
                 return
             data = QMimeData()
             data.setUrls([QUrl.fromLocalFile(str(self._path))])
@@ -79,7 +79,7 @@ class DiagnosticReportDialog(FthrDialog):
         self.file_button.set_file(path)
         self.body_layout.addWidget(self.file_button)
         self.action_layout.addStretch()
-        close = QPushButton('DONE')
+        close = QPushButton('Done')
         set_theme_style(close, button_primary_qss)
         close.clicked.connect(self.accept)
         self.action_layout.addWidget(close)

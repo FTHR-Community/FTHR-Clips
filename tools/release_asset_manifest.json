@@ -4,7 +4,6 @@
   "allowed_redistribution_status": "approved",
   "scanned_source_roots": [
     ".github",
-    "AppDir",
     "FTHR_UI/assets",
     "installer_assets"
   ],
@@ -27,6 +26,11 @@
     ".woff2"
   ],
   "origins": {
+    "user-provided-gary-cat": {
+      "type": "user-provided",
+      "description": "Workspace owner supplied gatze.png on 2026-10-15 for the one-in-ten alternate Gary Mode appearance; included unchanged.",
+      "notice": "licenses/FTHR-USER-PROVIDED-ASSETS.txt"
+    },
     "fthr-original-gary": {
       "type": "project-original",
       "description": "Original Gary artwork created by FTHR, confirmed by the project owner on 2026-09-17; retained as a source image, not an output of the release asset generator.",
@@ -58,39 +62,2559 @@
       "type": "user-provided",
       "description": "Workspace owner supplied the FTHR brand ICO used by the application window, executable, and Windows installer.",
       "notice": "licenses/FTHR-USER-PROVIDED-ASSETS.txt"
+    },
+    "oswald-4.103-regular": {
+      "type": "upstream-unmodified",
+      "publisher": "The Oswald Project Authors / Google Fonts",
+      "version": "4.103",
+      "source_revision": "89795261ac9eeb9aa8cd99f43982c4e4b0e53261",
+      "source_file": "https://raw.githubusercontent.com/googlefonts/OswaldFont/89795261ac9eeb9aa8cd99f43982c4e4b0e53261/fonts/ttf/Oswald-Regular.ttf",
+      "source_license": "https://raw.githubusercontent.com/googlefonts/OswaldFont/89795261ac9eeb9aa8cd99f43982c4e4b0e53261/OFL.txt",
+      "notice": "licenses/Oswald-OFL-1.1.txt"
+    },
+    "oswald-4.103-semibold": {
+      "type": "upstream-unmodified",
+      "publisher": "The Oswald Project Authors / Google Fonts",
+      "version": "4.103",
+      "source_revision": "89795261ac9eeb9aa8cd99f43982c4e4b0e53261",
+      "source_file": "https://raw.githubusercontent.com/googlefonts/OswaldFont/89795261ac9eeb9aa8cd99f43982c4e4b0e53261/fonts/ttf/Oswald-SemiBold.ttf",
+      "source_license": "https://raw.githubusercontent.com/googlefonts/OswaldFont/89795261ac9eeb9aa8cd99f43982c4e4b0e53261/OFL.txt",
+      "notice": "licenses/Oswald-OFL-1.1.txt"
+    },
+    "fthr-ui-reference-svg": {
+      "type": "project-source",
+      "description": "Interface SVG artwork ported unchanged from the user-supplied FTHR-Clips-experimental/FTHR_UI/assets/icons source tree. Governed by the project source license; distinct from the generated MIT asset set.",
+      "notice": "LICENSE"
+    },
+    "fthr-installer-polish-v1": {
+      "type": "project-generated",
+      "generator": "tools/generate_installer_assets.py",
+      "generator_version": 1,
+      "external_creative_inputs": [
+        "FTHR_UI/assets/icons/close.svg",
+        "FTHR_UI/assets/fonts/Oswald-Bold.ttf"
+      ],
+      "description": "Antialiased step indicators using the existing Oswald font, and a proportion-preserving raster of the current application close SVG.",
+      "notice": "LICENSE"
+    },
+    "kofi-promotional-symbol": {
+      "type": "third-party-brand-asset",
+      "publisher": "Ko-fi / Ko-fi Labs Limited",
+      "description": "Existing Ko-fi cup PNG visually verified against the official creator kit on 2026-10-13. Original acquisition URL not recorded. Used solely to promote the project Ko-fi page under the official promotional permission.",
+      "source_url": "https://more.ko-fi.com/brand-assets",
+      "permission_url": "https://help.ko-fi.com/hc/en-us/articles/360007169493-Can-I-use-the-Ko-fi-logo-to-promote-my-page",
+      "notice": "licenses/KO-FI-BRAND-ASSETS.txt"
     }
   },
   "assets": [
-    {"path": "FTHR_UI/assets/gary.png", "sha256": "4ccfb741b009977f0af444ba114c08340a070769d250dd163e279a28ccdc8571", "media_type": "image/png", "usage": ["Gary mode default image"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/gary.png"], "linux": ["_internal/assets/gary.png"]}, "packaging_references": ["FTHR.spec", "FTHR_linux.spec"], "license": "MIT", "copyright": "Copyright (c) 2026 Haakon Schaller, trading as FTHR-Software", "origin": "fthr-original-gary", "redistribution_status": "approved"},
-    {"path": ".github/social_preview.png", "sha256": "ea90be692d4c58f23cc70f139021938ca196b7039255d98e098820962cbefe14", "media_type": "image/png", "usage": ["repository social preview"], "distributions": ["repository-only"], "artifact_paths": {}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "AppDir/fthr-clips.png", "sha256": "0266ea11270d48a927c09805d59a2fd957e2cceb035f6793bff29fd7d8b50e08", "media_type": "image/png", "usage": ["AppImage desktop icon"], "distributions": ["linux"], "artifact_paths": {"linux": ["fthr-clips.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/fonts/Oswald-Bold.ttf", "sha256": "eb7d46f856dd57f18a8c03d033c57802692bf127f01dbd95ba8984338e6b5135", "media_type": "font/ttf", "usage": ["application display font"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/fonts/Oswald-Bold.ttf"], "linux": ["_internal/assets/fonts/Oswald-Bold.ttf"]}, "license": "OFL-1.1", "copyright": "Copyright 2016 The Oswald Project Authors (https://github.com/googlefonts/OswaldFont)", "origin": "oswald-4.103", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/fthr_logo.ico", "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936", "media_type": "image/vnd.microsoft.icon", "usage": ["Windows executable icon"], "distributions": ["windows-executable-embedded"], "artifact_paths": {}, "packaging_references": ["FTHR.spec"], "license": "User-provided", "copyright": "Workspace owner supplied brand icon", "origin": "user-provided-brand-icon", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/favicon.ico", "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936", "media_type": "image/vnd.microsoft.icon", "usage": ["window icon", "system tray icon", "watermark default", "theme default", "Windows installer icon and title-bar mark"], "distributions": ["windows", "linux", "windows-installer-embedded"], "artifact_paths": {"windows": ["_internal/assets/favicon.ico"], "linux": ["_internal/assets/favicon.ico"]}, "packaging_references": ["installer_windows.iss"], "license": "User-provided", "copyright": "Workspace owner supplied brand icon", "origin": "user-provided-brand-icon", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/fthr_logo.png", "sha256": "1164d541d01f2b71ba2003892389152f0f0535954f44c020bda3f0412919e90e", "media_type": "image/png", "usage": ["main window logo", "theme default"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/fthr_logo.png"], "linux": ["_internal/assets/fthr_logo.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/preview_desktop.png", "sha256": "4ba07a6b9b478f63d4897952a2bc02e9bc23ace1de18470da58cbdabe24cda55", "media_type": "image/png", "usage": ["standard visual-overlays preview background"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/preview_desktop.png"], "linux": ["_internal/assets/preview_desktop.png"]}, "license": "User-provided", "copyright": "Workspace owner supplied image", "origin": "user-provided-preview", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/clip.png", "sha256": "7dc91171c1d16bc9edd58501058ca597fe7fb9932abb869f35466b3d267a83c2", "media_type": "image/png", "usage": ["clip tab icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/clip.png"], "linux": ["_internal/assets/icons/clip.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/close.png", "sha256": "751d4c4b00852fa0fbd153e4f89360c51a22192a2fd3df51f864658b4403923f", "media_type": "image/png", "usage": ["close button icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/close.png"], "linux": ["_internal/assets/icons/close.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/dropdown.png", "sha256": "8918f835bb6c8404932020d8d1f09ea420801a800ebd840f16d4ed0170b3b09f", "media_type": "image/png", "usage": ["combo-box arrow"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/dropdown.png"], "linux": ["_internal/assets/icons/dropdown.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/home.png", "sha256": "e2d589bfab6e06e63cc676dc8dcb924808b9e7776230738678dde6364faae313", "media_type": "image/png", "usage": ["home button icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/home.png"], "linux": ["_internal/assets/icons/home.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/maximize.png", "sha256": "ee2c602cbc8ca68d8b6e8e0a7e744544d4613695eb0e8ea5095a355078578809", "media_type": "image/png", "usage": ["maximize button icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/maximize.png"], "linux": ["_internal/assets/icons/maximize.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/minimize.png", "sha256": "e7861bdc5ba185c22f295408bda8cbf588b325b3ffd69bac43852d31dc8c38c4", "media_type": "image/png", "usage": ["minimize button icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/minimize.png"], "linux": ["_internal/assets/icons/minimize.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/pause.png", "sha256": "1c25e339c453542fb3159ab102e22d7302bcc8ae6a253cdd44f2c26a1dc1fef7", "media_type": "image/png", "usage": ["media pause icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/pause.png"], "linux": ["_internal/assets/icons/pause.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/personalize.png", "sha256": "c3fea9fedd4f37f372f3dbe38928b4d7674709ae4cf9ef1451921b8457f1f983", "media_type": "image/png", "usage": ["customization tab icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/personalize.png"], "linux": ["_internal/assets/icons/personalize.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/play.png", "sha256": "3c9c4ba3d8a9794005c9d31ddac7cb8a237c17f4939fdaadac935c8ff0b2f9f8", "media_type": "image/png", "usage": ["media play icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/play.png"], "linux": ["_internal/assets/icons/play.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/refresh.png", "sha256": "101d18adaba7c478bcf65e6a39e27da545d6e4eb88a0aff43eda47d5f409c7c1", "media_type": "image/png", "usage": ["refresh button icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/refresh.png"], "linux": ["_internal/assets/icons/refresh.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/settings(general).png", "sha256": "da070779137d109cbc175a0c8c64eecf4dac0277b01ae9fde90babdad20e04bf", "media_type": "image/png", "usage": ["settings tab icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/settings(general).png"], "linux": ["_internal/assets/icons/settings(general).png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/sound.png", "sha256": "d1b08687a69d0743fa1cfe39608e6931740fb2dd7d7469d4e24269a833b52b39", "media_type": "image/png", "usage": ["audio tab icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/sound.png"], "linux": ["_internal/assets/icons/sound.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/shutdown.png", "sha256": "964597788bd296f4843c7114b1e6af3899499c9eb3afa8da5a726180dca14bff", "media_type": "image/png", "usage": ["shutdown button icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/shutdown.png"], "linux": ["_internal/assets/icons/shutdown.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/updates.png", "sha256": "da8f7dadb9aa1ece5bfee82e1d5568e8506eef656153f591c4f33cb46b990032", "media_type": "image/png", "usage": ["updates and performance icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/updates.png"], "linux": ["_internal/assets/icons/updates.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/icons/visuals.png", "sha256": "e3176bb051eae62705e309248ca5320c037c0c218b9612dc2452c63fd3cbfd48", "media_type": "image/png", "usage": ["visuals tab icon"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/icons/visuals.png"], "linux": ["_internal/assets/icons/visuals.png"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/sounds/clip_captured.wav", "sha256": "e0da4dd3382d3e91347c59796e904a775afbfb81ef3752defffbb9769bf2863b", "media_type": "audio/wav", "usage": ["clip-captured notification"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/sounds/clip_captured.wav"], "linux": ["_internal/assets/sounds/clip_captured.wav"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/sounds/error.wav", "sha256": "4af4ae3d084043b0c3cb7bda6943ad3ff10444c67722ca48c616b3a0827297a0", "media_type": "audio/wav", "usage": ["error notification"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/sounds/error.wav"], "linux": ["_internal/assets/sounds/error.wav"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/sounds/screenshot_saved.wav", "sha256": "80a3e9e313d6b825177eb5a82513c5907a81550d0d4d16e744f49ffb42356efb", "media_type": "audio/wav", "usage": ["screenshot-saved notification"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/sounds/screenshot_saved.wav"], "linux": ["_internal/assets/sounds/screenshot_saved.wav"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/sounds/startup.wav", "sha256": "56a04ecc28578f8cd83adfb2f37f2fa7d68ad3a7d29cb0068b6ec4cc556d4152", "media_type": "audio/wav", "usage": ["startup notification"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/sounds/startup.wav"], "linux": ["_internal/assets/sounds/startup.wav"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/sounds/upload_failed.wav", "sha256": "8e99c82a31e66f85a86d97df68c5fc05b0601dafd566b3b15e29b84770b35f1c", "media_type": "audio/wav", "usage": ["upload-failed notification"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/sounds/upload_failed.wav"], "linux": ["_internal/assets/sounds/upload_failed.wav"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "FTHR_UI/assets/sounds/upload_successful.wav", "sha256": "9eb8a4605642b28663697bb8045434208aeb2198359d5c5ee2c236ed9bd62137", "media_type": "audio/wav", "usage": ["upload-success notification"], "distributions": ["windows", "linux"], "artifact_paths": {"windows": ["_internal/assets/sounds/upload_successful.wav"], "linux": ["_internal/assets/sounds/upload_successful.wav"]}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "installer_assets/wizard_banner.bmp", "sha256": "22c0a8a0d2687cb4fd903856988aca208487948c4f92b007d8b068947e95d45a", "media_type": "image/bmp", "usage": ["legacy installer artwork retained in source but not embedded"], "distributions": [], "artifact_paths": {}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"},
-    {"path": "installer_assets/wizard_small.bmp", "sha256": "55448c510e3562627239f18cd7ad4e384654dc8abcda7a319d44ef99794c0852", "media_type": "image/bmp", "usage": ["legacy installer artwork retained in source but not embedded"], "distributions": [], "artifact_paths": {}, "license": "MIT", "copyright": "Copyright (c) 2026 FTHR-Community", "origin": "fthr-generator-v1", "redistribution_status": "approved"}
+    {
+      "path": "FTHR_UI/assets/gatze.png",
+      "sha256": "cbbbdf11da3d21f1fe1710798396c3f21f9f35cb47ecda07d0b6540b8250799f",
+      "media_type": "image/png",
+      "usage": [
+        "Gary mode one-in-ten alternate image"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/gatze.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/gatze.png"
+        ]
+      },
+      "packaging_references": [
+        "FTHR.spec"
+      ],
+      "license": "User-provided",
+      "copyright": "Workspace owner supplied image",
+      "origin": "user-provided-gary-cat",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/gary.png",
+      "sha256": "4ccfb741b009977f0af444ba114c08340a070769d250dd163e279a28ccdc8571",
+      "media_type": "image/png",
+      "usage": [
+        "Gary mode default image"
+      ],
+      "distributions": [
+        "windows"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/gary.png"
+        ]
+      },
+      "packaging_references": [
+        "FTHR.spec"
+      ],
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 Haakon Schaller, trading as FTHR-Software",
+      "origin": "fthr-original-gary",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": ".github/social_preview.png",
+      "sha256": "ea90be692d4c58f23cc70f139021938ca196b7039255d98e098820962cbefe14",
+      "media_type": "image/png",
+      "usage": [
+        "repository social preview"
+      ],
+      "distributions": [
+        "repository-only"
+      ],
+      "artifact_paths": {},
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/fonts/Oswald-Bold.ttf",
+      "sha256": "eb7d46f856dd57f18a8c03d033c57802692bf127f01dbd95ba8984338e6b5135",
+      "media_type": "font/ttf",
+      "usage": [
+        "application display font"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/fonts/Oswald-Bold.ttf"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/fonts/Oswald-Bold.ttf"
+        ]
+      },
+      "license": "OFL-1.1",
+      "copyright": "Copyright 2016 The Oswald Project Authors (https://github.com/googlefonts/OswaldFont)",
+      "origin": "oswald-4.103",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/fthr_logo.ico",
+      "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936",
+      "media_type": "image/vnd.microsoft.icon",
+      "usage": [
+        "Windows executable icon"
+      ],
+      "distributions": [
+        "windows-executable-embedded"
+      ],
+      "artifact_paths": {},
+      "packaging_references": [
+        "FTHR.spec"
+      ],
+      "license": "User-provided",
+      "copyright": "Workspace owner supplied brand icon",
+      "origin": "user-provided-brand-icon",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/favicon.ico",
+      "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936",
+      "media_type": "image/vnd.microsoft.icon",
+      "usage": [
+        "window icon",
+        "system tray icon",
+        "watermark default",
+        "theme default",
+        "Windows installer icon and title-bar mark"
+      ],
+      "distributions": [
+        "windows",
+        "windows-installer-embedded"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/favicon.ico"
+        ]
+      },
+      "packaging_references": [
+        "installer_windows.iss"
+      ],
+      "license": "User-provided",
+      "copyright": "Workspace owner supplied brand icon",
+      "origin": "user-provided-brand-icon",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/fthr_logo.png",
+      "sha256": "1164d541d01f2b71ba2003892389152f0f0535954f44c020bda3f0412919e90e",
+      "media_type": "image/png",
+      "usage": [
+        "main window logo",
+        "theme default"
+      ],
+      "distributions": [
+        "windows"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/fthr_logo.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/preview_desktop.png",
+      "sha256": "4ba07a6b9b478f63d4897952a2bc02e9bc23ace1de18470da58cbdabe24cda55",
+      "media_type": "image/png",
+      "usage": [
+        "standard visual-overlays preview background"
+      ],
+      "distributions": [
+        "windows"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/preview_desktop.png"
+        ]
+      },
+      "license": "User-provided",
+      "copyright": "Workspace owner supplied image",
+      "origin": "user-provided-preview",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/clip.png",
+      "sha256": "7dc91171c1d16bc9edd58501058ca597fe7fb9932abb869f35466b3d267a83c2",
+      "media_type": "image/png",
+      "usage": [
+        "clip tab icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/clip.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/clip.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/close.png",
+      "sha256": "751d4c4b00852fa0fbd153e4f89360c51a22192a2fd3df51f864658b4403923f",
+      "media_type": "image/png",
+      "usage": [
+        "close button icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/close.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/close.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/dropdown.png",
+      "sha256": "8918f835bb6c8404932020d8d1f09ea420801a800ebd840f16d4ed0170b3b09f",
+      "media_type": "image/png",
+      "usage": [
+        "combo-box arrow"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/dropdown.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/dropdown.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/home.png",
+      "sha256": "e2d589bfab6e06e63cc676dc8dcb924808b9e7776230738678dde6364faae313",
+      "media_type": "image/png",
+      "usage": [
+        "home button icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/home.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/home.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/maximize.png",
+      "sha256": "ee2c602cbc8ca68d8b6e8e0a7e744544d4613695eb0e8ea5095a355078578809",
+      "media_type": "image/png",
+      "usage": [
+        "maximize button icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/maximize.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/maximize.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/minimize.png",
+      "sha256": "e7861bdc5ba185c22f295408bda8cbf588b325b3ffd69bac43852d31dc8c38c4",
+      "media_type": "image/png",
+      "usage": [
+        "minimize button icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/minimize.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/minimize.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/pause.png",
+      "sha256": "1c25e339c453542fb3159ab102e22d7302bcc8ae6a253cdd44f2c26a1dc1fef7",
+      "media_type": "image/png",
+      "usage": [
+        "media pause icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/pause.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/pause.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/personalize.png",
+      "sha256": "c3fea9fedd4f37f372f3dbe38928b4d7674709ae4cf9ef1451921b8457f1f983",
+      "media_type": "image/png",
+      "usage": [
+        "customization tab icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/personalize.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/personalize.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/play.png",
+      "sha256": "3c9c4ba3d8a9794005c9d31ddac7cb8a237c17f4939fdaadac935c8ff0b2f9f8",
+      "media_type": "image/png",
+      "usage": [
+        "media play icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/play.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/play.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/refresh.png",
+      "sha256": "101d18adaba7c478bcf65e6a39e27da545d6e4eb88a0aff43eda47d5f409c7c1",
+      "media_type": "image/png",
+      "usage": [
+        "refresh button icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/refresh.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/refresh.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/settings(general).png",
+      "sha256": "da070779137d109cbc175a0c8c64eecf4dac0277b01ae9fde90babdad20e04bf",
+      "media_type": "image/png",
+      "usage": [
+        "settings tab icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/settings(general).png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/settings(general).png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/sound.png",
+      "sha256": "d1b08687a69d0743fa1cfe39608e6931740fb2dd7d7469d4e24269a833b52b39",
+      "media_type": "image/png",
+      "usage": [
+        "audio tab icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/sound.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/sound.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/shutdown.png",
+      "sha256": "964597788bd296f4843c7114b1e6af3899499c9eb3afa8da5a726180dca14bff",
+      "media_type": "image/png",
+      "usage": [
+        "shutdown button icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/shutdown.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/shutdown.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/updates.png",
+      "sha256": "da8f7dadb9aa1ece5bfee82e1d5568e8506eef656153f591c4f33cb46b990032",
+      "media_type": "image/png",
+      "usage": [
+        "updates and performance icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/updates.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/updates.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/visuals.png",
+      "sha256": "e3176bb051eae62705e309248ca5320c037c0c218b9612dc2452c63fd3cbfd48",
+      "media_type": "image/png",
+      "usage": [
+        "visuals tab icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/visuals.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/visuals.png"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/clip_captured.wav",
+      "sha256": "e0da4dd3382d3e91347c59796e904a775afbfb81ef3752defffbb9769bf2863b",
+      "media_type": "audio/wav",
+      "usage": [
+        "clip-captured notification"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/sounds/clip_captured.wav"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/sounds/clip_captured.wav"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/error.wav",
+      "sha256": "4af4ae3d084043b0c3cb7bda6943ad3ff10444c67722ca48c616b3a0827297a0",
+      "media_type": "audio/wav",
+      "usage": [
+        "error notification"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/sounds/error.wav"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/sounds/error.wav"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/screenshot_saved.wav",
+      "sha256": "80a3e9e313d6b825177eb5a82513c5907a81550d0d4d16e744f49ffb42356efb",
+      "media_type": "audio/wav",
+      "usage": [
+        "screenshot-saved notification"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/sounds/screenshot_saved.wav"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/sounds/screenshot_saved.wav"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/startup.wav",
+      "sha256": "56a04ecc28578f8cd83adfb2f37f2fa7d68ad3a7d29cb0068b6ec4cc556d4152",
+      "media_type": "audio/wav",
+      "usage": [
+        "startup notification"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/sounds/startup.wav"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/sounds/startup.wav"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/upload_failed.wav",
+      "sha256": "8e99c82a31e66f85a86d97df68c5fc05b0601dafd566b3b15e29b84770b35f1c",
+      "media_type": "audio/wav",
+      "usage": [
+        "upload-failed notification"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/sounds/upload_failed.wav"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/sounds/upload_failed.wav"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/upload_successful.wav",
+      "sha256": "9eb8a4605642b28663697bb8045434208aeb2198359d5c5ee2c236ed9bd62137",
+      "media_type": "audio/wav",
+      "usage": [
+        "upload-success notification"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/sounds/upload_successful.wav"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/sounds/upload_successful.wav"
+        ]
+      },
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/wizard_banner.bmp",
+      "sha256": "22c0a8a0d2687cb4fd903856988aca208487948c4f92b007d8b068947e95d45a",
+      "media_type": "image/bmp",
+      "usage": [
+        "legacy installer artwork retained in source but not embedded"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/wizard_small.bmp",
+      "sha256": "55448c510e3562627239f18cd7ad4e384654dc8abcda7a319d44ef99794c0852",
+      "media_type": "image/bmp",
+      "usage": [
+        "legacy installer artwork retained in source but not embedded"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT",
+      "copyright": "Copyright (c) 2026 FTHR-Community",
+      "origin": "fthr-generator-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/fonts/Oswald-Regular.ttf",
+      "sha256": "0d9980da817ee71ad9c34bb46950fcf15dd53e928031f39d2e11ae19178ab826",
+      "media_type": "font/ttf",
+      "usage": [
+        "application regular interface font"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/fonts/Oswald-Regular.ttf"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/fonts/Oswald-Regular.ttf"
+        ]
+      },
+      "license": "OFL-1.1",
+      "copyright": "Copyright 2016 The Oswald Project Authors (https://github.com/googlefonts/OswaldFont)",
+      "origin": "oswald-4.103-regular",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/fonts/Oswald-SemiBold.ttf",
+      "sha256": "8c5e61737c100d0a1ca87a9a1608afc53246b8a77f8d73c56b03406adc2d9282",
+      "media_type": "font/ttf",
+      "usage": [
+        "application semibold interface font"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/fonts/Oswald-SemiBold.ttf"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/fonts/Oswald-SemiBold.ttf"
+        ]
+      },
+      "license": "OFL-1.1",
+      "copyright": "Copyright 2016 The Oswald Project Authors (https://github.com/googlefonts/OswaldFont)",
+      "origin": "oswald-4.103-semibold",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/camera.svg",
+      "sha256": "852987633643a36ae2ac2ba75ae306b7a4af1bf12fc602b4053ce63de70a919e",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/camera.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/camera.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/chevronleft.svg",
+      "sha256": "eb36867087cf0074c67029c848c749ae7bf40d2a058efdc48a346a3780858dac",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/chevronleft.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/chevronleft.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/chevronright.svg",
+      "sha256": "3cb67583cf220d219a490db86ee209645866d0619db36f47be04ea18f12f137b",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/chevronright.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/chevronright.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/clips.svg",
+      "sha256": "1c4d1fe273ccaf209f31983a0f448f4800e95e88e6d5ffb1c3a695a1c1f607b5",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/clips.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/clips.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/close.svg",
+      "sha256": "026a61b97ae9c76662d1ae2ecd42029e0fa56cb61ce948bf4c2edc22c8b19103",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/close.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/close.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/copylink.svg",
+      "sha256": "04fa1ee1894b458e4f6575293c0fcbbf8dcffc908c74aec0594260af68192a07",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/copylink.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/copylink.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/customise.svg",
+      "sha256": "95610614af94201e590e22571763538440afa11a8c3fb5f067c531ef0fa9e530",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/customise.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/customise.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/delete.svg",
+      "sha256": "429b3f711367f4072e89cd670346471fc73b26e061283d114f17323cbc8f11ac",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/delete.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/delete.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/dropdown.svg",
+      "sha256": "e2e2b9bdea6cc43937d3894b98df0c7207344fc9530c02aa896e75dcadc0daec",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/dropdown.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/dropdown.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/home.svg",
+      "sha256": "1c4d1fe273ccaf209f31983a0f448f4800e95e88e6d5ffb1c3a695a1c1f607b5",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/home.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/home.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/maximise.svg",
+      "sha256": "f608bf3e31c5fca36ff472f95932928ed20e1f6a6d89dc3683c6b3398090f0d3",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/maximise.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/maximise.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/minimise.svg",
+      "sha256": "450dbeda48d38f703b4c1ecbd3b17a70c0dd2b5ec1738d0f076bc60c77bd4b90",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/minimise.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/minimise.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/pause.svg",
+      "sha256": "2a3c86dc08ba30efbd4b9f021c1dd9ee7318be41541137e7069e17fc425a6446",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/pause.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/pause.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/performance.svg",
+      "sha256": "d5e13ffdcf86e32d19e2c62db1b743aadaf50526378ee83034c1de6c24f70b97",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/performance.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/performance.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/play.svg",
+      "sha256": "99287ca034fc58d3eb984111c50fe2277505ba8e9f8e6b1aba8243b053dded1b",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/play.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/play.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/plus.svg",
+      "sha256": "3fb969804f21bf7e3746d9a845a7eaed49d3c0c45c19ef70cd0f5d51de26128d",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/plus.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/plus.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/refresh.svg",
+      "sha256": "aa3b373577d10c4e4a2e695bca8a21875e0c4dfed52660c0ed5d581d5544554a",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/refresh.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/refresh.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/settings.svg",
+      "sha256": "52ec0340493277455b1f2e6a7e05dfdf0b05f0211b2728b1a8ad4633dd3acc9b",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/settings.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/settings.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/shortcuts.svg",
+      "sha256": "f43ecb9b857fffc8cf2108f69e510f05e70910d63a448ffa849d453f981ffc8c",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/shortcuts.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/shortcuts.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/shutdown.svg",
+      "sha256": "2aac6a5fadad6a25e866d6b7d214541f50da45fdbcd3804bf8a8291e45d82dad",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/shutdown.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/shutdown.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/sound.svg",
+      "sha256": "21107ee03ba994ac0f9f26808eef1e3f28268e4f7e4d983dae5c68c04c53d1c8",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/sound.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/sound.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/update.svg",
+      "sha256": "1b3f9dd2f5741465d0790817f75f6ecec76815fc4f7e95df32f5590ad7f1a555",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/update.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/update.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/upload.svg",
+      "sha256": "2c6b59d1f061056228a1176766a8b71fabc7a52ccd2713dc6dbe0ca0a328619d",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/upload.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/upload.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/visuals.svg",
+      "sha256": "f0166a1ec71eb48db378114e2cbd57700f4f690dc1bea73909c3a94df55ee698",
+      "media_type": "image/svg+xml",
+      "usage": [
+        "application interface icon"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/visuals.svg"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/visuals.svg"
+        ]
+      },
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Software (project-supplied source artwork)",
+      "origin": "fthr-ui-reference-svg",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/close-current.png",
+      "sha256": "940a88bf9bffcdccdefe519046c588233d505ed1906c21eda57b94211798bf23",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "GPL-3.0-only",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-108.png",
+      "sha256": "6278873a7ce8a218772da2b6456454d1ff1fd48439e8676e64ca503e022e7633",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-122.png",
+      "sha256": "4b0d4b07184be1adbb9e9aac208339bf89eb8782f363f220215b89341f2e3e35",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-135.png",
+      "sha256": "5d8685c5299fb373762d9e57ef9a28304eaab6f0c9dfbd703472ee89a2500d2a",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-162.png",
+      "sha256": "e5abb277168e4a749e95143b0787754ed2b9f8f0f102729b553d7703d9f1caaa",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-216.png",
+      "sha256": "1c2dca7306dcf3b95b18fc9c17946634717dbf6b19b09d1ac4de5bfbf1af90c9",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-54.png",
+      "sha256": "246d54ea75cd401e38f02dbd5563b90a343e2b82cc96d3db6e83b54765095a6a",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-68.png",
+      "sha256": "f01d327fb7f57c540960a47f3d6d113da8e0f88d287ef67b4b811a5bf84a61a3",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-81.png",
+      "sha256": "d715e657a069a5f97cccfcd1cd6d6cdc901c046003ef5d5dcee37e2f7d340554",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-95.png",
+      "sha256": "d42df6c61b3e8e1e5db65409c84f9098f063277992bc53852014d9980f7c725a",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-108.png",
+      "sha256": "ea3cdb0de27ef861768910b5cdcb8cab173e94f3a60f120e091c0ac60145f90f",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-122.png",
+      "sha256": "0c3905ed3137c9096c37a3740787ed89490c5b5c087230cbc90c58936fdd8a6b",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-135.png",
+      "sha256": "370dabaf4ff1e906d63ec4cd11ae9094feee5fef579cdb40c862c06d16c7f331",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-162.png",
+      "sha256": "cbbff0dfd6712e8d32c102bde2f8b0fa6e455bce8fdca1de2c121e91ece29328",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-216.png",
+      "sha256": "153fb4a2f9bc7da3a08aeb19b4b1f5e2125d5243a3ce67f448deb8f14f1ed97f",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-54.png",
+      "sha256": "57d6966f8ab4ad244eec113d7171c0e7e09703d4244df3c5e9e42bff55942c04",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-68.png",
+      "sha256": "1ae1ec134ca5e6bb3c6c2753007325fdfe383549b6d810a6ac23a0d27f10df01",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-81.png",
+      "sha256": "1cf25cad987430648ab7f98d56f7c94105c3ed8190790e36216f4b840fd67d42",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-95.png",
+      "sha256": "36affb0a5f129e256f47d581f9e757fed1b7cae1b54613056daa2c260d117936",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-108.png",
+      "sha256": "a30429707c2875dcc210ff3a99d128ee245950556bcaec619b039d0bc6496405",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-122.png",
+      "sha256": "4bb3f9bec9cea5311748bbf0f33d4ef90221d50f35f269308b78d750ebe3f0cc",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-135.png",
+      "sha256": "927508ff69a4d790391907dbb08259bf7bd426c7b600178186246bec8a4074f2",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-162.png",
+      "sha256": "4dc3cd5b09cc69665c43a094bf0080de9798ce2b5926b210a549c7ef833a192c",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-216.png",
+      "sha256": "11906f84a16c17a6c342be334505e463cb2932764f06647f5e668cc1a2264564",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-54.png",
+      "sha256": "b908f6f6da476d5d29b1c7551fff154a6449881bde2f0b80dd66a12af7623228",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-68.png",
+      "sha256": "1156b100803eb9cc5919d4099964350472a98433fa4cb0e331f9be0e96e9c00b",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-81.png",
+      "sha256": "8844b483784a2b3945b2a2aee92d4c65fcb9ee1dec3ca363c2e55b4daca80e9e",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-95.png",
+      "sha256": "f643a52c9ee7a1b3e82314e586074bda0b2b54ce650237097be13e97ae710726",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-108.png",
+      "sha256": "b2cc27b12da0875632bde63ac210380becc0936ed4b461f6466cd92fb8a8e367",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-122.png",
+      "sha256": "2213d648fe012fb6b9a9f4ab5a2f19f69d136b095ea9cb47eee6570f547712b2",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-135.png",
+      "sha256": "be98c53a70d37ac7dc264dbba0768b6fcd3507d62900fa91756b360bd9b7c621",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-162.png",
+      "sha256": "bc876b2f180a678fddb94d400c3b1d54e6d555a5e644bb4f71d2c31532c9a054",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-216.png",
+      "sha256": "c189fe81df6ae3efcf605c2f396e555b89e519f247576f497a3f409342f1d9d4",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-54.png",
+      "sha256": "53bd8e25e5d50701cb694b612fd403f28ff2561cfb41c0c6d0dd52d389ffcb37",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-68.png",
+      "sha256": "d5d091fb56814348397f40b37a442f3319a219cb9164f3d4f67e679307aa447c",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-81.png",
+      "sha256": "0d12657c460d2c88e434142ab50bb780f94be92756847d3baa6fd11b0ded3fd5",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-95.png",
+      "sha256": "3eee2c6e2f1f9082db7e804ec8e1f9769fcc9a50da260a1c3d7cbc05e2975b53",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-108.png",
+      "sha256": "d0e59e4aac5e74a485ea6a154717daf61d2a1f4fac3906be07d934abccddd143",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-122.png",
+      "sha256": "84b5992c566088309a48161f58221bd4b050ff2aa4b1394820767c13439f5d53",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-135.png",
+      "sha256": "2972e698ac572bc915bb991eaa7d7ac682d36f4a9f8cfefca883f57ebe9039ea",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-162.png",
+      "sha256": "40f1b37fcf16ec5fdd040047f06beff29569f46452a1038435e1ec49a0a75131",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-216.png",
+      "sha256": "ef7a4b5bb49c5f507142090d0a87688bdd6d064d5b42714d47b4d4a9fa765c1b",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-54.png",
+      "sha256": "4abc50f7a1acf19e69c62e8eaee97581cc10c62c843db5bd50148284556198d9",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-68.png",
+      "sha256": "dd3e3e263364a9595ddb7dfcb11c0315feea6230019812855d843ef872fd148c",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-81.png",
+      "sha256": "ab5aab216e0e98943e3af4343781acbbe8d96dd2dd666d9e761f5d47975c9ea6",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-95.png",
+      "sha256": "485c99cb2d0712cf54d0d8f6acda6617c219e6e118b24a25aba4bec6d495240a",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-108.png",
+      "sha256": "c31a0b6168c7a87d6b2da2537dda7b1a6a33065eb208bcfa7262c015c10ab7fb",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-122.png",
+      "sha256": "d6aa3608bdc56c90c6f11a7c72ef7d1de4cd2037ad48f22f25affd1fd8668666",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-135.png",
+      "sha256": "e560d391f0c0d2a5560bc8fb90fcb39534b55996f525837ec7facada35369110",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-162.png",
+      "sha256": "65c7854ca52cc13673cec4efd6be7be669b71eeb4e952f04d44f37adc0d485c8",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-216.png",
+      "sha256": "cea6f0b3f4302bd2bf778d678d22ecc605238c41db948deb9d199305d5d0fb59",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-54.png",
+      "sha256": "301c0135d2253af0e5a59b1245b4550794a61092163b9372a314598f7a837ab1",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-68.png",
+      "sha256": "40ca8a77d8568bba9e5604c31c8405ca699dfef1205277033771cfdfc08ba87d",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-81.png",
+      "sha256": "939955ecf08af064ad6df8e35e01f0891e48ef915275083b16864cd4aa6d2bf5",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-95.png",
+      "sha256": "00e73facf55b9596b5ed5d14217d2405507e8fbd4244d0b1147ffe89e4bab2e1",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-108.png",
+      "sha256": "660c4a970d432e411ffa2af8d94be3072e5a53af86eb9b296671628a4e12140d",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-122.png",
+      "sha256": "d0b26a5aa3e7c14a94f490a345fe75825dcd01090f822b2dcb7bf3dd71cb6e0c",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-135.png",
+      "sha256": "a366cc8cadd171276de95a116b6581a23ada4db816381e05a812331f3c588088",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-162.png",
+      "sha256": "ae8910fd51c3ffb0465ba3e60a3b63e8fab6e278bb015c293d8ced9d901c8ced",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-216.png",
+      "sha256": "ef45d48d4d6fb239c2a332d396a626a95a4d76033b04735f0a02e23b6ecf33ca",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-54.png",
+      "sha256": "49ed06bd3eb4d4d141be2b934a4b67a6a669bc45b83409e0a8222ba2517abb48",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-68.png",
+      "sha256": "0aa316d200c7491f76ff65965c081e079521ea86351ec8ae61e6231fae7323bb",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-81.png",
+      "sha256": "3a4468cd8448de923b5b5e2654f193cdd8aa3f344c21163841d204d544cc015f",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-95.png",
+      "sha256": "ef9ea3259de3dcfa0afdee6f7251607e1e556b71e65054f50bd9a010d9b0ca9f",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-108.png",
+      "sha256": "dcc19050fd4a815402703cbe765cb6662ce3514930b9c4311a47564a0319a1cf",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-122.png",
+      "sha256": "7347818e59e452093ae7da2af6f39da4e1255cff526cbf6e597c1c2390d9cf65",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-135.png",
+      "sha256": "7299e550e1f595b7b2e8351ba22d566c49cc05eae667def84ec8a7cb6d47bb26",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-162.png",
+      "sha256": "75cb2a39c2bbe420b9edb835707782e4a11f3d6c47f63451696d11b526a3ba81",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-216.png",
+      "sha256": "ddf8dbcc372fdb04b4841ccdb98d51ec2364a3199d1fdc5580e2e9210ca25d3a",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-54.png",
+      "sha256": "9717a71cc79dc4894fc5c6722477477b60d3f78708da064c11e97d7164468171",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-68.png",
+      "sha256": "6de20add10a7f5edd4b1865be0be01a9cb27a8149dc7294229af67915b49cd12",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-81.png",
+      "sha256": "1f83db156b5571447c48e265524faffb44b4ba60b035f22cb89b13d32c477ff5",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-95.png",
+      "sha256": "ac9ca5ba8d19650eceac5162867bca04bad6b8ebce51fe1f22270810a32db4a6",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-108.png",
+      "sha256": "c88caacd9a2ed1e6ca0e20dd06b3b1e33ba3cbe0eaaea180362d6a4ef916e698",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-122.png",
+      "sha256": "6a09419396ffb33671eee62ba6a4a98062c7fbc9515790a2cf89e6b7ee748a30",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-135.png",
+      "sha256": "b7dd38ec3f14ad788ec8be2eef47d0c8c614b0760200a664491672d40d95415d",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-162.png",
+      "sha256": "dff2e52c337b423c2c56902ab7ce075eb97ba47dfd183841efa672b903722327",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-216.png",
+      "sha256": "1e3244141a480cd1d2e4ab3fd04092088a7d5d56f692281f45990d8913a71e04",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-54.png",
+      "sha256": "a00785e95ca455beaf4ebb62dcf39309e3c48acadacaa12bc02198eda225d0f2",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-68.png",
+      "sha256": "5a0b848b7119283487dc943ae4301e6b61095ef2c1440a334c16bfec543a8873",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-81.png",
+      "sha256": "47590197aff3c0ec686ea5c4e289e1bc3a9c6e1d2292c76ca96495d776b6a02c",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-95.png",
+      "sha256": "8e784531a552f6bd4f08a0e49d11b152a28be4060a762ff23ccb57ed7984aae9",
+      "media_type": "image/png",
+      "usage": [
+        "Windows installer artwork"
+      ],
+      "distributions": [],
+      "artifact_paths": {},
+      "license": "MIT; font rendering from OFL-1.1 Oswald",
+      "copyright": "Copyright (c) 2026 FTHR-Community; close artwork: FTHR-Software; font: The Oswald Project Authors",
+      "origin": "fthr-installer-polish-v1",
+      "redistribution_status": "approved"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/kofi_symbol.png",
+      "sha256": "6b0f958d50f68c84e235473a151f9e365a02e5a9abae4de63048d5f1210c6637",
+      "media_type": "image/png",
+      "usage": [
+        "Donation button linking to the project Ko-fi page"
+      ],
+      "distributions": [
+        "windows",
+        "linux"
+      ],
+      "artifact_paths": {
+        "windows": [
+          "_internal/assets/icons/kofi_symbol.png"
+        ],
+        "linux": [
+          "usr/share/fthrclips/assets/icons/kofi_symbol.png"
+        ]
+      },
+      "packaging_references": [
+        "FTHR_UI/main.py"
+      ],
+      "license": "Ko-fi promotional brand-asset permission; subject to content guidelines",
+      "copyright": "Ko-fi / Ko-fi Labs Limited",
+      "origin": "kofi-promotional-symbol",
+      "redistribution_status": "approved"
+    }
   ]
 }

@@ -476,7 +476,7 @@ def test_settings_troubleshooting_action_emits_export_request(
     requests = []
     page.diagnostic_export_requested.connect(lambda: requests.append(True))
 
-    assert page.export_diagnostic_btn.text() == 'EXPORT DIAGNOSTIC REPORT'
+    assert page.export_diagnostic_btn.text() == 'Export diagnostic report'
     page.export_diagnostic_btn.click()
 
     assert requests == [True]

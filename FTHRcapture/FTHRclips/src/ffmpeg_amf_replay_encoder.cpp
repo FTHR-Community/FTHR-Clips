@@ -27,6 +27,7 @@ extern "C" {
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <iostream>
@@ -56,6 +57,11 @@ const AmfCodecSelection kAv1Amf{
     "av1_amf",
     EncodedPacketFormat::LowOverheadObu,
     AV_PROFILE_AV1_MAIN};
+
+// Must match the pinned FFmpeg D3D11 hardware-frame pool configured below.
+// Keeping this bound in the wrapper makes the exported progress snapshot
+// bounded even if a test seam accepts frames without producing packets.
+constexpr uint32_t kAmfFramePoolCapacity = 8;
 
 std::string AvErrorString(int error_code) {
     char buffer[AV_ERROR_MAX_STRING_SIZE]{};
@@ -295,7 +301,7 @@ public:
         // slices cover AMF async_depth=4 plus the prepared input and transient
         // references. Each submitted AVFrame retains its array slice until AMF
         // releases it; capture never maps this GPU-only texture array.
-        frames_context->initial_pool_size = 8;
+        frames_context->initial_pool_size = kAmfFramePoolCapacity;
         result = av_hwframe_ctx_init(hw_frames_ctx_);
         if (result < 0) {
             error = "could not initialize FFmpeg D3D11 hardware frame context: "
@@ -504,7 +510,8 @@ public:
             0, 0, 0, converter_texture_, 0, nullptr);
         const HRESULT removed = d3d11_device_->GetDeviceRemovedReason();
         if (FAILED(removed)) {
-            error = HResultString("AMD D3D11 device", removed);
+            error = HResultString(
+                "ID3D11Device::GetDeviceRemovedReason(AMF)", removed);
             return false;
         }
         prepared_ = true;
@@ -896,6 +903,28 @@ FfmpegAmfReplayEncoder::~FfmpegAmfReplayEncoder() {
     Shutdown();
 }
 
+void FfmpegAmfReplayEncoder::ResetDiagnostics() noexcept {
+    diagnostic_prepare_attempts_.store(0, std::memory_order_relaxed);
+    diagnostic_prepare_successes_.store(0, std::memory_order_relaxed);
+    diagnostic_submit_attempts_.store(0, std::memory_order_relaxed);
+    diagnostic_submit_returns_.store(0, std::memory_order_relaxed);
+    diagnostic_submit_successes_.store(0, std::memory_order_relaxed);
+    diagnostic_backpressure_.store(0, std::memory_order_relaxed);
+    diagnostic_receive_attempts_.store(0, std::memory_order_relaxed);
+    diagnostic_packets_.store(0, std::memory_order_relaxed);
+    diagnostic_errors_.store(0, std::memory_order_relaxed);
+    diagnostic_device_removed_.store(0, std::memory_order_relaxed);
+    diagnostic_submit_stage_.store(0, std::memory_order_relaxed);
+    diagnostic_drain_stage_.store(0, std::memory_order_relaxed);
+    diagnostic_pending_submissions_.store(0, std::memory_order_relaxed);
+}
+
+void FfmpegAmfReplayEncoder::ClearDiagnosticActivity() noexcept {
+    diagnostic_submit_stage_.store(0, std::memory_order_release);
+    diagnostic_drain_stage_.store(0, std::memory_order_release);
+    diagnostic_pending_submissions_.store(0, std::memory_order_release);
+}
+
 bool FfmpegAmfReplayEncoder::Initialize(
     const EncoderConfig& config,
     ID3D11Device* shared_device,
@@ -914,6 +943,7 @@ bool FfmpegAmfReplayEncoder::Initialize(
     last_pts_ = -1;
     last_forced_keyframe_pts_ = -1;
     fps_ = config.fps;
+    ResetDiagnostics();
 
     if (!session_) {
         SetError("AMF codec session is unavailable");
@@ -931,6 +961,10 @@ bool FfmpegAmfReplayEncoder::Initialize(
     const auto* selection = GetAmfCodecSelection(codec_);
     if (!selection) {
         SetError("unsupported AMF codec selection");
+        return false;
+    }
+    if (config.fps == 0 || config.fps > 360) {
+        SetError("AMF frame rate must be between 1 and 360 FPS");
         return false;
     }
 
@@ -980,11 +1014,15 @@ bool FfmpegAmfReplayEncoder::PrepareGpuFrame(
         SetError("AMF GPU preparation called outside an active generation");
         return false;
     }
+    diagnostic_prepare_attempts_.fetch_add(1, std::memory_order_relaxed);
+    diagnostic_submit_stage_.store(1, std::memory_order_release);
     std::string error;
     if (!session_->PrepareGpuFrame(source, source_subresource, error)) {
         SetError(error.empty() ? "AMF GPU conversion failed" : std::move(error));
+        diagnostic_submit_stage_.store(0, std::memory_order_release);
         return false;
     }
+    diagnostic_prepare_successes_.fetch_add(1, std::memory_order_relaxed);
     gpu_frame_prepared_ = true;
     return true;
 }
@@ -1002,7 +1040,7 @@ bool FfmpegAmfReplayEncoder::EncodeFrame(int64_t present_qpc) {
     const int64_t pts = ComputePts(present_qpc);
     const bool force_keyframe = ConsumeKeyframeRequest() || last_forced_keyframe_pts_ < 0
         || pts - last_forced_keyframe_pts_
-            >= static_cast<int64_t>(fps_) * 4;
+            >= static_cast<int64_t>(fps_);
     if (!SubmitWithBackpressure(pts, force_keyframe)) return false;
     gpu_frame_prepared_ = false;
 
@@ -1010,8 +1048,16 @@ bool FfmpegAmfReplayEncoder::EncodeFrame(int64_t present_qpc) {
     if (present_qpc <= 0) QueryPerformanceCounter(&now);
     const int64_t wall_qpc = present_qpc > 0 ? present_qpc : now.QuadPart;
     submitted_timing_.push_back({pts, wall_qpc});
+    uint32_t pending = diagnostic_pending_submissions_.load(
+        std::memory_order_relaxed);
+    while (pending < kAmfFramePoolCapacity
+        && !diagnostic_pending_submissions_.compare_exchange_weak(
+            pending, pending + 1, std::memory_order_relaxed,
+            std::memory_order_relaxed)) {}
     if (force_keyframe) last_forced_keyframe_pts_ = pts;
-    return DrainAvailable(false);
+    const bool drained = DrainAvailable(false);
+    diagnostic_submit_stage_.store(0, std::memory_order_release);
+    return drained;
 }
 
 bool FfmpegAmfReplayEncoder::EncodeFrameCPU(
@@ -1042,6 +1088,7 @@ void FfmpegAmfReplayEncoder::Shutdown() {
     if (session_) session_->Reset();
     packet_callback_ = {};
     submitted_timing_.clear();
+    ClearDiagnosticActivity();
 }
 
 EncodedVideoConfig FfmpegAmfReplayEncoder::GetVideoConfig() const {
@@ -1056,6 +1103,47 @@ ActiveEncoderInfo FfmpegAmfReplayEncoder::GetActiveEncoderInfo() const {
         codec_,
         initialized_,
         selection ? selection->encoder_name : "amf_unknown"};
+}
+
+ReplayEncoderDiagnostics FfmpegAmfReplayEncoder::GetDiagnostics() const noexcept {
+    ReplayEncoderDiagnostics result;
+    // The existing structure predates FFmpeg AMF and names some fields after
+    // NVENC resources. AMF maps only the backend-neutral progress fields:
+    // prepare attempts/successes use the map counters, submit/return/success
+    // are direct, receive calls use drain_dequeues, and packets use
+    // completion_events/packets_produced. NVENC slot/resource fields and
+    // last_nvenc_status intentionally remain zero; AMF failures are preserved
+    // by GetLastError() and the backend-neutral aggregate counters below.
+    result.map_attempts = diagnostic_prepare_attempts_.load(
+        std::memory_order_acquire);
+    result.maps_succeeded = diagnostic_prepare_successes_.load(
+        std::memory_order_acquire);
+    result.encode_attempts = diagnostic_submit_attempts_.load(
+        std::memory_order_acquire);
+    result.encode_returns = diagnostic_submit_returns_.load(
+        std::memory_order_acquire);
+    result.encode_successes = diagnostic_submit_successes_.load(
+        std::memory_order_acquire);
+    result.drain_dequeues = diagnostic_receive_attempts_.load(
+        std::memory_order_acquire);
+    result.completion_events = diagnostic_packets_.load(
+        std::memory_order_acquire);
+    result.packets_produced = result.completion_events;
+    result.backpressure_events = diagnostic_backpressure_.load(
+        std::memory_order_acquire);
+    result.backend_errors = diagnostic_errors_.load(
+        std::memory_order_acquire);
+    result.device_removed_errors = diagnostic_device_removed_.load(
+        std::memory_order_acquire);
+    result.pending_resources = diagnostic_pending_submissions_.load(
+        std::memory_order_acquire);
+    result.queued_outputs = result.pending_resources;
+    result.pool_capacity = kAmfFramePoolCapacity;
+    result.submit_stage = diagnostic_submit_stage_.load(
+        std::memory_order_acquire);
+    result.drain_stage = diagnostic_drain_stage_.load(
+        std::memory_order_acquire);
+    return result;
 }
 
 std::string FfmpegAmfReplayEncoder::GetLastError() const {
@@ -1113,12 +1201,23 @@ int64_t FfmpegAmfReplayEncoder::WallQpcForPts(int64_t pts) {
 }
 
 bool FfmpegAmfReplayEncoder::DrainAvailable(bool flushing) {
+    diagnostic_drain_stage_.store(6, std::memory_order_release);
     while (true) {
         detail::AmfPacketView packet;
         std::string error;
+        diagnostic_receive_attempts_.fetch_add(1, std::memory_order_relaxed);
         const auto status = session_->ReceivePacket(packet, error);
         switch (status) {
         case detail::AmfReceiveStatus::Packet:
+            diagnostic_packets_.fetch_add(1, std::memory_order_relaxed);
+            {
+                uint32_t pending = diagnostic_pending_submissions_.load(
+                    std::memory_order_relaxed);
+                while (pending > 0
+                    && !diagnostic_pending_submissions_.compare_exchange_weak(
+                        pending, pending - 1, std::memory_order_relaxed,
+                        std::memory_order_relaxed)) {}
+            }
             if (packet.data && packet.size > 0 && packet_callback_) {
                 packet_callback_(
                     packet.data,
@@ -1129,14 +1228,20 @@ bool FfmpegAmfReplayEncoder::DrainAvailable(bool flushing) {
             }
             break;
         case detail::AmfReceiveStatus::NeedMoreInput:
+            diagnostic_drain_stage_.store(0, std::memory_order_release);
             return true;
         case detail::AmfReceiveStatus::EndOfStream:
+            diagnostic_drain_stage_.store(0, std::memory_order_release);
             return true;
         case detail::AmfReceiveStatus::Error:
             SetError(error.empty() ? "AMF packet receive failed" : std::move(error));
+            diagnostic_drain_stage_.store(0, std::memory_order_release);
             return false;
         }
-        if (!flushing && !initialized_) return false;
+        if (!flushing && !initialized_) {
+            ClearDiagnosticActivity();
+            return false;
+        }
     }
 }
 
@@ -1144,16 +1249,26 @@ bool FfmpegAmfReplayEncoder::SubmitWithBackpressure(
     int64_t pts,
     bool force_keyframe) {
     for (int attempt = 0; attempt < 2; ++attempt) {
+        diagnostic_submit_stage_.store(3, std::memory_order_release);
+        diagnostic_submit_attempts_.fetch_add(1, std::memory_order_relaxed);
         std::string error;
         const auto status = session_->SubmitFrame(pts, force_keyframe, error);
-        if (status == detail::AmfSubmitStatus::Accepted) return true;
+        diagnostic_submit_returns_.fetch_add(1, std::memory_order_relaxed);
+        if (status == detail::AmfSubmitStatus::Accepted) {
+            diagnostic_submit_successes_.fetch_add(1, std::memory_order_relaxed);
+            diagnostic_submit_stage_.store(4, std::memory_order_release);
+            return true;
+        }
         if (status == detail::AmfSubmitStatus::Error) {
             SetError(error.empty() ? "AMF frame submission failed" : std::move(error));
+            diagnostic_submit_stage_.store(0, std::memory_order_release);
             return false;
         }
+        diagnostic_backpressure_.fetch_add(1, std::memory_order_relaxed);
         if (!DrainAvailable(false)) return false;
     }
     SetError("AMF encoder remained backpressured after draining output");
+    diagnostic_submit_stage_.store(0, std::memory_order_release);
     return false;
 }
 
@@ -1165,25 +1280,43 @@ bool FfmpegAmfReplayEncoder::Flush() {
         if (status == detail::AmfSubmitStatus::Accepted) {
             const bool drained = DrainAvailable(true);
             flushing_ = false;
+            ClearDiagnosticActivity();
             return drained;
         }
         if (status == detail::AmfSubmitStatus::Error) {
             SetError(error.empty() ? "AMF flush failed" : std::move(error));
             flushing_ = false;
+            ClearDiagnosticActivity();
             return false;
         }
         if (!DrainAvailable(true)) {
             flushing_ = false;
+            ClearDiagnosticActivity();
             return false;
         }
     }
     SetError("AMF flush remained backpressured after draining output");
     flushing_ = false;
+    ClearDiagnosticActivity();
     return false;
 }
 
 void FfmpegAmfReplayEncoder::SetError(std::string error) {
     last_error_ = std::move(error);
+    diagnostic_errors_.fetch_add(1, std::memory_order_relaxed);
+    const std::string lower = [&] {
+        std::string value = last_error_;
+        std::transform(value.begin(), value.end(), value.begin(),
+            [](unsigned char character) {
+                return static_cast<char>(std::tolower(character));
+            });
+        return value;
+    }();
+    if (lower.find("getdeviceremovedreason") != std::string::npos
+        || lower.find("device removed") != std::string::npos) {
+        diagnostic_device_removed_.fetch_add(1, std::memory_order_relaxed);
+    }
+    ClearDiagnosticActivity();
     if (!last_error_.empty()) {
         std::cerr << "[AMF] " << last_error_ << std::endl;
     }

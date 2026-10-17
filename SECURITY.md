@@ -18,7 +18,7 @@ Include:
 - Potential impact
 - Your suggested fix (optional)
 
-we will most likely reply within 48 hours though we cannot guarantee that our laziness doesn't overcome our striving for improvement. 
+we will most likely reply within 48 hours though we cannot guarantee that our laziness doesn't overcome our striving for improvement.
 in case your report leads to a change in the app you may be listed in the apps credits unless you do not want to.
 
 ## Scope

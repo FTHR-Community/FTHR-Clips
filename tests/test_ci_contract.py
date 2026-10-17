@@ -46,6 +46,18 @@ def test_windows_bundle_is_built_only_after_the_engine() -> None:
     assert 'python -m pytest tests/test_uploader_plugin_boundary.py' in windows_job
 
 
+def test_optional_sftp_tests_get_dependencies_and_a_real_windows_bundle() -> None:
+    workflow = _workflow()
+    python_job = workflow[workflow.index('  python:'):workflow.index('  linux-engine:')]
+    windows_job = workflow[workflow.index('  windows-engine:'):workflow.index(
+        '  release-verification:')]
+    for job in (python_job, windows_job):
+        assert '-r requirements-uploader.txt' in job
+    assert python_job.index('python tools/build_optional_uploaders.py') < python_job.index(
+        'python -m pytest tests/')
+    assert "if: runner.os == 'Windows'" in python_job
+
+
 def test_windows_package_and_source_loader_use_supported_mixer_outputs() -> None:
     spec = (ROOT / "FTHR.spec").read_text(encoding="utf-8")
     loader = (ROOT / "FTHR_UI" / "core" / "ffmpeg_playback.py").read_text(

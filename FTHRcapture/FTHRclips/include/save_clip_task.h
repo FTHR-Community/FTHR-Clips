@@ -41,6 +41,17 @@ namespace fthr {
         }
     };
 
+    struct AudioSourcePresentationRange;
+
+    // Assemble one persistent AAC track from the source timeline range used by
+    // the video presentation interval. The snapshot retains the source's
+    // signed presentation origin so the muxer can preserve leading silence
+    // and encoder pre-roll with its edit-list offset.
+    EncodedAudioTrack TakeEncodedAudioTrackForPresentationRange(
+        const AudioSourceMetadata& source,
+        const EncodedAudioPacketRing& ring,
+        const AudioSourcePresentationRange& range);
+
 
     struct SaveClipTask {
         std::wstring output_path;

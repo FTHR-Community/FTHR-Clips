@@ -18,7 +18,36 @@
     "Gui",
     "Widgets",
     "Multimedia",
-    "MultimediaWidgets"
+    "MultimediaWidgets",
+    "Qml",
+    "Quick",
+    "QuickWidgets"
+  ],
+  "required_ui_resources": [
+    {
+      "source": "FTHR_UI/ui/qml/VideoPreview.qml",
+      "sha256": "0e6e6c14dbb3ba95556715e9220f1ed1e0c05b07ed1f784ab91df60ac1810153",
+      "artifact_paths": {
+        "windows": "_internal/ui/qml/VideoPreview.qml",
+        "linux": "usr/share/fthrclips/ui/qml/VideoPreview.qml"
+      }
+    },
+    {
+      "source": "FTHR_UI/ui/qml/Snapshot.qml",
+      "sha256": "a6c9425e9e02804929d062cf215a64b876c73a4c3588e6cbcb743a9804d2ca81",
+      "artifact_paths": {
+        "windows": "_internal/ui/qml/Snapshot.qml",
+        "linux": "usr/share/fthrclips/ui/qml/Snapshot.qml"
+      }
+    },
+    {
+      "source": "FTHR_UI/ui/qml/color.frag.qsb",
+      "sha256": "b22b51d2270219755541d43110a7e5bf412674b7ded63e1ffdc6913e791c75f8",
+      "artifact_paths": {
+        "windows": "_internal/ui/qml/color.frag.qsb",
+        "linux": "usr/share/fthrclips/ui/qml/color.frag.qsb"
+      }
+    }
   ],
   "approved_runtime_qt_modules": {
     "windows": [
@@ -31,7 +60,15 @@
       "OpenGLWidgets",
       "Pdf",
       "Svg",
-      "Widgets"
+      "Widgets",
+      "Qml",
+      "QmlCore",
+      "QmlMeta",
+      "QmlModels",
+      "QmlWorkerScript",
+      "Quick",
+      "QuickWidgets",
+      "MultimediaQuick"
     ],
     "linux": [
       "Concurrent",
@@ -47,10 +84,13 @@
       "OpenGLWidgets",
       "Pdf",
       "Qml",
+      "QmlCore",
       "QmlMeta",
       "QmlModels",
       "QmlWorkerScript",
       "Quick",
+      "QuickWidgets",
+      "MultimediaQuick",
       "Svg",
       "WaylandClient",
       "WaylandEglClientHwIntegration",
@@ -88,13 +128,14 @@
     "licenses/Qt6-LICENSE.txt",
     "licenses/Qt6-SOURCE.txt",
     "licenses/Qt6-THIRD-PARTY-NOTICES.txt",
-    "licenses/Wayland-Protocols-NOTICES.txt",
     "licenses/cffi-LICENSE.txt",
     "licenses/pycparser-LICENSE.txt",
     "licenses/release_asset_manifest.json"
   ],
   "official_sources": {
     "qt": "https://download.qt.io/official_releases/qt/6.11/6.11.1/single/qt-everywhere-src-6.11.1.tar.xz",
-    "qt_for_python": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.1-src/pyside-setup-everywhere-src-6.11.1.tar.xz"
+    "qt_for_python": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.1-src/pyside-setup-everywhere-src-6.11.1.tar.xz",
+    "qml_license": "https://doc.qt.io/qt-6/qtqml-index.html#licenses-and-attributions",
+    "quick_license": "https://doc.qt.io/qt-6/qtquick-index.html#licenses-and-attributions"
   }
 }

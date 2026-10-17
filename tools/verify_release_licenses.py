@@ -48,8 +48,10 @@ REQUIRED_TREE_FILES = (
     'licenses/Qt6-SOURCE.txt',
     'licenses/Qt6-THIRD-PARTY-NOTICES.txt',
     'licenses/Wayland-Protocols-NOTICES.txt',
+    'licenses/AppImage-type2-runtime-LICENSE.txt',
     'licenses/cffi-LICENSE.txt',
     'licenses/pycparser-LICENSE.txt',
+    'tools/appimage_tool_manifest.json',
     'tools/ffmpeg_manifest.json',
     'tools/generate_release_assets.py',
     'tools/qt_runtime_manifest.json',
@@ -86,6 +88,11 @@ QT_MANIFEST_REL = 'tools/qt_runtime_manifest.json'
 ASSET_MANIFEST_REL = 'tools/release_asset_manifest.json'
 QT_DLL_RE = re.compile(r'^Qt6([A-Za-z0-9_]+)\.dll$', re.I)
 QT_SO_RE = re.compile(r'^libQt6([A-Za-z0-9_]+)\.so(?:\..*)?$', re.I)
+REQUIRED_UI_RESOURCE_SOURCES = frozenset((
+    'FTHR_UI/ui/qml/VideoPreview.qml',
+    'FTHR_UI/ui/qml/Snapshot.qml',
+    'FTHR_UI/ui/qml/color.frag.qsb',
+))
 
 
 class Report:
@@ -295,12 +302,88 @@ def _locked_packages(path: Path) -> dict[str, str]:
     return pins
 
 
+def _required_ui_resources(data: dict, rep: Report):
+    resources = data.get('required_ui_resources')
+    if not isinstance(resources, list) or not resources:
+        rep.fail(f'{QT_MANIFEST_REL}: required_ui_resources is missing or empty')
+        return []
+    entries = []
+    seen = set()
+    for index, entry in enumerate(resources):
+        if not isinstance(entry, dict):
+            rep.fail(f'{QT_MANIFEST_REL}: UI resource {index} is not an object')
+            continue
+        source = str(entry.get('source') or '')
+        digest = str(entry.get('sha256') or '').lower()
+        paths = entry.get('artifact_paths')
+        if (not source or Path(source).is_absolute() or '..' in Path(source).parts
+                or not re.fullmatch(r'[0-9a-f]{64}', digest)):
+            rep.fail(f'{QT_MANIFEST_REL}: invalid UI resource schema at {index}')
+            continue
+        if source in seen:
+            rep.fail(f'{QT_MANIFEST_REL}: duplicate UI resource {source}')
+            continue
+        seen.add(source)
+        if not isinstance(paths, dict):
+            rep.fail(f'{QT_MANIFEST_REL}: artifact paths missing for {source}')
+            continue
+        platform_paths = {}
+        valid = True
+        for platform in ('windows', 'linux'):
+            values = paths.get(platform)
+            values = [values] if isinstance(values, str) else values
+            if (not isinstance(values, list) or not values
+                    or any(not isinstance(value, str)
+                           or Path(value).is_absolute()
+                           or '..' in Path(value).parts for value in values)):
+                rep.fail(f'{QT_MANIFEST_REL}: invalid {platform} path for {source}')
+                valid = False
+            else:
+                platform_paths[platform] = tuple(values)
+        if valid:
+            entries.append((source, digest, platform_paths))
+    missing = REQUIRED_UI_RESOURCE_SOURCES - seen
+    if missing:
+        rep.fail(f'{QT_MANIFEST_REL}: required UI resources missing: '
+                 + ', '.join(sorted(missing)))
+    return entries
+
+
+def check_qt_ui_resources_source(root: Path, data: dict, rep: Report) -> None:
+    """Require the app-owned QML/shader bytes selected by the manifest."""
+    print('\n-- Qt app-owned UI resources in source --')
+    for source, expected, _paths in _required_ui_resources(data, rep):
+        path = root / source
+        if not path.is_file():
+            rep.fail(f'missing required UI resource: {source}')
+        elif _file_sha256(path) != expected:
+            rep.fail(f'UI resource hash mismatch: {source}')
+        else:
+            rep.ok(f'UI resource source hash: {source}')
+
+
+def check_qt_ui_resources_artifact(
+        root: Path, data: dict, platform: str, rep: Report) -> None:
+    """Require exact packaged paths and bytes for app-owned UI resources."""
+    print(f'\n-- Qt app-owned UI resources in {platform} artifact --')
+    for _source, expected, paths in _required_ui_resources(data, rep):
+        for relative in paths.get(platform, ()):
+            path = root / relative
+            if not path.is_file():
+                rep.fail(f'{platform} artifact missing UI resource: {relative}')
+            elif _file_sha256(path) != expected:
+                rep.fail(f'{platform} UI resource hash mismatch: {relative}')
+            else:
+                rep.ok(f'{platform} UI resource hash: {relative}')
+
+
 def check_qt_source_selection(root: Path, rep: Report) -> None:
     """Verify that source, lock, and packaging select one approved Qt binding."""
     print('\n-- Qt binding source and lock --')
     data = _read_manifest(root, QT_MANIFEST_REL, rep)
     if data is None:
         return
+    check_qt_ui_resources_source(root, data, rep)
 
     binding = data.get('binding') or {}
     selected = str(binding.get('name') or '')
@@ -396,6 +479,7 @@ def check_qt_artifact(root: Path, rep: Report, platform: str,
     data = _read_manifest(source_root, QT_MANIFEST_REL, rep)
     if data is None:
         return
+    check_qt_ui_resources_artifact(root, data, platform, rep)
 
     binding = data.get('binding') or {}
     selected = str(binding.get('name') or '')

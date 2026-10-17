@@ -10,6 +10,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/opt.h>
+#include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
 }
 
@@ -60,11 +61,15 @@ public:
 
 private:
     bool TryOpen(const char* codec_name, const EncoderConfig& cfg);
+    bool IsVaapi() const { return codec_ctx_ && codec_ctx_->pix_fmt == AV_PIX_FMT_VAAPI; }
 
     AVCodecContext* codec_ctx_ = nullptr;
     SwsContext*     sws_ctx_   = nullptr;
     AVFrame*        yuv_frame_ = nullptr;
+    AVFrame*        hw_frame_  = nullptr;
     AVPacket*       pkt_       = nullptr;
+    AVBufferRef*    hw_device_ctx_ = nullptr;
+    AVBufferRef*    hw_frames_ctx_ = nullptr;
     struct FrameTiming {
         int64_t pts;
         int64_t wall_time_ns;

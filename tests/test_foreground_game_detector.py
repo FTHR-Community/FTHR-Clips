@@ -170,3 +170,19 @@ def test_detector_emits_loss_after_two_empty_observations():
     assert lost == []
     detector._observe(None)
     assert lost == [True]
+
+
+def test_blacklist_takes_precedence_over_manual_and_automatic_detection(monkeypatch):
+    candidate = _window(is_known_game=True)
+    rule = {'exe_path': candidate.exe_path}
+    detector = ForegroundGameDetector(stable_polls=1, custom_game_rules=[rule],
+                                      blacklist_rules=[rule], window_provider=lambda pid: candidate)
+    detected = []
+    detector.game_detected.connect(detected.append)
+    monkeypatch.setattr(detector._stop_event, 'wait', lambda timeout: detector._stop_event.set())
+    detector._run()
+    assert detected == []
+    detector.set_blacklist_rules([])
+    detector._stop_event.clear()
+    detector._run()
+    assert detected == [candidate]

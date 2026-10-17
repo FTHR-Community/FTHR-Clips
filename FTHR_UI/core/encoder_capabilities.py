@@ -17,7 +17,7 @@ from typing import Callable, Iterable
 from core.ffmpeg_tools import get_ffmpeg_exe
 
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -59,10 +59,6 @@ _BACKENDS: tuple[
 
 
 def _platform_backend_keys(platform: str) -> tuple[str, ...]:
-    # Windows replay requires hardware encoding. Linux also exposes
-    # OpenH264, Kvazaar, and AV1 software backends.
-    if platform.startswith('win'):
-        return ('nvenc', 'amf', 'qsv')
     return ('nvenc', 'amf', 'qsv', 'software')
 
 
@@ -125,6 +121,9 @@ def probe_encoder_capabilities(
         codecs: list[str] = []
         codec_names: list[tuple[str, str]] = []
         for codec, encoder_names in codec_candidates:
+            # Windows software replay currently uses the low-latency OpenH264 path.
+            if platform.startswith('win') and key == 'software' and codec != 'h264':
+                continue
             working_name = next((
                 name for name in encoder_names
                 if _encoder_works(
@@ -164,16 +163,95 @@ def _cache_path() -> Path:
     return Path.home() / '.fthr' / 'encoder_capabilities.json'
 
 
-def _ffmpeg_signature(ffmpeg: str, platform: str) -> dict:
+def _windows_adapter_signature() -> str | None:
+    """Return a stable adapter/driver identity, or no cache identity.
+
+    Capability probing is deliberately narrow (one frame on the default
+    adapter), so its Windows cache must not outlive the adapter/driver it
+    observed.  If either the display API or the registry identity is
+    unavailable, callers must bypass the persistent cache instead of guessing.
+    """
+    if sys.platform != 'win32':
+        return None
+    try:
+        import winreg
+        import ctypes
+        from ctypes import wintypes
+
+        class _DisplayDeviceW(ctypes.Structure):
+            _fields_ = [
+                ('cb', wintypes.DWORD),
+                ('DeviceName', wintypes.WCHAR * 32),
+                ('DeviceString', wintypes.WCHAR * 128),
+                ('StateFlags', wintypes.DWORD),
+                ('DeviceID', wintypes.WCHAR * 128),
+                ('DeviceKey', wintypes.WCHAR * 128),
+            ]
+
+        enum_display_devices = ctypes.WinDLL(
+            'user32', use_last_error=True).EnumDisplayDevicesW
+        enum_display_devices.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            ctypes.POINTER(_DisplayDeviceW),
+            wintypes.DWORD,
+        ]
+        enum_display_devices.restype = wintypes.BOOL
+
+        registry_prefix = '\\Registry\\Machine\\'
+        adapters: list[tuple[str, str, str]] = []
+        index = 0
+        while True:
+            device = _DisplayDeviceW()
+            device.cb = ctypes.sizeof(device)
+            if not enum_display_devices(None, index, ctypes.byref(device), 0):
+                break
+            index += 1
+            identity = str(device.DeviceID).strip().casefold()
+            key_path = str(device.DeviceKey).strip()
+            if not identity or not key_path.casefold().startswith(
+                    registry_prefix.casefold()):
+                return None
+            key_path = key_path[len(registry_prefix):]
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+                driver_version = winreg.QueryValueEx(key, 'DriverVersion')[0]
+                installed = winreg.QueryValueEx(
+                    key, 'InstalledDisplayDrivers')[0]
+
+            def _value_text(value) -> str:
+                if isinstance(value, (list, tuple)):
+                    value = '\x1f'.join(sorted(str(item) for item in value))
+                return str(value).strip().casefold()
+
+            driver_version = _value_text(driver_version)
+            installed = _value_text(installed)
+            if not driver_version or not installed:
+                return None
+            adapters.append((identity, driver_version, installed))
+
+        if not adapters:
+            return None
+        return json.dumps(sorted(adapters), separators=(',', ':'))
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        return None
+
+
+def _ffmpeg_signature(ffmpeg: str, platform: str) -> dict | None:
     path = Path(ffmpeg).resolve()
     stat = path.stat()
-    return {
+    signature = {
         'version': _CACHE_VERSION,
         'platform': platform,
         'ffmpeg': os.path.normcase(str(path)),
         'ffmpeg_size': stat.st_size,
         'ffmpeg_mtime_ns': stat.st_mtime_ns,
     }
+    if platform == 'win32':
+        adapter_signature = _windows_adapter_signature()
+        if adapter_signature is None:
+            return None
+        signature['windows_adapter_signature'] = adapter_signature
+    return signature
 
 
 def _serialize_capability(item: EncoderCapability) -> dict:
@@ -207,6 +285,8 @@ def load_cached_encoder_capabilities(
     try:
         executable = ffmpeg or get_ffmpeg_exe()
         expected = _ffmpeg_signature(executable, platform)
+        if expected is None:
+            return None
         path = cache_file or _cache_path()
         raw = json.loads(path.read_text(encoding='utf-8'))
         if not isinstance(raw, dict):
@@ -235,6 +315,8 @@ def save_encoder_capabilities_cache(
     try:
         executable = ffmpeg or get_ffmpeg_exe()
         data = _ffmpeg_signature(executable, platform)
+        if data is None:
+            return False
         data['capabilities'] = [
             _serialize_capability(item) for item in capabilities]
         path = cache_file or _cache_path()

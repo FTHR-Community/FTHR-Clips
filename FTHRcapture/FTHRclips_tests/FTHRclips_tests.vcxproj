@@ -20,10 +20,12 @@
     <ClCompile Include="tests\windows_microphone_audio_provider_test.cpp" />
     <ClCompile Include="tests\audio_format_converter_test.cpp" />
     <ClCompile Include="tests\amf_replay_encoder_test.cpp" />
+    <ClCompile Include="tests\software_replay_encoder_test.cpp" />
     <ClCompile Include="tests\qsv_replay_encoder_test.cpp" />
     <ClCompile Include="tests\windows_replay_policy_test.cpp" />
     <ClCompile Include="tests\windows_monitor_resolver_test.cpp" />
     <ClCompile Include="tests\windows_capture_border_policy_test.cpp" />
+    <ClCompile Include="tests\windows_capture_backend_policy_test.cpp" />
     <ClCompile Include="..\FTHRclips\src\encoded_ring_buffer.cpp" />
     <ClCompile Include="..\FTHRclips\src\save_clip_task.cpp" />
     <ClCompile Include="..\FTHRclips\src\continuous_recording_writer.cpp" />
@@ -38,6 +40,7 @@
     <ClCompile Include="..\FTHRclips\src\audio_format_converter.cpp" />
     <ClCompile Include="..\FTHRclips\src\encoded_video_config.cpp" />
     <ClCompile Include="..\FTHRclips\src\ffmpeg_amf_replay_encoder.cpp" />
+    <ClCompile Include="..\FTHRclips\src\software_replay_encoder.cpp" />
     <ClCompile Include="..\FTHRclips\src\ffmpeg_qsv_replay_encoder.cpp" />
     <ClCompile Include="..\FTHRclips\src\nvenc_codec_config.cpp" />
     <ClCompile Include="..\FTHRclips\src\replay_encoder_policy.cpp" />
@@ -87,7 +90,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)..\FTHRclips\third_party\ffmpeg\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swresample.lib;d3d11.lib;dxgi.lib;User32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;d3d11.lib;dxgi.lib;User32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -104,7 +107,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)..\FTHRclips\third_party\ffmpeg\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swresample.lib;d3d11.lib;dxgi.lib;User32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;d3d11.lib;dxgi.lib;User32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

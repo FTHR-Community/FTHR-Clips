@@ -9,19 +9,34 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import logging
 
 from PySide6.QtCore import QUrl
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QSoundEffect
+
+_LOG = logging.getLogger(__name__)
+_MULTIMEDIA_ERROR: str | None = None
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QSoundEffect
+except (ImportError, OSError) as error:
+    # QtMultimedia is optional for the rest of the application. Keep this
+    # boundary narrow: required QtCore/Widgets imports remain fail-fast.
+    QAudioOutput = QMediaPlayer = QSoundEffect = None
+    _MULTIMEDIA_ERROR = f'{type(error).__name__}: {error}'[:240]
+    _LOG.warning('Optional Qt multimedia unavailable: %s', _MULTIMEDIA_ERROR)
 
 
-_MEDIA_READY = {
-    QMediaPlayer.MediaStatus.LoadedMedia,
-    QMediaPlayer.MediaStatus.BufferedMedia,
-}
-_MEDIA_FAILED = {
-    QMediaPlayer.MediaStatus.InvalidMedia,
-    QMediaPlayer.MediaStatus.NoMedia,
-}
+if QMediaPlayer is None:
+    _MEDIA_READY = set()
+    _MEDIA_FAILED = set()
+else:
+    _MEDIA_READY = {
+        QMediaPlayer.MediaStatus.LoadedMedia,
+        QMediaPlayer.MediaStatus.BufferedMedia,
+    }
+    _MEDIA_FAILED = {
+        QMediaPlayer.MediaStatus.InvalidMedia,
+        QMediaPlayer.MediaStatus.NoMedia,
+    }
 
 
 @dataclass
@@ -70,6 +85,8 @@ class SoundPlayback:
 
     def prepare(self, path: Path | str) -> bool:
         """Begin loading ``path`` without playing it."""
+        if QSoundEffect is None or QMediaPlayer is None or QAudioOutput is None:
+            return False
         path = Path(path)
         signature = self._signature(path)
         if signature is None:

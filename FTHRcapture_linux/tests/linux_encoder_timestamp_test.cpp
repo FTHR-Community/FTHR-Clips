@@ -19,6 +19,10 @@ int main() {
     config.fps = fps;
     config.bitrate_kbps = 300;
     config.codec_pref = fthr::CodecPref::H264;
+    // Timestamp semantics must be deterministic and independent of whichever
+    // GPU happens to be installed on the test machine. Hardware encoder
+    // qualification is covered by linux_vaapi_encoder_test.
+    config.encoder_pref = fthr::EncoderPref::Software;
     config.preset = 1;
 
     fthr::Encoder encoder;

@@ -3,10 +3,11 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 namespace fthr {
 
-enum class BackendType { WlrScreencopy, ExtImageCopy, X11Grab };
+enum class BackendType { WlrScreencopy, ExtImageCopy, X11Grab, PortalScreenCast };
 
 // Raw frame delivered synchronously by CaptureFrame().
 // data pointer is valid only until the next CaptureFrame() call.
@@ -37,10 +38,22 @@ public:
     virtual uint32_t NativeHeight() const = 0;
 };
 
-// Factory: tries wlr-screencopy → ext-image-copy-capture → x11grab.
-// Returns nullptr if no backend works or capture cancellation is requested.
+// Why CreateBestBackend() returned nullptr, worded for the UI. Empty when
+// capture was merely cancelled. retry_pointless marks failures that only user
+// action can resolve (a dismissed portal dialog); the engine's bounded
+// recovery would otherwise re-open that dialog on every attempt.
+struct BackendFailure {
+    std::string reason;
+    bool retry_pointless = false;
+};
+
+// Factory. On Wayland: wlr-screencopy → ext-image-copy-capture → ScreenCast
+// portal (PipeWire); the protocol backends come first because they need no
+// dialog. Native X11: x11grab. Returns nullptr if no backend works or capture
+// cancellation is requested; `failure` (optional) then explains why.
 std::unique_ptr<ICaptureBackend> CreateBestBackend(
     const CaptureConfig& cfg,
-    const std::atomic<bool>* running);
+    const std::atomic<bool>* running,
+    BackendFailure* failure = nullptr);
 
 } // namespace fthr

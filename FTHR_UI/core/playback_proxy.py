@@ -11,16 +11,38 @@ import math
 import os
 from pathlib import Path
 import threading
+from collections import OrderedDict
 
 from core.ffmpeg_tools import get_ffmpeg_exe, get_ffprobe_exe, software_video_args
 from core.media_process import run_media_process
+from core.media_identity import file_identity
 
 CACHE_DIR = Path.home() / '.fthr' / 'playback'
+_PROBE_DECISIONS: OrderedDict[Path, bool] = OrderedDict()
+_PROBE_LOCK = threading.Lock()
+
+
+def _remember_probe(target: Path, needed: bool) -> None:
+    with _PROBE_LOCK:
+        _PROBE_DECISIONS[target] = needed
+        _PROBE_DECISIONS.move_to_end(target)
+        while len(_PROBE_DECISIONS) > 128:
+            _PROBE_DECISIONS.popitem(last=False)
+
+
+def _has_keyframe_evidence(packets) -> bool:
+    for packet in packets:
+        try:
+            if ('K' in packet.get('flags', '')
+                    and math.isfinite(float(packet['pts_time']))):
+                return True
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+    return False
 
 
 def _cache_path(source: str) -> Path:
-    info = os.stat(source)
-    identity = f'{os.path.normcase(os.path.abspath(source))}|{info.st_size}|{info.st_mtime_ns}|gop30-v1'
+    identity = f'{file_identity(source)!r}|gop30-v2'
     return CACHE_DIR / (hashlib.sha256(identity.encode('utf-8')).hexdigest() + '.mp4')
 
 
@@ -71,6 +93,12 @@ def prepare_playback_path(source: str, cancelled: threading.Event) -> str:
         if cached != source or cancelled.is_set():
             return cached
         target = _cache_path(source)
+        with _PROBE_LOCK:
+            decision = _PROBE_DECISIONS.get(target)
+            if decision is not None:
+                _PROBE_DECISIONS.move_to_end(target)
+        if decision is False:
+            return source
         probe = run_media_process(
             [get_ffprobe_exe(), '-v', 'error', '-select_streams', 'v:0',
              '-read_intervals', '0%+8', '-show_entries',
@@ -81,12 +109,22 @@ def prepare_playback_path(source: str, cancelled: threading.Event) -> str:
         document = json.loads(probe[1])
         if any(stream.get('color_transfer') in {'smpte2084', 'arib-std-b67'}
                for stream in document.get('streams', [])):
+            if not cancelled.is_set() and _cache_path(source) == target:
+                _remember_probe(target, False)
             return source  # Keep HDR on its original, color-managed decoder path.
         duration = float(document.get('format', {}).get('duration', 0))
         if not math.isfinite(duration) or not 0 < duration <= 300:
+            if (math.isfinite(duration) and duration > 300
+                    and not cancelled.is_set() and _cache_path(source) == target):
+                _remember_probe(target, False)
             return source
         packets = document.get('packets', [])
-        if not needs_seek_proxy(packets):
+        needed = needs_seek_proxy(packets)
+        # Empty/malformed packet responses are not successful eligibility evidence.
+        if (not needed and _has_keyframe_evidence(packets)
+                and not cancelled.is_set() and _cache_path(source) == target):
+            _remember_probe(target, False)
+        if not needed:
             return source
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(f'.{os.getpid()}-{threading.get_ident()}.partial.mp4')
@@ -96,7 +134,7 @@ def prepare_playback_path(source: str, cancelled: threading.Event) -> str:
              '-filter_threads', '1', '-i', source, '-map', '0:v:0', '-map', '0:a?',
              *software_video_args(16000, ffmpeg), '-threads:v', '2',
              '-c:a', 'copy', '-movflags', '+faststart', str(temporary)],
-            cancelled, timeout_seconds=120)
+            cancelled, timeout_seconds=120, background='proxy')
         if (result is None or result[0] != 0 or cancelled.is_set()
                 or _cache_path(source) != target
                 or temporary.stat().st_size > 2 * 1024**3):

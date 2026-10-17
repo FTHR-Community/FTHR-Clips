@@ -151,13 +151,13 @@ def parse_ffprobe_video_metadata(
 
 def probe_video_metadata(
         media_path: str | os.PathLike[str], *, timeout_seconds: float = 4.0,
+        cancelled: threading.Event | None = None,
 ) -> VideoMetadata | None:
     """Probe one file without guessing missing media facts."""
 
     try:
         probe = get_ffprobe_exe()
-        result = subprocess.run(
-            [
+        command = [
                 probe, '-v', 'error',
                 '-show_entries',
                 'stream=index,codec_type,width,height,avg_frame_rate,'
@@ -165,21 +165,28 @@ def probe_video_metadata(
                 'format_tags=fthr_frame_rate,fthr_video_bitrate_bps:'
                 'format=duration,size,bit_rate',
                 '-of', 'json', os.fspath(media_path),
-            ],
-            capture_output=True, text=True, timeout=timeout_seconds,
-            check=False, **_NO_WINDOW,
-        )
+            ]
+        if cancelled is None:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    timeout=timeout_seconds, check=False, **_NO_WINDOW)
+            returncode, output = result.returncode, result.stdout
+        else:
+            from core.media_process import run_media_process
+            result = run_media_process(command, cancelled, timeout_seconds=timeout_seconds)
+            if result is None:
+                return None
+            returncode, output = result[0], result[1].decode('utf-8', errors='replace')
     except (FFmpegUnavailable, OSError, subprocess.SubprocessError):
         # A failed timing probe is intentionally inconclusive; the caller
         # treats it as needing the conservative CFR repair path.
         return None
-    if result.returncode != 0:
+    if returncode != 0:
         return None
     try:
         file_size = Path(media_path).stat().st_size
     except OSError:
         file_size = None
-    return parse_ffprobe_video_metadata(result.stdout, file_size=file_size)
+    return parse_ffprobe_video_metadata(output, file_size=file_size)
 
 
 def _probe_video_packets(

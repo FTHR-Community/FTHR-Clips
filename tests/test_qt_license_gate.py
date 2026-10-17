@@ -58,6 +58,12 @@ def _manifest_root(tmp_path: Path) -> Path:
 
 def _source_tree(tmp_path: Path) -> Path:
     root = _manifest_root(tmp_path)
+    data = json.loads(REAL_MANIFEST.read_text(encoding='utf-8'))
+    for entry in data['required_ui_resources']:
+        source = ROOT / entry['source']
+        destination = root / entry['source']
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
     _write(root / 'FTHR_UI' / 'app.py', 'from PySide6.QtCore import Signal\n')
     _write(
         root / 'requirements-alpha.txt',
@@ -68,8 +74,7 @@ def _source_tree(tmp_path: Path) -> Path:
             'shiboken6==6.11.1',
         )),
     )
-    for name in ('requirements.in', 'FTHR.spec', 'FTHR_linux.spec',
-                 'build_linux.sh'):
+    for name in ('requirements.in', 'FTHR.spec', 'FTHR_linux.spec', 'build_linux.sh'):
         _write(root / name, 'PySide6\n')
     return root
 
@@ -80,16 +85,44 @@ def _license_files(root: Path) -> None:
         _write(root / rel, f'test fixture for {rel}\n')
 
 
+def _ui_resources(root: Path, platform: str) -> None:
+    data = json.loads(REAL_MANIFEST.read_text(encoding='utf-8'))
+    for entry in data['required_ui_resources']:
+        source = ROOT / entry['source']
+        relative = entry['artifact_paths'][platform]
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
 def _windows_artifact(tmp_path: Path) -> tuple[Path, Path]:
     manifest_root = _manifest_root(tmp_path / 'source')
     artifact = tmp_path / 'artifact'
     _license_files(artifact)
+    _ui_resources(artifact, 'windows')
     _write(artifact / 'PySide6' / 'QtCore.pyd')
     for module in ('Core', 'Gui', 'Widgets', 'Multimedia',
-                   'MultimediaWidgets'):
+                   'MultimediaWidgets', 'Qml', 'Quick', 'QuickWidgets'):
         _write(artifact / 'PySide6' / 'Qt' / 'bin' / f'Qt6{module}.dll')
     _write(artifact / 'PySide6' / 'Qt' / 'plugins' / 'platforms' /
            'qwindows.dll')
+    return artifact, manifest_root
+
+
+def _linux_artifact(tmp_path: Path) -> tuple[Path, Path]:
+    manifest_root = _manifest_root(tmp_path / 'source')
+    artifact = tmp_path / 'artifact'
+    _license_files(artifact)
+    _ui_resources(artifact, 'linux')
+    _write(artifact / 'PySide6' / 'QtCore.so')
+    for module in ('Core', 'Gui', 'Widgets', 'Multimedia',
+                   'MultimediaWidgets', 'Qml', 'Quick', 'QuickWidgets'):
+        _write(artifact / 'PySide6' / 'Qt' / 'lib' /
+               f'libQt6{module}.so.6')
+    _write(artifact / 'PySide6' / 'Qt' / 'plugins' / 'platforms' /
+           'libqxcb.so')
+    _write(artifact / 'PySide6' / 'Qt' / 'plugins' / 'platforms' /
+           'libqwayland.so')
     return artifact, manifest_root
 
 
@@ -118,12 +151,54 @@ def test_source_selection_rejects_unreviewed_binding_version(tmp_path):
     assert any('lock mismatch' in failure for failure in rep.failures)
 
 
+@pytest.mark.parametrize('tamper', ['missing', 'changed'])
+def test_source_selection_rejects_missing_or_tampered_ui_resource(tmp_path, tamper):
+    root = _source_tree(tmp_path)
+    path = root / 'FTHR_UI' / 'ui' / 'qml' / 'VideoPreview.qml'
+    if tamper == 'missing':
+        path.unlink()
+    else:
+        path.write_text('tampered\n', encoding='utf-8')
+    rep = vrl.Report()
+    vrl.check_qt_source_selection(root, rep)
+    assert rep.failures
+    assert any('UI resource' in failure for failure in rep.failures)
+
+
 def test_windows_artifact_accepts_reviewed_binding_and_modules(tmp_path):
     artifact, manifest_root = _windows_artifact(tmp_path)
     rep = vrl.Report()
     vrl.check_qt_artifact(
         artifact, rep, 'windows', manifest_root=manifest_root)
     assert not rep.failures, rep.failures
+
+
+def test_linux_artifact_accepts_reviewed_binding_modules_and_ui_resources(tmp_path):
+    artifact, manifest_root = _linux_artifact(tmp_path)
+    rep = vrl.Report()
+    vrl.check_qt_artifact(
+        artifact, rep, 'linux', manifest_root=manifest_root)
+    assert not rep.failures, rep.failures
+
+
+@pytest.mark.parametrize('platform', ['windows', 'linux'])
+@pytest.mark.parametrize('tamper', ['missing', 'changed'])
+def test_artifact_rejects_missing_or_tampered_ui_resource(tmp_path, platform, tamper):
+    factory = _windows_artifact if platform == 'windows' else _linux_artifact
+    artifact, manifest_root = factory(tmp_path)
+    relative = ('_internal/ui/qml/VideoPreview.qml'
+                if platform == 'windows'
+                else 'usr/share/fthrclips/ui/qml/VideoPreview.qml')
+    path = artifact / relative
+    if tamper == 'missing':
+        path.unlink()
+    else:
+        path.write_bytes(b'tampered')
+    rep = vrl.Report()
+    vrl.check_qt_artifact(
+        artifact, rep, platform, manifest_root=manifest_root)
+    assert rep.failures
+    assert any('UI resource' in failure for failure in rep.failures)
 
 
 def test_artifact_rejects_both_qt_bindings(tmp_path):
@@ -143,39 +218,3 @@ def test_artifact_rejects_gpl_only_qt_module(tmp_path, module):
     vrl.check_qt_artifact(
         artifact, rep, 'windows', manifest_root=manifest_root)
     assert any('GPL-only' in failure for failure in rep.failures)
-
-
-def test_linux_artifact_requires_xcb_and_wayland_plugins(tmp_path):
-    manifest_root = _manifest_root(tmp_path / 'source')
-    artifact = tmp_path / 'artifact'
-    _license_files(artifact)
-    _write(artifact / 'PySide6' / 'QtCore.so')
-    for module in ('Core', 'Gui', 'Widgets', 'Multimedia',
-                   'MultimediaWidgets'):
-        _write(artifact / 'PySide6' / 'Qt' / 'lib' /
-               f'libQt6{module}.so.6')
-    rep = vrl.Report()
-    vrl.check_qt_artifact(artifact, rep, 'linux', manifest_root=manifest_root)
-    assert any('libqxcb.so missing' in failure for failure in rep.failures)
-    assert any('Wayland Qt platform plugin missing' in failure
-               for failure in rep.failures)
-
-
-def test_linux_artifact_accepts_every_reviewed_runtime_module(tmp_path):
-    manifest_root = _manifest_root(tmp_path / 'source')
-    artifact = tmp_path / 'artifact'
-    _license_files(artifact)
-    _write(artifact / 'PySide6' / 'QtCore.so')
-    data = json.loads(REAL_MANIFEST.read_text(encoding='utf-8'))
-    for module in data['approved_runtime_qt_modules']['linux']:
-        _write(artifact / 'PySide6' / 'Qt' / 'lib' /
-               f'libQt6{module}.so.6')
-    _write(artifact / 'PySide6' / 'Qt' / 'plugins' / 'platforms' /
-           'libqxcb.so')
-    _write(artifact / 'PySide6' / 'Qt' / 'plugins' / 'platforms' /
-           'libqwayland.so')
-
-    rep = vrl.Report()
-    vrl.check_qt_artifact(artifact, rep, 'linux', manifest_root=manifest_root)
-
-    assert not rep.failures, rep.failures

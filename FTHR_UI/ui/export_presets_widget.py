@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ui.icons import IconButton
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
@@ -22,7 +24,7 @@ from PySide6.QtWidgets import (
 from core.export_profiles import ExportPreset, ExportPresetManager
 from ui.style import set_theme_style
 from ui.style import (
-    Colors, Fonts, button_outline_qss, button_primary_qss, checkbox_qss,
+    Colors, Fonts, Sizes, button_outline_qss, button_primary_qss, checkbox_qss,
     combo_qss, label_body, WheelSafeComboBox,
 )
 from ui.dialogs import FthrDialog, FthrMessageDialog
@@ -38,14 +40,14 @@ class _PresetStepperMixin:
         self.lineEdit().setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        self._minus = QPushButton('−', self)
+        self._minus = IconButton('decrease.png', self, label='Decrease')
         self._minus.setObjectName('presetStepDown')
         self._minus.setToolTip('Decrease')
         self._minus.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._minus.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._minus.clicked.connect(self.stepDown)
 
-        self._plus = QPushButton('+', self)
+        self._plus = IconButton('increase.png', self, label='Increase')
         self._plus.setObjectName('presetStepUp')
         self._plus.setToolTip('Increase')
         self._plus.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -59,11 +61,11 @@ class _PresetStepperMixin:
             QDoubleSpinBox#presetStepper {{
                 background-color: {Colors.SURFACE_1};
                 border: 1px solid {Colors.BORDER};
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
                 color: {Colors.TEXT};
                 font-family: {Fonts.DISPLAY};
                 font-size: {Fonts.SIZE_BODY}px;
-                font-weight: bold;
+                font-weight: 600;
                 padding: 6px 64px 6px 10px;
                 selection-background-color: {Colors.ACCENT};
                 selection-color: {Colors.BG};
@@ -79,11 +81,11 @@ class _PresetStepperMixin:
                 background-color: {Colors.SURFACE_2};
                 border: none;
                 border-left: 1px solid {Colors.BORDER};
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
                 color: {Colors.ACCENT};
                 font-family: {Fonts.DISPLAY};
                 font-size: 14px;
-                font-weight: bold;
+                font-weight: 600;
                 padding: 0px;
             }}
             QPushButton#presetStepDown:hover,
@@ -146,7 +148,7 @@ class ExportPresetDialog(FthrDialog):
             QLineEdit {{
                 background: {Colors.SURFACE_1};
                 border: 1px solid {Colors.BORDER};
-                border-radius: 0px;
+                border-radius: {Sizes.RADIUS_MD}px;
                 color: {Colors.TEXT};
                 font-family: {Fonts.BODY};
                 padding: 7px 9px;
@@ -201,10 +203,10 @@ class ExportPresetDialog(FthrDialog):
         form.addRow('Audio', self.audio)
         self.body_layout.addLayout(form)
 
-        cancel = QPushButton('CANCEL')
+        cancel = QPushButton('Cancel')
         set_theme_style(cancel, button_outline_qss)
         cancel.clicked.connect(self.reject)
-        save = QPushButton('SAVE PRESET')
+        save = QPushButton('Save preset')
         set_theme_style(save, button_primary_qss)
         save.clicked.connect(self._validate_and_accept)
         self.action_layout.addStretch()
@@ -254,15 +256,15 @@ class ExportPresetsWidget(QWidget):
         self.combo = WheelSafeComboBox()
         set_theme_style(self.combo, combo_qss)
         row.addWidget(self.combo, 1)
-        self.new_btn = QPushButton('NEW')
+        self.new_btn = QPushButton('New')
         set_theme_style(self.new_btn, button_primary_qss)
         self.new_btn.clicked.connect(self._new)
         row.addWidget(self.new_btn)
-        self.edit_btn = QPushButton('EDIT')
+        self.edit_btn = QPushButton('Edit')
         set_theme_style(self.edit_btn, button_outline_qss)
         self.edit_btn.clicked.connect(self._edit)
         row.addWidget(self.edit_btn)
-        self.delete_btn = QPushButton('DELETE')
+        self.delete_btn = QPushButton('Delete')
         set_theme_style(self.delete_btn, button_outline_qss)
         self.delete_btn.clicked.connect(self._delete)
         row.addWidget(self.delete_btn)
@@ -282,7 +284,7 @@ class ExportPresetsWidget(QWidget):
         self.combo.blockSignals(True)
         self.combo.clear()
         for preset in self.manager.all():
-            suffix = ' · BUILT IN' if preset.built_in else ''
+            suffix = ' · Built-in' if preset.built_in else ''
             self.combo.addItem(preset.name + suffix, preset.preset_id)
         index = self.combo.findData(current)
         self.combo.setCurrentIndex(index if index >= 0 else 0)

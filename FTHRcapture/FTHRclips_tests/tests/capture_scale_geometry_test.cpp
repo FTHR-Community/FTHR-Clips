@@ -95,12 +95,44 @@ void UltrawideAndOddInputs() {
     Check(!fthr::BuildCaptureScaleGeometry(1, 1080, 1920, 1080, false, geometry),
         "invalid source is rejected");
 }
+
+void HighResolutionMatrix() {
+    struct Resolution {
+        uint32_t width;
+        uint32_t height;
+    };
+    const Resolution resolutions[] = {
+        {1920, 1080}, {2560, 1440}, {3840, 2160},
+    };
+    for (const auto source : resolutions) {
+        for (const auto target : resolutions) {
+            for (const bool fit : {false, true}) {
+                fthr::CaptureScaleGeometry geometry;
+                Check(fthr::BuildCaptureScaleGeometry(
+                          source.width, source.height,
+                          target.width, target.height, fit, geometry),
+                    "1080p/1440p/4K scale matrix resolves");
+                Check(geometry.valid()
+                        && geometry.destination.left % 2 == 0
+                        && geometry.destination.top % 2 == 0,
+                    "high-resolution scale matrix stays even and bounded");
+                if (source.width * target.height
+                    == target.width * source.height) {
+                    Check(geometry.destination.width == target.width
+                            && geometry.destination.height == target.height,
+                        "same-aspect high-resolution fit has no bars");
+                }
+            }
+        }
+    }
+}
 }
 
 int RunCaptureScaleGeometryTests() {
     StretchAndFit();
     ExactTargetGeometriesAndQuadrants();
     UltrawideAndOddInputs();
+    HighResolutionMatrix();
     std::cout << "Capture scale geometry checks: " << checks << std::endl;
     return checks;
 }

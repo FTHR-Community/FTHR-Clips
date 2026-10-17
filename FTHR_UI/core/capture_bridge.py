@@ -8,6 +8,9 @@ import ctypes
 from ctypes import Structure, c_uint32, c_bool, c_float, c_uint64
 from enum import IntEnum
 import os
+import threading
+
+from core.capture_health import CaptureHealthFlag
 
 if sys.platform == 'win32':
     from ctypes import c_wchar
@@ -134,6 +137,7 @@ class CaptureBridge:
             cls._instance._layout = None
             cls._instance._linux_mmap = None
             cls._instance._logged_read_errors = set()
+            cls._instance._mapping_lock = threading.RLock()
         return cls._instance
 
     def _log_read_error_once(self, where: str, e: Exception):
@@ -145,12 +149,17 @@ class CaptureBridge:
 
 
     def initialize(self) -> bool:
+        if sys.platform == 'win32':
+            # Stop/restart may arrive while OpenFileMappingW or MapViewOfFile
+            # is in flight. Serialize only mapping ownership; polling and
+            # process waits remain outside this lock.
+            with self._mapping_lock:
+                if self._initialized:
+                    return True
+                return self._initialize_windows()
         if self._initialized:
             return True
-        if sys.platform == 'win32':
-            return self._initialize_windows()
-        else:
-            return self._initialize_linux()
+        return self._initialize_linux()
 
 
     def _initialize_linux(self) -> bool:
@@ -199,14 +208,26 @@ class CaptureBridge:
 
         if not self._layout.is_initialized:
             print('Linux engine not initialized yet')
-            self._linux_mmap.close()
-            self._linux_mmap = None
-            self._layout = None
+            self._release_linux_mapping()
             return False
 
         self._initialized = True
         print('Connected to Linux capture engine')
         return True
+
+
+    def _release_linux_mapping(self) -> None:
+        """Release ctypes' exported view before closing the mmap.
+
+        ``SharedMemoryLayout.from_buffer`` keeps an exported pointer on the
+        mapping.  Closing first raises ``BufferError`` and masks the intended
+        failed-initialization result.
+        """
+        self._layout = None
+        mapping = self._linux_mmap
+        self._linux_mmap = None
+        if mapping is not None:
+            mapping.close()
 
 
     def _initialize_windows(self) -> bool:
@@ -251,11 +272,13 @@ class CaptureBridge:
         if sys.platform != 'win32':
             # Release the ctypes from_buffer reference before closing the mmap;
             # otherwise Python raises BufferError for the exported pointer.
-            self._layout = None
-            if self._linux_mmap is not None:
-                self._linux_mmap.close()
-                self._linux_mmap = None
-        else:
+            self._release_linux_mapping()
+            self._initialized = False
+            if CaptureBridge._instance is self:
+                CaptureBridge._instance = None
+            return
+
+        with self._mapping_lock:
             if self._layout:
                 ctypes.windll.kernel32.UnmapViewOfFile(
                     ctypes.c_void_p(getattr(self, '_win_map_ptr', None) or 0))
@@ -264,8 +287,9 @@ class CaptureBridge:
             if self._mem_handle:
                 ctypes.windll.kernel32.CloseHandle(self._mem_handle)
                 self._mem_handle = None
-        self._initialized = False
-        CaptureBridge._instance = None
+            self._initialized = False
+            if CaptureBridge._instance is self:
+                CaptureBridge._instance = None
 
 
     def is_connected(self) -> bool:
@@ -478,6 +502,15 @@ class CaptureBridge:
                 'content_suspicious_streak': int(self._layout.content_suspicious_streak),
                 'content_luma_mean': float(self._layout.content_luma_mean),
                 'content_luma_variance': float(self._layout.content_luma_variance),
+                # Linux publishes a bounded terminal backend reason through
+                # engine_string. On Windows that field can still contain a
+                # save error, so never expose it as capture evidence there.
+                'capture_failure_detail': (
+                    self._read_engine_string()
+                    if sys.platform != 'win32'
+                    and int(self._layout.capture_health_flags)
+                    & int(CaptureHealthFlag.BACKEND_FAILED)
+                    else ''),
             }
         except Exception as e:
             self._log_read_error_once('get_status', e)

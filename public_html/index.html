@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<! icons: Lucide Icons (https://lucide.dev/icons), used under the ISC License (https://github.com/lucide-icons/lucide/blob/main/LICENSE). >
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTHRClips</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=30">
+</head>
+<body>
+    <canvas class="dot-field" id="dotField" aria-hidden="true"></canvas>
+
+    <div class="step-nav">
+        <button class="step-arrow hidden" id="btnUp" onclick="SectionNav.prev()" title="Previous Section">
+            <svg data-lucide="chevron-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></svg>
+        </button>
+        <button class="step-arrow" id="btnDown" onclick="SectionNav.next()" title="Next Section">
+            <svg data-lucide="chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+    </div>
+
+    <div class="scroll-square" id="scrollSquare"></div>
+
+    <nav>
+        <a class="logo" id="logo" onclick="handleLogoClick()">
+            <img src="favicon.svg" alt="FTHR">
+        </a>
+        <ul class="nav-links">
+            <li><a onclick="scrollToSection('features')">Features</a></li>
+            <li><a onclick="scrollToSection('how-it-works')">How It Works</a></li>
+            <li><a onclick="scrollToSection('privacy')">Privacy</a></li>
+            <li><a onclick="scrollToSection('team')">Team</a></li>
+            <li><a onclick="window.open('https://faq.fthrclips.com')">FAQ</a></li>
+            <li><a href="docs/">Docs</a></li>
+            <li><a onclick="scrollToSection('coming-soon')">Status</a></li>
+        </ul>
+        <div class="nav-right">
+            <a class="nav-gary" href="https://gary.fthrclips.com" target="_blank" rel="noopener noreferrer">Gary</a>
+            <button class="nav-hc-btn" id="hcToggle" onclick="HCMode.toggle()" aria-label="Toggle high contrast mode" title="High contrast mode">
+                <svg data-lucide="contrast" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 18a6 6 0 0 0 0-12v12z"/>
+                </svg>
+                HC
+            </button>
+            <a class="nav-discord" href="https://discord.gg/fthrclips" target="_blank" rel="noopener noreferrer">
+                <svg data-lucide="message-circle" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"/></svg>
+                Join Discord
+            </a>
+        </div>
+    </nav>
+
+    <section class="hero animate-section" id="hero">
+        <div class="hero-icon-field" aria-hidden="true">
+            <div class="hero-float-icon icon-gamepad"><img src="assets/icons/gamepad-2.svg" alt=""></div>
+            <div class="hero-float-icon icon-monitor"><img src="assets/icons/monitor-play.svg" alt=""></div>
+            <div class="hero-float-icon icon-video"><img src="assets/icons/video.svg" alt=""></div>
+            <div class="hero-float-icon icon-clapper"><img src="assets/icons/clapperboard.svg" alt=""></div>
+            <div class="hero-float-icon icon-scissors"><img src="assets/icons/scissors.svg" alt=""></div>
+        </div>
+        <button class="hero-hc-btn" id="hcToggleMobile" onclick="HCMode.toggle()" aria-label="Toggle high contrast mode">
+            <svg data-lucide="contrast" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M12 18a6 6 0 0 0 0-12v12z"/>
+            </svg>
+            High Contrast
+        </button>
+        <h1>
+            <div class="rotating-text-wrapper">
+                <div class="rotating-text">
+                    <span class="active">Clip anything, any game, any app.</span>
+                    <span>Your Clips, Your Property.</span>
+                    <span>Your Privacy isn't Currency.</span>
+                </div>
+            </div>
+        </h1>
+        <p class="hero-subtitle">Open-Source &mdash; Privacy-First &mdash;  Maximum Performance</p>
+        <div class="alpha-notice">
+            <div class="coming-soon-title">Coming Soon</div>
+            <div class="label">CURRENT PHASE: CLOSED DEVELOPMENT</div>
+            <p>FTHRClips is still being built and is not publicly available yet. Source code will be available from day one of the alpha release. Join the Discord for build updates, early testing news, or email contact@fthrclips.com for questions.</p>
+            <div class="status-strip" aria-label="Development status details">
+                <span>Public alpha target: AUGUST 2026</span>
+            </div>
+        </div>
+        <div class="cta-group">
+            <button class="btn btn-primary" onclick="scrollToSection('features')">See Features</button>
+            <button class="btn btn-secondary" onclick="scrollToSection('how-it-works')">How It Works</button>
+            <button class="btn btn-secondary" onclick="window.open('https://faq.fthrclips.com')">FAQ</button>
+            <button class="btn btn-secondary" onclick="window.open('https://socials.fthrclips.com')">Socials</button>
+        </div>
+    </section>
+
+    <section id="features" class="animate-section">
+        <div class="section-header">
+            <div class="label">What You Get</div>
+            <h2>Features</h2>
+            <p>Every feature earns its place. Nothing that isn't pulling weight.</p>
+        </div>
+
+        <div class="feature-tabs">
+            <button class="feature-tab-btn active" data-cat="core" onclick="FeatureTabs.show('core')">Core</button>
+            <button class="feature-tab-btn" data-cat="cool" onclick="FeatureTabs.show('cool')">What Makes It Different</button>
+        </div>
+
+        <div class="feature-categories-wrap">
+        <div class="feature-category active" data-cat="core">
+            <div class="feature-blocks">
+
+                <div class="feature-block">
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+                            <svg class="feature-icon-svg" data-lucide="gauge" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="m12 14 4-4"/>
+                                <path d="M3.34 19a10 10 0 1 1 17.32 0"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">Any Framerate, Any Resolution</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>No artificial caps. Pick the frame rate, resolution, and bit rate you actually want. The selected setup stays visible and reloads with the same values.</p>
+                            <div class="feature-demo capture-config" data-demo="capture">
+                                <div class="settings-grid">
+                                    <label class="mock-field">
+                                        <span>FRAMERATE</span>
+                                        <select data-capture-setting="framerate" aria-label="Framerate">
+                                            <option value="60 FPS">60 FPS</option>
+                                            <option value="120 FPS">120 FPS</option>
+                                            <option value="144 FPS">144 FPS</option>
+                                            <option value="165 FPS">165 FPS</option>
+                                            <option value="240 FPS">240 FPS</option>
+                                            <option value="360 FPS">360 FPS</option>
+                                        </select>
+                                    </label>
+                                    <label class="mock-field">
+                                        <span>RESOLUTION</span>
+                                        <select data-capture-setting="resolution" aria-label="Resolution">
+                                            <option value="480p">480p</option>
+                                            <option value="720p">720p</option>
+                                            <option value="1080p">1080p</option>
+                                            <option value="1440p">1440p</option>
+                                            <option value="Source">Source</option>
+                                        </select>
+                                    </label>
+                                    <label class="mock-field">
+                                        <span>BITRATE</span>
+                                        <select data-capture-setting="bitrate" aria-label="Bit rate">
+                                            <option value="Low">Low</option>
+                                            <option value="Medium">Medium</option>
+                                            <option value="High">High</option>
+                                            <option value="Custom">Custom</option>
+                                        </select>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="feature-block">
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+                            <svg class="feature-icon-svg" data-lucide="badge-x" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z"/>
+                                <line x1="15" x2="9" y1="9" y2="15"/>
+                                <line x1="9" x2="15" y1="9" y2="15"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">No Useless Fluff</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>No "Premium" Subscription charging for basic Features, no viral feed, no notifications begging for engagement. Just a hotkey that saves your clip.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="feature-block">
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+                            <svg class="feature-icon-svg" data-lucide="zap" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">Maximum Performance</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>FTHR uses hardware encoding when your system supports it, keeping most compression work off the main CPU path. The current app can encode H.264, HEVC (H.265), or AV1 when the selected encoder and GPU support it.</p>
+                            <p>No compatible hardware encoder? FTHR can fall back to software encoding for broader compatibility. Actual load still depends on your resolution, frame rate, codec, and hardware.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="feature-block">
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+                            <svg class="feature-icon-svg" data-lucide="lock-keyhole" viewBox="0 0 24 24" aria-hidden="true">
+                                <circle cx="12" cy="16" r="1"/>
+                                <rect x="3" y="10" width="18" height="12" rx="2"/>
+                                <path d="M7 10V7a5 5 0 0 1 10 0v3"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">No Data Collection</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>FTHR Clips Core works locally with no required account and no telemetry. The optional uploader is separate and only contacts the provider you choose after you enable it.</p>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="feature-category" data-cat="cool">
+            <div class="feature-blocks">
+
+                <div class="feature-block">
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+                            <svg class="feature-icon-svg" data-lucide="cloud-upload" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M12 13v8"/>
+                                <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/>
+                                <path d="m8 17 4-4 4 4"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">Upload to Lustful, Catbox, or Your Server</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>Choose Lustful, Catbox, or your own endpoint and get a shareable link when the upload finishes. Lustful uses a hardware-bound account and supports favorites so selected uploads can be kept.</p>
+                            <div class="feature-demo upload-config" data-demo="upload">
+                                <div class="app-section-line">
+                                    <span>SERVER</span>
+                                </div>
+                                <div class="upload-form">
+                                    <label class="upload-field">
+                                        <span>Provider</span>
+                                        <select data-upload-provider aria-label="Upload provider">
+                                            <option value="lustful">Lustful</option>
+                                            <option value="catbox">Catbox</option>
+                                            <option value="custom">Own server</option>
+                                        </select>
+                                    </label>
+                                    <label class="upload-field" data-upload-url-row>
+                                        <span>Server URL</span>
+                                        <input data-upload-value="url" value="https://fthr.lustful.wtf" aria-label="Server URL">
+                                    </label>
+                                    <label class="upload-field" data-upload-extra-row>
+                                        <span data-upload-extra-label>Account</span>
+                                        <input data-upload-value="extra" value="Hardware-bound account" aria-label="Account" readonly aria-readonly="true">
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="feature-block">
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+                            <svg class="feature-icon-svg" data-lucide="audio-lines" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M2 10v3"/>
+                                <path d="M6 6v11"/>
+                                <path d="M10 3v18"/>
+                                <path d="M14 8v7"/>
+                                <path d="M18 5v13"/>
+                                <path d="M22 10v3"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">Separate Multitrack Audio</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>The newer app stores video and audio separately instead of baking them together during capture. Game or system audio, mic, Discord, browser, and other app sources can stay on independent tracks, be mixed non-destructively, and are merged with the video when you export.</p>
+                            <div class="feature-demo audio-mix" data-demo="audio">
+                                <div class="mock-titlebar">
+                                    <span class="mock-title">AUDIO MIX</span>
+                                    <span class="mock-save-state" data-save-state="audio">Saved</span>
+                                </div>
+                                <div class="audio-track-list" data-audio-list>
+                                    <div class="audio-track" data-track="master">
+                                        <span class="track-name">MASTER</span>
+                                        <input type="range" min="0" max="100" value="100" aria-label="Master volume">
+                                        <span class="track-value">100%</span>
+                                    </div>
+                                    <div class="audio-track" data-track="game">
+                                        <span class="track-name">GAME</span>
+                                        <input type="range" min="0" max="100" value="100" aria-label="Game volume">
+                                        <span class="track-value">100%</span>
+                                    </div>
+                                    <div class="audio-track" data-track="browser">
+                                        <span class="track-name">BROWSER</span>
+                                        <input type="range" min="0" max="100" value="100" aria-label="Browser volume">
+                                        <span class="track-value">100%</span>
+                                    </div>
+                                    <div class="audio-track" data-track="music">
+                                        <span class="track-name">MUSIC APP</span>
+                                        <input type="range" min="0" max="100" value="100" aria-label="Music app volume">
+                                        <span class="track-value">100%</span>
+                                    </div>
+                                    <div class="audio-track" data-track="discord">
+                                        <span class="track-name">DISCORD</span>
+                                        <input type="range" min="0" max="100" value="100" aria-label="Discord volume">
+                                        <span class="track-value">100%</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="feature-block feature-block-overlays">
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+
+                            <svg class="feature-icon-svg" data-lucide="keyboard" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M10 8h.01"/>
+                                <path d="M12 12h.01"/>
+                                <path d="M14 8h.01"/>
+                                <path d="M16 12h.01"/>
+                                <path d="M18 8h.01"/>
+                                <path d="M6 8h.01"/>
+                                <path d="M7 16h10"/>
+                                <path d="M8 12h.01"/>
+                                <rect width="20" height="16" x="2" y="4" rx="2"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">Custom Overlays</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>Build useful overlays directly into the clip. Cover private details with an image, decorate with some custom overlays for your game's UI, or show your keyboard inputs.</p>
+                            <div class="editor-tool-grid overlay-tool-grid" aria-label="Custom overlay options">
+                                <div class="editor-tool">
+                                    <svg data-lucide="image" viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+                                    <div><strong>Image Overlays</strong><span>Hide names, chat, or anything private.(or just put a picture of gary cuz gary is cool)</span></div>
+                                </div>
+                                <div class="editor-tool">
+                                    <svg data-lucide="sparkles" viewBox="0 0 24 24" aria-hidden="true"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/><path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/></svg>
+                                    <div><strong>Decorations</strong><span>Add frames, badges, and UI accents</span></div>
+                                </div>
+                                <div class="editor-tool">
+                                    <svg data-lucide="keyboard" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 8h.01"/><path d="M12 12h.01"/><path d="M14 8h.01"/><path d="M16 12h.01"/><path d="M18 8h.01"/><path d="M6 8h.01"/><path d="M7 16h10"/><path d="M8 12h.01"/><rect width="20" height="16" x="2" y="4" rx="2"/></svg>
+                                    <div><strong>Keyboard Inputs</strong><span>Show your exact inputs. Great for tutorials.</span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="feature-block" data-theme-target>
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+                            <svg class="feature-icon-svg" data-lucide="palette" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z"/>
+                                <circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/>
+                                <circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/>
+                                <circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/>
+                                <circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">Customize Your UI</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>Change colors and icons or add any sound you like. For example: colors like here.</p>
+                            <div class="feature-demo ui-customizer" data-demo="theme">
+                                <div class="theme-controls">
+                                    <label><span>Background</span><input type="color" data-theme-token="bg" value="#001a12"></label>
+                                    <label><span>Text</span><input type="color" data-theme-token="text" value="#ffffff"></label>
+                                    <label><span>Highlight</span><input type="color" data-theme-token="highlight" value="#00ffaa"></label>
+                                    <label><span>Icon</span><input type="color" data-theme-token="icon" value="#9a9a9a"></label>
+                                    <button type="button" class="mock-reset" data-theme-reset>Reset</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="feature-block">
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+                            <svg class="feature-icon-svg" data-lucide="share-2" viewBox="0 0 24 24" aria-hidden="true">
+                                <circle cx="18" cy="5" r="3"/>
+                                <circle cx="6" cy="12" r="3"/>
+                                <circle cx="18" cy="19" r="3"/>
+                                <line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/>
+                                <line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">Drag & Drop Share</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>Drag a clip straight out of FTHR and drop it anywhere. Built-in compression handles Discord's upload limit automatically, no manual re-encoding, no third-party tools.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="feature-block feature-block-editor">
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+                            <svg class="feature-icon-svg" data-lucide="crop" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M6 2v14a2 2 0 0 0 2 2h14"/>
+                                <path d="M18 22V8a2 2 0 0 0-2-2H2"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">Clip Editor</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>Turn the captured moment into the exact clip you want. The editor keeps its tools close at hand while video and audio remain separate until the final export.</p>
+                            <div class="editor-tool-grid" aria-label="Clip editor tools">
+                                <div class="editor-tool">
+                                    <svg data-lucide="scissors" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/></svg>
+                                    <div><strong>Trim Length</strong><span>Set exact in and out points</span></div>
+                                </div>
+                                <div class="editor-tool">
+                                    <svg data-lucide="crop" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>
+                                    <div><strong>Crop Frame</strong><span>Reframe any part of the image</span></div>
+                                </div>
+                                <div class="editor-tool">
+                                    <svg data-lucide="settings-2" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 17H5"/><path d="M19 7h-9"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
+                                    <div><strong>Export Quality</strong><span>Choose resolution and quality</span></div>
+                                </div>
+                                <div class="editor-tool">
+                                    <svg data-lucide="move-horizontal" viewBox="0 0 24 24" aria-hidden="true"><path d="m18 8 4 4-4 4"/><path d="M2 12h20"/><path d="m6 8-4 4 4 4"/></svg>
+                                    <div><strong>Stretch Video</strong><span>so you can larp being high elo</span></div>
+                                </div>
+                                <div class="editor-tool">
+                                    <svg data-lucide="gauge" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
+                                    <div><strong>Playback Speed</strong><span>Slow down or speed up</span></div>
+                                </div>
+                                <div class="editor-tool">
+                                    <svg data-lucide="separator-vertical" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18"/><path d="m16 16 4-4-4-4"/><path d="m8 8-4 4 4 4"/></svg>
+                                    <div><strong>Split Video</strong><span>Create and manage separate segments</span></div>
+                                </div>
+                                <div class="editor-tool">
+                                    <svg data-lucide="contrast" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 18a6 6 0 0 0 0-12v12z"/></svg>
+                                    <div><strong>Color Controls</strong><span>Adjust saturation and more</span></div>
+                                </div>
+                                <div class="editor-tool">
+                                    <svg data-lucide="audio-lines" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/></svg>
+                                    <div><strong>Mix Audio</strong><span>each audio source can be adjusted</span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="feature-block">
+                    <button class="feature-trigger" onclick="FeatureManager.toggle(this)">
+                        <div class="feature-icon-wrap">
+                            <svg class="feature-icon-svg" data-lucide="folder-up" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
+                                <path d="M12 10v6"/>
+                                <path d="m9 13 3-3 3 3"/>
+                            </svg>
+                        </div>
+                        <span class="feature-name">Imports</span>
+                        <span class="feature-expand">+</span>
+                    </button>
+                    <div class="feature-body">
+                        <div class="feature-content">
+                            <p>Let auto-detect find your old clips or point FTHR at any folder and it pulls in clips from other clipping software automatically.</p>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+        </div>
+    </section>
+
+    <section id="how-it-works" class="animate-section">
+        <div class="section-header">
+            <div class="label">Engine Preview</div>
+            <h2>How A Clip Gets Made</h2>
+            <p>A simplified, current look at the replay loop. Choose a platform to see the capture path and the qualification notes that apply.</p>
+        </div>
+
+        <div class="platform-switch" data-platform-switch role="tablist" aria-label="Choose capture platform">
+            <button id="platform-tab-windows" class="platform-switch__tab is-active" type="button" role="tab" aria-selected="true" aria-controls="pipeline-windows" tabindex="0" data-platform-tab="windows">
+                <span>Windows</span>
+                <span class="platform-switch__status">Default</span>
+            </button>
+            <button id="platform-tab-linux" class="platform-switch__tab" type="button" role="tab" aria-selected="false" aria-controls="pipeline-linux" tabindex="-1" data-platform-tab="linux">
+                <span>Linux</span>
+                <span class="platform-switch__status">Experimental</span>
+            </button>
+        </div>
+
+        <div class="platform-panel" id="pipeline-windows" data-platform-panel="windows" role="tabpanel" aria-labelledby="platform-tab-windows" tabindex="0">
+            <div class="platform-panel__intro">
+                <span class="platform-panel__eyebrow mono">WINDOWS // VERIFIED PRIMARY PATH</span>
+                <p>Windows Graphics Capture is preferred for the selected window or monitor, with hardware-backed replay encoding when the selected device supports it.</p>
+            </div>
+
+            <div class="capture-map" aria-label="Windows capture pipeline overview">
+                <div class="capture-map-track">
+                    <span class="capture-map-label">Video</span>
+                    <span class="capture-map-node">WGC window / monitor</span>
+                    <span class="capture-map-arrow" aria-hidden="true">&rarr;</span>
+                    <span class="capture-map-node">DXGI fallback</span>
+                    <span class="capture-map-arrow" aria-hidden="true">&rarr;</span>
+                    <span class="capture-map-node capture-map-node-accent">
+                        Encoded replay ring
+                        <small>H.264 / HEVC / AV1 when supported</small>
+                    </span>
+                </div>
+                <div class="capture-map-track">
+                    <span class="capture-map-label">Audio</span>
+                    <span class="capture-map-node">WASAPI + mic + apps</span>
+                    <span class="capture-map-arrow" aria-hidden="true">&rarr;</span>
+                    <span class="capture-map-node capture-map-node-accent">Timed audio tracks</span>
+                </div>
+                <div class="capture-map-track capture-map-track-save">
+                    <span class="capture-map-label">Export</span>
+                    <span class="capture-map-node">Video + audio</span>
+                    <span class="capture-map-arrow" aria-hidden="true">&rarr;</span>
+                    <span class="capture-map-node">Mux + manifest</span>
+                    <span class="capture-map-arrow" aria-hidden="true">&rarr;</span>
+                    <span class="capture-map-node capture-map-node-accent">Final MP4</span>
+                </div>
+            </div>
+
+            <div class="flow-steps">
+                <div class="flow-step">
+                    <button class="step-trigger" onclick="AccordionManager.toggle(this)">
+                        <span class="step-number">01</span>
+                        <span class="step-title">Capture The Right Target</span>
+                        <span class="step-indicator">+</span>
+                    </button>
+                    <div class="step-body">
+                        <div class="step-content">
+                            <p>Windows Graphics Capture is the normal path for the window or monitor you select. If its privacy border cannot be suppressed or WGC is unavailable, the engine can fall back to DXGI Output Duplication.</p>
+                            <p>For known anti-cheat titles, focus-gated monitor capture keeps the selected game capturable without quietly buffering the whole desktop after an alt-tab. Frames are accepted at your chosen capture rate and excess arrivals are skipped before encoding.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <button class="step-trigger" onclick="AccordionManager.toggle(this)">
+                        <span class="step-number">02</span>
+                        <span class="step-title">Compress Before Buffering</span>
+                        <span class="step-indicator">+</span>
+                    </button>
+                    <div class="step-body">
+                        <div class="step-content">
+                            <p>Raw gameplay would consume gigabytes over the replay window, so video is encoded continuously before it enters the ring. The current app supports H.264, HEVC (H.265), and AV1 when the selected encoder and hardware pass capability discovery.</p>
+                            <p>The qualified Windows core path keeps capture and hardware encoding on the same adapter. Hybrid and cross-adapter combinations remain limited for the alpha build.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <button class="step-trigger" onclick="AccordionManager.toggle(this)">
+                        <span class="step-number">03</span>
+                        <span class="step-title">Rolling Video, Separate Audio</span>
+                        <span class="step-indicator">+</span>
+                    </button>
+                    <div class="step-body">
+                        <div class="step-content">
+                            <p>Video and audio are captured on their own timed paths. The Windows engine can keep the desktop mix, microphone, and selected application sources as independent tracks instead of baking them together during capture.</p>
+                            <p>That gives the editor room to adjust the mix later. Windows 11 per-app stems are code-integrated, but their full qualification is still pending a physical Windows 11 run.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <button class="step-trigger" onclick="AccordionManager.toggle(this)">
+                        <span class="step-number">04</span>
+                        <span class="step-title">Save &rarr; Finished Clip</span>
+                        <span class="step-indicator">+</span>
+                    </button>
+                    <div class="step-body">
+                        <div class="step-content">
+                            <p>Pressing the hotkey snapshots the requested interval from the encoded replay ring while capture continues in the background.</p>
+                            <p>On the current Windows path, the saved video is muxed with the selected audio tracks and an adjacent audio manifest is published transactionally. There is no full video re-encode just to save the replay.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="disclaimer-box">
+                <div class="label">Windows Qualification</div>
+                <p>Windows 10 x64 with same-adapter NVIDIA hardware is physically verified for the core replay, audio, and save workflows. AMD and Intel paths are code-integrated and automated-tested but hardware-unverified; Windows 11 per-app stems and official borderless capture still need a physical qualification run.</p>
+            </div>
+        </div>
+
+        <div class="platform-panel" id="pipeline-linux" data-platform-panel="linux" role="tabpanel" aria-labelledby="platform-tab-linux" tabindex="0" hidden>
+            <div class="platform-panel__intro">
+                <span class="platform-panel__eyebrow mono">LINUX // EXPERIMENTAL WAYLAND PATH</span>
+                <p>Linux is compositor-dependent: the alpha build needs one of its supported Wayland capture protocols and reports a bounded failure when neither is available.</p>
+            </div>
+
+            <div class="capture-map" aria-label="Linux capture pipeline overview">
+                <div class="capture-map-track">
+                    <span class="capture-map-label">Video</span>
+                    <span class="capture-map-node">Wayland compositor</span>
+                    <span class="capture-map-arrow" aria-hidden="true">&rarr;</span>
+                    <span class="capture-map-node">wlr / ext-image-copy</span>
+                    <span class="capture-map-arrow" aria-hidden="true">&rarr;</span>
+                    <span class="capture-map-node capture-map-node-accent">
+                        Encoded replay ring
+                        <small>Hardware or reviewed FFmpeg path</small>
+                    </span>
+                </div>
+                <div class="capture-map-track">
+                    <span class="capture-map-label">Audio</span>
+                    <span class="capture-map-node">PipeWire / PulseAudio</span>
+                    <span class="capture-map-arrow" aria-hidden="true">&rarr;</span>
+                    <span class="capture-map-node capture-map-node-accent">Timed audio ring</span>
+                </div>
+                <div class="capture-map-track capture-map-track-save">
+                    <span class="capture-map-label">Export</span>
+                    <span class="capture-map-node">Video + audio</span>
+                    <span class="capture-map-arrow" aria-hidden="true">&rarr;</span>
+                    <span class="capture-map-node">Mix + merge</span>
+                    <span class="capture-map-arrow" aria-hidden="true">&rarr;</span>
+                    <span class="capture-map-node capture-map-node-accent">Final MP4</span>
+                </div>
+            </div>
+
+            <div class="flow-steps">
+                <div class="flow-step">
+                    <button class="step-trigger" onclick="AccordionManager.toggle(this)">
+                        <span class="step-number">01</span>
+                        <span class="step-title">Ask The Compositor For Frames</span>
+                        <span class="step-indicator">+</span>
+                    </button>
+                    <div class="step-body">
+                        <div class="step-content">
+                            <p>The Linux engine tries <strong>wlr-screencopy</strong> first, then <strong>ext-image-copy-capture</strong>. Which path works depends on the Wayland compositor: Hyprland and other wlroots compositors target the first protocol, while KDE Plasma 6+ and GNOME 46+ may expose the second.</p>
+                            <p>X11 capture is disabled for the alpha build. If the compositor exposes neither supported protocol, FTHR stops cleanly instead of silently recording an empty or unsafe desktop.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <button class="step-trigger" onclick="AccordionManager.toggle(this)">
+                        <span class="step-number">02</span>
+                        <span class="step-title">Encode Before Buffering</span>
+                        <span class="step-indicator">+</span>
+                    </button>
+                    <div class="step-body">
+                        <div class="step-content">
+                            <p>Frames are rate-limited, encoded continuously, and pushed into a bounded replay ring. Linux uses hardware encoders when the machine exposes a working path; reviewed FFmpeg software candidates can also be selected when capability discovery validates them.</p>
+                            <p>H.264, HEVC, and AV1 are possible codec choices, but the exact list depends on the encoder and libraries available on that Linux system.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <button class="step-trigger" onclick="AccordionManager.toggle(this)">
+                        <span class="step-number">03</span>
+                        <span class="step-title">Keep Audio And Hotkeys User-Owned</span>
+                        <span class="step-indicator">+</span>
+                    </button>
+                    <div class="step-body">
+                        <div class="step-content">
+                            <p>Desktop audio opens through the PulseAudio-compatible path, which can be backed by PipeWire. Audio stays timed against the replay, and multiband sources can be mixed after the video save.</p>
+                            <p>Linux hotkeys do not read global input directly. The compositor sends a save command to FTHR's owner-only Unix socket, so the workflow does not require root or membership in the <code>input</code> group.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flow-step">
+                    <button class="step-trigger" onclick="AccordionManager.toggle(this)">
+                        <span class="step-number">04</span>
+                        <span class="step-title">Save &rarr; Finished Clip</span>
+                        <span class="step-indicator">+</span>
+                    </button>
+                    <div class="step-body">
+                        <div class="step-content">
+                            <p>The compositor-triggered save snapshots the requested interval from the encoded ring while the capture loop keeps running.</p>
+                            <p>FTHR then combines the captured video with the selected audio in an MP4. Unsupported Wayland sessions fail with a bounded recovery path rather than publishing a misleading clip.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="disclaimer-box">
+                <div class="label">Linux Qualification</div>
+                <p>Linux engine, IPC, audio-open, and bounded-failure behavior are verified in Ubuntu 24.04 on WSL2. Visible capture on a real Wayland desktop has not yet been verified on a representative compositor, so Linux should be treated as experimental rather than broadly supported.</p>
+            </div>
+        </div>
+    </section>
+
+    <section id="privacy" class="animate-section">
+        <div class="section-header">
+            <div class="label">Your Data</div>
+            <h2>Privacy First</h2>
+            <p>No collection. No telemetry. Network access stays under your control.</p>
+        </div>
+
+        <div class="privacy-carousel" data-privacy-carousel aria-label="Privacy commitments">
+            <div class="privacy-cards" data-privacy-cards>
+                <button class="privacy-card is-active" type="button" data-privacy-card aria-controls="privacy-detail" aria-pressed="true">
+                    <span class="privacy-card__index mono">01 / 04</span>
+                    <span class="privacy-card__icon" aria-hidden="true">
+                        <img class="privacy-icon-svg" src="assets/icons/eye-off.svg" alt="">
+                    </span>
+                    <span class="privacy-card__title">No Data Collection</span>
+                </button>
+
+                <button class="privacy-card" type="button" data-privacy-card aria-controls="privacy-detail" aria-pressed="false">
+                    <span class="privacy-card__index mono">02 / 04</span>
+                    <span class="privacy-card__icon" aria-hidden="true">
+                        <img class="privacy-icon-svg" src="assets/icons/radio-tower.svg" alt="">
+                    </span>
+                    <span class="privacy-card__title">No Telemetry</span>
+                </button>
+
+                <button class="privacy-card" type="button" data-privacy-card aria-controls="privacy-detail" aria-pressed="false">
+                    <span class="privacy-card__index mono">03 / 04</span>
+                    <span class="privacy-card__icon" aria-hidden="true">
+                        <img class="privacy-icon-svg" src="assets/icons/user-round-x.svg" alt="">
+                    </span>
+                    <span class="privacy-card__title">No Accounts</span>
+                </button>
+
+                <button class="privacy-card" type="button" data-privacy-card aria-controls="privacy-detail" aria-pressed="false">
+                    <span class="privacy-card__index mono">04 / 04</span>
+                    <span class="privacy-card__icon" aria-hidden="true">
+                        <img class="privacy-icon-svg" src="assets/icons/link-2-off.svg" alt="">
+                    </span>
+                    <span class="privacy-card__title">Network Only On Your Command</span>
+                </button>
+            </div>
+
+            <div class="privacy-detail" aria-live="polite">
+                <div class="privacy-detail__marker" aria-hidden="true"></div>
+                <div class="privacy-detail__copy">
+                    <div class="privacy-detail__eyebrow mono" data-privacy-eyebrow>01 // LOCAL BY DEFAULT</div>
+                    <h3 id="privacy-detail" data-privacy-title>No Data Collection</h3>
+                    <p data-privacy-description>FTHR collects your clips for you, not what you do with them. There is no analytics pipeline and no telemetry. Your captures stay in the folder you chose unless you explicitly send one through the optional uploader.</p>
+                </div>
+                <div class="privacy-detail__controls">
+                    <button type="button" class="privacy-arrow" data-privacy-prev aria-label="Previous privacy commitment">
+                        <svg data-lucide="chevron-left" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                    </button>
+                    <span class="privacy-detail__count mono" data-privacy-count>01 / 04</span>
+                    <button type="button" class="privacy-arrow" data-privacy-next aria-label="Next privacy commitment">
+                        <svg data-lucide="chevron-right" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="disclaimer-box">
+            <div class="label">Not Subject To Change</div>
+            <p>These are core commitments: no data collection, no telemetry, no required account, and no upload without your explicit choice. Your privacy is no one's currency.</p>
+        </div>
+    </section>
+
+    <section id="team" class="animate-section" aria-label="Team">
+        <div class="team-kicker">
+            <div class="label">The People Behind FTHR</div>
+            <div class="team-position mono" aria-live="polite">
+                <span data-team-current>01</span><span aria-hidden="true"> / </span><span data-team-total>03</span>
+            </div>
+        </div>
+
+        <div class="team-carousel" data-team-carousel>
+            <div class="team-viewport">
+                <article class="team-member active" data-team-member aria-hidden="false">
+                    <figure class="team-portrait">
+                        <img src="assets/team/team-01.jpg" alt="Portrait of team member one">
+                        <figcaption class="mono">PROFILE_01 // THE FOUNDER</figcaption>
+                    </figure>
+                    <div class="team-copy">
+                        <div class="team-role mono">Founder / Head of Design</div>
+                        <h2>Haakon "Big Man"</h2>
+                        <p>Defining the design language and keeping FTHRClips focused on one promise: your clips stay yours.</p>
+                        <div class="team-signal" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+                    </div>
+                </article>
+
+                <article class="team-member" data-team-member aria-hidden="true">
+                    <figure class="team-portrait">
+                        <img src="assets/team/team-02.jpg" alt="Portrait of team member two">
+                        <figcaption class="mono">PROFILE_02 // THE DEV</figcaption>
+                    </figure>
+                    <div class="team-copy">
+                        <div class="team-role mono">Co-Founder / Head of Development</div>
+                        <h2>Tom <br> "Code Slave"</h2>
+                        <p>The Backend Guy and only Leenux user.</p>
+                        <div class="team-signal" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+                    </div>
+                </article>
+
+                <article class="team-member" data-team-member aria-hidden="true">
+                    <figure class="team-portrait">
+                        <img src="assets/team/team-03.jpg" alt="Portrait of team member three">
+                        <figcaption class="mono">PROFILE_03 // DISCORD GUY</figcaption>
+                    </figure>
+                    <div class="team-copy">
+                        <div class="team-role mono">Community Relations</div>
+                        <h2>Yuii "Fat Gary" </h2>
+                        <p>Hes alive.</p>
+                        <div class="team-signal" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+                    </div>
+                </article>
+            </div>
+
+            <button class="team-arrow team-arrow-prev" type="button" data-team-prev aria-label="Previous team member">
+                <svg data-lucide="chevron-left" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+            </button>
+            <button class="team-arrow team-arrow-next" type="button" data-team-next aria-label="Next team member">
+                <svg data-lucide="chevron-right" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+        </div>
+
+        <div class="team-footer">
+            <div class="team-progress" role="tablist" aria-label="Choose a team member">
+                <button class="active" type="button" data-team-dot="0" role="tab" aria-selected="true" aria-label="Show team member 1"></button>
+                <button type="button" data-team-dot="1" role="tab" aria-selected="false" aria-label="Show team member 2"></button>
+                <button type="button" data-team-dot="2" role="tab" aria-selected="false" aria-label="Show team member 3"></button>
+            </div>
+            <p class="mono">Swipe or use left / right</p>
+        </div>
+    </section>
+
+    <section id="coming-soon" class="animate-section">
+        <div class="section-header">
+            <div class="label">Roadmap</div>
+            <h2>What's Getting Built</h2>
+            <p>Where things are, and where they're going.</p>
+        </div>
+
+        <div class="roadmap" id="roadmapContainer"></div>
+    </section>
+
+    <footer id="site-footer">
+        <ul class="footer-links">
+            <li><a href="https://about.fthrclips.com" target="_blank" rel="noopener noreferrer">Legal Notice</a></li>
+        </ul>
+        <div class="footer-note">&copy; 2026 FTHR Software // ALL RIGHTS RESERVED</div>
+    </footer>
+    <script src="script.js?v=31" defer></script>
+</body>
+</html>
+<! wow youve read all the way down here! now get a job. >

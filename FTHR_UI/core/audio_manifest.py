@@ -50,10 +50,15 @@ def manifest_path_for(media_path: str | Path) -> Path:
     return media.with_name(media.name + MANIFEST_SUFFIX)
 
 
-def media_sha256(media_path: str | Path) -> str:
+def media_sha256(media_path: str | Path, cancelled=None) -> str:
     digest = hashlib.sha256()
     with Path(media_path).open('rb') as media:
-        for block in iter(lambda: media.read(1024 * 1024), b''):
+        while True:
+            if cancelled is not None and cancelled.is_set():
+                raise InterruptedError('media validation cancelled')
+            block = media.read(1024 * 1024)
+            if not block:
+                break
             digest.update(block)
     return digest.hexdigest()
 
@@ -72,7 +77,8 @@ def build_manifest(*, media_path: str | Path, transaction_id: str,
     return manifest
 
 
-def validate_manifest(manifest: dict[str, Any], *, media_path: str | Path | None = None) -> None:
+def validate_manifest(manifest: dict[str, Any], *, media_path: str | Path | None = None,
+                      cancelled=None) -> None:
     """Validate data and, when supplied, bind it to a specific media file."""
     if not isinstance(manifest, dict):
         raise AudioManifestError('manifest must be an object')
@@ -98,7 +104,7 @@ def validate_manifest(manifest: dict[str, Any], *, media_path: str | Path | None
         media = Path(media_path)
         if media.name != media_file:
             raise AudioManifestError('manifest media name does not match clip')
-        if media_sha256(media) != media_hash:
+        if media_sha256(media, cancelled) != media_hash:
             raise AudioManifestError('manifest media hash does not match clip')
 
 
@@ -147,7 +153,7 @@ def rebind_manifest_after_media_replace(media_path: str | Path) -> bool:
         return False
 
 
-def read_manifest_for_media(media_path: str | Path) -> dict[str, Any] | None:
+def read_manifest_for_media(media_path: str | Path, cancelled=None) -> dict[str, Any] | None:
     """Return a validated FTHR manifest or ``None`` for legacy/imported clips.
 
     A stale/corrupt sidecar is intentionally treated as absent: the caller must
@@ -158,8 +164,10 @@ def read_manifest_for_media(media_path: str | Path) -> dict[str, Any] | None:
         return None
     try:
         manifest = json.loads(path.read_text(encoding='utf-8'))
-        validate_manifest(manifest, media_path=media_path)
+        validate_manifest(manifest, media_path=media_path, cancelled=cancelled)
         return manifest
+    except InterruptedError:
+        raise
     except (OSError, json.JSONDecodeError, AudioManifestError):
         # Sidecars are optional for legacy/imported clips. A stale/corrupt
         # sidecar must cleanly fall back to MP4 metadata, never invent tracks.

@@ -7,6 +7,7 @@ from enum import Enum, auto
 
 
 NORMAL_CLIP_VALUES = (5, 10, 15, 30, 45, 60, 90, 120, 180, 240, 300)
+MAX_CLIP_SECONDS = 900
 FPS_VALUES = (30, 60, 90, 120, 144, 165, 180, 240)
 AUDIO_CAPTURE_MODE_COMBINED = 'combined'
 AUDIO_CAPTURE_MODE_SEPARATED = 'separated'
@@ -36,7 +37,7 @@ def _validate_int(value: int, *, name: str, minimum: int, maximum: int) -> int:
 
 
 def validate_normal_clip_length(value: int) -> int:
-    return _validate_int(value, name='normal clip length', minimum=5, maximum=300)
+    return _validate_int(value, name='normal clip length', minimum=5, maximum=MAX_CLIP_SECONDS)
 
 
 
@@ -64,6 +65,8 @@ class CaptureConfig:
     # separate streams; combined audio is the default.
     separate_audio_enabled: bool = False
     microphone_endpoint_id: str = ''
+    playback_endpoint_id: str = ''
+    microphone_mono: bool = False
     normal_clip_seconds: int = 30
     crop_enabled: bool = False
     crop_x: float = 0.0
@@ -72,10 +75,24 @@ class CaptureConfig:
     crop_h: float = 1.0
 
 
-def compute_buffer_seconds(normal_seconds: int) -> int:
-    """Return a native-safe ring size while retaining the usual safety margin."""
-    normal = validate_normal_clip_length(normal_seconds)
-    return min(300, normal + 2)
+def custom_clip_lengths(values) -> list[int]:
+    if not isinstance(values, list):
+        return []
+    result = set()
+    for value in values:
+        try:
+            result.add(validate_normal_clip_length(value))
+        except ValueError:
+            # User-edited invalid entries must not register unusable hotkeys.
+            pass
+    return sorted(result)
+
+
+def compute_buffer_seconds(normal_seconds: int, custom_lengths=None) -> int:
+    """Retain the longest configured clip with a native-safe safety margin."""
+    normal = max([validate_normal_clip_length(normal_seconds)]
+                 + custom_clip_lengths(custom_lengths))
+    return min(MAX_CLIP_SECONDS, normal + 2)
 
 
 class ApplyStatus(Enum):

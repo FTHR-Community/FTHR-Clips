@@ -19,6 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\wgc_cadence_wait.h" />
     <ClInclude Include="include\continuous_recording_writer.h" />
     <ClInclude Include="include\audio_packet_ring.h" />
     <ClInclude Include="include\audio_source_model.h" />
@@ -30,7 +31,8 @@
     <ClInclude Include="include\audio_timeline.h" />
     <ClInclude Include="include\audio_capture.h" />
     <ClInclude Include="include\audio_encoder.h" />
-    <ClInclude Include="include\audio_format_converter.h" />
+      <ClInclude Include="include\audio_format_converter.h" />
+      <ClInclude Include="include\audio_signal_metrics.h" />
     <ClInclude Include="include\audio_ring_buffer.h" />
     <ClInclude Include="include\capture_engine.h" />
     <ClInclude Include="include\capture_scale_geometry.h" />
@@ -39,6 +41,7 @@
     <ClInclude Include="include\encoded_video_config.h" />
     <ClInclude Include="include\encoded_video_config_ffmpeg.h" />
     <ClInclude Include="include\ffmpeg_amf_replay_encoder.h" />
+    <ClInclude Include="include\software_replay_encoder.h" />
     <ClInclude Include="include\ffmpeg_qsv_replay_encoder.h" />
     <ClInclude Include="include\hardware_encoder.h" />
     <ClInclude Include="include\nvenc_codec_config.h" />
@@ -70,6 +73,7 @@
     <ClCompile Include="src\encoded_ring_buffer.cpp" />
     <ClCompile Include="src\encoded_video_config.cpp" />
     <ClCompile Include="src\ffmpeg_amf_replay_encoder.cpp" />
+    <ClCompile Include="src\software_replay_encoder.cpp" />
     <ClCompile Include="src\ffmpeg_qsv_replay_encoder.cpp" />
     <ClCompile Include="src\hardware_encoder.cpp" />
     <ClCompile Include="src\nvenc_codec_config.cpp" />

@@ -1,0 +1,5 @@
+{
+  "architecture": "x86_64",
+  "build_runner": "ubuntu-22.04",
+  "max_glibc": "2.35"
+}

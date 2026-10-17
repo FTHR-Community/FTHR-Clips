@@ -20,6 +20,13 @@ struct Selection {
     int64_t requested_start = 0;
     int64_t target_end = 0;
     int64_t media_end = 0;
+    enum class Outcome {
+        Valid,
+        EmptyInput,
+        NoPacketAtTarget,
+        MissingStartKeyframe,
+    };
+    Outcome outcome = Outcome::EmptyInput;
 };
 
 struct FixedRateSelection {
@@ -57,14 +64,22 @@ inline Selection Select(
     int64_t target_end,
     int64_t requested_duration) {
     Selection result;
-    if (samples.empty() || requested_duration <= 0) return result;
+    if (samples.empty() || requested_duration <= 0) {
+        result.outcome = Selection::Outcome::EmptyInput;
+        return result;
+    }
 
     size_t end = samples.size();
     while (end > 0 && samples[end - 1].timestamp > target_end) --end;
-    if (end == 0) return result;
+    if (end == 0) {
+        result.outcome = Selection::Outcome::NoPacketAtTarget;
+        return result;
+    }
     --end;
 
     const int64_t requested_start = target_end - requested_duration;
+    result.requested_start = requested_start;
+    result.target_end = target_end;
     size_t keyframe_before = samples.size();
     size_t first_keyframe = samples.size();
     for (size_t i = 0; i <= end; ++i) {
@@ -72,11 +87,13 @@ inline Selection Select(
         if (first_keyframe == samples.size()) first_keyframe = i;
         if (samples[i].timestamp <= requested_start) keyframe_before = i;
     }
-    if (first_keyframe == samples.size()) return result;
+    if (first_keyframe == samples.size()) {
+        result.outcome = Selection::Outcome::MissingStartKeyframe;
+        return result;
+    }
 
     result.valid = true;
-    result.target_end = target_end;
-    result.requested_start = requested_start;
+    result.outcome = Selection::Outcome::Valid;
     result.end = end;
     result.media_end = samples[end].timestamp;
     result.full_history = samples.front().timestamp <= requested_start

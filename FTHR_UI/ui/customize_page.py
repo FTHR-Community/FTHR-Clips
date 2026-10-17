@@ -5,6 +5,10 @@ updates the main theme in one QSS pass.
 """
 from __future__ import annotations
 
+from ui.style import set_theme_style
+
+from ui.icons import IconButton
+
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +17,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QPixmap, QColor, QPainter, QPen, QBrush, QFont, QCursor,
-    QMouseEvent, QPaintEvent, QFontDatabase, QTransform,
+    QMouseEvent, QPaintEvent, QFontDatabase,
 )
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
@@ -21,7 +25,7 @@ from PySide6.QtWidgets import (
     QSlider,
 )
 from ui.style import (
-    Colors, Fonts, label_uppercase, label_body,
+    Colors, Fonts, Sizes, label_uppercase, label_body,
     button_primary_qss, button_outline_qss, button_secondary_qss,
     combo_qss, slider_qss, ThemedDropdownArrow, WheelSafeComboBox,
 )
@@ -29,147 +33,134 @@ from core.theme_manager import (
     ThemeManager, DEFAULT_COLORS, CUSTOMIZABLE_ICONS,
     CUSTOMIZABLE_SOUNDS, SUPPORTED_IMAGE_FORMATS, SUPPORTED_SOUND_FORMATS,
     SUPPORTED_FONT_FORMATS, DEFAULT_CAPTURE_CARD_COLORS, DEFAULT_FONTS,
-    CUSTOMIZABLE_COLOR_GROUPS,
+    CUSTOMIZABLE_COLOR_GROUPS, BUILTIN_FONT_FAMILIES,
 )
 from ui.sound_playback import SoundPlayback
 
 
 def _default_icon_path(filename: str) -> Path:
     """Return the bundled source used by the live app for an icon key."""
-    assets = Path(__file__).parent.parent / 'assets'
-    if filename == 'favicon.ico':
-        return assets / 'favicon.ico'
-    # The Performance tab is an inverted Updates arrow; it has no separate
-    # bundled file, but it is still a real, customizable icon in the app.
-    if filename == 'performance.png':
-        return assets / 'icons' / 'updates.png'
-    return assets / 'icons' / filename
+    from ui.icons import bundled_icon_path
+    return bundled_icon_path(filename)
 
 
 def _default_icon_pixmap(filename: str, size: int) -> QPixmap:
-    """Load the visual used for an icon preview, including derived icons."""
-    path = _default_icon_path(filename)
-    pix = QPixmap(str(path)) if path.exists() else QPixmap()
-    if filename == 'performance.png' and not pix.isNull():
-        pix = pix.transformed(QTransform().scale(1, -1))
-    if pix.isNull():
-        return pix
-    return pix.scaled(
-        size, size,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
+    """Preview the same supplied artwork used by live controls."""
+    from ui.icons import icon_pixmap
+    return icon_pixmap(filename, size, bundled=True)
 
 
 # Dark-themed stylesheet for the non-native QColorDialog
-_COLOR_DIALOG_QSS = f"""
-QColorDialog {{
-    background-color: {Colors.SURFACE_1};
-}}
-QColorDialog QWidget {{
-    background-color: {Colors.SURFACE_1};
-    color: {Colors.TEXT};
-}}
-QColorDialog QLabel {{
-    color: {Colors.TEXT_DIM};
-    font-family: {Fonts.BODY};
-    font-size: {Fonts.SIZE_BODY}px;
-    background: transparent;
-}}
-QColorDialog QGroupBox {{
-    color: {Colors.ACCENT};
-    font-family: {Fonts.DISPLAY};
-    font-size: {Fonts.SIZE_LABEL}px;
-    font-weight: bold;
-    letter-spacing: {Fonts.TRACK_LABEL}px;
-    border: 1px solid {Colors.BORDER};
-    margin-top: 10px;
-    padding-top: 14px;
-}}
-QColorDialog QGroupBox::title {{
-    subcontrol-origin: margin;
-    padding: 0 6px;
-}}
-QColorDialog QSpinBox {{
-    background-color: {Colors.SURFACE_2};
-    color: {Colors.TEXT};
-    border: 1px solid {Colors.BORDER};
-    padding: 2px 4px;
-    font-family: {Fonts.BODY};
-    font-size: {Fonts.SIZE_BODY}px;
-    min-height: 20px;
-}}
-QColorDialog QSpinBox:focus {{
-    border-color: {Colors.ACCENT};
-}}
-QColorDialog QSpinBox::up-button, QColorDialog QSpinBox::down-button {{
-    background-color: {Colors.SURFACE_3};
-    border: 1px solid {Colors.BORDER};
-    width: 16px;
-}}
-QColorDialog QSpinBox::up-button:hover, QColorDialog QSpinBox::down-button:hover {{
-    background-color: {Colors.BORDER_HI};
-}}
-QColorDialog QSpinBox::up-arrow {{
-    width: 0; height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-bottom: 4px solid {Colors.TEXT_DIM};
-}}
-QColorDialog QSpinBox::down-arrow {{
-    width: 0; height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 4px solid {Colors.TEXT_DIM};
-}}
-QColorDialog QLineEdit {{
-    background-color: {Colors.SURFACE_2};
-    color: {Colors.TEXT};
-    border: 1px solid {Colors.BORDER};
-    padding: 4px 6px;
-    font-family: {Fonts.BODY};
-    font-size: {Fonts.SIZE_BODY}px;
-    selection-background-color: {Colors.ACCENT_DIM};
-    selection-color: {Colors.TEXT};
-}}
-QColorDialog QLineEdit:focus {{
-    border-color: {Colors.ACCENT};
-}}
-QColorDialog QPushButton {{
-    background-color: {Colors.SURFACE_3};
-    color: {Colors.TEXT};
-    border: 1px solid {Colors.BORDER};
-    padding: 6px 14px;
-    font-family: {Fonts.DISPLAY};
-    font-weight: bold;
-    font-size: {Fonts.SIZE_BODY}px;
-    letter-spacing: 1px;
-    min-width: 70px;
-}}
-QColorDialog QPushButton:hover {{
-    border-color: {Colors.ACCENT};
-    color: {Colors.ACCENT};
-}}
-QColorDialog QPushButton:pressed {{
-    background-color: {Colors.SURFACE_2};
-}}
-QColorDialog QPushButton:default {{
-    background-color: {Colors.ACCENT};
-    color: {Colors.BG};
-    border-color: {Colors.ACCENT};
-}}
-QColorDialog QPushButton:default:hover {{
-    background-color: {Colors.ACCENT_DIM};
-    border-color: {Colors.ACCENT_DIM};
-    color: {Colors.BG};
-}}
-QColorDialog QDialogButtonBox {{
-    background: transparent;
-}}
-QColorDialog QFrame {{
-    background-color: {Colors.SURFACE_1};
-}}
-"""
+def _color_dialog_qss() -> str:
+    return f"""
+    QColorDialog {{
+        background-color: {Colors.SURFACE_1};
+    }}
+    QColorDialog QWidget {{
+        background-color: {Colors.SURFACE_1};
+        color: {Colors.TEXT};
+    }}
+    QColorDialog QLabel {{
+        color: {Colors.TEXT_DIM};
+        font-family: {Fonts.BODY};
+        font-size: {Fonts.SIZE_BODY}px;
+        background: transparent;
+    }}
+    QColorDialog QGroupBox {{
+        color: {Colors.ACCENT};
+        font-family: {Fonts.DISPLAY};
+        font-size: {Fonts.SIZE_LABEL}px;
+        font-weight: 600;
+        letter-spacing: {Fonts.TRACK_LABEL}px;
+        border: 1px solid {Colors.BORDER};
+        margin-top: 10px;
+        padding-top: 14px;
+    }}
+    QColorDialog QGroupBox::title {{
+        subcontrol-origin: margin;
+        padding: 0 6px;
+    }}
+    QColorDialog QSpinBox {{
+        background-color: {Colors.SURFACE_2};
+        color: {Colors.TEXT};
+        border: 1px solid {Colors.BORDER};
+        padding: 2px 4px;
+        font-family: {Fonts.BODY};
+        font-size: {Fonts.SIZE_BODY}px;
+        min-height: 20px;
+    }}
+    QColorDialog QSpinBox:focus {{
+        border-color: {Colors.ACCENT};
+    }}
+    QColorDialog QSpinBox::up-button, QColorDialog QSpinBox::down-button {{
+        background-color: {Colors.SURFACE_3};
+        border: 1px solid {Colors.BORDER};
+        width: 16px;
+    }}
+    QColorDialog QSpinBox::up-button:hover, QColorDialog QSpinBox::down-button:hover {{
+        background-color: {Colors.BORDER_HI};
+    }}
+    QColorDialog QSpinBox::up-arrow {{
+        width: 0; height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-bottom: 4px solid {Colors.TEXT_DIM};
+    }}
+    QColorDialog QSpinBox::down-arrow {{
+        width: 0; height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 4px solid {Colors.TEXT_DIM};
+    }}
+    QColorDialog QLineEdit {{
+        background-color: {Colors.SURFACE_2};
+        color: {Colors.TEXT};
+        border: 1px solid {Colors.BORDER};
+        padding: 4px 6px;
+        font-family: {Fonts.BODY};
+        font-size: {Fonts.SIZE_BODY}px;
+        selection-background-color: {Colors.ACCENT_DIM};
+        selection-color: {Colors.TEXT};
+    }}
+    QColorDialog QLineEdit:focus {{
+        border-color: {Colors.ACCENT};
+    }}
+    QColorDialog QPushButton {{
+        background-color: {Colors.SURFACE_3};
+        color: {Colors.TEXT};
+        border: 1px solid {Colors.BORDER};
+        padding: 6px 14px;
+        font-family: {Fonts.DISPLAY};
+        font-weight: 600;
+        font-size: {Fonts.SIZE_BODY}px;
+        letter-spacing: 0px;
+        min-width: 70px;
+    }}
+    QColorDialog QPushButton:hover {{
+        border-color: {Colors.ACCENT};
+        color: {Colors.ACCENT};
+    }}
+    QColorDialog QPushButton:pressed {{
+        background-color: {Colors.SURFACE_2};
+    }}
+    QColorDialog QPushButton:default {{
+        background-color: {Colors.ACCENT};
+        color: {Colors.BG};
+        border-color: {Colors.ACCENT};
+    }}
+    QColorDialog QPushButton:default:hover {{
+        background-color: {Colors.ACCENT_DIM};
+        border-color: {Colors.ACCENT_DIM};
+        color: {Colors.BG};
+    }}
+    QColorDialog QDialogButtonBox {{
+        background: transparent;
+    }}
+    QColorDialog QFrame {{
+        background-color: {Colors.SURFACE_1};
+    }}
+    """
+
 
 
 def _inject_custom_titlebar(dlg, title: str):
@@ -180,33 +171,27 @@ def _inject_custom_titlebar(dlg, title: str):
 
     title_bar = QFrame()
     title_bar.setFixedHeight(36)
-    title_bar.setStyleSheet(
-        f'QFrame {{ background-color: {Colors.SURFACE_1};'
-        f' border-bottom: 1px solid {Colors.BORDER}; }}'
-    )
+    set_theme_style(title_bar, lambda: (f'QFrame {{ background-color: {Colors.SURFACE_1};'
+        f' border-bottom: 1px solid {Colors.BORDER}; }}'))
     tb_layout = QHBoxLayout(title_bar)
     tb_layout.setContentsMargins(12, 0, 6, 0)
     tb_layout.setSpacing(0)
 
-    title_lbl = QLabel(title.upper())
-    title_lbl.setStyleSheet(
-        f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px;'
-        f' font-family: {Fonts.DISPLAY}; font-weight: bold;'
+    title_lbl = QLabel(title)
+    set_theme_style(title_lbl, lambda: (f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px;'
+        f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
         f' letter-spacing: {Fonts.TRACK_LABEL}px;'
-        f' background: transparent;'
-    )
+        f' background: transparent;'))
     tb_layout.addWidget(title_lbl)
     tb_layout.addStretch()
 
-    close_btn = QPushButton('×')
+    close_btn = IconButton('close.png', label='Close')
     close_btn.setFixedSize(28, 28)
     close_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-    close_btn.setStyleSheet(
-        f'QPushButton {{ background: transparent; border: none;'
-        f' color: {Colors.TEXT_DIM}; font-size: 16px; font-weight: bold; }}'
+    set_theme_style(close_btn, lambda: (f'QPushButton {{ background: transparent; border: none;'
+        f' color: {Colors.TEXT_DIM}; font-size: 16px; font-weight: 600; }}'
         f' QPushButton:hover {{ background-color: {Colors.ERROR};'
-        f' color: {Colors.TEXT}; }}'
-    )
+        f' color: {Colors.TEXT}; }}'))
     close_btn.clicked.connect(dlg.reject)
     tb_layout.addWidget(close_btn)
 
@@ -241,10 +226,8 @@ def _fthr_message_box(parent, title: str, message: str,
         Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
     )
     dlg.setFixedWidth(420)
-    dlg.setStyleSheet(
-        f'QDialog {{ background: {Colors.SURFACE_1};'
-        f' border: 1px solid {Colors.BORDER_HI}; }}'
-    )
+    set_theme_style(dlg, lambda: (f'QDialog {{ background: {Colors.SURFACE_1};'
+        f' border: 1px solid {Colors.BORDER_HI}; }}'))
 
     layout = QVBoxLayout(dlg)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -253,47 +236,39 @@ def _fthr_message_box(parent, title: str, message: str,
     # Title bar
     title_bar = QFrame()
     title_bar.setFixedHeight(36)
-    title_bar.setStyleSheet(
-        f'QFrame {{ background: {Colors.SURFACE_2};'
-        f' border-bottom: 1px solid {Colors.BORDER}; }}'
-    )
+    set_theme_style(title_bar, lambda: (f'QFrame {{ background: {Colors.SURFACE_2};'
+        f' border-bottom: 1px solid {Colors.BORDER}; }}'))
     tb_layout = QHBoxLayout(title_bar)
     tb_layout.setContentsMargins(12, 0, 6, 0)
     tb_layout.setSpacing(0)
-    title_lbl = QLabel(title.upper())
-    title_lbl.setStyleSheet(
-        f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px;'
-        f' font-family: {Fonts.DISPLAY}; font-weight: bold;'
+    title_lbl = QLabel(title)
+    set_theme_style(title_lbl, lambda: (f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px;'
+        f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
         f' letter-spacing: {Fonts.TRACK_LABEL}px;'
-        f' background: transparent;'
-    )
+        f' background: transparent;'))
     tb_layout.addWidget(title_lbl)
     tb_layout.addStretch()
-    close_btn = QPushButton('×')
+    close_btn = IconButton('close.png', label='Close')
     close_btn.setFixedSize(28, 28)
     close_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-    close_btn.setStyleSheet(
-        f'QPushButton {{ background: transparent; border: none;'
-        f' color: {Colors.TEXT_DIM}; font-size: 16px; font-weight: bold; }}'
+    set_theme_style(close_btn, lambda: (f'QPushButton {{ background: transparent; border: none;'
+        f' color: {Colors.TEXT_DIM}; font-size: 16px; font-weight: 600; }}'
         f' QPushButton:hover {{ background-color: {Colors.ERROR};'
-        f' color: {Colors.TEXT}; }}'
-    )
+        f' color: {Colors.TEXT}; }}'))
     close_btn.clicked.connect(dlg.reject)
     tb_layout.addWidget(close_btn)
     layout.addWidget(title_bar)
 
     # Body
     body = QFrame()
-    body.setStyleSheet(f'QFrame {{ background: {Colors.SURFACE_1}; }}')
+    set_theme_style(body, lambda: (f'QFrame {{ background: {Colors.SURFACE_1}; }}'))
     bl = QVBoxLayout(body)
     bl.setContentsMargins(20, 16, 20, 16)
     bl.setSpacing(12)
     msg_lbl = QLabel(message)
     msg_lbl.setWordWrap(True)
-    msg_lbl.setStyleSheet(
-        f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY}px;'
-        f' font-family: {Fonts.BODY}; background: transparent;'
-    )
+    set_theme_style(msg_lbl, lambda: (f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY}px;'
+        f' font-family: {Fonts.BODY}; background: transparent;'))
     bl.addWidget(msg_lbl)
 
     # Buttons
@@ -302,13 +277,11 @@ def _fthr_message_box(parent, title: str, message: str,
     ok_btn = QPushButton('OK')
     ok_btn.setFixedWidth(80)
     ok_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-    ok_btn.setStyleSheet(
-        f'QPushButton {{ background: {Colors.ACCENT}; color: {Colors.BG};'
+    set_theme_style(ok_btn, lambda: (f'QPushButton {{ background: {Colors.ACCENT}; color: {Colors.BG};'
         f' border: none; padding: 6px 14px; font-family: {Fonts.DISPLAY};'
-        f' font-weight: bold; font-size: {Fonts.SIZE_LABEL}px;'
-        f' letter-spacing: 1px; }}'
-        f' QPushButton:hover {{ background: {Colors.TEXT}; }}'
-    )
+        f' font-weight: 600; font-size: {Fonts.SIZE_LABEL}px;'
+        f' letter-spacing: 0px; }}'
+        f' QPushButton:hover {{ background: {Colors.TEXT}; }}'))
     ok_btn.clicked.connect(dlg.accept)
     btn_row.addWidget(ok_btn)
 
@@ -316,14 +289,12 @@ def _fthr_message_box(parent, title: str, message: str,
         cancel_btn = QPushButton('Cancel')
         cancel_btn.setFixedWidth(80)
         cancel_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        cancel_btn.setStyleSheet(
-            f'QPushButton {{ background: transparent; color: {Colors.TEXT_DIM};'
+        set_theme_style(cancel_btn, lambda: (f'QPushButton {{ background: transparent; color: {Colors.TEXT_DIM};'
             f' border: 1px solid {Colors.BORDER}; padding: 6px 14px;'
-            f' font-family: {Fonts.DISPLAY}; font-weight: bold;'
-            f' font-size: {Fonts.SIZE_LABEL}px; letter-spacing: 1px; }}'
+            f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
+            f' font-size: {Fonts.SIZE_LABEL}px; letter-spacing: 0px; }}'
             f' QPushButton:hover {{ border-color: {Colors.TEXT};'
-            f' color: {Colors.TEXT}; }}'
-        )
+            f' color: {Colors.TEXT}; }}'))
         cancel_btn.clicked.connect(dlg.reject)
         btn_row.addWidget(cancel_btn)
 
@@ -372,7 +343,7 @@ class _AccordionSection(QFrame):
         self._header = QPushButton()
         self._header.setObjectName('accordionHeader')
         self._header.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._header.setFixedHeight(40)
+        self._header.setFixedHeight(Sizes.CAPTURE_CONTROL_H)
         self._header.clicked.connect(self.toggle)
 
         h_layout = QHBoxLayout(self._header)
@@ -381,20 +352,16 @@ class _AccordionSection(QFrame):
 
         if number:
             num_lbl = QLabel(number)
-            num_lbl.setStyleSheet(
-                f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY_L}px;'
-                f' font-family: {Fonts.DISPLAY}; font-weight: bold;'
-                f' background: transparent;'
-            )
+            set_theme_style(num_lbl, lambda: (f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY_L}px;'
+                f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
+                f' background: transparent;'))
             h_layout.addWidget(num_lbl)
 
-        title_lbl = QLabel(title.upper())
-        title_lbl.setStyleSheet(
-            f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY_L}px;'
-            f' font-family: {Fonts.DISPLAY}; font-weight: bold;'
+        title_lbl = QLabel(title)
+        set_theme_style(title_lbl, lambda: (f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY_L}px;'
+            f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
             f' letter-spacing: {Fonts.TRACK_LABEL}px;'
-            f' background: transparent;'
-        )
+            f' background: transparent;'))
         h_layout.addWidget(title_lbl)
         h_layout.addStretch()
 
@@ -411,7 +378,7 @@ class _AccordionSection(QFrame):
         # Give controls a full spacing step around every edge.  The wrappers
         # inside the body used to paint the global pure-black canvas and made
         # right-aligned actions appear to touch the section border.
-        self._body_layout.setContentsMargins(24, 16, 24, 20)
+        self._body_layout.setContentsMargins(Sizes.SPACE_5, Sizes.SPACE_5, Sizes.SPACE_5, Sizes.SPACE_5)
         self._body_layout.setSpacing(8)
         layout.addWidget(self._body)
         self.refresh_theme()
@@ -443,15 +410,16 @@ class _AccordionSection(QFrame):
 
     def refresh_theme(self):
         """Refresh the section shell and header after a theme change."""
-        self.setStyleSheet(f'''
+        set_theme_style(self, lambda: (f'''
             QFrame#accordionSection {{
                 background-color: {Colors.SURFACE_3};
                 border: 1px solid {Colors.BORDER};
+                border-radius: {Sizes.RADIUS_CARD}px;
             }}
             QPushButton#accordionHeader {{
                 background-color: {Colors.SURFACE_3};
                 border: none;
-                border-bottom: 1px solid {Colors.BORDER};
+                border-radius: {Sizes.RADIUS_CARD}px;
                 text-align: left;
             }}
             QPushButton#accordionHeader:hover {{
@@ -459,7 +427,7 @@ class _AccordionSection(QFrame):
             }}
             QWidget#accordionBody,
             QWidget#accordionBody > QWidget#accordionContent {{
-                background-color: {Colors.SURFACE_3};
+                background-color: transparent;
             }}
             QWidget#accordionBody QFrame#iconRow,
             QWidget#accordionBody QFrame#iconTintRow,
@@ -467,21 +435,17 @@ class _AccordionSection(QFrame):
                 background-color: transparent;
                 border: none;
             }}
-        ''')
+        '''))
         for label in self._header.findChildren(QLabel):
-            if label.text() == self._title.upper():
-                label.setStyleSheet(
-                    f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY_L}px;'
-                    f' font-family: {Fonts.DISPLAY}; font-weight: bold;'
+            if label.text() == self._title:
+                set_theme_style(label, lambda: (f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY_L}px;'
+                    f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
                     f' letter-spacing: {Fonts.TRACK_LABEL}px;'
-                    f' background: transparent;'
-                )
+                    f' background: transparent;'))
             else:
-                label.setStyleSheet(
-                    f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY_L}px;'
-                    f' font-family: {Fonts.DISPLAY}; font-weight: bold;'
-                    f' background: transparent;'
-                )
+                set_theme_style(label, lambda: (f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY_L}px;'
+                    f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
+                    f' background: transparent;'))
         self._indicator.refresh_theme()
 
     def toggle(self):
@@ -533,7 +497,7 @@ class _ColorSwatch(QWidget):
         swatch_rect = QRect(0, 0, self.width(), 30)
         p.setBrush(QBrush(QColor(self._color)))
         p.setPen(QPen(QColor(Colors.BORDER_HI), 1))
-        p.drawRect(swatch_rect)
+        p.drawRoundedRect(swatch_rect.adjusted(1, 1, -1, -1), Sizes.RADIUS_MD, Sizes.RADIUS_MD)
 
         # Label text below
         p.setPen(QPen(QColor(Colors.TEXT_DIM)))
@@ -552,10 +516,8 @@ class _ColorSwatch(QWidget):
             )
             dlg.setOption(QColorDialog.ColorDialogOption.ShowAlphaChannel)
             dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog)
-            dlg.setStyleSheet(
-                _COLOR_DIALOG_QSS
-                + f'QColorDialog {{ border: 1px solid {Colors.BORDER_HI}; }}'
-            )
+            set_theme_style(dlg, lambda: (_color_dialog_qss()
+                + f'QColorDialog {{ border: 1px solid {Colors.BORDER_HI}; }}'))
             _inject_custom_titlebar(dlg, f'Pick color: {self._label}')
             if dlg.exec():
                 color = dlg.currentColor()
@@ -578,8 +540,10 @@ class _ColorPreviewMockup(QFrame):
         self._rebuild()
 
     def update_colors(self, colors: dict[str, str]):
-        self._colors = dict(colors)
-        self._rebuild()
+        from ui.style import refresh_theme_styles
+        self._colors.clear()
+        self._colors.update(colors)
+        refresh_theme_styles(self)
 
     def _rebuild(self):
         # Clear existing children
@@ -599,26 +563,22 @@ class _ColorPreviewMockup(QFrame):
         # Mini top bar
         top_bar = QFrame()
         top_bar.setFixedHeight(26)
-        top_bar.setStyleSheet(
-            f'background-color: {c["SHELL_BG"]};'
-            f' border-bottom: 1px solid {c["SHELL_DIVIDER"]};'
-        )
+        set_theme_style(top_bar, lambda: (f'background-color: {c["SHELL_BG"]};'
+            f' border-top-left-radius: {Sizes.RADIUS_CARD}px;'
+            f' border-top-right-radius: {Sizes.RADIUS_CARD}px;'
+            f' border-bottom: 1px solid {c["SHELL_DIVIDER"]};'))
         tb_layout = QHBoxLayout(top_bar)
         tb_layout.setContentsMargins(10, 0, 10, 0)
         logo_lbl = QLabel('FTHR')
-        logo_lbl.setStyleSheet(
-            f'color: {c["TEXT"]}; font-size: 10px; font-weight: bold;'
-            f' font-family: {Fonts.DISPLAY}; letter-spacing: 2px;'
-            f' background: transparent;'
-        )
+        set_theme_style(logo_lbl, lambda: (f'color: {c["TEXT"]}; font-size: 10px; font-weight: 600;'
+            f' font-family: {Fonts.DISPLAY}; letter-spacing: 0px;'
+            f' background: transparent;'))
         tb_layout.addWidget(logo_lbl)
         tb_layout.addStretch()
-        status = QLabel('CAPTURING')
-        status.setStyleSheet(
-            f'color: {c["ACCENT"]}; background: transparent; border: none;'
-            f' font-size: 8px; font-weight: bold; padding: 0 2px;'
-            f' font-family: {Fonts.DISPLAY}; letter-spacing: 1px;'
-        )
+        status = QLabel('Capturing')
+        set_theme_style(status, lambda: (f'color: {c["ACCENT"]}; background: transparent; border: none;'
+            f' font-size: 8px; font-weight: 600; padding: 0 2px;'
+            f' font-family: {Fonts.DISPLAY}; letter-spacing: 0px;'))
         tb_layout.addWidget(status)
         layout.addWidget(top_bar)
 
@@ -627,54 +587,47 @@ class _ColorPreviewMockup(QFrame):
         # that changing the token affects more than the main canvas.
         status_bar = QFrame()
         status_bar.setFixedHeight(20)
-        status_bar.setStyleSheet(
-            f'background-color: {c["SHELL_BG_2"]};'
-            f' border-bottom: 1px solid {c["SHELL_DIVIDER"]};'
-        )
+        set_theme_style(status_bar, lambda: (f'background-color: {c["SHELL_BG_2"]};'
+            f' border-bottom: 1px solid {c["SHELL_DIVIDER"]};'))
         sb_layout = QHBoxLayout(status_bar)
         sb_layout.setContentsMargins(10, 0, 10, 0)
-        ready = QLabel('READY')
-        ready.setStyleSheet(
-            f'color: {c["SUCCESS"]}; font-size: 8px; font-weight: bold;'
-            f' font-family: {Fonts.DISPLAY}; background: transparent;'
-        )
+        ready = QLabel('Ready')
+        set_theme_style(ready, lambda: (f'color: {c["SUCCESS"]}; font-size: 8px; font-weight: 600;'
+            f' font-family: {Fonts.DISPLAY}; background: transparent;'))
         sb_layout.addWidget(ready)
         sb_layout.addStretch()
-        sb_hint = QLabel('STATUS STRIP')
-        sb_hint.setStyleSheet(
-            f'color: {c["TEXT_MUTED"]}; font-size: 7px;'
-            f' font-family: {Fonts.BODY}; background: transparent;'
-        )
+        sb_hint = QLabel('Status strip')
+        set_theme_style(sb_hint, lambda: (f'color: {c["TEXT_MUTED"]}; font-size: 7px;'
+            f' font-family: {Fonts.BODY}; background: transparent;'))
         sb_layout.addWidget(sb_hint)
         layout.addWidget(status_bar)
 
         # Content area with cards
         content = QFrame()
-        content.setStyleSheet(f'background-color: {c["BG"]};')
+        set_theme_style(content, lambda: (f'background-color: {c["BG"]};'
+                             f' border-bottom-left-radius: {Sizes.RADIUS_CARD}px;'
+                             f' border-bottom-right-radius: {Sizes.RADIUS_CARD}px;'))
         cl = QVBoxLayout(content)
         cl.setContentsMargins(10, 8, 10, 8)
-        cl.setSpacing(6)
+        cl.setSpacing(Sizes.SPACE_3)
 
         # Mini clip cards
         cards_row = QHBoxLayout()
-        cards_row.setSpacing(6)
+        cards_row.setSpacing(Sizes.SPACE_3)
         for i in range(3):
             card = QFrame()
             card.setFixedSize(80, 48)
-            card.setStyleSheet(
-                f'background-color: {c["CARD_BG"]};'
+            set_theme_style(card, lambda: (f'background-color: {c["CARD_BG"]};'
                 f' border: 1px solid {c["CARD_BORDER"]};'
-            )
+                f' border-radius: {Sizes.RADIUS_SM}px;'))
             card_l = QVBoxLayout(card)
             card_l.setContentsMargins(6, 4, 6, 4)
             thumb = QFrame()
             thumb.setFixedHeight(22)
-            thumb.setStyleSheet(f'background-color: {c["SURFACE_2"]};')
+            set_theme_style(thumb, lambda: (f'background-color: {c["SURFACE_2"]};'))
             card_l.addWidget(thumb)
             title = QLabel(f'clip_{i+1}.mp4')
-            title.setStyleSheet(
-                f'color: {c["TEXT_DIM"]}; font-size: 7px; background: transparent;'
-            )
+            set_theme_style(title, lambda: (f'color: {c["TEXT_DIM"]}; font-size: 7px; background: transparent;'))
             card_l.addWidget(title)
             cards_row.addWidget(card)
         cards_row.addStretch()
@@ -682,21 +635,17 @@ class _ColorPreviewMockup(QFrame):
 
         # Mini button row
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-        primary_btn = QLabel('SAVE CLIP')
-        primary_btn.setStyleSheet(
-            f'background-color: {c["ACCENT"]}; color: {c["BG"]};'
-            f' font-size: 8px; font-weight: bold; padding: 4px 10px;'
-            f' font-family: {Fonts.DISPLAY};'
-        )
+        btn_row.setSpacing(Sizes.SPACE_3)
+        primary_btn = QLabel('Save clip')
+        set_theme_style(primary_btn, lambda: (f'background-color: {c["ACCENT"]}; color: {c["BG"]};'
+            f' font-size: 8px; font-weight: 600; padding: 4px 10px;'
+            f' font-family: {Fonts.DISPLAY};'))
         btn_row.addWidget(primary_btn)
-        outline_btn = QLabel('EXPORT')
-        outline_btn.setStyleSheet(
-            f'background-color: transparent; color: {c["TEXT"]};'
+        outline_btn = QLabel('Export')
+        set_theme_style(outline_btn, lambda: (f'background-color: transparent; color: {c["TEXT"]};'
             f' border: 1px solid {c["BORDER_HI"]};'
-            f' font-size: 8px; font-weight: bold; padding: 4px 10px;'
-            f' font-family: {Fonts.DISPLAY};'
-        )
+            f' font-size: 8px; font-weight: 600; padding: 4px 10px;'
+            f' font-family: {Fonts.DISPLAY};'))
         btn_row.addWidget(outline_btn)
         btn_row.addStretch()
         cl.addLayout(btn_row)
@@ -705,13 +654,13 @@ class _ColorPreviewMockup(QFrame):
         text_row = QVBoxLayout()
         text_row.setSpacing(2)
         t1 = QLabel('Primary text sample')
-        t1.setStyleSheet(f'color: {c["TEXT"]}; font-size: 9px; background: transparent;')
+        set_theme_style(t1, lambda: (f'color: {c["TEXT"]}; font-size: 9px; background: transparent;'))
         t2 = QLabel('Secondary text sample')
-        t2.setStyleSheet(f'color: {c["TEXT_DIM"]}; font-size: 9px; background: transparent;')
+        set_theme_style(t2, lambda: (f'color: {c["TEXT_DIM"]}; font-size: 9px; background: transparent;'))
         t3 = QLabel('Muted text sample')
-        t3.setStyleSheet(f'color: {c["TEXT_MUTED"]}; font-size: 9px; background: transparent;')
+        set_theme_style(t3, lambda: (f'color: {c["TEXT_MUTED"]}; font-size: 9px; background: transparent;'))
         t4 = QLabel('Ghost text sample')
-        t4.setStyleSheet(f'color: {c["TEXT_GHOST"]}; font-size: 9px; background: transparent;')
+        set_theme_style(t4, lambda: (f'color: {c["TEXT_GHOST"]}; font-size: 9px; background: transparent;'))
         text_row.addWidget(t1)
         text_row.addWidget(t2)
         text_row.addWidget(t3)
@@ -721,34 +670,25 @@ class _ColorPreviewMockup(QFrame):
         # Error / delete samples
         state_row = QHBoxLayout()
         state_row.setSpacing(8)
-        err = QLabel('ERROR')
-        err.setStyleSheet(
-            f'color: {c["ERROR"]}; font-size: 8px; font-weight: bold;'
+        err = QLabel('Error')
+        set_theme_style(err, lambda: (f'color: {c["ERROR"]}; font-size: 8px; font-weight: 600;'
             f' border: 1px solid {c["ERROR"]}; padding: 2px 6px;'
-            f' background: transparent; font-family: {Fonts.DISPLAY};'
-        )
+            f' background: transparent; font-family: {Fonts.DISPLAY};'))
         state_row.addWidget(err)
-        warning = QLabel('WARNING')
-        warning.setStyleSheet(
-            f'color: {c["WARNING"]}; font-size: 8px; font-weight: bold;'
+        warning = QLabel('Warning')
+        set_theme_style(warning, lambda: (f'color: {c["WARNING"]}; font-size: 8px; font-weight: 600;'
             f' border: 1px solid {c["WARNING"]}; padding: 2px 6px;'
-            f' background: transparent; font-family: {Fonts.DISPLAY};'
-        )
+            f' background: transparent; font-family: {Fonts.DISPLAY};'))
         state_row.addWidget(warning)
-        success = QLabel('SUCCESS')
-        success.setStyleSheet(
-            f'color: {c["SUCCESS"]}; font-size: 8px; font-weight: bold;'
+        success = QLabel('Success')
+        set_theme_style(success, lambda: (f'color: {c["SUCCESS"]}; font-size: 8px; font-weight: 600;'
             f' border: 1px solid {c["SUCCESS"]}; padding: 2px 6px;'
-            f' background: transparent; font-family: {Fonts.DISPLAY};'
-        )
+            f' background: transparent; font-family: {Fonts.DISPLAY};'))
         state_row.addWidget(success)
-        delete_color = c.get("DELETE", c["ERROR"])
-        delbtn = QLabel('DELETE')
-        delbtn.setStyleSheet(
-            f'color: {delete_color}; font-size: 8px; font-weight: bold;'
-            f' border: 1px solid {delete_color}; padding: 2px 6px;'
-            f' background: transparent; font-family: {Fonts.DISPLAY};'
-        )
+        delbtn = QLabel('Delete')
+        set_theme_style(delbtn, lambda: (f'color: {c["DELETE"]}; font-size: 8px; font-weight: 600;'
+            f' border: 1px solid {c["DELETE"]}; padding: 2px 6px;'
+            f' background: transparent; font-family: {Fonts.DISPLAY};'))
         state_row.addWidget(delbtn)
         state_row.addStretch()
         cl.addLayout(state_row)
@@ -756,8 +696,7 @@ class _ColorPreviewMockup(QFrame):
         layout.addWidget(content, stretch=1)
 
     def update_single_color(self, token: str, hex_value: str):
-        self._colors[token] = hex_value
-        self._rebuild()
+        self.update_colors({**self._colors, token: hex_value})
 
 
 # Icon Crop Dialog — crop imported image to match original icon dimensions
@@ -994,59 +933,51 @@ class _IconRow(QFrame):
         # Label
         name_lbl = QLabel(label)
         name_lbl.setFixedWidth(120)
-        name_lbl.setStyleSheet(label_body(Colors.TEXT, Fonts.SIZE_BODY))
+        set_theme_style(name_lbl, lambda: (label_body(Colors.TEXT, Fonts.SIZE_BODY)))
         layout.addWidget(name_lbl)
 
         # Original icon reference
         ref_lbl = QLabel('Default:')
-        ref_lbl.setStyleSheet(label_body(Colors.TEXT_MUTED, Fonts.SIZE_LABEL))
+        set_theme_style(ref_lbl, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_LABEL)))
         layout.addWidget(ref_lbl)
         self._ref_icon = QLabel()
         self._ref_icon.setFixedSize(32, 32)
-        self._ref_icon.setStyleSheet(
-            f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};'
-        )
+        set_theme_style(self._ref_icon, lambda: (f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};'))
         self._load_reference_icon()
         layout.addWidget(self._ref_icon)
 
         # Current custom icon
         cur_lbl = QLabel('Current:')
-        cur_lbl.setStyleSheet(label_body(Colors.TEXT_MUTED, Fonts.SIZE_LABEL))
+        set_theme_style(cur_lbl, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_LABEL)))
         layout.addWidget(cur_lbl)
         self._cur_icon = QLabel()
         self._cur_icon.setFixedSize(32, 32)
-        self._cur_icon.setStyleSheet(
-            f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};'
-        )
+        set_theme_style(self._cur_icon, lambda: (f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};'))
         self._load_current_icon()
         layout.addWidget(self._cur_icon)
 
         layout.addStretch()
 
         # Import button
-        import_btn = QPushButton('IMPORT')
-        import_btn.setStyleSheet(
-            f'QPushButton {{ background: {Colors.SURFACE_3};'
+        import_btn = QPushButton('Import')
+        set_theme_style(import_btn, lambda: (f'QPushButton {{ background: {Colors.SURFACE_3};'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT};'
             f' font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' font-weight: bold; letter-spacing: 1px; padding: 4px 12px; }}'
+            f' font-weight: 600; letter-spacing: 0px; padding: 4px 12px; }}'
             f' QPushButton:hover {{ border-color: {Colors.ACCENT};'
-            f' color: {Colors.ACCENT}; }}'
-        )
+            f' color: {Colors.ACCENT}; }}'))
         import_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         import_btn.clicked.connect(self._on_import)
         layout.addWidget(import_btn)
 
         # Reset button
-        reset_btn = QPushButton('RESET')
-        reset_btn.setStyleSheet(
-            f'QPushButton {{ background: transparent;'
+        reset_btn = QPushButton('Reset')
+        set_theme_style(reset_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT_DIM};'
             f' font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' font-weight: bold; letter-spacing: 1px; padding: 4px 10px; }}'
+            f' font-weight: 600; letter-spacing: 0px; padding: 4px 10px; }}'
             f' QPushButton:hover {{ border-color: {Colors.ERROR};'
-            f' color: {Colors.ERROR}; }}'
-        )
+            f' color: {Colors.ERROR}; }}'))
         reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         reset_btn.clicked.connect(self._on_reset)
         layout.addWidget(reset_btn)
@@ -1129,11 +1060,9 @@ class _IconRow(QFrame):
             Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
         )
         dlg.setMinimumSize(500, 400)
-        dlg.setStyleSheet(
-            f'QDialog {{ background: {Colors.SURFACE_1};'
+        set_theme_style(dlg, lambda: (f'QDialog {{ background: {Colors.SURFACE_1};'
             f' border: 1px solid {Colors.BORDER_HI}; }}'
-            f' QLabel {{ color: {Colors.TEXT}; background: transparent; }}'
-        )
+            f' QLabel {{ color: {Colors.TEXT}; background: transparent; }}'))
         _inject_custom_titlebar(dlg, f'Crop Icon — {self._label}')
 
         dl = QVBoxLayout(dlg)
@@ -1147,12 +1076,12 @@ class _IconRow(QFrame):
         # Reference column
         ref_col = QVBoxLayout()
         ref_col.setSpacing(8)
-        ref_title = QLabel('REFERENCE')
-        ref_title.setStyleSheet(label_uppercase(Colors.TEXT_DIM, Fonts.SIZE_LABEL))
+        ref_title = QLabel('Reference')
+        set_theme_style(ref_title, lambda: (label_uppercase(Colors.TEXT_DIM, Fonts.SIZE_LABEL)))
         ref_col.addWidget(ref_title)
         ref_display = QLabel()
         ref_display.setFixedSize(64, 64)
-        ref_display.setStyleSheet(f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};')
+        set_theme_style(ref_display, lambda: (f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};'))
         ref_pix = _default_icon_pixmap(self._filename, 60)
         if not ref_pix.isNull():
             ref_display.setPixmap(ref_pix)
@@ -1165,12 +1094,10 @@ class _IconRow(QFrame):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.setStyleSheet(
-            f'QPushButton {{ background: {Colors.SURFACE_3}; color: {Colors.TEXT};'
+        set_theme_style(buttons, lambda: (f'QPushButton {{ background: {Colors.SURFACE_3}; color: {Colors.TEXT};'
             f' border: 1px solid {Colors.BORDER}; padding: 6px 16px;'
-            f' font-family: {Fonts.DISPLAY}; font-weight: bold; }}'
-            f' QPushButton:hover {{ border-color: {Colors.ACCENT}; color: {Colors.ACCENT}; }}'
-        )
+            f' font-family: {Fonts.DISPLAY}; font-weight: 600; }}'
+            f' QPushButton:hover {{ border-color: {Colors.ACCENT}; color: {Colors.ACCENT}; }}'))
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
         dl.addWidget(buttons)
@@ -1192,6 +1119,7 @@ class _IconRow(QFrame):
 def _tint_pixmap(pixmap: QPixmap, color: QColor) -> QPixmap:
     """Recolor all opaque pixels to *color*, preserving alpha."""
     tinted = QPixmap(pixmap.size())
+    tinted.setDevicePixelRatio(pixmap.devicePixelRatio())
     tinted.fill(Qt.GlobalColor.transparent)
     p = QPainter(tinted)
     p.drawPixmap(0, 0, pixmap)
@@ -1222,16 +1150,14 @@ class _IconTintRow(QFrame):
         # Tinted icon preview
         self._preview = QLabel()
         self._preview.setFixedSize(32, 32)
-        self._preview.setStyleSheet(
-            f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};'
-        )
+        set_theme_style(self._preview, lambda: (f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};'))
         self._refresh_preview()
         layout.addWidget(self._preview)
 
         # Label
         name_lbl = QLabel(label)
         name_lbl.setFixedWidth(120)
-        name_lbl.setStyleSheet(label_body(Colors.TEXT, Fonts.SIZE_BODY))
+        set_theme_style(name_lbl, lambda: (label_body(Colors.TEXT, Fonts.SIZE_BODY)))
         layout.addWidget(name_lbl)
 
         layout.addStretch()
@@ -1246,15 +1172,13 @@ class _IconTintRow(QFrame):
         layout.addWidget(self._swatch)
 
         # Reset button
-        reset_btn = QPushButton('RESET')
-        reset_btn.setStyleSheet(
-            f'QPushButton {{ background: transparent;'
+        reset_btn = QPushButton('Reset')
+        set_theme_style(reset_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT_DIM};'
             f' font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' font-weight: bold; letter-spacing: 1px; padding: 4px 10px; }}'
+            f' font-weight: 600; letter-spacing: 0px; padding: 4px 10px; }}'
             f' QPushButton:hover {{ border-color: {Colors.ERROR};'
-            f' color: {Colors.ERROR}; }}'
-        )
+            f' color: {Colors.ERROR}; }}'))
         reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         reset_btn.clicked.connect(self._on_reset)
         layout.addWidget(reset_btn)
@@ -1263,10 +1187,8 @@ class _IconTintRow(QFrame):
         return self._theme.get_icon_tint(self._filename)
 
     def _update_swatch(self):
-        self._swatch.setStyleSheet(
-            f'background: {self._current_tint()};'
-            f' border: 1px solid {Colors.BORDER_HI};'
-        )
+        set_theme_style(self._swatch, lambda: (f'background: {self._current_tint()};'
+            f' border: 1px solid {Colors.BORDER_HI};'))
 
     def _refresh_preview(self):
         pix = _default_icon_pixmap(self._filename, 28)
@@ -1284,10 +1206,8 @@ class _IconTintRow(QFrame):
             Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
         )
         dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog)
-        dlg.setStyleSheet(
-            _COLOR_DIALOG_QSS
-            + f'QColorDialog {{ border: 1px solid {Colors.BORDER_HI}; }}'
-        )
+        set_theme_style(dlg, lambda: (_color_dialog_qss()
+            + f'QColorDialog {{ border: 1px solid {Colors.BORDER_HI}; }}'))
         _inject_custom_titlebar(dlg, f'Icon color: {self._label}')
         if dlg.exec():
             color = dlg.currentColor().name()
@@ -1343,26 +1263,25 @@ class _SoundRow(QFrame):
         # Label
         name_lbl = QLabel(label)
         name_lbl.setFixedWidth(150)
-        name_lbl.setStyleSheet(label_body(Colors.TEXT, Fonts.SIZE_BODY))
+        set_theme_style(name_lbl, lambda: (label_body(Colors.TEXT, Fonts.SIZE_BODY)))
         layout.addWidget(name_lbl)
 
         # Current file indicator
         self._file_lbl = QLabel()
         self._file_lbl.setFixedWidth(150)
-        self._file_lbl.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_LABEL))
+        set_theme_style(self._file_lbl, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_LABEL)))
         self._update_file_label()
         layout.addWidget(self._file_lbl)
 
         volume_key = self._VOLUME_KEYS.get(key, key)
         self._volume_setting = f'sound_volume_{volume_key}'
-        volume_label = QLabel('VOLUME')
-        volume_label.setStyleSheet(
-            label_uppercase(Colors.TEXT_MUTED, Fonts.SIZE_MICRO, 1))
+        volume_label = QLabel('Volume')
+        set_theme_style(volume_label, lambda: (label_uppercase(Colors.TEXT_MUTED, Fonts.SIZE_MICRO, 1)))
         layout.addWidget(volume_label)
         self._volume_slider = QSlider(Qt.Orientation.Horizontal)
         self._volume_slider.setRange(0, 100)
         self._volume_slider.setFixedWidth(120)
-        self._volume_slider.setStyleSheet(slider_qss())
+        set_theme_style(self._volume_slider, lambda: (slider_qss()))
         current_volume = int(
             self._settings.get(self._volume_setting, 100)
             if self._settings is not None else 100)
@@ -1373,49 +1292,42 @@ class _SoundRow(QFrame):
         self._volume_value.setFixedWidth(34)
         self._volume_value.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._volume_value.setStyleSheet(
-            label_body(Colors.TEXT_DIM, Fonts.SIZE_LABEL))
+        set_theme_style(self._volume_value, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_LABEL)))
         layout.addWidget(self._volume_value)
 
         layout.addStretch()
 
         # Preview button
-        preview_btn = QPushButton('▶  PREVIEW')
-        preview_btn.setStyleSheet(
-            f'QPushButton {{ background: transparent;'
+        preview_btn = IconButton('play.png', label='Preview sound', text='preview')
+        set_theme_style(preview_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.ACCENT};'
             f' font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' font-weight: bold; letter-spacing: 1px; padding: 4px 10px; }}'
-            f' QPushButton:hover {{ border-color: {Colors.ACCENT}; }}'
-        )
+            f' font-weight: 600; letter-spacing: 0px; padding: 4px 10px; }}'
+            f' QPushButton:hover {{ border-color: {Colors.ACCENT}; }}'))
         preview_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         preview_btn.clicked.connect(self._on_preview)
         layout.addWidget(preview_btn)
 
         # Import button
-        import_btn = QPushButton('IMPORT')
-        import_btn.setStyleSheet(
-            f'QPushButton {{ background: {Colors.SURFACE_3};'
+        import_btn = QPushButton('Import')
+        set_theme_style(import_btn, lambda: (f'QPushButton {{ background: {Colors.SURFACE_3};'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT};'
             f' font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' font-weight: bold; letter-spacing: 1px; padding: 4px 12px; }}'
+            f' font-weight: 600; letter-spacing: 0px; padding: 4px 12px; }}'
             f' QPushButton:hover {{ border-color: {Colors.ACCENT};'
-            f' color: {Colors.ACCENT}; }}'
-        )
+            f' color: {Colors.ACCENT}; }}'))
         import_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         import_btn.clicked.connect(self._on_import)
         layout.addWidget(import_btn)
 
         # Reset button
-        reset_btn = QPushButton('RESET')
-        reset_btn.setStyleSheet(
-            f'QPushButton {{ background: transparent;'
+        reset_btn = QPushButton('Reset')
+        set_theme_style(reset_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT_DIM};'
             f' font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' font-weight: bold; letter-spacing: 1px; padding: 4px 10px; }}'
+            f' font-weight: 600; letter-spacing: 0px; padding: 4px 10px; }}'
             f' QPushButton:hover {{ border-color: {Colors.ERROR};'
-            f' color: {Colors.ERROR}; }}'
-        )
+            f' color: {Colors.ERROR}; }}'))
         reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         reset_btn.clicked.connect(self._on_reset)
         layout.addWidget(reset_btn)
@@ -1507,15 +1419,14 @@ class CustomizePage(QWidget):
     def __init__(self, settings_manager=None, parent=None):
         super().__init__(parent)
         self.setObjectName('customizePage')
-        self.setStyleSheet(
-            f'QWidget#customizePage {{ background: {Colors.BG}; }}')
+        set_theme_style(self, lambda: (f'QWidget#customizePage {{ background: {Colors.BG}; }}'))
         self._theme = ThemeManager()
         self._settings = settings_manager
         self._swatches: list[_ColorSwatch] = []
         self._setup_ui()
 
     def _setup_ui(self):
-        # Scroll area wrapper for the entire page
+        # Theme actions stay outside the scrolling options.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -1524,23 +1435,20 @@ class CustomizePage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setObjectName('customizeScroll')
-        scroll.setStyleSheet(
-            f'QScrollArea#customizeScroll {{ border: none;'
+        set_theme_style(scroll, lambda: (f'QScrollArea#customizeScroll {{ border: none;'
             f' background: {Colors.BG}; }}'
             f' QScrollArea#customizeScroll QWidget#qt_scrollarea_viewport {{'
-            f' background: {Colors.BG}; }}'
-        )
+            f' background: {Colors.BG}; }}'))
         self._scroll = scroll
 
         container = QWidget()
         container.setObjectName('customizeContainer')
-        container.setStyleSheet(
-            f'QWidget#customizeContainer {{ background: {Colors.BG}; }}')
+        set_theme_style(container, lambda: (f'QWidget#customizeContainer {{ background: {Colors.BG}; }}'))
         self._container = container
         self._layout = QVBoxLayout(container)
-        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
         self._layout.setSpacing(12)
         self._layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -1551,11 +1459,9 @@ class CustomizePage(QWidget):
             f'Icons: {", ".join(SUPPORTED_IMAGE_FORMATS)}  |  '
             f'Sounds: {", ".join(SUPPORTED_SOUND_FORMATS)}'
         )
-        info_bar.setStyleSheet(
-            f'color: {Colors.TEXT_MUTED}; font-size: {Fonts.SIZE_LABEL}px;'
+        set_theme_style(info_bar, lambda: (f'color: {Colors.TEXT_MUTED}; font-size: {Fonts.SIZE_LABEL}px;'
             f' font-family: {Fonts.BODY}; background: {Colors.SURFACE_2};'
-            f' padding: 8px 16px; border: 1px solid {Colors.BORDER};'
-        )
+            f' padding: 12px 16px; border: 1px solid {Colors.BORDER}; border-radius: {Sizes.RADIUS_CARD}px;'))
         info_bar.setWordWrap(True)
         self._info_bar = info_bar
         self._layout.addWidget(info_bar)
@@ -1590,20 +1496,20 @@ class CustomizePage(QWidget):
         self._build_sounds_section()
         self._layout.addWidget(self._sounds_section)
 
-        # Export / Import bar
-        self._layout.addSpacing(16)
+        # Fixed action row above every customization section.
         action_bar = QHBoxLayout()
-        action_bar.setSpacing(10)
+        action_bar.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_4)
+        action_bar.setSpacing(Sizes.ROW_GAP)
 
-        export_btn = QPushButton('EXPORT THEME')
-        export_btn.setStyleSheet(button_secondary_qss())
+        export_btn = QPushButton('Export theme')
+        set_theme_style(export_btn, lambda: (button_secondary_qss()))
         export_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         export_btn.clicked.connect(self._on_export)
         self._export_btn = export_btn
         action_bar.addWidget(export_btn)
 
-        import_btn = QPushButton('IMPORT THEME')
-        import_btn.setStyleSheet(button_outline_qss())
+        import_btn = QPushButton('Import theme')
+        set_theme_style(import_btn, lambda: (button_outline_qss()))
         import_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         import_btn.clicked.connect(self._on_import)
         self._import_btn = import_btn
@@ -1611,18 +1517,27 @@ class CustomizePage(QWidget):
 
         action_bar.addStretch()
 
-        apply_btn = QPushButton('APPLY THEME')
-        apply_btn.setStyleSheet(button_primary_qss())
+        reset_btn = QPushButton('Reset all')
+        set_theme_style(reset_btn, button_outline_qss)
+        reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        reset_btn.setToolTip(
+            'Restore default fonts, colors, icons, capture-card styling, sounds and volumes.')
+        reset_btn.clicked.connect(self._on_reset_all)
+        self._reset_btn = reset_btn
+        action_bar.addWidget(reset_btn)
+
+        apply_btn = QPushButton('Apply theme')
+        set_theme_style(apply_btn, lambda: (button_primary_qss()))
         apply_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         apply_btn.clicked.connect(self._on_apply)
         self._apply_btn = apply_btn
         action_bar.addWidget(apply_btn)
 
-        self._layout.addLayout(action_bar)
+        outer.addLayout(action_bar)
         self._layout.addStretch()
 
         scroll.setWidget(container)
-        outer.addWidget(scroll)
+        outer.addWidget(scroll, 1)
 
     # Typography section
 
@@ -1634,32 +1549,31 @@ class CustomizePage(QWidget):
 
         note = QLabel('Fonts: .ttf and .otf files are supported.')
         note.setWordWrap(True)
-        note.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        set_theme_style(note, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
         layout.addWidget(note)
 
-        families = ['Oswald', *sorted(
+        families = [*BUILTIN_FONT_FAMILIES, *sorted(
             (family for family in self._theme.get_custom_font_paths()
-             if family != 'Oswald'),
+             if family not in BUILTIN_FONT_FAMILIES),
             key=str.casefold,
         )]
         self._font_combos = {}
-        for role, title in (('display', 'DISPLAY FONT'), ('body', 'INTERFACE FONT')):
+        for role, title in (('display', 'Heading font'), ('body', 'Interface font')):
             row = QHBoxLayout()
             row.setSpacing(12)
             label = QLabel(title)
             label.setFixedWidth(140)
-            label.setStyleSheet(
-                label_uppercase(Colors.TEXT, Fonts.SIZE_LABEL, 1))
+            set_theme_style(label, lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_LABEL, 1)))
             row.addWidget(label)
             combo = WheelSafeComboBox()
             # Keep the typography selectors lifted from the pure-black canvas;
             # the color preview below intentionally remains a true black sample.
-            combo.setStyleSheet(combo_qss(background=Colors.SURFACE_3))
+            set_theme_style(combo, lambda: (combo_qss(background=Colors.SURFACE_3)))
             current = self._theme.get_font(role)
             for family in families:
                 combo.addItem(family, family)
             if current not in families:
-                current = 'Oswald'
+                current = DEFAULT_FONTS[role]
                 self._theme.set_font(role, current)
                 self._theme.save()
             index = combo.findData(current)
@@ -1670,8 +1584,8 @@ class CustomizePage(QWidget):
             row.addWidget(combo, 1)
             self._font_combos[role] = combo
 
-            import_btn = QPushButton('IMPORT FONT')
-            import_btn.setStyleSheet(button_outline_qss())
+            import_btn = QPushButton('Import font')
+            set_theme_style(import_btn, lambda: (button_outline_qss()))
             import_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             import_btn.clicked.connect(
                 lambda _checked=False, selected_role=role:
@@ -1680,18 +1594,17 @@ class CustomizePage(QWidget):
             layout.addLayout(row)
 
         self._font_preview = QLabel(
-            "YOUR PRIVACY ISN'T CURRENCY  ·  Your privacy isn't currency.")
+            "Your privacy isn't currency.")
         self._font_preview.setMinimumHeight(52)
         self._font_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._font_preview.setStyleSheet(
-            f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER}; '
-            f'color: {Colors.TEXT}; padding: 10px;')
+        set_theme_style(self._font_preview, lambda: (f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER}; '
+            f'color: {Colors.TEXT}; padding: 10px;'))
         layout.addWidget(self._font_preview)
 
         reset_row = QHBoxLayout()
         reset_row.addStretch()
-        reset = QPushButton('RESET TYPOGRAPHY')
-        reset.setStyleSheet(button_outline_qss())
+        reset = QPushButton('Reset typography')
+        set_theme_style(reset, lambda: (button_outline_qss()))
         reset.clicked.connect(self._on_reset_fonts)
         reset_row.addWidget(reset)
         layout.addLayout(reset_row)
@@ -1758,10 +1671,10 @@ class CustomizePage(QWidget):
     def _update_font_preview(self):
         display = self._theme.get_font('display').replace('"', '')
         body = self._theme.get_font('body').replace('"', '')
-        self._font_preview.setStyleSheet(
-            f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER}; '
+        set_theme_style(self._font_preview, lambda body=body, display=display: (f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER}; '
+            f'border-radius: {Sizes.RADIUS_MD}px; '
             f'color: {Colors.TEXT}; padding: 10px; '
-            f'font-family: "{display}", "{body}"; font-size: {Fonts.SIZE_BODY_L}px;')
+            f'font-family: "{display}", "{body}"; font-size: {Fonts.SIZE_BODY_L}px;'))
 
     # Colors section
 
@@ -1784,14 +1697,12 @@ class CustomizePage(QWidget):
             # Category label on the left
             cat_col = QVBoxLayout()
             cat_col.setSpacing(2)
-            cat_lbl = QLabel(group_name.upper())
+            cat_lbl = QLabel(group_name)
             cat_lbl.setFixedWidth(90)
-            cat_lbl.setStyleSheet(
-                f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY}px;'
-                f' font-family: {Fonts.DISPLAY}; font-weight: bold;'
+            set_theme_style(cat_lbl, lambda: (f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY}px;'
+                f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
                 f' letter-spacing: {Fonts.TRACK_LABEL}px;'
-                f' background: transparent; padding-top: 4px;'
-            )
+                f' background: transparent; padding-top: 4px;'))
             cat_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
             cat_col.addWidget(cat_lbl)
             cat_col.addStretch()
@@ -1815,15 +1726,13 @@ class CustomizePage(QWidget):
         # Reset all colors button
         reset_row = QHBoxLayout()
         reset_row.addStretch()
-        reset_btn = QPushButton('RESET ALL COLORS')
-        reset_btn.setStyleSheet(
-            f'QPushButton {{ background: transparent;'
+        reset_btn = QPushButton('Reset all colors')
+        set_theme_style(reset_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT_DIM};'
             f' font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' font-weight: bold; letter-spacing: 1px; padding: 6px 14px; }}'
+            f' font-weight: 600; letter-spacing: 0px; padding: 6px 14px; }}'
             f' QPushButton:hover {{ border-color: {Colors.ERROR};'
-            f' color: {Colors.ERROR}; }}'
-        )
+            f' color: {Colors.ERROR}; }}'))
         reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         reset_btn.clicked.connect(self._on_reset_all_colors)
         reset_row.addWidget(reset_btn)
@@ -1872,13 +1781,11 @@ class CustomizePage(QWidget):
         # Global tint row
         global_row = QHBoxLayout()
         global_row.setSpacing(12)
-        g_label = QLabel('GLOBAL TINT')
+        g_label = QLabel('Global tint')
         g_label.setFixedWidth(120)
-        g_label.setStyleSheet(
-            f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY}px;'
-            f' font-family: {Fonts.DISPLAY}; font-weight: bold;'
-            f' letter-spacing: {Fonts.TRACK_LABEL}px; background: transparent;'
-        )
+        set_theme_style(g_label, lambda: (f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY}px;'
+            f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
+            f' letter-spacing: {Fonts.TRACK_LABEL}px; background: transparent;'))
         global_row.addWidget(g_label)
 
         self._global_tint_swatch = QLabel()
@@ -1891,15 +1798,13 @@ class CustomizePage(QWidget):
         global_row.addWidget(self._global_tint_swatch)
         global_row.addStretch()
 
-        reset_all_btn = QPushButton('RESET ALL')
-        reset_all_btn.setStyleSheet(
-            f'QPushButton {{ background: transparent;'
+        reset_all_btn = QPushButton('Reset all')
+        set_theme_style(reset_all_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT_DIM};'
             f' font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' font-weight: bold; letter-spacing: 1px; padding: 4px 10px; }}'
+            f' font-weight: 600; letter-spacing: 0px; padding: 4px 10px; }}'
             f' QPushButton:hover {{ border-color: {Colors.ERROR};'
-            f' color: {Colors.ERROR}; }}'
-        )
+            f' color: {Colors.ERROR}; }}'))
         reset_all_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         reset_all_btn.clicked.connect(self._on_reset_all_tints)
         global_row.addWidget(reset_all_btn)
@@ -1918,10 +1823,8 @@ class CustomizePage(QWidget):
 
     def _update_global_tint_swatch(self):
         color = self._theme.get_global_icon_tint()
-        self._global_tint_swatch.setStyleSheet(
-            f'background: {color};'
-            f' border: 1px solid {Colors.BORDER_HI};'
-        )
+        set_theme_style(self._global_tint_swatch, lambda color=color: (f'background: {color};'
+            f' border: 1px solid {Colors.BORDER_HI};'))
 
     def _on_global_tint_click(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
@@ -1932,10 +1835,8 @@ class CustomizePage(QWidget):
             Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
         )
         dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog)
-        dlg.setStyleSheet(
-            _COLOR_DIALOG_QSS
-            + f'QColorDialog {{ border: 1px solid {Colors.BORDER_HI}; }}'
-        )
+        set_theme_style(dlg, lambda: (_color_dialog_qss()
+            + f'QColorDialog {{ border: 1px solid {Colors.BORDER_HI}; }}'))
         _inject_custom_titlebar(dlg, 'Global icon tint')
         if dlg.exec():
             color = dlg.currentColor().name()
@@ -1987,15 +1888,13 @@ class CustomizePage(QWidget):
         # Reset row
         reset_row = QHBoxLayout()
         reset_row.addStretch()
-        reset_btn = QPushButton('RESET CAPTURE CARD')
-        reset_btn.setStyleSheet(
-            f'QPushButton {{ background: transparent;'
+        reset_btn = QPushButton('Reset capture card')
+        set_theme_style(reset_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT_DIM};'
             f' font-size: {Fonts.SIZE_LABEL}px; font-family: {Fonts.DISPLAY};'
-            f' font-weight: bold; letter-spacing: 1px; padding: 6px 14px; }}'
+            f' font-weight: 600; letter-spacing: 0px; padding: 6px 14px; }}'
             f' QPushButton:hover {{ border-color: {Colors.ERROR};'
-            f' color: {Colors.ERROR}; }}'
-        )
+            f' color: {Colors.ERROR}; }}'))
         reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         reset_btn.clicked.connect(self._on_reset_cc_colors)
         reset_row.addWidget(reset_btn)
@@ -2023,7 +1922,7 @@ class CustomizePage(QWidget):
         wl.setSpacing(4)
 
         note = QLabel('Any format the system can play is supported.')
-        note.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        set_theme_style(note, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
         note.setWordWrap(True)
         wl.addWidget(note)
         wl.addSpacing(8)
@@ -2081,60 +1980,28 @@ class CustomizePage(QWidget):
             )
 
     def refresh_theme(self):
-        """Rebuild local control QSS after shared theme tokens change.
-
-        Preserve expanded accordions and scroll position through Apply.
-        """
-        scroll_value = self._scroll.verticalScrollBar().value()
-        expanded = {
-            section: section.expanded
-            for section in (
-                self._typography_section,
-                self._colors_section,
-                self._icon_colors_section,
-                self._icons_section,
-                self._capture_card_section,
-                self._sounds_section,
-            )
-        }
-
-        self.setStyleSheet(
-            f'QWidget#customizePage {{ background: {Colors.BG}; }}')
-        self._scroll.setStyleSheet(
-            f'QScrollArea#customizeScroll {{ border: none;'
-            f' background: {Colors.BG}; }}'
-            f' QScrollArea#customizeScroll QWidget#qt_scrollarea_viewport {{'
-            f' background: {Colors.BG}; }}'
-        )
-        self._container.setStyleSheet(
-            f'QWidget#customizeContainer {{ background: {Colors.BG}; }}')
-        self._info_bar.setStyleSheet(
-            f'color: {Colors.TEXT_MUTED}; font-size: {Fonts.SIZE_LABEL}px;'
-            f' font-family: {Fonts.BODY}; background: {Colors.SURFACE_2};'
-            f' padding: 8px 16px; border: 1px solid {Colors.BORDER};'
-        )
-        self._export_btn.setStyleSheet(button_secondary_qss())
-        self._import_btn.setStyleSheet(button_outline_qss())
-        self._apply_btn.setStyleSheet(button_primary_qss())
-
-        self._swatches = []
-        sections = (
-            (self._typography_section, self._build_typography_section),
-            (self._colors_section, self._build_colors_section),
-            (self._icon_colors_section, self._build_icon_colors_section),
-            (self._icons_section, self._build_icons_section),
-            (self._capture_card_section, self._build_capture_card_section),
-            (self._sounds_section, self._build_sounds_section),
-        )
-        for section, builder in sections:
-            section.clear_content()
+        """Restyle existing controls without rebuilding sections or sound players."""
+        from ui.style import refresh_theme_styles
+        refresh_theme_styles(self)
+        for section in (self._typography_section, self._colors_section,
+                        self._icon_colors_section, self._icons_section,
+                        self._capture_card_section, self._sounds_section):
             section.refresh_theme()
-            builder()
-        for section, was_expanded in expanded.items():
-            if was_expanded:
-                section.expand()
+        self._update_font_preview()
+        self._preview.update_colors(self._theme.get_all_colors())
+        for swatch in (*self._swatches, *self._cc_swatches):
+            swatch.update()
 
-        self._scroll.verticalScrollBar().setValue(scroll_value)
+    def _on_reset_all(self):
+        for row in self.findChildren(_SoundRow):
+            row._sound_playback.stop()
+        self._theme.reset_all()
+        if self._settings is not None:
+            for key in _SoundRow._VOLUME_KEYS.values():
+                self._settings.set(f'sound_volume_{key}', 100)
+            self._settings.save_settings()
+        self._refresh_all()
+        self.theme_applied.emit()
 
     def _on_apply(self):
         self.theme_applied.emit()
@@ -2145,6 +2012,9 @@ class CustomizePage(QWidget):
         if hasattr(self, '_font_combos'):
             for configured_family, font_path in (
                     self._theme.get_custom_font_paths().items()):
+                if all(combo.findData(configured_family) >= 0
+                       for combo in self._font_combos.values()):
+                    continue
                 font_id = QFontDatabase.addApplicationFont(str(font_path))
                 registered = (QFontDatabase.applicationFontFamilies(font_id)
                               if font_id >= 0 else [])
@@ -2153,17 +2023,24 @@ class CustomizePage(QWidget):
                     for family in sorted(names, key=str.casefold):
                         if combo.findData(family) < 0:
                             combo.addItem(family, family)
+            allowed_families = set(BUILTIN_FONT_FAMILIES) | set(
+                self._theme.get_custom_font_paths())
             for role, combo in self._font_combos.items():
+                blocked = combo.blockSignals(True)
+                for index in reversed(range(combo.count())):
+                    if combo.itemData(index) not in allowed_families:
+                        combo.removeItem(index)
+                combo.blockSignals(blocked)
                 family = self._theme.get_font(role)
                 index = combo.findData(family)
                 if index < 0:
-                    family = 'Oswald'
+                    family = DEFAULT_FONTS[role]
                     self._theme.set_font(role, family)
                     index = combo.findData(family)
                 combo.blockSignals(True)
                 combo.setCurrentIndex(index)
                 combo.blockSignals(False)
-                combo.setStyleSheet(combo_qss(background=Colors.SURFACE_3))
+                set_theme_style(combo, lambda: (combo_qss(background=Colors.SURFACE_3)))
             self._update_font_preview()
         for swatch in self._swatches:
             swatch.set_color(colors.get(swatch.token, '#000000'))
@@ -2177,3 +2054,17 @@ class CustomizePage(QWidget):
             cc_colors = self._theme.get_all_capture_card_colors()
             for swatch in self._cc_swatches:
                 swatch.set_color(cc_colors.get(swatch.token, '#ffffff'))
+
+        for row in self.findChildren(_IconRow):
+            row._load_reference_icon()
+            row._load_current_icon()
+        for row in self.findChildren(_SoundRow):
+            row._sound_playback.stop()
+            row._update_file_label()
+            volume = int(self._settings.get(row._volume_setting, 100)
+                         if self._settings is not None else 100)
+            blocked = row._volume_slider.blockSignals(True)
+            row._volume_slider.setValue(volume)
+            row._volume_slider.blockSignals(blocked)
+            row._volume_value.setText(f'{row._volume_slider.value()}%')
+            row._sound_playback.set_volume(row._volume_slider.value())

@@ -1,0 +1,5323 @@
+{
+  "format": 1,
+  "version": "2.0.0-alpha",
+  "snapshot_date": "2026-10-17",
+  "compression": "ZIP Deflate level 9",
+  "files": [
+    {
+      "path": "START_HERE.md",
+      "bytes": 1180,
+      "sha256": "9215e8b4d979d979ffe0d095665fedfb89e0e8668f2626b4017fa4aef3623b34"
+    },
+    {
+      "path": ".gitattributes",
+      "bytes": 3916,
+      "sha256": "18a6bda69d313d5b4d370a9e1504963edd320317df2d29d0f38b1658c6ebb471"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug_report.yml",
+      "bytes": 1449,
+      "sha256": "ae89a101a15d1d79d0e38ff59f56dc5dfc9ce399539b66a7542a0854d4e6eb6f"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/feature_request.yml",
+      "bytes": 657,
+      "sha256": "d4cad239ff6cb3f4086ea9d9f21f9d7566a29a4b22c515e808dfd904b83ca994"
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "bytes": 391,
+      "sha256": "6eba8d8de72428068e329883461da59e7e8eee11399a149b262bd8693e9b54a8"
+    },
+    {
+      "path": ".github/social_preview.png",
+      "bytes": 820033,
+      "sha256": "ea90be692d4c58f23cc70f139021938ca196b7039255d98e098820962cbefe14"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "bytes": 15184,
+      "sha256": "827217369c16fcbd8ea9e11d9588b1526585d8733849b891a1656c09b341c449"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 4720,
+      "sha256": "eb3dc6dd540807e0b106287472b01540b13bd54707f3e27ffa0eea1883857a94"
+    },
+    {
+      "path": "AppDir/fthr-clips.desktop",
+      "bytes": 188,
+      "sha256": "c2ad102f7a7a4e2b51760cbfa139b639d98168b49abcb02b0f74ce8698c67e09"
+    },
+    {
+      "path": "AppDir/fthr-clips.png",
+      "bytes": 262809,
+      "sha256": "0266ea11270d48a927c09805d59a2fd957e2cceb035f6793bff29fd7d8b50e08"
+    },
+    {
+      "path": "build_linux.sh",
+      "bytes": 18032,
+      "sha256": "0979381e3338e45633dc7b8f895d682e1d5ed2e94e89f8b84f05f6ced6c0ba34"
+    },
+    {
+      "path": "BUILDING.md",
+      "bytes": 17721,
+      "sha256": "9fa7343350302f60895d63c7f48e73914154450f3e31759d2c86f30643467acc"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "bytes": 10104,
+      "sha256": "fdab49a835818a39c323db02cbbe839d139d1cb206fbd6dcfdf07e8192cce429"
+    },
+    {
+      "path": "COPYRIGHT.md",
+      "bytes": 2217,
+      "sha256": "627269b2508f6e12d6625a08b027666861c5025495e010aa4cd29d0748c1752d"
+    },
+    {
+      "path": "docs/ALPHA-FIELD-BUG-TRIAGE-2026-09-20.md",
+      "bytes": 23367,
+      "sha256": "9643967990866489ca4be789e02ed5420207195d99e885bcd514e88d6e0621c5"
+    },
+    {
+      "path": "docs/ALPHA-FIELD-REPORTS-2026-09-19.md",
+      "bytes": 5595,
+      "sha256": "1ea01427d84ed4a8b53ea60d00defb6380eeab62dc319f5b806af13c6ff97db1"
+    },
+    {
+      "path": "docs/ALPHA-FIX-ROADMAP.md",
+      "bytes": 66214,
+      "sha256": "7b605fb25f43a93efdd873bbd0f82e74ca848de4deb713a2647c234ba8eae331"
+    },
+    {
+      "path": "docs/clip-grid-scroll-2026-10-11.md",
+      "bytes": 3971,
+      "sha256": "434fb59079b3138bfe6322136072fa72efdb1d873526a91916315be89459fbc4"
+    },
+    {
+      "path": "docs/customization-alpha-2026-10-15.md",
+      "bytes": 1933,
+      "sha256": "0e20f6bf9b2b61f4bf79432bbc96848925a82c56bdaa8a8fc57f4115c736acf2"
+    },
+    {
+      "path": "docs/engine-startup.md",
+      "bytes": 2523,
+      "sha256": "98cb9bae90d5ae70ff844ca602360b95cfb2318a3c6160a2c781c6d0bcad84e5"
+    },
+    {
+      "path": "docs/local-ui-integration-2026-10-15.md",
+      "bytes": 7480,
+      "sha256": "51cd050c9f6f5f0db91ae7446e6d33e245a9af26c2032068d48a39957ca08e0f"
+    },
+    {
+      "path": "docs/provider-removal-settings-2026-10-15.md",
+      "bytes": 2502,
+      "sha256": "c62754e6d4d49ba4dd6323d16465a382b5f7ed4413f7c8348b5f67f81ff6f487"
+    },
+    {
+      "path": "docs/recording-reliability-2026-09-16.md",
+      "bytes": 8486,
+      "sha256": "76870fc826ac710cd7ca513d3da840dd880bdc0e9bdd183cf8e978bb440e9a9c"
+    },
+    {
+      "path": "docs/settings-transition-fix-2026-10-12.md",
+      "bytes": 5273,
+      "sha256": "f1aa28c57332d6543686f6bf41e18386a8b9045456a729d437671ed596e02d5a"
+    },
+    {
+      "path": "docs/sftp-known-hosts-2026-10-13.md",
+      "bytes": 1998,
+      "sha256": "3d9d3b5deac952b9a8a96af7e2be30476c5b4e16db108577cbc1628830b82879"
+    },
+    {
+      "path": "docs/ui-consistency-2026-10-11.md",
+      "bytes": 3051,
+      "sha256": "f10cff6927c7798cbb70536d4d5bb5475eb1d146e4dcf4240019b8c5dd45e9bc"
+    },
+    {
+      "path": "docs/ui-efficiency-implementation-2026-10-12.md",
+      "bytes": 5810,
+      "sha256": "915852a73c0baa82fa7a615a46cbeda29b0612974f31ac3e83a4dd7fcb036591"
+    },
+    {
+      "path": "docs/ui-followup-audit-2026-10-12.md",
+      "bytes": 7448,
+      "sha256": "ac5399904339ef20f7bfb0878373a043a0defd151191c5bf24074082d04903c7"
+    },
+    {
+      "path": "docs/ui-followup-fixes-2026-10-12.md",
+      "bytes": 4770,
+      "sha256": "9e0e7cbd337aedec9bcf8a4dc51b041601c6891603fa9bb77aca3af3c3976786"
+    },
+    {
+      "path": "docs/ui-memory-audit-2026-10-12.md",
+      "bytes": 6361,
+      "sha256": "721a7bf4627b85e8de195376572efd0f402d73330383b0c5e3ce4845d965d53a"
+    },
+    {
+      "path": "docs/ui-memory-implementation-2026-10-12.md",
+      "bytes": 6328,
+      "sha256": "c34be103e6c87d9caff866b0c1cd6de859ef81be1e9ee132eebe5a497dbce30e"
+    },
+    {
+      "path": "docs/ui-performance-2026-10-11.md",
+      "bytes": 5009,
+      "sha256": "113fad024a8707fec8d1fb32e90d1c23d36ac4825b8b38e4e9c65850b3972dd2"
+    },
+    {
+      "path": "docs/ui-performance-audit-2026-10-11.md",
+      "bytes": 12140,
+      "sha256": "b9c1bc25d8d2b831a1dfa8603dba27afac0aa03986716e50b512cff284230f37"
+    },
+    {
+      "path": "docs/ui-performance-implementation-2026-10-12.md",
+      "bytes": 4126,
+      "sha256": "e3daa8ad0a8c74cea207c5d6fce58cac92000e27b753f54236b3e70e74b38752"
+    },
+    {
+      "path": "docs/ui-performance-presets-2026-10-13.md",
+      "bytes": 2959,
+      "sha256": "b53ee49deed2f2878c2b88476f774155289e0242a296efe2dfd6263fe01a05f1"
+    },
+    {
+      "path": "docs/vaultscope-partner-2026-10-14.md",
+      "bytes": 1771,
+      "sha256": "10f1d282f36a4d2b3345c6d80db314b6edee4019723d587e9049624c12bb0258"
+    },
+    {
+      "path": "docs/window-source-preview.md",
+      "bytes": 4909,
+      "sha256": "0542839fa8d7cc6eb9681ae06973c853734c613b41bdb080e84159e237026d28"
+    },
+    {
+      "path": "docs/windows-amd-field-test-2026-10-16.md",
+      "bytes": 5328,
+      "sha256": "a19c99acbbf8ef80228e0033b6f90f2e5635c3279ca52667bf6526a0702feb57"
+    },
+    {
+      "path": "docs/windows-av-sync-gate-2026-10-10.md",
+      "bytes": 25805,
+      "sha256": "eed3817e62c9a421a8208c37b8bd951efab340f8041283d20037d6a3c9580b5d"
+    },
+    {
+      "path": "docs/windows-av-sync-investigation-2026-10-17.md",
+      "bytes": 10187,
+      "sha256": "c5e01534520d9d98232855cbe36fa66f170203754c06ff941fa00381de0758d0"
+    },
+    {
+      "path": "docs/windows-error015-av-retest-gate-2026-10-10.md",
+      "bytes": 11803,
+      "sha256": "e9027f4488175ea7512de561632e2f3edf30ebaff3977837f09dda4920105703"
+    },
+    {
+      "path": "docs/windows-installer-alpha-2.0-2026-10-13.md",
+      "bytes": 1755,
+      "sha256": "128aea0b6cb1079edda105cd0d154b3aee34bbc30b0af61bfaa5b2dc18a6eb66"
+    },
+    {
+      "path": "docs/windows-installer-polish-2026-10-11.md",
+      "bytes": 1699,
+      "sha256": "a334e9dc4ab0607a482a51400cf5963f52a5c3db0464d5f2565c74a94bd3b54c"
+    },
+    {
+      "path": "docs/windows-installer-refresh-2026-10-11.md",
+      "bytes": 2235,
+      "sha256": "4517f991b0c25c0bc5e06968cfb02027320afb99343bfc6071df43145584c9fe"
+    },
+    {
+      "path": "docs/windows-static-replay-gate-2026-10-10.md",
+      "bytes": 10826,
+      "sha256": "cb2d202669658812290d6fafafd9500dd63e41f60ce82fb20a27cc785f8f3436"
+    },
+    {
+      "path": "FTHR.spec",
+      "bytes": 10894,
+      "sha256": "58cf294d97324ebad2d19e97b1e1c622d92cb4c8780bb5daf84d2499ff3cd00e"
+    },
+    {
+      "path": "FTHR_Hardware_ID/hardware_id_service.py",
+      "bytes": 4465,
+      "sha256": "95f51f237b376506533d5bdd3aefb2853a96bc668ee4bec980b61bed5973e0bb"
+    },
+    {
+      "path": "FTHR_Hardware_ID/PRIVACY_POLICY.txt",
+      "bytes": 861,
+      "sha256": "44e9a947bb6364ceb731579439ab618c7fa3af714f783d137d76763074ef0f3f"
+    },
+    {
+      "path": "FTHR_Hardware_ID/TERMS_OF_SERVICE.txt",
+      "bytes": 795,
+      "sha256": "340b4f48a08323d7bfc9af1e4434e590034936de2984f788d51c9163fe156761"
+    },
+    {
+      "path": "FTHR_linux.spec",
+      "bytes": 10263,
+      "sha256": "0dfa1eb3477b1db1fb64ed4b85725eca5650130b87fa9580280e78d8e96ddf64"
+    },
+    {
+      "path": "FTHR_UI/assets/favicon.ico",
+      "bytes": 15086,
+      "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936"
+    },
+    {
+      "path": "FTHR_UI/assets/fonts/Oswald-Bold.ttf",
+      "bytes": 108496,
+      "sha256": "eb7d46f856dd57f18a8c03d033c57802692bf127f01dbd95ba8984338e6b5135"
+    },
+    {
+      "path": "FTHR_UI/assets/fonts/Oswald-Regular.ttf",
+      "bytes": 105572,
+      "sha256": "0d9980da817ee71ad9c34bb46950fcf15dd53e928031f39d2e11ae19178ab826"
+    },
+    {
+      "path": "FTHR_UI/assets/fonts/Oswald-SemiBold.ttf",
+      "bytes": 109120,
+      "sha256": "8c5e61737c100d0a1ca87a9a1608afc53246b8a77f8d73c56b03406adc2d9282"
+    },
+    {
+      "path": "FTHR_UI/assets/fthr_logo.ico",
+      "bytes": 15086,
+      "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936"
+    },
+    {
+      "path": "FTHR_UI/assets/fthr_logo.png",
+      "bytes": 34624,
+      "sha256": "1164d541d01f2b71ba2003892389152f0f0535954f44c020bda3f0412919e90e"
+    },
+    {
+      "path": "FTHR_UI/assets/fthr_windows.manifest",
+      "bytes": 1561,
+      "sha256": "f6e8ea0ab49f4958b392986df82cd6dd6c9a66900fe281106a195c39da3ff641"
+    },
+    {
+      "path": "FTHR_UI/assets/gary.png",
+      "bytes": 1472385,
+      "sha256": "4ccfb741b009977f0af444ba114c08340a070769d250dd163e279a28ccdc8571"
+    },
+    {
+      "path": "FTHR_UI/assets/gatze.png",
+      "bytes": 1423564,
+      "sha256": "cbbbdf11da3d21f1fe1710798396c3f21f9f35cb47ecda07d0b6540b8250799f"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/camera.svg",
+      "bytes": 554,
+      "sha256": "852987633643a36ae2ac2ba75ae306b7a4af1bf12fc602b4053ce63de70a919e"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/chevronleft.svg",
+      "bytes": 383,
+      "sha256": "eb36867087cf0074c67029c848c749ae7bf40d2a058efdc48a346a3780858dac"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/chevronright.svg",
+      "bytes": 386,
+      "sha256": "3cb67583cf220d219a490db86ee209645866d0619db36f47be04ea18f12f137b"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/clip.png",
+      "bytes": 14128,
+      "sha256": "7dc91171c1d16bc9edd58501058ca597fe7fb9932abb869f35466b3d267a83c2"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/clips.svg",
+      "bytes": 521,
+      "sha256": "1c4d1fe273ccaf209f31983a0f448f4800e95e88e6d5ffb1c3a695a1c1f607b5"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/close.png",
+      "bytes": 14376,
+      "sha256": "751d4c4b00852fa0fbd153e4f89360c51a22192a2fd3df51f864658b4403923f"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/close.svg",
+      "bytes": 400,
+      "sha256": "026a61b97ae9c76662d1ae2ecd42029e0fa56cb61ce948bf4c2edc22c8b19103"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/copylink.svg",
+      "bytes": 381,
+      "sha256": "04fa1ee1894b458e4f6575293c0fcbbf8dcffc908c74aec0594260af68192a07"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/customise.svg",
+      "bytes": 1764,
+      "sha256": "95610614af94201e590e22571763538440afa11a8c3fb5f067c531ef0fa9e530"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/delete.svg",
+      "bytes": 339,
+      "sha256": "429b3f711367f4072e89cd670346471fc73b26e061283d114f17323cbc8f11ac"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/dropdown.png",
+      "bytes": 14243,
+      "sha256": "8918f835bb6c8404932020d8d1f09ea420801a800ebd840f16d4ed0170b3b09f"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/dropdown.svg",
+      "bytes": 343,
+      "sha256": "e2e2b9bdea6cc43937d3894b98df0c7207344fc9530c02aa896e75dcadc0daec"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/home.png",
+      "bytes": 14192,
+      "sha256": "e2d589bfab6e06e63cc676dc8dcb924808b9e7776230738678dde6364faae313"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/home.svg",
+      "bytes": 521,
+      "sha256": "1c4d1fe273ccaf209f31983a0f448f4800e95e88e6d5ffb1c3a695a1c1f607b5"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/kofi_symbol.png",
+      "bytes": 14033,
+      "sha256": "6b0f958d50f68c84e235473a151f9e365a02e5a9abae4de63048d5f1210c6637"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/maximise.svg",
+      "bytes": 193,
+      "sha256": "f608bf3e31c5fca36ff472f95932928ed20e1f6a6d89dc3683c6b3398090f0d3"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/maximize.png",
+      "bytes": 14080,
+      "sha256": "ee2c602cbc8ca68d8b6e8e0a7e744544d4613695eb0e8ea5095a355078578809"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/minimise.svg",
+      "bytes": 203,
+      "sha256": "450dbeda48d38f703b4c1ecbd3b17a70c0dd2b5ec1738d0f076bc60c77bd4b90"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/minimize.png",
+      "bytes": 14043,
+      "sha256": "e7861bdc5ba185c22f295408bda8cbf588b325b3ffd69bac43852d31dc8c38c4"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/pause.png",
+      "bytes": 14039,
+      "sha256": "1c25e339c453542fb3159ab102e22d7302bcc8ae6a253cdd44f2c26a1dc1fef7"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/pause.svg",
+      "bytes": 309,
+      "sha256": "2a3c86dc08ba30efbd4b9f021c1dd9ee7318be41541137e7069e17fc425a6446"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/performance.svg",
+      "bytes": 724,
+      "sha256": "d5e13ffdcf86e32d19e2c62db1b743aadaf50526378ee83034c1de6c24f70b97"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/personalize.png",
+      "bytes": 14126,
+      "sha256": "c3fea9fedd4f37f372f3dbe38928b4d7674709ae4cf9ef1451921b8457f1f983"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/play.png",
+      "bytes": 14261,
+      "sha256": "3c9c4ba3d8a9794005c9d31ddac7cb8a237c17f4939fdaadac935c8ff0b2f9f8"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/play.svg",
+      "bytes": 346,
+      "sha256": "99287ca034fc58d3eb984111c50fe2277505ba8e9f8e6b1aba8243b053dded1b"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/plus.svg",
+      "bytes": 327,
+      "sha256": "3fb969804f21bf7e3746d9a845a7eaed49d3c0c45c19ef70cd0f5d51de26128d"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/refresh.png",
+      "bytes": 14278,
+      "sha256": "101d18adaba7c478bcf65e6a39e27da545d6e4eb88a0aff43eda47d5f409c7c1"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/refresh.svg",
+      "bytes": 1888,
+      "sha256": "aa3b373577d10c4e4a2e695bca8a21875e0c4dfed52660c0ed5d581d5544554a"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/settings(general).png",
+      "bytes": 14219,
+      "sha256": "da070779137d109cbc175a0c8c64eecf4dac0277b01ae9fde90babdad20e04bf"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/settings.svg",
+      "bytes": 413,
+      "sha256": "52ec0340493277455b1f2e6a7e05dfdf0b05f0211b2728b1a8ad4633dd3acc9b"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/shortcuts.svg",
+      "bytes": 298,
+      "sha256": "f43ecb9b857fffc8cf2108f69e510f05e70910d63a448ffa849d453f981ffc8c"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/shutdown.png",
+      "bytes": 229,
+      "sha256": "964597788bd296f4843c7114b1e6af3899499c9eb3afa8da5a726180dca14bff"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/shutdown.svg",
+      "bytes": 345,
+      "sha256": "2aac6a5fadad6a25e866d6b7d214541f50da45fdbcd3804bf8a8291e45d82dad"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/sound.png",
+      "bytes": 14251,
+      "sha256": "d1b08687a69d0743fa1cfe39608e6931740fb2dd7d7469d4e24269a833b52b39"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/sound.svg",
+      "bytes": 548,
+      "sha256": "21107ee03ba994ac0f9f26808eef1e3f28268e4f7e4d983dae5c68c04c53d1c8"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/update.svg",
+      "bytes": 673,
+      "sha256": "1b3f9dd2f5741465d0790817f75f6ecec76815fc4f7e95df32f5590ad7f1a555"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/updates.png",
+      "bytes": 14170,
+      "sha256": "da8f7dadb9aa1ece5bfee82e1d5568e8506eef656153f591c4f33cb46b990032"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/upload.svg",
+      "bytes": 839,
+      "sha256": "2c6b59d1f061056228a1176766a8b71fabc7a52ccd2713dc6dbe0ca0a328619d"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/visuals.png",
+      "bytes": 14240,
+      "sha256": "e3176bb051eae62705e309248ca5320c037c0c218b9612dc2452c63fd3cbfd48"
+    },
+    {
+      "path": "FTHR_UI/assets/icons/visuals.svg",
+      "bytes": 521,
+      "sha256": "f0166a1ec71eb48db378114e2cbd57700f4f690dc1bea73909c3a94df55ee698"
+    },
+    {
+      "path": "FTHR_UI/assets/preview_desktop.png",
+      "bytes": 261756,
+      "sha256": "4ba07a6b9b478f63d4897952a2bc02e9bc23ace1de18470da58cbdabe24cda55"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/clip_captured.wav",
+      "bytes": 176914,
+      "sha256": "e0da4dd3382d3e91347c59796e904a775afbfb81ef3752defffbb9769bf2863b"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/error.wav",
+      "bytes": 176914,
+      "sha256": "4af4ae3d084043b0c3cb7bda6943ad3ff10444c67722ca48c616b3a0827297a0"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/screenshot_saved.wav",
+      "bytes": 176914,
+      "sha256": "80a3e9e313d6b825177eb5a82513c5907a81550d0d4d16e744f49ffb42356efb"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/startup.wav",
+      "bytes": 176914,
+      "sha256": "56a04ecc28578f8cd83adfb2f37f2fa7d68ad3a7d29cb0068b6ec4cc556d4152"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/upload_failed.wav",
+      "bytes": 176914,
+      "sha256": "8e99c82a31e66f85a86d97df68c5fc05b0601dafd566b3b15e29b84770b35f1c"
+    },
+    {
+      "path": "FTHR_UI/assets/sounds/upload_successful.wav",
+      "bytes": 176914,
+      "sha256": "9eb8a4605642b28663697bb8045434208aeb2198359d5c5ee2c236ed9bd62137"
+    },
+    {
+      "path": "FTHR_UI/core/__init__.py",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "FTHR_UI/core/alpha_capabilities.py",
+      "bytes": 1030,
+      "sha256": "0c45f78d8c2f51ff9d70432ffd6bc0053e7583131750e623e57a80b81f5b60a3"
+    },
+    {
+      "path": "FTHR_UI/core/audio_manifest.py",
+      "bytes": 10129,
+      "sha256": "cfb6aea342be9430c44633fff36eaea88cef5aebe6963367c5b9aca1f05418b5"
+    },
+    {
+      "path": "FTHR_UI/core/audio_mixer.py",
+      "bytes": 3178,
+      "sha256": "0a6aaa191a53089976c98f9465c50dec27c89bf96112a2444e98b314d72cf084"
+    },
+    {
+      "path": "FTHR_UI/core/av_sync_diagnostics.py",
+      "bytes": 5786,
+      "sha256": "f729c421bb017488a30993a1548f7c3e1fbd72469b4b8b726ac08c8a98991310"
+    },
+    {
+      "path": "FTHR_UI/core/camera_overlay.py",
+      "bytes": 4120,
+      "sha256": "56595bcd6e8cc9c25ddc5fa509392679dce9ac3efdf163e4e40da51f1510d62c"
+    },
+    {
+      "path": "FTHR_UI/core/camera_recorder.py",
+      "bytes": 13643,
+      "sha256": "d7eab0a16c028f6d9946704cfdc67d1e2d627826614895d974458c07b722ab01"
+    },
+    {
+      "path": "FTHR_UI/core/capture_bridge.py",
+      "bytes": 23252,
+      "sha256": "29baf1b8ed65da4e3f608ab85117e27427b378001162933691c21940321b86d5"
+    },
+    {
+      "path": "FTHR_UI/core/capture_card_watermark.py",
+      "bytes": 4147,
+      "sha256": "8c91e0e3742b82cecdfc85b707e7d45f66a291bdd2ea57a93aba3898d8b74141"
+    },
+    {
+      "path": "FTHR_UI/core/capture_health.py",
+      "bytes": 15097,
+      "sha256": "b57a284631293e7d01f1c2a820a3116ed0bd486a6d201870bca5b3e223c06780"
+    },
+    {
+      "path": "FTHR_UI/core/capture_settings.py",
+      "bytes": 4556,
+      "sha256": "e528655492510b9398c25139bf7c1b4afd2e7aac6ca8d68800f3271336f66f0e"
+    },
+    {
+      "path": "FTHR_UI/core/clip_files.py",
+      "bytes": 7676,
+      "sha256": "22d1f4e757263bb1e2b434225ee07125d03ef5dbd256577107e31822016571bc"
+    },
+    {
+      "path": "FTHR_UI/core/clip_grouping.py",
+      "bytes": 4145,
+      "sha256": "a8f033cf9869131ba64e861e785d6b29ffb840cc2eed3bfc2a57a143789a15e3"
+    },
+    {
+      "path": "FTHR_UI/core/clip_metadata_manager.py",
+      "bytes": 8674,
+      "sha256": "08295033729635f58d1d87156716da94d60ccc374906a800edc3e60b22bf50be"
+    },
+    {
+      "path": "FTHR_UI/core/clip_mutations.py",
+      "bytes": 2794,
+      "sha256": "e66265a1b760a8624ed125842e87fc8273d3b94ffe2c8d20d9ee92eebe8ffc9f"
+    },
+    {
+      "path": "FTHR_UI/core/clip_readiness.py",
+      "bytes": 4553,
+      "sha256": "5761acdaab349f750a6177b17a888e20b6649d8495cf879237b52caed31804a5"
+    },
+    {
+      "path": "FTHR_UI/core/combined_audio_policy.py",
+      "bytes": 4842,
+      "sha256": "680b4e057b6a6231bf026a463284b2c53003cb7e2c5d87a96760dc8d06c65a14"
+    },
+    {
+      "path": "FTHR_UI/core/compositor.py",
+      "bytes": 1774,
+      "sha256": "ad24f90903ec1aef72fdda572fff9af02185c66428c4595ba086275ae8d238c0"
+    },
+    {
+      "path": "FTHR_UI/core/diagnostics.py",
+      "bytes": 10039,
+      "sha256": "ef3c5690366fcea93b9c709daa739e9f1a2e52eac993e3afe9bf4d41308c608c"
+    },
+    {
+      "path": "FTHR_UI/core/encoder_capabilities.py",
+      "bytes": 11822,
+      "sha256": "fafb0af78063339fe30f60c1c4686cd7f1795d11784ecc9900c6873994d4c219"
+    },
+    {
+      "path": "FTHR_UI/core/engine_startup_diagnostics.py",
+      "bytes": 5555,
+      "sha256": "09054f7a03281bcf209d6ccb1e13787d6ae2a3d2e07e0e9c03f0b526c6271974"
+    },
+    {
+      "path": "FTHR_UI/core/error_codes.py",
+      "bytes": 5283,
+      "sha256": "9580c5c196fa0750f5181432022816b51fe33b97d1a469690d7a351b5b9e91e8"
+    },
+    {
+      "path": "FTHR_UI/core/error_recovery.py",
+      "bytes": 3577,
+      "sha256": "e219b33db476776a6640a982752d6d284fd8aa0f1ad5afb66b9ee448586d35bd"
+    },
+    {
+      "path": "FTHR_UI/core/export_encoding.py",
+      "bytes": 4486,
+      "sha256": "47fa4c0cabeb5c41597b2eef6aa6f27ffca854ac1c1105c7e76e590ba6bc010f"
+    },
+    {
+      "path": "FTHR_UI/core/export_lifecycle.py",
+      "bytes": 21037,
+      "sha256": "36dc21ffbbc2d1dae36ff3ec3ac4e76db6ff43dc4e249047850345842c53d924"
+    },
+    {
+      "path": "FTHR_UI/core/export_profiles.py",
+      "bytes": 21463,
+      "sha256": "56676b281288504c59bbbd1150461f3d97e1e56fd5bceaec02ee5965ac8fdfc0"
+    },
+    {
+      "path": "FTHR_UI/core/export_queue.py",
+      "bytes": 9421,
+      "sha256": "3274773cac897bef4de64a5fcf8a548b3a10f103d288c8e77817bbffb180d192"
+    },
+    {
+      "path": "FTHR_UI/core/ffmpeg_playback.py",
+      "bytes": 43565,
+      "sha256": "ba8a930fd6aa24e72c4c322d9b95b7dd604689fbf02c24daaaf456548c6851ed"
+    },
+    {
+      "path": "FTHR_UI/core/ffmpeg_tools.py",
+      "bytes": 10890,
+      "sha256": "dbada61c11369371f4537b2f0fbf602d36a9b9b54f1f5bf29eada72d464e7d8b"
+    },
+    {
+      "path": "FTHR_UI/core/field_diagnostics.py",
+      "bytes": 44501,
+      "sha256": "de3ca5bf91d42dbaffc589738506753dbdd207d543d8ad2bd6021f9a67b47197"
+    },
+    {
+      "path": "FTHR_UI/core/focus_monitor.py",
+      "bytes": 2493,
+      "sha256": "e72a2cd246f38c33ac73a09a4327a6fa2e6434a04a765bda0a2a5d08be951916"
+    },
+    {
+      "path": "FTHR_UI/core/game_detector.py",
+      "bytes": 35204,
+      "sha256": "9cd76ee050e9e1c78093b7c446e69d9096ac605791445a6af9a50a719f76519e"
+    },
+    {
+      "path": "FTHR_UI/core/gary_mode.py",
+      "bytes": 1719,
+      "sha256": "8092b4bca3d7b7c819b3043869b639d40fb6bf60a0dac83701768c05e56370bb"
+    },
+    {
+      "path": "FTHR_UI/core/hotkey_manager.py",
+      "bytes": 70241,
+      "sha256": "c6e5b2cd3a5566a63d84fd57833140deae08bc4a9a35a2c125fecfabaf22df1c"
+    },
+    {
+      "path": "FTHR_UI/core/instance_activation.py",
+      "bytes": 3314,
+      "sha256": "63d7f909c348892abda4b531e2e7d22aec00086b1a1c31288b316d25af55b501"
+    },
+    {
+      "path": "FTHR_UI/core/library_cache.py",
+      "bytes": 4051,
+      "sha256": "02349409ba5a24113edac68eec7db14bbfcd07746e1bbf44873456fff7dbf0cf"
+    },
+    {
+      "path": "FTHR_UI/core/library_index.py",
+      "bytes": 12478,
+      "sha256": "6fb169d89d612185fb881f36763ccca2a3906f7e5515d20b3119fcd34a0c09a6"
+    },
+    {
+      "path": "FTHR_UI/core/library_ownership.py",
+      "bytes": 2615,
+      "sha256": "d761298ba09d42e675448e100540231e3784203b83dcd69bb9b9c538ad7e6ecd"
+    },
+    {
+      "path": "FTHR_UI/core/linux_runtime.py",
+      "bytes": 6089,
+      "sha256": "e1990f99de92d7d017c795769766080066f90618b8350da7ee57d61731110e34"
+    },
+    {
+      "path": "FTHR_UI/core/linux_tools.py",
+      "bytes": 4031,
+      "sha256": "fd8482b349fe4bc10d0f33e4140e544cf99f0c1a2cf54261617e946aa071003e"
+    },
+    {
+      "path": "FTHR_UI/core/media_identity.py",
+      "bytes": 344,
+      "sha256": "bb84352b06d71e3de7401643b30fe9a54a44dba0efaedb56b71693ec8078dcfb"
+    },
+    {
+      "path": "FTHR_UI/core/media_metadata.py",
+      "bytes": 14908,
+      "sha256": "773c26c20711372bdbeb3251b835f15106fc755d987fdc0d75bfa05ee2acb9b6"
+    },
+    {
+      "path": "FTHR_UI/core/media_process.py",
+      "bytes": 8429,
+      "sha256": "32217ca211a2318d3d4e97644169860e14338ca15cd227fe43085a1bc42b8cd7"
+    },
+    {
+      "path": "FTHR_UI/core/mic_recorder.py",
+      "bytes": 9240,
+      "sha256": "847435b054dd5a379e3e6e0b27a5476c7ef1e8ec48fc4d90739abacabdf7ce9f"
+    },
+    {
+      "path": "FTHR_UI/core/navigation_bindings.py",
+      "bytes": 7456,
+      "sha256": "eb25b6b7729abae66fbcaf53fe7e62b8446e2064cfdbc96e1b65cab8619866e9"
+    },
+    {
+      "path": "FTHR_UI/core/playback_mix_model.py",
+      "bytes": 12212,
+      "sha256": "1c482ddd84cebd30a4a9a2edfb39d29b27d1df36eba4b19b561b4ec2baaf2119"
+    },
+    {
+      "path": "FTHR_UI/core/playback_proxy.py",
+      "bytes": 7537,
+      "sha256": "99a034a8229dc29d51406c1adb7e4da21dd0ea53513a2a86b7a138d5b9867ae3"
+    },
+    {
+      "path": "FTHR_UI/core/presets_manager.py",
+      "bytes": 2028,
+      "sha256": "06294d459af507bd8a00bd92ddc292aa6849da1968ee2c35857805dbba12bdda"
+    },
+    {
+      "path": "FTHR_UI/core/save_state.py",
+      "bytes": 14260,
+      "sha256": "f6f8e22c383ede9c1f7492430b8a77b8259237d181b4f559bbe9d5668a6f9332"
+    },
+    {
+      "path": "FTHR_UI/core/screenshot_save.py",
+      "bytes": 7505,
+      "sha256": "fbc0fc8de9bd9164f7a1714f4b17c9e7ebed0b4b37d98999751f27c18154ab5e"
+    },
+    {
+      "path": "FTHR_UI/core/screenshot_target.py",
+      "bytes": 3095,
+      "sha256": "8c529e5c0b2b4f02a13e2aa5df3a9fd7d3f254ad00189dfd6803f03c6a5b8d88"
+    },
+    {
+      "path": "FTHR_UI/core/settings_manager.py",
+      "bytes": 22727,
+      "sha256": "2e3d3ced690ab3fa409e884db925cbc93bd32698466fd06a01cecf89cad042b7"
+    },
+    {
+      "path": "FTHR_UI/core/single_instance.py",
+      "bytes": 6439,
+      "sha256": "64d93e6460a58faa7533d82e7cf47f264e5638bdda62b4774f30cdff2d0c6af5"
+    },
+    {
+      "path": "FTHR_UI/core/theme_manager.py",
+      "bytes": 28357,
+      "sha256": "76656e89d5a76fe1e48d7fd5f395dd71e8c05c475bc0b40dd3794af9563f993b"
+    },
+    {
+      "path": "FTHR_UI/core/third_party_keyboard.py",
+      "bytes": 27490,
+      "sha256": "b084e6beb2037b2538c5fc7c58580f8cdc172affa943b6ce21272a8e15e4c099"
+    },
+    {
+      "path": "FTHR_UI/core/transactional_output.py",
+      "bytes": 1018,
+      "sha256": "f7a5c3e43fe0f05ad8b56807bf0341012c70d94d4e6ae8e9d68371c79896eba6"
+    },
+    {
+      "path": "FTHR_UI/core/ui_performance.py",
+      "bytes": 2920,
+      "sha256": "440a098a2876657235795fac7d356098d5193d0579e8f2e302fad5f1e6772a57"
+    },
+    {
+      "path": "FTHR_UI/core/upload_manager.py",
+      "bytes": 40104,
+      "sha256": "1820f5aa13b44dd982197d663a16784ae80eecbcd590a53c83758d01421b4cf6"
+    },
+    {
+      "path": "FTHR_UI/core/uploader_bundle_manifest.py",
+      "bytes": 348,
+      "sha256": "7ba68af9f09cae737196cbac429b841a7608aedfe016e4efba506691a59ad695"
+    },
+    {
+      "path": "FTHR_UI/core/window_geometry.py",
+      "bytes": 7848,
+      "sha256": "ac204feed3d1473d2790085352a185efacc014c6282610b33b126e132b1cbda4"
+    },
+    {
+      "path": "FTHR_UI/core/window_preview.py",
+      "bytes": 25774,
+      "sha256": "699aa8fb9b9711b9d91de57e9173cea7088e091c207b4c15cf5860b63f7950be"
+    },
+    {
+      "path": "FTHR_UI/core/windows_autostart.py",
+      "bytes": 3584,
+      "sha256": "6537fbbdcb1c918d3583cfd09f33d7849203544039b6ca49e5079afc6bd8e66e"
+    },
+    {
+      "path": "FTHR_UI/core/windows_dpi.py",
+      "bytes": 5512,
+      "sha256": "da372a669786a95c89501adbdeddd2e3ea74f1eff23148d3c8df9977d6c85cb0"
+    },
+    {
+      "path": "FTHR_UI/core/windows_microphone_devices.py",
+      "bytes": 15650,
+      "sha256": "1f2849d54d8dbc79614a4b90194e8342e7e6963bb155925c3c798d5df928a9e7"
+    },
+    {
+      "path": "FTHR_UI/core/windows_monitor.py",
+      "bytes": 18128,
+      "sha256": "8f9843eba217e03560e24e5aba81e30910ce151a8ac3559949691f86e3acb1ba"
+    },
+    {
+      "path": "FTHR_UI/core/x11_monitor.py",
+      "bytes": 5806,
+      "sha256": "7de99f696a9061a28d8d205376f848797a2579ffa5a74197f758f0b8fcfd7c41"
+    },
+    {
+      "path": "FTHR_UI/main.py",
+      "bytes": 651164,
+      "sha256": "6998dabf3859bd41e60ef5f8494092214c94ad26a1d10361977874acf18b434a"
+    },
+    {
+      "path": "FTHR_UI/ui/__init__.py",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "FTHR_UI/ui/app_style.py",
+      "bytes": 2790,
+      "sha256": "ba67340ffd76c4cfeedd5f570d1e3cd3c3b7681373cc88a45098f80a84b900a3"
+    },
+    {
+      "path": "FTHR_UI/ui/basic_clip_viewer.py",
+      "bytes": 3177,
+      "sha256": "64d184fc0d06d2d5cf659d85552ff81ed702516c85edf668cfc9bdfa5b99c2d9"
+    },
+    {
+      "path": "FTHR_UI/ui/camera_overlay_editor.py",
+      "bytes": 29728,
+      "sha256": "35741eb141e047796c6239bc1dacbe8100bfd4a0ebe9d0b27a6aacafcffc61a7"
+    },
+    {
+      "path": "FTHR_UI/ui/capture_card.py",
+      "bytes": 23633,
+      "sha256": "c2a3cfb222ae6540130195610c42362608948ed854651dd89f0e5882157a7b76"
+    },
+    {
+      "path": "FTHR_UI/ui/capture_card_client.py",
+      "bytes": 8750,
+      "sha256": "4f42e93bb4520ec8832a00fe60332149dc54d3fe09718cdc55af108567dc5ebb"
+    },
+    {
+      "path": "FTHR_UI/ui/capture_card_process.py",
+      "bytes": 4362,
+      "sha256": "237d17ecee74f765e3149c76ab70f214b8a3feca5e37d7db1c497969af71ef66"
+    },
+    {
+      "path": "FTHR_UI/ui/capture_settings_widget.py",
+      "bytes": 36509,
+      "sha256": "9cae454db587363548e76557bab74aaeb0f93570a4e83df81912d55cb9199b83"
+    },
+    {
+      "path": "FTHR_UI/ui/clip_editor_window.py",
+      "bytes": 8567,
+      "sha256": "25befab4245a531652c4508c2d7b7b2f2f095b47cfe3f914a275e5a56fb695a3"
+    },
+    {
+      "path": "FTHR_UI/ui/clip_grid.py",
+      "bytes": 151984,
+      "sha256": "22f5bea445ce3fbfb37b14ee374d775bad1f079fab621ed2a7d39595a0c4c369"
+    },
+    {
+      "path": "FTHR_UI/ui/clip_viewer.py",
+      "bytes": 406564,
+      "sha256": "6277ff04bbe989335d12109797ec8445de11a041f6b87935e2892702eab101ef"
+    },
+    {
+      "path": "FTHR_UI/ui/customize_page.py",
+      "bytes": 84598,
+      "sha256": "e4fd5f5bae05270b545cb5df11b9142d68304cc13266d7ebdf62cdb3b5e50c62"
+    },
+    {
+      "path": "FTHR_UI/ui/diagnostic_report.py",
+      "bytes": 3554,
+      "sha256": "ee9e1a23ebc7ea98c62cef2e6ca2a688a243c882312a8ba24ac13a09d6d8fe9e"
+    },
+    {
+      "path": "FTHR_UI/ui/dialogs.py",
+      "bytes": 10899,
+      "sha256": "a2926cdce4a66f32d00e75d4bc9787392525494f496c92c7b40d8e35435388bf"
+    },
+    {
+      "path": "FTHR_UI/ui/editor_sessions.py",
+      "bytes": 358,
+      "sha256": "3d93643e6dbe936ea25180bc1e33790ab7c0098092061c7054847d9dc2fa21d1"
+    },
+    {
+      "path": "FTHR_UI/ui/error_bar.py",
+      "bytes": 9231,
+      "sha256": "b70e4fbf379c4a8cb248756b37c0cddb52b87a15173a1f2f686a2afe58e2898a"
+    },
+    {
+      "path": "FTHR_UI/ui/export_jobs.py",
+      "bytes": 6930,
+      "sha256": "acb3e272dfd57f09106b7ef611b8a26847c19f55328ea7e337659894299989c5"
+    },
+    {
+      "path": "FTHR_UI/ui/export_presets_widget.py",
+      "bytes": 13572,
+      "sha256": "b4a754102d6251ab0c3a4beae73565916491043ec967f831299cfdecc75b6d11"
+    },
+    {
+      "path": "FTHR_UI/ui/frameless_window_linux.py",
+      "bytes": 4559,
+      "sha256": "3fc01f1c0396c5d8c30dd126b7b998c656ca8f826f11910419cb961a49c1b8f2"
+    },
+    {
+      "path": "FTHR_UI/ui/frameless_window_windows.py",
+      "bytes": 8434,
+      "sha256": "f22d10b78b53d3946c39fadf7ceb20048cc17304d4f8c4209d52a4de95f9af0c"
+    },
+    {
+      "path": "FTHR_UI/ui/game_crop_dialog.py",
+      "bytes": 8464,
+      "sha256": "c464377b4051a3602c27aaf070318d220200fa8bb58049f117dc971d7938ba50"
+    },
+    {
+      "path": "FTHR_UI/ui/gary_overlay.py",
+      "bytes": 4536,
+      "sha256": "4febef58390abd293bedcfe005afdedbb303a051137ced1d2aa7fbbd8b7187cc"
+    },
+    {
+      "path": "FTHR_UI/ui/hover_transition.py",
+      "bytes": 6912,
+      "sha256": "9f3c343a3fd5c7b835c46abe4c459e0cc59214166e07fa623cb342d3a1d6dee9"
+    },
+    {
+      "path": "FTHR_UI/ui/icons.py",
+      "bytes": 4587,
+      "sha256": "66c60cd45aaa82eab19781f53ee2031b78bdbdc7057a7703ca30999ddd5a7836"
+    },
+    {
+      "path": "FTHR_UI/ui/image_memory.py",
+      "bytes": 3752,
+      "sha256": "6932110dd63c5d72e4535cb893078b27d51a55baf00b0d6bf1d90e5eddafb5b3"
+    },
+    {
+      "path": "FTHR_UI/ui/keyboard_navigation.py",
+      "bytes": 15663,
+      "sha256": "74c1e92043670ccd4682e3a480cf73e560c4c6eabddfb58f5740d5bd37da48a1"
+    },
+    {
+      "path": "FTHR_UI/ui/keyboard_overlay_preview.py",
+      "bytes": 5421,
+      "sha256": "20041e80aff0b5132ca4c9981662b5ae1322c5cb6154fa888539b39f0238d6be"
+    },
+    {
+      "path": "FTHR_UI/ui/motion.py",
+      "bytes": 2239,
+      "sha256": "696b6a29759b8e971b5e23a48487a7da5eca28c55325255524a30e6bd795fd20"
+    },
+    {
+      "path": "FTHR_UI/ui/qml/color.frag",
+      "bytes": 1781,
+      "sha256": "ac84e717703f93baf98cc8cad0e342fcd9ce1195b56a12b95136f4e09ee0d519"
+    },
+    {
+      "path": "FTHR_UI/ui/qml/color.frag.qsb",
+      "bytes": 4866,
+      "sha256": "b22b51d2270219755541d43110a7e5bf412674b7ded63e1ffdc6913e791c75f8"
+    },
+    {
+      "path": "FTHR_UI/ui/qml/README.md",
+      "bytes": 1771,
+      "sha256": "f2efdcc1126e2edc8ce95ba68d99887dbe4c9090f1995d8e4611c04eb36e4f9a"
+    },
+    {
+      "path": "FTHR_UI/ui/qml/Snapshot.qml",
+      "bytes": 1349,
+      "sha256": "a6c9425e9e02804929d062cf215a64b876c73a4c3588e6cbcb743a9804d2ca81"
+    },
+    {
+      "path": "FTHR_UI/ui/qml/VideoPreview.qml",
+      "bytes": 3397,
+      "sha256": "0e6e6c14dbb3ba95556715e9220f1ed1e0c05b07ed1f784ab91df60ac1810153"
+    },
+    {
+      "path": "FTHR_UI/ui/quick_snapshot.py",
+      "bytes": 4846,
+      "sha256": "710879ae5fbc06c69153498a1ad1acfd86cb12fb7696e1c478bb23d06099ca45"
+    },
+    {
+      "path": "FTHR_UI/ui/quick_video_preview.py",
+      "bytes": 4185,
+      "sha256": "86521bf7ff08db6d63c854e0c27b08f6a660c8b43df96002a6519dc9d45f372b"
+    },
+    {
+      "path": "FTHR_UI/ui/screenshot_editor.py",
+      "bytes": 12239,
+      "sha256": "a91714c3fd99a6edb04ad6849b31c943e9b92d5e5169fe0bf940ede01bbced51"
+    },
+    {
+      "path": "FTHR_UI/ui/shell_transitions.py",
+      "bytes": 12250,
+      "sha256": "041f5483f4052d89d7d428c5245475a7d817f1ce8bdbf75fff6549566b00b136"
+    },
+    {
+      "path": "FTHR_UI/ui/smooth_scroll_area.py",
+      "bytes": 3287,
+      "sha256": "bd9c4858807b26c80ae174894474d1da902566abb21a26903c97a9d21738c4ac"
+    },
+    {
+      "path": "FTHR_UI/ui/sound_playback.py",
+      "bytes": 7137,
+      "sha256": "5f4e2a1eb57f74fafc0211d937efed71e9256020b54a71410dc82a415d8a707b"
+    },
+    {
+      "path": "FTHR_UI/ui/style.py",
+      "bytes": 24093,
+      "sha256": "0dd4655621dac78a66226d5aea34f27f2c0fade9ae8905f7589d4a2a39568323"
+    },
+    {
+      "path": "FTHR_UI/ui/timeline_segments.py",
+      "bytes": 3198,
+      "sha256": "9b4d63c10bc9df3aaf1dd573816959453a498ace05dde90e4c2759f188adbec3"
+    },
+    {
+      "path": "FTHR_UI/ui/upload_settings_widget.py",
+      "bytes": 35462,
+      "sha256": "f2b46c940d1ded14fb7f027575686eb387fba890dd56f06a9f8d040afb92cd5d"
+    },
+    {
+      "path": "FTHR_UI/ui/window_preview.py",
+      "bytes": 15018,
+      "sha256": "f3383240f7e6c4b52d678f6810af6dea0ce19053557f8d2990b812bb478bdb73"
+    },
+    {
+      "path": "FTHR_UI/version.py",
+      "bytes": 1523,
+      "sha256": "aab9cf0d4642ec752dbb078950c35d85ab0af0b8f58470d040f42e120d793d0c"
+    },
+    {
+      "path": "FTHR_Uploader/fthr_upload_api.py",
+      "bytes": 6621,
+      "sha256": "ba5f1eda44087ab484f12f840accd5cc978b8afef1f7270d80a525badcbd61e0"
+    },
+    {
+      "path": "FTHR_Uploader/hardware_identity_client.py",
+      "bytes": 3384,
+      "sha256": "d495d4517d0c7112eab860d2bc25b17586dc08f581e348ac23b1fe5e675c2ca7"
+    },
+    {
+      "path": "FTHR_Uploader/PRIVACY_POLICY.txt",
+      "bytes": 2232,
+      "sha256": "fc2be0afdb1e399b8ac83a1e0048d3940a8c9ad0d99c93ea63ab1f683a3575d2"
+    },
+    {
+      "path": "FTHR_Uploader/sftp_provider.py",
+      "bytes": 11736,
+      "sha256": "0fec50bd85a80308e64ed9d9ed859d44af81e802e0d9a86ce677a5968e1bed6c"
+    },
+    {
+      "path": "FTHR_Uploader/TERMS_OF_SERVICE.txt",
+      "bytes": 1488,
+      "sha256": "28d084024ceca668b7e8b457f40cead0a153c88b08fc8e7f0fa9a71ce427d105"
+    },
+    {
+      "path": "FTHR_Uploader/upload_runtime.py",
+      "bytes": 11252,
+      "sha256": "5f19c8be1b62317ee4d754c2a92fd63935b5fefe6f6ccbdeaa1da0fc2d77b88d"
+    },
+    {
+      "path": "FTHR_Uploader/uploader_service.py",
+      "bytes": 6238,
+      "sha256": "b7bf27e852a7f0c213d82cddfb944ebedaba2ff6b1a6d5d0c43e28502437ac3b"
+    },
+    {
+      "path": "FTHRcapture/FTHRcapture.sln",
+      "bytes": 2546,
+      "sha256": "28ee2e2c2c88605ba4d9bd098d24e4b846bb0800c436c7050aaf5e10df4530f9"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/FTHRclips.vcxproj",
+      "bytes": 12104,
+      "sha256": "fcbf6ac37d00fe5fe491c460baeb73c40c390f0d5f3b47fa49f5ce2980b9e126"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/FTHRclips.vcxproj.filters",
+      "bytes": 6875,
+      "sha256": "3dee1de57adb66ede196b3111fe6fa4f7123e3daf1022d3abbbf197c6839aad6"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/audio_capture.h",
+      "bytes": 12082,
+      "sha256": "6bd609e574a6127ef679ed54a9ca994977400ccfb9d3e6d8bae3260abc87bd60"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/audio_continuity_metrics.h",
+      "bytes": 7335,
+      "sha256": "ce01e4cfdaa0a772d8918bed88a3cbed3bd7734fc669131d100179889f450b09"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/audio_encoder.h",
+      "bytes": 4154,
+      "sha256": "f0076e5b49df26d2f44eb505963641cfbbe4b38e6f029942fa4b9ecac268a644"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/audio_format_converter.h",
+      "bytes": 3116,
+      "sha256": "be85bce01d1cf5b0cc126fabb46a80244938b1fd8e0893fc2842a2001094be42"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/audio_packet_ring.h",
+      "bytes": 2184,
+      "sha256": "39512aa4171f143cf1fa601b31ce8c1e050a89bd623d4389f18e5aff22f328bb"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/audio_ring_buffer.h",
+      "bytes": 3821,
+      "sha256": "3514a37ee7492acb48c551c411fb8d5ff0fed7e6665a35d0121291e1f95febbd"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/audio_signal_metrics.h",
+      "bytes": 9612,
+      "sha256": "22888f073a89626f650f5584b589ed9c631899d29aeda4576015e8e38edd90ef"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/audio_source_model.h",
+      "bytes": 5941,
+      "sha256": "b74ac38b27f0e5047074dfbcaad33f6deeb35260dc836adabf6f53a32f2f82db"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/audio_timeline.h",
+      "bytes": 10499,
+      "sha256": "bce8a906b2d3442ce64887f322240097f38488fbddc0b5b15b28e6bd4a90d7ec"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/capture_engine.h",
+      "bytes": 20675,
+      "sha256": "59ec9101897755607d8ce132751fd3fed23340a7f8e2eba0e0a7d009631bdb6f"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/capture_focus_policy.h",
+      "bytes": 1127,
+      "sha256": "35429fb6cbb6340c85b603500b7dec670969cd0ba893f66ab58abd40b8cf6ff0"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/capture_scale_geometry.h",
+      "bytes": 3328,
+      "sha256": "fa6f4f0672e9b50c464269a678c0f2fd050f12831a47a17d472c544032692f5b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/clip_audio_manifest.h",
+      "bytes": 1376,
+      "sha256": "cd094464321c47a921a3a4e626e31b3a0e7b9808e0c708ad31f5670b067c32e4"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/continuous_recording_writer.h",
+      "bytes": 3427,
+      "sha256": "58a1a3cd9031c925742c2f97a622455bb1c13a362b4d8e73600c17997679e746"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/dxgi_replay_cadence.h",
+      "bytes": 12460,
+      "sha256": "7b6bedc4629f9f81ae5e5d62e56a3eec0db4cf5cd53f32e044042ae4c433a409"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/encoded_replay_health.h",
+      "bytes": 1946,
+      "sha256": "ee00d328c40b5629f89f6737167b7da52676ab64aa7189a476b43a2ff6584ff5"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/encoded_ring_buffer.h",
+      "bytes": 8653,
+      "sha256": "6fc65ec119fe919e8ba97b546a2307d2ed64b85d916c134893a3826231d74425"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/encoded_video_config.h",
+      "bytes": 2697,
+      "sha256": "80e3bf55aa8dee61847195696485494c555486d8ddd5310db4c66653fcf1a756"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/encoded_video_config_ffmpeg.h",
+      "bytes": 1202,
+      "sha256": "60129b282ff56c80b70906bb57b68cc12285c3305e66c829bc5d5d586c087afc"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/ffmpeg_amf_replay_encoder.h",
+      "bytes": 5893,
+      "sha256": "d05e99720223c46810af514ea092156b7fffcdfbb47625262e4cb319d0d930ec"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/ffmpeg_qsv_replay_encoder.h",
+      "bytes": 4813,
+      "sha256": "bd0bf41ef55e3727981b2ef2bc54537385a303057fae2812513657678d2f50a3"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/frame_rate_scheduler.h",
+      "bytes": 1661,
+      "sha256": "81f32117e2ccc3ab39b0f00500fcedf66ae9b614939b4afd6ab6bc164f0671d1"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/hardware_encoder.h",
+      "bytes": 11997,
+      "sha256": "68374bc62585b6f9588ae7a64fe56f30267a1e2a1996454ffcbf25224453dd3f"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/nvenc/nvEncodeAPI.h",
+      "bytes": 311753,
+      "sha256": "5d561b00524a81f08e7414a83335f1efc989e70a6bc9374eb9b33343352cca83"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/nvenc_codec_config.h",
+      "bytes": 1374,
+      "sha256": "0d31dd7de899e38815d8a63260eeee18a201ce0de7e311de328f890f6a2e7b21"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/nvenc_input_lifecycle.h",
+      "bytes": 2673,
+      "sha256": "ff6737785ab7e829d747bf67b4074ff1a3b18f5c57ed8f4ece56fb47422f9fbe"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/packet_buffer_pool.h",
+      "bytes": 4659,
+      "sha256": "128845914567fd80b7e2fd7b21a2c7eec697660fe7e611895915861b3f773f2f"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/replay_encoder.h",
+      "bytes": 13323,
+      "sha256": "84fc8e5365c3429d07d91fdaeac16b510cf953064c051bda98f1917ff25949e1"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/save_clip_task.h",
+      "bytes": 5207,
+      "sha256": "4a60e6b0f1f046d53333e1bb285d08d56ebc89927b287b64e6357515b774f012"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/shared_memory.h",
+      "bytes": 7787,
+      "sha256": "3396ced98314c02064a98533b487370307d55ae3a2ed80d77d347d340d97392b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/software_replay_encoder.h",
+      "bytes": 1908,
+      "sha256": "fcd01524b4efc6ef4ecb6910a127693df1972cc30fd386cf86ad7830b656c2c4"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/video_encoder.h",
+      "bytes": 7323,
+      "sha256": "6ee2d024b6cc36018e371f14a2993a8ba1bb2f9c0240fe4a1766a80f1d9e7fd7"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/wgc_cadence_wait.h",
+      "bytes": 3345,
+      "sha256": "b81f05b42b3dd904707220bfeaa12b53d8542e10fb9f7e513dea329a247d923c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/wgc_frame_lease.h",
+      "bytes": 733,
+      "sha256": "b6f51c8ef2115715769337911ad4dceafdf3989a63dac1bf4775d0b290841643"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/windows_audio_session_registry.h",
+      "bytes": 4349,
+      "sha256": "851b00dba1b32ac8380335c0121ae7f355501c1f1368efe8c4c05796574706a4"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/windows_capture_backend_policy.h",
+      "bytes": 4297,
+      "sha256": "b3b95b66accaeb76b5626b039848fd0c9970253d48573cf104470a2cd9b9d6e2"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/windows_capture_border_policy.h",
+      "bytes": 1272,
+      "sha256": "665c518b90f34a460ce739cce78b6f0a5fbf7d3869c6e0f23d32f5f1097cb207"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/windows_dxgi_recovery.h",
+      "bytes": 14013,
+      "sha256": "e74c58e7894c8cb5696a89c420647bd56af5926a95c7e1badbdde87d2a06133b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/windows_microphone_audio_provider.h",
+      "bytes": 6882,
+      "sha256": "0d2ff188a4827a061b3be850316385a143d237a3939808d8c1788a3e90839fc9"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/windows_monitor_resolver.h",
+      "bytes": 5164,
+      "sha256": "57648c55c772a5f326704a63a1201211fe9c2cc83793958745d19a3813cafb20"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/windows_native_error.h",
+      "bytes": 5222,
+      "sha256": "89b4492b7ef0676d969173994e4fcaa5d9379236f88015a8567f7b444d126229"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/windows_process_loopback_audio_provider.h",
+      "bytes": 8859,
+      "sha256": "8306b676f445b66f7fb00283a6f72618542fd72245c1fb59bcb27e343110c12c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/audio_capture.cpp",
+      "bytes": 35633,
+      "sha256": "32403078e925e8efebcf58edfeb1ef9765ab9545609260646aeddbd0e291fcc6"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/audio_encoder.cpp",
+      "bytes": 11744,
+      "sha256": "c689cba7dd21888023acc86c3fe2e4c947143a77435c8a2e2cb6e95244ae9325"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/audio_format_converter.cpp",
+      "bytes": 14880,
+      "sha256": "e2909d0dd5f6059bccbdca4133f5dc7901315b1e824f414c69a9c4c13f28950d"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/audio_packet_ring.cpp",
+      "bytes": 3157,
+      "sha256": "e3411b177ffa46b5c9a4923f3e19c8e1c4d11a5c229ba02cbcc095a21c642a45"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/audio_ring_buffer.cpp",
+      "bytes": 5489,
+      "sha256": "37421bfdfd5c62727a431b742c8a02fa1cd094f251e3607fef7e4cafa7ceb3e3"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/audio_source_model.cpp",
+      "bytes": 10053,
+      "sha256": "2e15ff09da7187ea6c058be40f5335e54ebdde535347a29186b6be86b5e2819d"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/audio_timeline.cpp",
+      "bytes": 22116,
+      "sha256": "af40c28d59277d52a689b071c868d629eaba6a83d391f71748e79c543e22a727"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/capture_engine.cpp",
+      "bytes": 369371,
+      "sha256": "ee11bd0356ac74a3630d97a8c549efcd434819c18bd507e3bc56e05c2510749a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/clip_audio_manifest.cpp",
+      "bytes": 9900,
+      "sha256": "d3a33d1542e1968e47af6ca45c8863b7a93a4f2ca20c0043a10081b720a82723"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/continuous_recording_writer.cpp",
+      "bytes": 15291,
+      "sha256": "ba6ade6f3b10bdd51cf60d826529216785cf5076a27a1232df435519c3acdd6a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/encoded_ring_buffer.cpp",
+      "bytes": 17500,
+      "sha256": "5da63d4e0ede88564e85f7e76e14de99a61b7286aa20d3a7a615adc666095f96"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/encoded_video_config.cpp",
+      "bytes": 3473,
+      "sha256": "ad1d9ef9a94cf8e5ca1f9f03ab76e39af40f07637540ab876bccdc5f957a78a7"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/ffmpeg_amf_replay_encoder.cpp",
+      "bytes": 51229,
+      "sha256": "c22bf26ecf494043d44307f1d294c2bd9f1c09bada04bc9a99e4a2a252bf0088"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/ffmpeg_qsv_replay_encoder.cpp",
+      "bytes": 47717,
+      "sha256": "8c2e49201c958fff40ba8a56653dcf9affeaaacdcfdcd11f17b8b8efbafe698f"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/hardware_encoder.cpp",
+      "bytes": 93739,
+      "sha256": "a8b03dab24dab5fb57fd71b4b04d75c0bad49a9857cad302f15934032319a040"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/main.cpp",
+      "bytes": 25208,
+      "sha256": "9f2ca7e3797872f9c1644c327bd02b83c30593b696620300cbda17c18f88afba"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/nvenc_codec_config.cpp",
+      "bytes": 6721,
+      "sha256": "46d161cdd13ff84f8e3e6f2bdd424045db3ddf7a6a2a7c46154fdc40b5353cf5"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/packet_buffer_pool.cpp",
+      "bytes": 4276,
+      "sha256": "0caf7f3a105566588058f3a582ec335ce587faccfb5bff1eb078c99bae89be50"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/replay_encoder_factory.cpp",
+      "bytes": 959,
+      "sha256": "d96d1d83d8f95b15b7715ebbaa1a890bfa818f82a292098cd99b81f6a4d5064f"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/replay_encoder_policy.cpp",
+      "bytes": 4876,
+      "sha256": "819be796c1e1e0ddb9ab4d4217e29626d4180eaafd792833364b21c95730076e"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/save_clip_task.cpp",
+      "bytes": 3718,
+      "sha256": "2ca0d4a4a81ff0f841594a33828b73f28e68a4886cab5c7621c9e73602ad7816"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/shared_memory.cpp",
+      "bytes": 1266,
+      "sha256": "57b36058b7773c41e2ebf28d869e8166a7aadec3f814c0a450f24a7836f77c3d"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/software_replay_encoder.cpp",
+      "bytes": 12353,
+      "sha256": "973bc0d4361698bec9c4270eaf509c50e25b46f34572819445c8523b533532d2"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/video_encoder.cpp",
+      "bytes": 32874,
+      "sha256": "c48a73b815066bc3d6afa46add9278cb468c86b4f05761a5729e681663638845"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/windows_audio_session_registry.cpp",
+      "bytes": 22992,
+      "sha256": "59b53a589dcd5d58ac637ae0e89d63185d993570cd290038077787f9f60f94db"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/windows_capture_border_policy.cpp",
+      "bytes": 2221,
+      "sha256": "11dde895fb005e2c71286872a9328b42edb42b20aa7bada7fa7e5f58d2f179aa"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/windows_microphone_audio_provider.cpp",
+      "bytes": 39036,
+      "sha256": "85330eb9526e00400a260d013f8b00c85b03f30e3b0e081f98962ccbffc726e9"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/windows_monitor_resolver.cpp",
+      "bytes": 21709,
+      "sha256": "6681fb9901782af44fa910fb3adefb4a704ff1a3c650d82c0b907a3556832263"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/src/windows_process_loopback_audio_provider.cpp",
+      "bytes": 59982,
+      "sha256": "30de0ed5a703ace1e726ba74305afdb60f0209b917f60333b2d60879a290d1ed"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/ac3_parser.h",
+      "bytes": 1207,
+      "sha256": "200c6d2e96975196e8ba5f5716223dc9dda999d51578dabce2fca93175a05252"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/adts_parser.h",
+      "bytes": 1354,
+      "sha256": "d466583a8dc1260b015e588adbe3abd45f3f8ca0e43722f3088b472e80492a15"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/avcodec.h",
+      "bytes": 109840,
+      "sha256": "909f5c2fe7caf26601c39cd96acbc6f58f49ec5a78914d2e5b524a3fc2571afc"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/avdct.h",
+      "bytes": 2726,
+      "sha256": "7c125edc1985ec078f99abb1c9044c4fc76b06a03eb02c026cb968fb9d41fcca"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/bsf.h",
+      "bytes": 11540,
+      "sha256": "cc26676aa44638fa5cbef953d967e19e2084b46aaa100f0a35ba2d34b302301c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/codec.h",
+      "bytes": 12641,
+      "sha256": "b1c1afa2310c509b95845d526fbd1ec8f5f7130e4ade5920d2d8848ac6e58a13"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/codec_desc.h",
+      "bytes": 4264,
+      "sha256": "d1fc6e89a3a7e49e61893620e00256d4f00db994764435ebe159b46a3c4326b5"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/codec_id.h",
+      "bytes": 18674,
+      "sha256": "2d9599fdcf5edc3330040120cab459a543eec17555f779da52c24f163219bbe6"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/codec_par.h",
+      "bytes": 7839,
+      "sha256": "0eb8dc13be7116fa5388116ab9a6905c91eb687c9a6f473b055f4e81a46f9f26"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/d3d11va.h",
+      "bytes": 2610,
+      "sha256": "0a5b324124f3dd67942bac8d8288aba152215fb0ef2dede40d492198e0989346"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/defs.h",
+      "bytes": 13333,
+      "sha256": "f1d391ac2417702b59b7a4b6ae3927eea8c8b5e9858ae9ade6fdd009a60bd9ce"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/dirac.h",
+      "bytes": 4126,
+      "sha256": "09fd1f670422ee61713568abd90fdf371b30e6fe35bc6fb8213f1ad32b45cf56"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/dv_profile.h",
+      "bytes": 3694,
+      "sha256": "19f59e0b20ac583de4bfd76d18889d334bf0b6cdf7b5356723a33f3874738466"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/dxva2.h",
+      "bytes": 2128,
+      "sha256": "3a603c2cf8bc00d0c9df6cc80a5f0ed091d48d20303713baac1c7e432619f0bb"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/exif.h",
+      "bytes": 7584,
+      "sha256": "5c2c970d3863adc8716b38c0f5783e236cc5addabdd8b501f99a3b9b80ddb181"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/jni.h",
+      "bytes": 2263,
+      "sha256": "f98405ffb7ba26665cde92daef33bc4371c91aa6c85b522b36864ed289600ebc"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/mediacodec.h",
+      "bytes": 3570,
+      "sha256": "1f64544000dd2f2ec94604d5fcf7c2a6d26d32d085264356084a4b53a7f0c3f0"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/packet.h",
+      "bytes": 32343,
+      "sha256": "96b17565536b27251918cdec0776e5200b0cdf2e42d9276024d9f831bfc30cf6"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/qsv.h",
+      "bytes": 3844,
+      "sha256": "e45780237ab0e9ea9ec11aab9f62dfb8b059138f846632ecacdc024db16dfb1b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/smpte_436m.h",
+      "bytes": 11580,
+      "sha256": "6e5a93aad21b7c098fb8ac5d1e4ba469887f8cfce0eb21762b35c2fd1097f2a8"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/vdpau.h",
+      "bytes": 4555,
+      "sha256": "014ec822b00aa33305d503ea128c04287e7d1265194fda3a91cc00cd2a763272"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/version.h",
+      "bytes": 1619,
+      "sha256": "61f149cce5f51d2005e584565d2051f11176d6e5d025c97bb0c5dabfb8291ac2"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/version_major.h",
+      "bytes": 2356,
+      "sha256": "b70daf8ad1fbf8c6d1658b79a223119b7a788c9637e4fb6446e98ba8114bdd58"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/videotoolbox.h",
+      "bytes": 2445,
+      "sha256": "b182be72a4404f99dc761680193f647c47c2a792ab50d975f6d8b75984c6f5b9"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavcodec/vorbis_parser.h",
+      "bytes": 2285,
+      "sha256": "57077b2e1d28d42636cab0f69e4b92b1ad64ac2eaa2843c270a6afaf308a76ae"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavdevice/avdevice.h",
+      "bytes": 13506,
+      "sha256": "a4d649615eeab8d4c2cf882a6dd06be4a95f74a1f6cf18d6ea819186c2d60ac3"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavdevice/version.h",
+      "bytes": 1624,
+      "sha256": "9d03a0c951b30f542080ba3e3ff200c2241b29d33a657b709e8ba9f76cc536e3"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavdevice/version_major.h",
+      "bytes": 1263,
+      "sha256": "23f24a56925e7bc6c73f18300a42374286204d4b65cb06d6ce8ce07361ad7205"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavfilter/avfilter.h",
+      "bytes": 46200,
+      "sha256": "3d92e8c001afa2c18f38aea61cfbb0e9cd03b6005a33afbd9814a7893f1b2369"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavfilter/buffersink.h",
+      "bytes": 6979,
+      "sha256": "72c8ae2993837c280cfdf176db13cf7dfaec6b0aec3fb81a899037083c62e2be"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavfilter/buffersrc.h",
+      "bytes": 7212,
+      "sha256": "98249b5e22966b84bc9116441432bc1c015f187c16329d994b5aa0395055ecf9"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavfilter/version.h",
+      "bytes": 1653,
+      "sha256": "cf8f77b6595ca8d15c07a86862e05c425dd5472493b9cc03d5218a6b20b7cf7e"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavfilter/version_major.h",
+      "bytes": 1416,
+      "sha256": "380fc564ce0000212b0861bfc012166dd08d5564d82c31405cfd6609075ed5f8"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavformat/avformat.h",
+      "bytes": 118360,
+      "sha256": "a92ad4e9ae2866fb5bb409a30dda8162e253f77e9250fd3057c09f60e3059cbe"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavformat/avio.h",
+      "bytes": 31178,
+      "sha256": "30312971fc299e65bc69cf1beddb76f50394e044d9c71fe32fec3ae9c13bd1af"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavformat/version.h",
+      "bytes": 1652,
+      "sha256": "43c69df3cb9e2e1788adf14c9467b72a33dff78384264f7be0dbb7cd52353706"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavformat/version_major.h",
+      "bytes": 1876,
+      "sha256": "3dde828335345cf56d654fcae728c0fdeb66da23774556d5fed8b09a1fb1a9fc"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/adler32.h",
+      "bytes": 1696,
+      "sha256": "f21a861957bf4b1812ed67fdc528890f9cff1bb483facf0f5109e4a51932fe3b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/aes.h",
+      "bytes": 1912,
+      "sha256": "0a86ebeaf9ed33548bf0f92359f7047e521d4d80fe6b0ef1c8ef9505e38b6d28"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/aes_ctr.h",
+      "bytes": 2443,
+      "sha256": "fbbb94888bfab2ea7141e7e1afa5872de099e7ee57baea17632c3d4fdd2cba3f"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/ambient_viewing_environment.h",
+      "bytes": 2585,
+      "sha256": "00135de08089f8c711bb113588f80575a1d26e86d50b6dac5928a27a0ff9a8c7"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/attributes.h",
+      "bytes": 6410,
+      "sha256": "0d3c996c473cc9576ed818332ee3ee65eb057afb4654d91678841cfde78b34ba"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/audio_fifo.h",
+      "bytes": 5966,
+      "sha256": "3c513ca46927346c0673cd9db302afe62dbbf976844f36da0307fd10f7f47bfd"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/avassert.h",
+      "bytes": 4015,
+      "sha256": "986182bd395e6559ec1a20243e540018ac99a64f1cd148f203ab6fbc4878f3ac"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/avconfig.h",
+      "bytes": 180,
+      "sha256": "975611ad5eba15212d9e1d5fca9d4fdf0daec6d2269b2fcab8e29af8667164bc"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/avstring.h",
+      "bytes": 14962,
+      "sha256": "630d231013e996b10b2c9aec98c569f8f88dc53a425491d435d868172a53ecb0"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/avutil.h",
+      "bytes": 9492,
+      "sha256": "8f3782efa238fc579463497136e831b4c098664bc022b84928b91bbaca8045e1"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/base64.h",
+      "bytes": 2285,
+      "sha256": "81ac13d23f3744fe85ea2651ce903e201cd55fc63fcdd899d2cfe5560d50ef3d"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/blowfish.h",
+      "bytes": 2394,
+      "sha256": "b955a63c60c8b3be0203ec6c3973f9084d848cf884fe56cd56088301aeef7992"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/bprint.h",
+      "bytes": 8818,
+      "sha256": "5e3800d797fb8f67ffa7917420d3710c759afaca6f84b655fb64bf4dfa4650d2"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/bswap.h",
+      "bytes": 2788,
+      "sha256": "1d985324139f195d3247c3bb59aa7976c074fbaaf85b8b783f88c178c59f48d3"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/buffer.h",
+      "bytes": 11998,
+      "sha256": "f16742d574216434580573a2b09f56fc5b66b7dda1960d4f02ba59e3269ba548"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/camellia.h",
+      "bytes": 2139,
+      "sha256": "1db30753e71c73f1937e807850069e8215cdf37a1bc3ff89d3a6370a719c1fde"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/cast5.h",
+      "bytes": 2561,
+      "sha256": "05b2e13aecaa0adbb470081a689f45baffb8e03a71997c31f37a22ea4e383a60"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/channel_layout.h",
+      "bytes": 34091,
+      "sha256": "fbd3246297cd72be45268eacd9229d23247dfe394fb15b6a40ce8773422661c6"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/common.h",
+      "bytes": 17601,
+      "sha256": "c882e2a3e53721474e1370523c555af5315bd6d23c19998bed9f0b5b55c3f99c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/container_fifo.h",
+      "bytes": 4855,
+      "sha256": "d8bbe3f1f4dfcdcd56f40618961736ff3bc34fafd81f52ac6c993c91ef43916a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/cpu.h",
+      "bytes": 7050,
+      "sha256": "fdab69a7e8820ae44cc94e91dd6a03fe796dbcb7e79f1b291a5a45e04505421e"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/crc.h",
+      "bytes": 3259,
+      "sha256": "5728cf65705a46723ea28b4f6c8361aad82b76a90e859943efe8af0edb79ec86"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/csp.h",
+      "bytes": 7304,
+      "sha256": "2760b91454642f77f88339f39b614da987c806b30ea54b6f6eddb1a7ac3a738e"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/des.h",
+      "bytes": 2514,
+      "sha256": "15ebdda1af65d91c4607a3444c5f749d5e9757ff5d7f4b04213b3194603f74d9"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/detection_bbox.h",
+      "bytes": 3524,
+      "sha256": "8f5817d77af243a52e905947aa5ae73c218d68dba909040b2f63bd2ca6f93922"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/dict.h",
+      "bytes": 9521,
+      "sha256": "b8b7abebb6e5ab5ffa70b8463df52c96d4e774aa2d5574bebbc02f6031e62ad8"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/display.h",
+      "bytes": 3472,
+      "sha256": "b9c78c80aa9331b945802b6bcd1db4ecc9ec4f9fad41993cc82b880c0dec2576"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/dovi_meta.h",
+      "bytes": 12730,
+      "sha256": "e0ca4be00b203f35ceff50b53c92f448450c823eb24df7f01db0cd0d6c9077cb"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/downmix_info.h",
+      "bytes": 3235,
+      "sha256": "2fc23ad8f0750d82fcd6aa3b653998e2ea9721f9d1664df7b6cb80e93d7fa3aa"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/encryption_info.h",
+      "bytes": 7056,
+      "sha256": "ccc3a4a889b8a3c5aaf37b9fb2407bcdf23a065487c7cba718518a517c463b18"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/error.h",
+      "bytes": 5555,
+      "sha256": "bcf4f7e69c7e0d658ad6e81611810f7cf1f0b8334ebe948d27e518c459e4104c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/eval.h",
+      "bytes": 6600,
+      "sha256": "68efeaa9b6600ec47dae9031d1f0869818c88083b24fb133de3c2cf73f8adf1f"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/executor.h",
+      "bytes": 1924,
+      "sha256": "db578edacd55adbb7be49ff6662777f3ddb84f530e0ad7d7cd8e0c18f0aae878"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/ffversion.h",
+      "bytes": 209,
+      "sha256": "086ec568b0ae8fcb767595fabe9265b34a8b5b30e295b775f2e13a068caaa082"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/fifo.h",
+      "bytes": 8487,
+      "sha256": "9d6e9a6db887d32ee3f4bdafab68869d00f9d89590e33718922c37067eb7f5fe"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/file.h",
+      "bytes": 2225,
+      "sha256": "10daa0d0f1f2a3bedf2b7d8b5c4fea208dd9cf8caabb81dac341fc6ad24f685f"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/film_grain_params.h",
+      "bytes": 9190,
+      "sha256": "414d2755769a6993d0c3f4b5a7e92e22a558675f0c49b44df3afc876473e825c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/frame.h",
+      "bytes": 42294,
+      "sha256": "91275238d0abfc4fef41f2f6a4f182e279886af78e2f525864329279206a3be9"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hash.h",
+      "bytes": 8457,
+      "sha256": "b0896571267220736679eea28c454783795a02a0f1aef008ebe7c40489a75fdd"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hdr_dynamic_metadata.h",
+      "bytes": 14385,
+      "sha256": "0d64ba1388d67453ee677cd50227d4b3bedf3cda6e4572f3517b2331e7a8d017"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hdr_dynamic_vivid_metadata.h",
+      "bytes": 8427,
+      "sha256": "91580e9f4eb39ef296365aa756ef48a170b57c07b288be4bb10affd98ede83f2"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hmac.h",
+      "bytes": 2865,
+      "sha256": "d14d625a897d6bba0668acdf33dc597bb0050237c5c1a5f7e568fe36822782e7"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext.h",
+      "bytes": 24170,
+      "sha256": "229c918d0809dbbaa0aaebd18848bece039ad458538f0fcafc11015fd2111fc2"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_amf.h",
+      "bytes": 1612,
+      "sha256": "dba50d97c5897a05c9024bb77e6f695d2efc81eb5f41fe9a34e3ba311b259618"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_cuda.h",
+      "bytes": 1843,
+      "sha256": "4878f46347271bc7a9ff26bb1573449a99cc81447684e1034a3edd4b0ff91d9a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_d3d11va.h",
+      "bytes": 7193,
+      "sha256": "ac6ffe37fb89e9b935c2654cebd931f78972b960cd16406dfe9cc2b80869eef9"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_d3d12va.h",
+      "bytes": 6201,
+      "sha256": "62c67ab00795c6a521801d3ac32e9e09180982958130d3737a48f38d2db9d75b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_drm.h",
+      "bytes": 4673,
+      "sha256": "b598f37f40cf1342f923c0b97784a6f2830b543868eccee046375e096fbd5f24"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_dxva2.h",
+      "bytes": 2411,
+      "sha256": "73a0333b65e99675834dcb1b63a5e9339638ccc619f1a2fcba85cdd0e179ade0"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_mediacodec.h",
+      "bytes": 1988,
+      "sha256": "8c602859ebca906ba6e43ea548ff28821cf2886b4500b2be1deaaf2d552496d4"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_oh.h",
+      "bytes": 1098,
+      "sha256": "62df338901602b1ac41b8a61fb26b2179de39662e78f3e2b87b6464c53895ddc"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_opencl.h",
+      "bytes": 3098,
+      "sha256": "c6e9ec709d824a24928e1dd9e5f80411b008657402320d6e02d149df83dc6c3c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_qsv.h",
+      "bytes": 2515,
+      "sha256": "735168cd07100f41000e2cb4121786dcbd7d54fc12585b4682faae28f883d653"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_vaapi.h",
+      "bytes": 3784,
+      "sha256": "5a63f50d3f1972b63038f03e005d53d8e666f119d8015f07038312c713aaf0f1"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_vdpau.h",
+      "bytes": 1360,
+      "sha256": "6c96373d9e5deb2c500004f3f55ee1d2cea0f76cdfaeabaf5a3ad3e4938e8252"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_videotoolbox.h",
+      "bytes": 3877,
+      "sha256": "71bbb6baf2dceff96c8673ef5afc5467548efb7b99c4d98d67df49c624f740c1"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/hwcontext_vulkan.h",
+      "bytes": 13334,
+      "sha256": "350a898f252aa56486b3a0b35f127c36eadcbea3bb960488e4a304d99430724a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/iamf.h",
+      "bytes": 21603,
+      "sha256": "c085745f71262d01c47f7c4eadbfd624cfd192056a87e4a83a9224e868c789ce"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/imgutils.h",
+      "bytes": 16326,
+      "sha256": "8e0055fd86fb10b7c9e435e9375736b6db201cb9930a38fb4ff1e1a1da8e0cff"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/intfloat.h",
+      "bytes": 1726,
+      "sha256": "3a29e4eebc8c269cfd867b96de91d8231773d392c12a8820e46eaba96d2b4ca1"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/intreadwrite.h",
+      "bytes": 19426,
+      "sha256": "6e9c404e70f71a02208af81910434e47c501cbe1b0a80116e731cb673f98c734"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/lfg.h",
+      "bytes": 2542,
+      "sha256": "6f094721480df57814cad6e6ce0f3f81867ffec24c58ee4d3e1800ec3484a061"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/log.h",
+      "bytes": 14088,
+      "sha256": "b8ef46be6210baadb3ad61eb72ee48e7dd7d6be39c17c3a8bbc8c81ba9e26110"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/lzo.h",
+      "bytes": 2048,
+      "sha256": "61e89928dee9d83030adececac06aa6c1ae2aada06c5682fde52c52015c53556"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/macros.h",
+      "bytes": 2304,
+      "sha256": "b63b3a268b096f0eed1e91b821714cff334e5dc5bb34365148704393ae15321e"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/mastering_display_metadata.h",
+      "bytes": 4284,
+      "sha256": "dbb1584931d4d8ff7d7a868b519097b6d92f0426d781543987cb784f80ba973a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/mathematics.h",
+      "bytes": 9565,
+      "sha256": "e85c71fb77b0fe7823a88db904982e2a9b953e806ced0714fe6cc6b8a0951469"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/md5.h",
+      "bytes": 2092,
+      "sha256": "5b42de1758d289f78b4d20c47686f443e4ea8a5a6411c0deb357f709d2ef34d7"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/mem.h",
+      "bytes": 20457,
+      "sha256": "bf9a1d8c218c38b333efb16be076c5778d31d66a0691bdd6175f171c08283d7c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/motion_vector.h",
+      "bytes": 1770,
+      "sha256": "dc0b0a15a638c8b91df95a418c5951ee5e787d518f22b6e3d70094922536e8bb"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/murmur3.h",
+      "bytes": 3507,
+      "sha256": "649258a51c4737fa19a025a489e2ac9e9b06a96eafa802f2765178c684382887"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/opt.h",
+      "bytes": 47238,
+      "sha256": "2a2cd99f0e8dbb799cff0fde4468e28e59e01249a63aeebf5d1dc43e29200120"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/parseutils.h",
+      "bytes": 7888,
+      "sha256": "e8efed69396851f429a8258d50e9c4f0431f921687a7c31bf6db13d14f7482c3"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/pixdesc.h",
+      "bytes": 16432,
+      "sha256": "4dc17f708daedb294fd3aa7ec1940f4b9a504518b4d4813be83db605ac13494d"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/pixelutils.h",
+      "bytes": 2051,
+      "sha256": "339cd6ffb6460d06401801c5dfb91ca66b9bdc028e1acc9ff4a0f447cfd3785c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/pixfmt.h",
+      "bytes": 47890,
+      "sha256": "6a8f5a61fe8d3bda60a62e59cc15237f61555ebd77adf477fc6d69ab8e609f77"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/random_seed.h",
+      "bytes": 1889,
+      "sha256": "4490fd79919aadb18f765caac0c210d22cafa4d63cddcf9275e6f5bf66e2fdea"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/rational.h",
+      "bytes": 6287,
+      "sha256": "f4fb850924b414f9ca35579df4e50d6f406734eb9735bbfbf388ae22ec5a0a9c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/rc4.h",
+      "bytes": 2004,
+      "sha256": "61b69b7bc0183b17e5d6e4a56e991fa2452bb97c0d4512c4b0d70b69656ee305"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/refstruct.h",
+      "bytes": 12172,
+      "sha256": "8e7be80109d14fce52e3de7a30932efea283abe963ccdd755787e219a4699b19"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/replaygain.h",
+      "bytes": 1607,
+      "sha256": "4ec82edbdc4e5493fba3cae6a27566f0f15d1399ccf16e25073ffd50ba8187ea"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/ripemd.h",
+      "bytes": 2158,
+      "sha256": "df9ef8c29ee31e5bd8ea299b03d51bd25fe937583793a994db53d1df2b316620"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/samplefmt.h",
+      "bytes": 10270,
+      "sha256": "bec4e2708b42a026450c1227e137661f71850698f19b89f6e9f721fe993f56a9"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/sha.h",
+      "bytes": 2368,
+      "sha256": "91280db6995b1b99b9e5aad0aa211a3177dc4d2841da2fea097f54964b7891fd"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/sha512.h",
+      "bytes": 2413,
+      "sha256": "da265152798b221706d7fe95293a0e8cd18fa2b5087bf32504a8120f10e7658f"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/spherical.h",
+      "bytes": 8607,
+      "sha256": "ab945689e58b593157d8532f315c8fb8674fb4c9f4ac96c1106a5aa62be8889d"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/stereo3d.h",
+      "bytes": 7446,
+      "sha256": "32cc28caac01b5bf18ae016af4b0ffffbe40feb77e96cb434d723954a83b776a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/tdrdi.h",
+      "bytes": 5280,
+      "sha256": "9b7ac5326cadef9f3956470e22cdb9ba751c0da90b39f9df4562bffc8e4115a3"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/tea.h",
+      "bytes": 2035,
+      "sha256": "3c1e93c566630bb4eeedad3ef3c8719bd6050081ac1c764b1fde81aba4969076"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/threadmessage.h",
+      "bytes": 3910,
+      "sha256": "9bb242d7adc48662b947726843108aff7c34547d7a4a0d0e6f58f54a00fc4c9f"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/time.h",
+      "bytes": 1800,
+      "sha256": "40e11fa242e0585996753affb054443e78be25919b7c3063042d0aaff1656760"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/timecode.h",
+      "bytes": 7843,
+      "sha256": "20936b639afa89e7a356bd5f5317b33745b1f4c3d467486ad043cb9b5d51527a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/timestamp.h",
+      "bytes": 2726,
+      "sha256": "dfd2e2071577f04ddc3cae200abd96ba0fb7d38f53359025af319d4b902f1947"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/tree.h",
+      "bytes": 5408,
+      "sha256": "2f8e906917612a05c138036dea7ed9f8faee5899413a523fdad4eb51711bc1e5"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/twofish.h",
+      "bytes": 2245,
+      "sha256": "b71714336821e1c606b65620ba4b1ea47e431666be41f3174facbc51047fd814"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/tx.h",
+      "bytes": 7141,
+      "sha256": "a1c5c309f493cc22f4637e67696581be676cd33fdcaa0661a01f5bb4345c900a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/uuid.h",
+      "bytes": 4895,
+      "sha256": "e669ce76a6b987e189b4d7ff62d0fd9ad6e334fa4967076cc6d912976574b646"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/version.h",
+      "bytes": 4479,
+      "sha256": "1de4a0ee20c75f04603ec1799faf9f4e650f790674e2f5ed2fdb1ab735cca75b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/video_enc_params.h",
+      "bytes": 5991,
+      "sha256": "f287486c4f828f82e579f93ea98fccb98749129544f660decfa56da6f818fd57"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/video_hint.h",
+      "bytes": 3585,
+      "sha256": "7ae7b1e152aa7daf0ae55e29b1ed673039678d62d3f7a11d9c9443cfc8236997"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libavutil/xtea.h",
+      "bytes": 2834,
+      "sha256": "2eb91f780cc4ad86095e4ebbce453475d40f4e9b8737d52bdf20a068dfafcdf0"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libswresample/swresample.h",
+      "bytes": 22361,
+      "sha256": "b23e625ab295d57a3d1ae0142c937b485dc386a36e4ed63f4b99ed886dc905e1"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libswresample/version.h",
+      "bytes": 1707,
+      "sha256": "6136f94fdc058466e84442fc0194c6456fe618b97fc776d1d5a286d0c64e01ab"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libswresample/version_major.h",
+      "bytes": 1015,
+      "sha256": "5ded851cffe3a75e556e6914551ee8331c9b6eaa515307c88ceff8c9ab8b2dd1"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libswscale/swscale.h",
+      "bytes": 26034,
+      "sha256": "8811a21d373f71a00e38fabc7d82dc9c7ccd91b151d30d4e1ac37b9acf63ca66"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libswscale/version.h",
+      "bytes": 1589,
+      "sha256": "0f58c90ea208016bfc8179c4b793d3e880cb38618bfcb6bb7b6db42e3b9324ca"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/include/libswscale/version_major.h",
+      "bytes": 1175,
+      "sha256": "00be1f7f4faefb2a98269e901abeccaa28794f347e585bf1ad3cf975d1a3c616"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/avcodec-62.def",
+      "bytes": 4841,
+      "sha256": "e8d82495b286f18b5df070135ee794719d7e9eddf9cb4dfd8ebb8cc7d982e1a8"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/avcodec.lib",
+      "bytes": 146578,
+      "sha256": "aae17c97ec976acfab98a5b865273274dffcc3bcc59c7ab401a6b33db04b9ee5"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/avdevice-62.def",
+      "bytes": 453,
+      "sha256": "4155c10e76c60ea96e0b9dc181b64e66fc0a4b2b699e492c87777ad221ef6eb5"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/avdevice.lib",
+      "bytes": 14120,
+      "sha256": "8f9bd51840fe4d9a469efb4585a8c40f8ec7c606d460b43745172d389c183803"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/avfilter-11.def",
+      "bytes": 1973,
+      "sha256": "ee898f96b7994a1e35291e15841d41d6494832e8fab5aea94784d0deb1d23402"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/avfilter.lib",
+      "bytes": 57188,
+      "sha256": "5cbdea9867f7f328601ad52e4967a9f5ac2bdf5c696926ed577847680bd359d5"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/avformat-62.def",
+      "bytes": 3614,
+      "sha256": "437ab7ecb1b5aed487ab4fffe0017a46ca824032fdb455f3398a81cdfb84a66b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/avformat.lib",
+      "bytes": 126110,
+      "sha256": "c3fe893975b777e45a42672c65b29b2bc6528571ec1665e6ebbd2c1c92d4d983"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/avutil-60.def",
+      "bytes": 15154,
+      "sha256": "1e828e94ba48706986f452acd14c88a9004dece304ed73fb6953931bb7b71a63"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/avutil.lib",
+      "bytes": 500720,
+      "sha256": "de461263818475d87a395e5a7330a32d6fd507a4f3f5ee03c067da8a8e368178"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/libavcodec.dll.a",
+      "bytes": 122574,
+      "sha256": "c841c0cd5781850259b546b871ecff4ea0c5cc55ee1957795b8228f0faa7046a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/libavdevice.dll.a",
+      "bytes": 11416,
+      "sha256": "87637bb9ed8dcc7a0ba43f9995ad4127431402238e3e6899dce8ef424449c13c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/libavfilter.dll.a",
+      "bytes": 47516,
+      "sha256": "5364f67e38368206d3b07f4bb1df23810582c40fcd56d34000b405e318a033be"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/libavformat.dll.a",
+      "bytes": 129160,
+      "sha256": "626901ce4f72d1286f25910b18af70906818e54207108e238478cf4a6277f041"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/libavutil.dll.a",
+      "bytes": 418438,
+      "sha256": "8dfb2f5af28c011904113c8dd2a361e786ef1a60bcde7f119377cb4da5f5217d"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/libswresample.dll.a",
+      "bytes": 15964,
+      "sha256": "f2e47e09743ab43180cf2d139edaeff3e105155ea2261b0d84e5da7c46381197"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/libswscale.dll.a",
+      "bytes": 27234,
+      "sha256": "71ee8aaf34d34a0c8effbe6c0f45eb9bc9524875f8f4ff54fa07afff5968732b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/pkgconfig/libavcodec.pc",
+      "bytes": 312,
+      "sha256": "aa29133524793aff0c360a2c58e54a8ae2c2bfc7dd677fca5bde60fa8501650e"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/pkgconfig/libavdevice.pc",
+      "bytes": 423,
+      "sha256": "a259860f660dd049168a736d280bbe072e43e7be9a93e112b8b9b5c2e2e1ec23"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/pkgconfig/libavfilter.pc",
+      "bytes": 404,
+      "sha256": "0bf7991f75a339a5d0e62851938bb3fee71359c9b6440309c6ad3291b0f6008e"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/pkgconfig/libavformat.pc",
+      "bytes": 350,
+      "sha256": "efee4ce0f3621363b93be3af8c46fa0f7358b9022a5cefc35f375855b49c9336"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/pkgconfig/libavutil.pc",
+      "bytes": 264,
+      "sha256": "67fa7b08dcf0db4f3682a9e525779b42ac91e6347902d48c8a89b0c644bf4b5b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/pkgconfig/libswresample.pc",
+      "bytes": 301,
+      "sha256": "148eff4a882cd0fc221044ff875a5effdd8095ec9b159c1f2c10aaf77dd01c30"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/pkgconfig/libswscale.pc",
+      "bytes": 294,
+      "sha256": "bc2b0984e83738734b2bfeba22ca35bfd633e161ef264dafd555a79a54cd7303"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/swresample-6.def",
+      "bytes": 475,
+      "sha256": "f9218bbdf6a09284adae3ef14e4b481a7a405d5a57de39907a6e803950114677"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/swresample.lib",
+      "bytes": 19876,
+      "sha256": "e81abb13e51972ceecb4caf9a7af4d12cffd6e91a2eb82f30cb31dcc00a95a0a"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/swscale-9.def",
+      "bytes": 911,
+      "sha256": "f99d273291bd67ecf4959e28cacad0b2d1ce67a4f6d318954cb389a1959bd8a1"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/lib/swscale.lib",
+      "bytes": 33288,
+      "sha256": "c720364a08b72cfa6d3ffb3d3360f2c3c82f1a521c87ab5cd45f4cad35c3a043"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/third_party/ffmpeg/LICENSE.txt",
+      "bytes": 7651,
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/FTHRclips_tests.vcxproj",
+      "bytes": 7211,
+      "sha256": "8514baf9ec4ef6c271136d53d3154465966dfcfc135e681ebf690ce8bf7417ff"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/amf_replay_encoder_test.cpp",
+      "bytes": 38611,
+      "sha256": "2b21a5ff9a36dc8fd1b95ad6d6864b1657ca84bed9d31d6f0ecd74a69277e172"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/audio_format_converter_test.cpp",
+      "bytes": 84392,
+      "sha256": "83f1da75e9131af9918b4f91bed591517159fde17ff2b6e53df5f355feb22c6b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/audio_source_model_test.cpp",
+      "bytes": 19041,
+      "sha256": "2e830c2ccfe2efa68b8cdb7800b2260534c1462dcabea20bb96d8005f7d0e8e6"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/capture_scale_geometry_test.cpp",
+      "bytes": 5910,
+      "sha256": "90d392f248f6a80ffd90e25380057a9a5038858ccf908122bf82b840242ed8a7"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/continuous_recording_writer_test.cpp",
+      "bytes": 13823,
+      "sha256": "bf5c611ffc0cdf42255529667f7ceff0954549b66fa38a2930a1cededd9f5535"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/nvenc_input_lifecycle_test.cpp",
+      "bytes": 2353,
+      "sha256": "0a8f25111f5c18c590a9afd10327cb5ab0b44d99eac2775efd71a7c333bc4eeb"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/qsv_replay_encoder_test.cpp",
+      "bytes": 17475,
+      "sha256": "65e9b6c272ae89ba4f09bf0b1ce774e5c2244293f543ce2d6b7a835a351ce974"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/software_replay_encoder_test.cpp",
+      "bytes": 6109,
+      "sha256": "94e5f1d71d74a36c79996457401a836213a60900fdc9c98a0cc544cda8214a8b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/windows_audio_session_registry_test.cpp",
+      "bytes": 3976,
+      "sha256": "03f3e16f5f8cbc1ba03efd6a1ebcd080de592017901b42c2b2934448661fa6ee"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/windows_capture_backend_policy_test.cpp",
+      "bytes": 5484,
+      "sha256": "0db6bce20d340eb96f1aca127f4e00e873afaf69343f86baa820e24141202d5c"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/windows_capture_border_policy_test.cpp",
+      "bytes": 4321,
+      "sha256": "be7ab2f6fd419f1bc6981f3e344103f500518a4f729876400da21e100243e44d"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/windows_microphone_audio_provider_test.cpp",
+      "bytes": 10539,
+      "sha256": "0e014ffc53285c99c87f32f240405cc43afd800dc326c8c3c99f056a4a73a9a4"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/windows_monitor_resolver_test.cpp",
+      "bytes": 64205,
+      "sha256": "dd2d07e74f06e10c73484818e8206b87771e4c1fd7d80d1aeb098ad5f96b2df8"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/windows_process_loopback_audio_provider_test.cpp",
+      "bytes": 17115,
+      "sha256": "d3ee64d2ccc1913da0e6a576bceb905e7084ebbea7ee361044a58b358b2efb30"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips_tests/tests/windows_replay_policy_test.cpp",
+      "bytes": 115649,
+      "sha256": "3529ddeba227275a370d0c401cd1fe2d52ef7e23826e1866dc714e7d194d6fe4"
+    },
+    {
+      "path": "FTHRcapture/FTHRPlaybackMixer/FTHRPlaybackMixer.vcxproj",
+      "bytes": 4506,
+      "sha256": "d86fde5514b8c1e3d9f7c52895349a8e1820e6432646fcca4704acbc3362035d"
+    },
+    {
+      "path": "FTHRcapture_common/capture_config_limits.h",
+      "bytes": 1411,
+      "sha256": "d214fc82ef1c072565d6e65ba105f19cc05eb43d94203008e92f6274c27832c2"
+    },
+    {
+      "path": "FTHRcapture_common/capture_pipeline_health.h",
+      "bytes": 12309,
+      "sha256": "17bc2105060fe070e4b0163ce8cb1c11bb733544b8b4e03140bddf3d962b2797"
+    },
+    {
+      "path": "FTHRcapture_common/ffmpeg_playback_bridge.cpp",
+      "bytes": 31823,
+      "sha256": "8a242db3527e2ca4fa1d703ff26f0ced8475086d5f9a4d610b13696c5ab5f89b"
+    },
+    {
+      "path": "FTHRcapture_common/ffmpeg_playback_bridge.h",
+      "bytes": 2633,
+      "sha256": "63defdc95e1b78acc9af68e3afb360d268c60b61cf664222306ddba3c557083b"
+    },
+    {
+      "path": "FTHRcapture_common/replay_health.h",
+      "bytes": 12252,
+      "sha256": "10874c203fb7fda18fbb57ab7969e45729c9fccb63115b609707b757db7f4fd2"
+    },
+    {
+      "path": "FTHRcapture_common/replay_interval.h",
+      "bytes": 4230,
+      "sha256": "6f10900b73d9f8adabd5c191d36352d10edc96a88594a047804a6017039be49e"
+    },
+    {
+      "path": "FTHRcapture_common/replay_pause_clock.h",
+      "bytes": 3101,
+      "sha256": "8bb2d91474991d45c2576b366891aa86a8aea69d833284d431280bd0ba9e7e90"
+    },
+    {
+      "path": "FTHRcapture_common/replay_save_diagnostics.h",
+      "bytes": 6597,
+      "sha256": "9d08cebc9da7b7ca8e1e27759b271e6e51b0a06f07ec36b16ef89034dd7d1bd4"
+    },
+    {
+      "path": "FTHRcapture_common/tests/raw_fixed_rate_duration_test.cpp",
+      "bytes": 1054,
+      "sha256": "7b5ac763bd41d4b87ed1dcbb1cd181dac6d3fe4ee1a5f8a6723c27f618a8693d"
+    },
+    {
+      "path": "FTHRcapture_common/tests/replay_interval_test.cpp",
+      "bytes": 7331,
+      "sha256": "7918b2afb047c104ee87d454692759b83b5f04781fb5f7409ec4b5b5f63f1bcc"
+    },
+    {
+      "path": "FTHRcapture_common/tests/transactional_save_test.cpp",
+      "bytes": 8028,
+      "sha256": "83c0d78ede667084659ecbcc98f3172d00720f7109a07528a8a3a677700413ab"
+    },
+    {
+      "path": "FTHRcapture_common/transactional_save.h",
+      "bytes": 13735,
+      "sha256": "11d131f39b26f3a8820edce1cce638e4e9e7246b6874febff6923dcfdabe39bd"
+    },
+    {
+      "path": "FTHRcapture_linux/CMakeLists.txt",
+      "bytes": 24755,
+      "sha256": "0789b2eea9380ffe44b9fa72078d28ccfcd5074c802254ce124641a975e68425"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/ext-foreign-toplevel-list-client-protocol.h",
+      "bytes": 17060,
+      "sha256": "89caf153c6b37a93f193187e1adc09d3eec1d0e0f40ada6a53ad962601a7b7eb"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/ext-foreign-toplevel-list-protocol.c",
+      "bytes": 3231,
+      "sha256": "39eeca02360aa1f474075e8d3a31c62d1ba4e8c768d2d165d326f964688fff5a"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/ext-foreign-toplevel-list-v1.xml",
+      "bytes": 10021,
+      "sha256": "6b2ffb3a07d679d1c4170263adfefb9a7c37dd34ed3db5180bf58cb8ff8fbd0b"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/ext-image-capture-source-client-protocol.h",
+      "bytes": 13768,
+      "sha256": "fdef7a591c46527d2f3ad64c78033d7047bc863d1c8aaeb24f733cb38d2ebfe1"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/ext-image-capture-source-protocol.c",
+      "bytes": 3232,
+      "sha256": "13aa175a1fc9ac6597f98e5a4cd2c933ea5af7e593d45187317aecee3fe43c79"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/ext-image-capture-source-v1.xml",
+      "bytes": 5021,
+      "sha256": "eaa9e6c3b9c254762c2d8cbb691192bea777e221f18fbf0ba78c0feb02d54e77"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/ext-image-copy-capture-client-protocol.h",
+      "bytes": 37070,
+      "sha256": "78558d7e8a3d19f8324d93dc06799ac8db164cbdc40cc395ac6471900a903de0"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/ext-image-copy-capture-protocol.c",
+      "bytes": 5515,
+      "sha256": "53f63567d1c0affa3a089a302d9fc663d1d80c9841b74586f3cd18a95368a56b"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/ext-image-copy-capture-v1.xml",
+      "bytes": 19006,
+      "sha256": "41a446653f788fabb404cab3168c0bd667c1ff4b54f1f0bb1e18810a1f47d73f"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/wlr-screencopy-client-protocol.h",
+      "bytes": 17661,
+      "sha256": "7a75b5867bc2df005adaa35ed3136d146165d5293d5afa46b8684c5a2643ffa1"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/wlr-screencopy-protocol.c",
+      "bytes": 3477,
+      "sha256": "c5ef365f9c1edd80f6355b5077cd47746da2d281de17564b1fc8c4f4e3c893ac"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/wlr-screencopy-unstable-v1.xml",
+      "bytes": 10304,
+      "sha256": "131b8f9b4aad0c8a9cf705e90d2a1511a5ca0c477637fd3400cf1cc4fa963fb8"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/xdg-output-client-protocol.h",
+      "bytes": 14776,
+      "sha256": "9d52388be4ad61ff6ccbc288346bdaf6776e4ad5d7c540b007b3cb078fdc52d3"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/xdg-output-protocol.c",
+      "bytes": 2772,
+      "sha256": "4fc34995aad46d9dc7c93cf14f6eb604eb5264a04c781097649d8e1c35be444b"
+    },
+    {
+      "path": "FTHRcapture_linux/protocols/xdg-output-unstable-v1.xml",
+      "bytes": 9693,
+      "sha256": "363d547c3eefe8959160cac903ff90b311d4b183005557d73640d9df2cfd7f79"
+    },
+    {
+      "path": "FTHRcapture_linux/src/audio_capture.cpp",
+      "bytes": 9572,
+      "sha256": "493c422377e5fa8ae72924fc9064169c9bb609f44a64c6a703cbd11af3d3f1fb"
+    },
+    {
+      "path": "FTHRcapture_linux/src/audio_capture.h",
+      "bytes": 1713,
+      "sha256": "073f20e2a78423397a38e015923c55ea80ff909d9152be00910384203ccba614"
+    },
+    {
+      "path": "FTHRcapture_linux/src/audio_multi_capture.cpp",
+      "bytes": 14258,
+      "sha256": "7691897d4e72895d4f88d61bc830fe0bd3f99f8593ad254135b51a3b5b88e13b"
+    },
+    {
+      "path": "FTHRcapture_linux/src/audio_multi_capture.h",
+      "bytes": 2649,
+      "sha256": "79bdf248cb35dc75c91de6527a68c98a5332f75d995403da6f8261b410e13929"
+    },
+    {
+      "path": "FTHRcapture_linux/src/audio_timing.cpp",
+      "bytes": 595,
+      "sha256": "8f5d31abf9ec921acdd6014a5e9145e5adb2fbf63f5810aaaada4b7a72d192f6"
+    },
+    {
+      "path": "FTHRcapture_linux/src/audio_timing.h",
+      "bytes": 284,
+      "sha256": "869ba42f836c205b7482d8d80c090e3d15433ea53e690fa7df65b958d23ed4b6"
+    },
+    {
+      "path": "FTHRcapture_linux/src/backend_ext.cpp",
+      "bytes": 11521,
+      "sha256": "cae18520e8696c74601c207df4a36b2bf00b3a073503625265c89742dfd6f9e3"
+    },
+    {
+      "path": "FTHRcapture_linux/src/backend_ext.h",
+      "bytes": 3807,
+      "sha256": "6a910734fd3971da957a1bf7d159f712cccc86e3a2c275ceada0d96f6db84131"
+    },
+    {
+      "path": "FTHRcapture_linux/src/backend_portal.cpp",
+      "bytes": 25512,
+      "sha256": "64f765da3182a9743504ebd0f4fdc8373235d45609cc7dabc23708e5c4cb20e8"
+    },
+    {
+      "path": "FTHRcapture_linux/src/backend_portal.h",
+      "bytes": 4175,
+      "sha256": "237f010e92d3a69d5643ecff84d2f7bf1c6b2660ea2849b6b63911753bc3c381"
+    },
+    {
+      "path": "FTHRcapture_linux/src/backend_wlr.cpp",
+      "bytes": 14133,
+      "sha256": "2eda5e1f9227c90f9db0a9d6989ee096f2d2b6c49cc0b5651a22c09c52f50a11"
+    },
+    {
+      "path": "FTHRcapture_linux/src/backend_wlr.h",
+      "bytes": 3146,
+      "sha256": "ba04ff5358a323f4a18fe24569d6cddb0a70780b847ae19134267864db66914a"
+    },
+    {
+      "path": "FTHRcapture_linux/src/backend_x11.cpp",
+      "bytes": 5929,
+      "sha256": "ddda2dd1964f43de3be3d599d3ac84d3d55498cafacd37b543914243af484c93"
+    },
+    {
+      "path": "FTHRcapture_linux/src/backend_x11.h",
+      "bytes": 1189,
+      "sha256": "c154164048d7858c7c74396de1368e5b14a0cc93866fb71bb71edef8b05c7068"
+    },
+    {
+      "path": "FTHRcapture_linux/src/capture_backend.cpp",
+      "bytes": 3670,
+      "sha256": "59087f106cac471b4ba3ba5efe16b12b9718d09d6ff79fd9dfa00aaff66dc466"
+    },
+    {
+      "path": "FTHRcapture_linux/src/capture_backend.h",
+      "bytes": 2095,
+      "sha256": "cd87bf8fb79a006e2bda951e0d95e2d1081d750db72e74bb521a340d744ffa9c"
+    },
+    {
+      "path": "FTHRcapture_linux/src/capture_engine.cpp",
+      "bytes": 17343,
+      "sha256": "25d605628d10411d1e77f405ffb02a879a1bd9bf00b2b06aa401067d559dacd7"
+    },
+    {
+      "path": "FTHRcapture_linux/src/capture_engine.h",
+      "bytes": 4431,
+      "sha256": "d1143d0a6c66fad31aecfe57352394b76f4a2d0928fa99fcacd257bc25fdb8e5"
+    },
+    {
+      "path": "FTHRcapture_linux/src/encoder.cpp",
+      "bytes": 16068,
+      "sha256": "c2802875f85bbfaee78184311457a8a244b3512e4fc27534d2a21edbaec9ecb8"
+    },
+    {
+      "path": "FTHRcapture_linux/src/encoder.h",
+      "bytes": 2814,
+      "sha256": "f5a1ffeb0fea43063808ae61a0887169c78f3760f937be6e226d8bb6ce0115b1"
+    },
+    {
+      "path": "FTHRcapture_linux/src/main.cpp",
+      "bytes": 12015,
+      "sha256": "346653e2dbe5de5184c1a4082df1e9abaa2961ecbe36e258539b5ea6350e4430"
+    },
+    {
+      "path": "FTHRcapture_linux/src/pipewire_frame.cpp",
+      "bytes": 2032,
+      "sha256": "ae9dbf3503686a095826a7ac88d7a6ac75e7317c6330a497850b05dfeec22cf3"
+    },
+    {
+      "path": "FTHRcapture_linux/src/pipewire_frame.h",
+      "bytes": 1380,
+      "sha256": "67fd93ea9ff6da85ff3ba0b46c977eb70a1f79d408977180a0dcbb81c0d5af80"
+    },
+    {
+      "path": "FTHRcapture_linux/src/portal_screencast.cpp",
+      "bytes": 30924,
+      "sha256": "2ea32e145fbe9ec3df7773462ccd238c1d43838aa110cba71a230319b74b9afb"
+    },
+    {
+      "path": "FTHRcapture_linux/src/portal_screencast.h",
+      "bytes": 8851,
+      "sha256": "a3132f597bfe6a3d73240610d8615c0b9d98df4f1250668be89c16b4e7e6ed9c"
+    },
+    {
+      "path": "FTHRcapture_linux/src/recovery_policy.h",
+      "bytes": 2186,
+      "sha256": "3b9c350bff7d203457e852a49748c9fcf7d44ca2acc669c9d2303e43da97abfe"
+    },
+    {
+      "path": "FTHRcapture_linux/src/ring_buffer.cpp",
+      "bytes": 2888,
+      "sha256": "8d7de8304c2c43984d917ed2c6db4cc5a965d51c27f69987167cc8235acb241f"
+    },
+    {
+      "path": "FTHRcapture_linux/src/ring_buffer.h",
+      "bytes": 1703,
+      "sha256": "3495bfc06637ab3da970ffbe7d983c59b5ea49be25fd905182dd9864b96a6f0b"
+    },
+    {
+      "path": "FTHRcapture_linux/src/save_clip.cpp",
+      "bytes": 17679,
+      "sha256": "92509a55f1ad767b2ada531563968cc9d036f6376584cb87cb0c043509cdff7d"
+    },
+    {
+      "path": "FTHRcapture_linux/src/save_clip.h",
+      "bytes": 1346,
+      "sha256": "5b984e2287bc5665e9a3e63db15c4e41141f619b4027a0a9465a7badf4434acc"
+    },
+    {
+      "path": "FTHRcapture_linux/src/shared_memory.cpp",
+      "bytes": 1641,
+      "sha256": "d5cf03415f79af17a659fb897b71693d990cf1e81aa3e8e78d8aaa7be1832e2c"
+    },
+    {
+      "path": "FTHRcapture_linux/src/shared_memory.h",
+      "bytes": 3496,
+      "sha256": "27ba3d3ad04b75cc1c247d32984dab05d17201cc83801054e382b3f954ed7a8e"
+    },
+    {
+      "path": "FTHRcapture_linux/src/wayland_dispatch.cpp",
+      "bytes": 8227,
+      "sha256": "d8bd9a47f2b3909a68140d738a5f9ef01f75e8018eee19b5737c2cc93c091bd2"
+    },
+    {
+      "path": "FTHRcapture_linux/src/wayland_dispatch.h",
+      "bytes": 2362,
+      "sha256": "131a673524d0bba37bf43a5ff0d177630e16b9a1ec51b8d8801b6251d6155d84"
+    },
+    {
+      "path": "FTHRcapture_linux/src/x11_capture_target.cpp",
+      "bytes": 1711,
+      "sha256": "e61f187ba56b378f08333bc5cc46de0ae9eddaa0778c0c3941493ecf7dc66a11"
+    },
+    {
+      "path": "FTHRcapture_linux/src/x11_capture_target.h",
+      "bytes": 518,
+      "sha256": "986cad06d077ce4c593700092db9d32bfbead6d5c054ce8da22f340aac11399a"
+    },
+    {
+      "path": "FTHRcapture_linux/src/x11_frame_converter.cpp",
+      "bytes": 1896,
+      "sha256": "0ad6809c0066038616e84ca82d8a3e767646db9199392f6bd2a1c716d208ccd8"
+    },
+    {
+      "path": "FTHRcapture_linux/src/x11_frame_converter.h",
+      "bytes": 963,
+      "sha256": "df8cdb54ed155a1b8b9351fecca759fdd65951c7be88fdc8aaa024ef802c697a"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/audio_timing_test.cpp",
+      "bytes": 598,
+      "sha256": "7610951522a3a9c579b1e106d038d4b8042021e0a30779dd30ea92db93661902"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/capture_recovery_test.cpp",
+      "bytes": 3724,
+      "sha256": "76e021e8f188b8aaa6ad8df577f6503a75adc52f0d7a2aa6415381977aec4600"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/linux_encoded_ring_duration_test.cpp",
+      "bytes": 2730,
+      "sha256": "cd15eeade702db9912141f646d9cbdcd808b9677e6d500475a29b1512345f175"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/linux_encoder_timestamp_test.cpp",
+      "bytes": 2709,
+      "sha256": "f2340caedfc79e3755b3a44ee39233e86d57f55e9a095038ab06658a88c78823"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/linux_vaapi_encoder_test.cpp",
+      "bytes": 1715,
+      "sha256": "66aef6c71cab61d6b29e8f6ceed559bdd8d34c7c95f5119f7fad5b72e1b78539"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/playback_bridge_load_test.cpp",
+      "bytes": 1006,
+      "sha256": "257285b4c5878d8d8d9cd10553d8cb0e07883a7aa09a063df16f482c98e926ac"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/portal_screencast_test.cpp",
+      "bytes": 12097,
+      "sha256": "f1a1b21f4f6b46c9fb23e648d09fef3f39cc6ab7aa30dd4ac15e3ef95f7a98aa"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/short_save_mp4_integration_test.cpp",
+      "bytes": 6125,
+      "sha256": "58ced9f3fd1926c05a18c5fc380c39688f44e5c315b708d48a61d9bf62b4ccdf"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/transactional_save_test.cpp",
+      "bytes": 8028,
+      "sha256": "83c0d78ede667084659ecbcc98f3172d00720f7109a07528a8a3a677700413ab"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/wayland_dispatch_test.cpp",
+      "bytes": 8107,
+      "sha256": "00439ab825d6f7d89596a27484ebb1c380591bac7c8b8467c39be5a5e12b58a2"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/windows_audio_interval_test.cpp",
+      "bytes": 2890,
+      "sha256": "c1d16be7159ab4051789d2ccccf2f367d4b79515b797cd45c43cd846d7054b88"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/windows_encoded_ring_duration_test.cpp",
+      "bytes": 2734,
+      "sha256": "7833d5c31c1eca02dbf634e6a33d583c6339210b7fb93e20a177fc86ffe9701e"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/x11_capture_target_test.cpp",
+      "bytes": 1043,
+      "sha256": "55711df9f2b830be64bfac6bdd03afdeecce53db907eb58f574a0a765f9ebac0"
+    },
+    {
+      "path": "FTHRcapture_linux/tests/x11_frame_converter_test.cpp",
+      "bytes": 2384,
+      "sha256": "eff6d2c15397e1bd33ec3e18e445c28056fceae56e4239e6073601b32ab82bf7"
+    },
+    {
+      "path": "installer_assets/polished/close-current.png",
+      "bytes": 3396,
+      "sha256": "940a88bf9bffcdccdefe519046c588233d505ed1906c21eda57b94211798bf23"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-108.png",
+      "bytes": 2840,
+      "sha256": "6278873a7ce8a218772da2b6456454d1ff1fd48439e8676e64ca503e022e7633"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-122.png",
+      "bytes": 3249,
+      "sha256": "4b0d4b07184be1adbb9e9aac208339bf89eb8782f363f220215b89341f2e3e35"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-135.png",
+      "bytes": 3524,
+      "sha256": "5d8685c5299fb373762d9e57ef9a28304eaab6f0c9dfbd703472ee89a2500d2a"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-162.png",
+      "bytes": 4246,
+      "sha256": "e5abb277168e4a749e95143b0787754ed2b9f8f0f102729b553d7703d9f1caaa"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-216.png",
+      "bytes": 5884,
+      "sha256": "1c2dca7306dcf3b95b18fc9c17946634717dbf6b19b09d1ac4de5bfbf1af90c9"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-54.png",
+      "bytes": 1337,
+      "sha256": "246d54ea75cd401e38f02dbd5563b90a343e2b82cc96d3db6e83b54765095a6a"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-68.png",
+      "bytes": 1716,
+      "sha256": "f01d327fb7f57c540960a47f3d6d113da8e0f88d287ef67b4b811a5bf84a61a3"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-81.png",
+      "bytes": 1962,
+      "sha256": "d715e657a069a5f97cccfcd1cd6d6cdc901c046003ef5d5dcee37e2f7d340554"
+    },
+    {
+      "path": "installer_assets/polished/step-1-active-95.png",
+      "bytes": 2504,
+      "sha256": "d42df6c61b3e8e1e5db65409c84f9098f063277992bc53852014d9980f7c725a"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-108.png",
+      "bytes": 2707,
+      "sha256": "ea3cdb0de27ef861768910b5cdcb8cab173e94f3a60f120e091c0ac60145f90f"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-122.png",
+      "bytes": 3118,
+      "sha256": "0c3905ed3137c9096c37a3740787ed89490c5b5c087230cbc90c58936fdd8a6b"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-135.png",
+      "bytes": 3388,
+      "sha256": "370dabaf4ff1e906d63ec4cd11ae9094feee5fef579cdb40c862c06d16c7f331"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-162.png",
+      "bytes": 4160,
+      "sha256": "cbbff0dfd6712e8d32c102bde2f8b0fa6e455bce8fdca1de2c121e91ece29328"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-216.png",
+      "bytes": 5718,
+      "sha256": "153fb4a2f9bc7da3a08aeb19b4b1f5e2125d5243a3ce67f448deb8f14f1ed97f"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-54.png",
+      "bytes": 1260,
+      "sha256": "57d6966f8ab4ad244eec113d7171c0e7e09703d4244df3c5e9e42bff55942c04"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-68.png",
+      "bytes": 1673,
+      "sha256": "1ae1ec134ca5e6bb3c6c2753007325fdfe383549b6d810a6ac23a0d27f10df01"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-81.png",
+      "bytes": 1906,
+      "sha256": "1cf25cad987430648ab7f98d56f7c94105c3ed8190790e36216f4b840fd67d42"
+    },
+    {
+      "path": "installer_assets/polished/step-1-done-95.png",
+      "bytes": 2410,
+      "sha256": "36affb0a5f129e256f47d581f9e757fed1b7cae1b54613056daa2c260d117936"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-108.png",
+      "bytes": 2533,
+      "sha256": "a30429707c2875dcc210ff3a99d128ee245950556bcaec619b039d0bc6496405"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-122.png",
+      "bytes": 2974,
+      "sha256": "4bb3f9bec9cea5311748bbf0f33d4ef90221d50f35f269308b78d750ebe3f0cc"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-135.png",
+      "bytes": 3211,
+      "sha256": "927508ff69a4d790391907dbb08259bf7bd426c7b600178186246bec8a4074f2"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-162.png",
+      "bytes": 3870,
+      "sha256": "4dc3cd5b09cc69665c43a094bf0080de9798ce2b5926b210a549c7ef833a192c"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-216.png",
+      "bytes": 5304,
+      "sha256": "11906f84a16c17a6c342be334505e463cb2932764f06647f5e668cc1a2264564"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-54.png",
+      "bytes": 1187,
+      "sha256": "b908f6f6da476d5d29b1c7551fff154a6449881bde2f0b80dd66a12af7623228"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-68.png",
+      "bytes": 1516,
+      "sha256": "1156b100803eb9cc5919d4099964350472a98433fa4cb0e331f9be0e96e9c00b"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-81.png",
+      "bytes": 1784,
+      "sha256": "8844b483784a2b3945b2a2aee92d4c65fcb9ee1dec3ca363c2e55b4daca80e9e"
+    },
+    {
+      "path": "installer_assets/polished/step-1-pending-95.png",
+      "bytes": 2215,
+      "sha256": "f643a52c9ee7a1b3e82314e586074bda0b2b54ce650237097be13e97ae710726"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-108.png",
+      "bytes": 3673,
+      "sha256": "b2cc27b12da0875632bde63ac210380becc0936ed4b461f6466cd92fb8a8e367"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-122.png",
+      "bytes": 4178,
+      "sha256": "2213d648fe012fb6b9a9f4ab5a2f19f69d136b095ea9cb47eee6570f547712b2"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-135.png",
+      "bytes": 4624,
+      "sha256": "be98c53a70d37ac7dc264dbba0768b6fcd3507d62900fa91756b360bd9b7c621"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-162.png",
+      "bytes": 5522,
+      "sha256": "bc876b2f180a678fddb94d400c3b1d54e6d555a5e644bb4f71d2c31532c9a054"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-216.png",
+      "bytes": 7513,
+      "sha256": "c189fe81df6ae3efcf605c2f396e555b89e519f247576f497a3f409342f1d9d4"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-54.png",
+      "bytes": 1794,
+      "sha256": "53bd8e25e5d50701cb694b612fd403f28ff2561cfb41c0c6d0dd52d389ffcb37"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-68.png",
+      "bytes": 2261,
+      "sha256": "d5d091fb56814348397f40b37a442f3319a219cb9164f3d4f67e679307aa447c"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-81.png",
+      "bytes": 2613,
+      "sha256": "0d12657c460d2c88e434142ab50bb780f94be92756847d3baa6fd11b0ded3fd5"
+    },
+    {
+      "path": "installer_assets/polished/step-2-active-95.png",
+      "bytes": 3199,
+      "sha256": "3eee2c6e2f1f9082db7e804ec8e1f9769fcc9a50da260a1c3d7cbc05e2975b53"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-108.png",
+      "bytes": 3552,
+      "sha256": "d0e59e4aac5e74a485ea6a154717daf61d2a1f4fac3906be07d934abccddd143"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-122.png",
+      "bytes": 4031,
+      "sha256": "84b5992c566088309a48161f58221bd4b050ff2aa4b1394820767c13439f5d53"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-135.png",
+      "bytes": 4471,
+      "sha256": "2972e698ac572bc915bb991eaa7d7ac682d36f4a9f8cfefca883f57ebe9039ea"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-162.png",
+      "bytes": 5371,
+      "sha256": "40f1b37fcf16ec5fdd040047f06beff29569f46452a1038435e1ec49a0a75131"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-216.png",
+      "bytes": 7292,
+      "sha256": "ef7a4b5bb49c5f507142090d0a87688bdd6d064d5b42714d47b4d4a9fa765c1b"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-54.png",
+      "bytes": 1707,
+      "sha256": "4abc50f7a1acf19e69c62e8eaee97581cc10c62c843db5bd50148284556198d9"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-68.png",
+      "bytes": 2167,
+      "sha256": "dd3e3e263364a9595ddb7dfcb11c0315feea6230019812855d843ef872fd148c"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-81.png",
+      "bytes": 2541,
+      "sha256": "ab5aab216e0e98943e3af4343781acbbe8d96dd2dd666d9e761f5d47975c9ea6"
+    },
+    {
+      "path": "installer_assets/polished/step-2-done-95.png",
+      "bytes": 3102,
+      "sha256": "485c99cb2d0712cf54d0d8f6acda6617c219e6e118b24a25aba4bec6d495240a"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-108.png",
+      "bytes": 3291,
+      "sha256": "c31a0b6168c7a87d6b2da2537dda7b1a6a33065eb208bcfa7262c015c10ab7fb"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-122.png",
+      "bytes": 3753,
+      "sha256": "d6aa3608bdc56c90c6f11a7c72ef7d1de4cd2037ad48f22f25affd1fd8668666"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-135.png",
+      "bytes": 4189,
+      "sha256": "e560d391f0c0d2a5560bc8fb90fcb39534b55996f525837ec7facada35369110"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-162.png",
+      "bytes": 4943,
+      "sha256": "65c7854ca52cc13673cec4efd6be7be669b71eeb4e952f04d44f37adc0d485c8"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-216.png",
+      "bytes": 6715,
+      "sha256": "cea6f0b3f4302bd2bf778d678d22ecc605238c41db948deb9d199305d5d0fb59"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-54.png",
+      "bytes": 1599,
+      "sha256": "301c0135d2253af0e5a59b1245b4550794a61092163b9372a314598f7a837ab1"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-68.png",
+      "bytes": 1974,
+      "sha256": "40ca8a77d8568bba9e5604c31c8405ca699dfef1205277033771cfdfc08ba87d"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-81.png",
+      "bytes": 2352,
+      "sha256": "939955ecf08af064ad6df8e35e01f0891e48ef915275083b16864cd4aa6d2bf5"
+    },
+    {
+      "path": "installer_assets/polished/step-2-pending-95.png",
+      "bytes": 2864,
+      "sha256": "00e73facf55b9596b5ed5d14217d2405507e8fbd4244d0b1147ffe89e4bab2e1"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-108.png",
+      "bytes": 3901,
+      "sha256": "660c4a970d432e411ffa2af8d94be3072e5a53af86eb9b296671628a4e12140d"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-122.png",
+      "bytes": 4436,
+      "sha256": "d0b26a5aa3e7c14a94f490a345fe75825dcd01090f822b2dcb7bf3dd71cb6e0c"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-135.png",
+      "bytes": 4837,
+      "sha256": "a366cc8cadd171276de95a116b6581a23ada4db816381e05a812331f3c588088"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-162.png",
+      "bytes": 5858,
+      "sha256": "ae8910fd51c3ffb0465ba3e60a3b63e8fab6e278bb015c293d8ced9d901c8ced"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-216.png",
+      "bytes": 8036,
+      "sha256": "ef45d48d4d6fb239c2a332d396a626a95a4d76033b04735f0a02e23b6ecf33ca"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-54.png",
+      "bytes": 1863,
+      "sha256": "49ed06bd3eb4d4d141be2b934a4b67a6a669bc45b83409e0a8222ba2517abb48"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-68.png",
+      "bytes": 2366,
+      "sha256": "0aa316d200c7491f76ff65965c081e079521ea86351ec8ae61e6231fae7323bb"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-81.png",
+      "bytes": 2784,
+      "sha256": "3a4468cd8448de923b5b5e2654f193cdd8aa3f344c21163841d204d544cc015f"
+    },
+    {
+      "path": "installer_assets/polished/step-3-active-95.png",
+      "bytes": 3342,
+      "sha256": "ef9ea3259de3dcfa0afdee6f7251607e1e556b71e65054f50bd9a010d9b0ca9f"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-108.png",
+      "bytes": 3765,
+      "sha256": "dcc19050fd4a815402703cbe765cb6662ce3514930b9c4311a47564a0319a1cf"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-122.png",
+      "bytes": 4279,
+      "sha256": "7347818e59e452093ae7da2af6f39da4e1255cff526cbf6e597c1c2390d9cf65"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-135.png",
+      "bytes": 4677,
+      "sha256": "7299e550e1f595b7b2e8351ba22d566c49cc05eae667def84ec8a7cb6d47bb26"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-162.png",
+      "bytes": 5717,
+      "sha256": "75cb2a39c2bbe420b9edb835707782e4a11f3d6c47f63451696d11b526a3ba81"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-216.png",
+      "bytes": 7787,
+      "sha256": "ddf8dbcc372fdb04b4841ccdb98d51ec2364a3199d1fdc5580e2e9210ca25d3a"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-54.png",
+      "bytes": 1795,
+      "sha256": "9717a71cc79dc4894fc5c6722477477b60d3f78708da064c11e97d7164468171"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-68.png",
+      "bytes": 2300,
+      "sha256": "6de20add10a7f5edd4b1865be0be01a9cb27a8149dc7294229af67915b49cd12"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-81.png",
+      "bytes": 2752,
+      "sha256": "1f83db156b5571447c48e265524faffb44b4ba60b035f22cb89b13d32c477ff5"
+    },
+    {
+      "path": "installer_assets/polished/step-3-done-95.png",
+      "bytes": 3300,
+      "sha256": "ac9ca5ba8d19650eceac5162867bca04bad6b8ebce51fe1f22270810a32db4a6"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-108.png",
+      "bytes": 3507,
+      "sha256": "c88caacd9a2ed1e6ca0e20dd06b3b1e33ba3cbe0eaaea180362d6a4ef916e698"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-122.png",
+      "bytes": 3985,
+      "sha256": "6a09419396ffb33671eee62ba6a4a98062c7fbc9515790a2cf89e6b7ee748a30"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-135.png",
+      "bytes": 4418,
+      "sha256": "b7dd38ec3f14ad788ec8be2eef47d0c8c614b0760200a664491672d40d95415d"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-162.png",
+      "bytes": 5306,
+      "sha256": "dff2e52c337b423c2c56902ab7ce075eb97ba47dfd183841efa672b903722327"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-216.png",
+      "bytes": 7180,
+      "sha256": "1e3244141a480cd1d2e4ab3fd04092088a7d5d56f692281f45990d8913a71e04"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-54.png",
+      "bytes": 1662,
+      "sha256": "a00785e95ca455beaf4ebb62dcf39309e3c48acadacaa12bc02198eda225d0f2"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-68.png",
+      "bytes": 2058,
+      "sha256": "5a0b848b7119283487dc943ae4301e6b61095ef2c1440a334c16bfec543a8873"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-81.png",
+      "bytes": 2560,
+      "sha256": "47590197aff3c0ec686ea5c4e289e1bc3a9c6e1d2292c76ca96495d776b6a02c"
+    },
+    {
+      "path": "installer_assets/polished/step-3-pending-95.png",
+      "bytes": 3039,
+      "sha256": "8e784531a552f6bd4f08a0e49d11b152a28be4060a762ff23ccb57ed7984aae9"
+    },
+    {
+      "path": "installer_assets/wizard_banner.bmp",
+      "bytes": 154542,
+      "sha256": "22c0a8a0d2687cb4fd903856988aca208487948c4f92b007d8b068947e95d45a"
+    },
+    {
+      "path": "installer_assets/wizard_small.bmp",
+      "bytes": 9798,
+      "sha256": "55448c510e3562627239f18cd7ad4e384654dc8abcda7a319d44ef99794c0852"
+    },
+    {
+      "path": "installer_windows.iss",
+      "bytes": 48411,
+      "sha256": "4feb676088a073d985047818df18fb493b93182ae676beb80d66450b7eb4e297"
+    },
+    {
+      "path": "KNOWN_ISSUES.md",
+      "bytes": 3028,
+      "sha256": "24988e8ddb8d142affb3c14b582aca662146ce814b640fdd25e23b150b262165"
+    },
+    {
+      "path": "launch_windows.bat",
+      "bytes": 3041,
+      "sha256": "7979f135d47acf35c1c04d3c3a38eef2e59edfb2fe272bf4c66bd38d5027ad27"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 32983,
+      "sha256": "fa20afae8ae04600b02a8092abf8363d4fe4f5245ea8c56dd2de90b7d8439802"
+    },
+    {
+      "path": "licenses/AppImage-type2-runtime-LICENSE.txt",
+      "bytes": 1678,
+      "sha256": "aa154fc9070614bbe7921f89db11efd1dba7a1f3a41685958110e2230f9c0ca1"
+    },
+    {
+      "path": "licenses/cffi-LICENSE.txt",
+      "bytes": 1108,
+      "sha256": "1d2438cadca31cb11257f8440703766e42c995202aa27e7f629f9a79a8b5c07f"
+    },
+    {
+      "path": "licenses/FFmpeg-LICENSE.txt",
+      "bytes": 7651,
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+    },
+    {
+      "path": "licenses/FTHR-GENERATED-ASSETS.txt",
+      "bytes": 1564,
+      "sha256": "f99da0f82f96273ea877a569f84cd75002de01d07492a3ade0c29cf2fad06a21"
+    },
+    {
+      "path": "licenses/FTHR-USER-PROVIDED-ASSETS.txt",
+      "bytes": 928,
+      "sha256": "2f419136ff87a1bddc164b2fc007442a0829aa53ca72f6b3d9b617b4186f52c5"
+    },
+    {
+      "path": "licenses/keyboard-LICENSE.txt",
+      "bytes": 1077,
+      "sha256": "2bf14a525555d05a801c2d2c28901504fb76abee7c2d7ebfb4cfc7508d7df0f7"
+    },
+    {
+      "path": "licenses/KO-FI-BRAND-ASSETS.txt",
+      "bytes": 1034,
+      "sha256": "984deb944aa702bbde5b5d982deb3b10b400df856672ee7bdc97569c7e0a4cbc"
+    },
+    {
+      "path": "licenses/MIT.txt",
+      "bytes": 1071,
+      "sha256": "03e7bf20b009a7d2754693c0874b58a2a917acee82d694f0b26d2f4905326b0e"
+    },
+    {
+      "path": "licenses/numpy-LICENSE.txt",
+      "bytes": 45801,
+      "sha256": "dc97d59562c75c04557f1e9a68f3eae326699eb119d569cd4ed6a4eafe5f9abb"
+    },
+    {
+      "path": "licenses/NVIDIA-NVENC-SDK-LICENSE.txt",
+      "bytes": 1143,
+      "sha256": "bceb22ab34f06b68cc31b6a85079710af5066a9f8828617ba92ba59238d91022"
+    },
+    {
+      "path": "licenses/opencv-LICENSE-Apache2.txt",
+      "bytes": 1070,
+      "sha256": "09d719058e782ac7bc71ba21c944e1136cde2bb957c0e888121f0218d6b5f02c"
+    },
+    {
+      "path": "licenses/opencv-LICENSE.txt",
+      "bytes": 177835,
+      "sha256": "0e8fac55c2f5bff939c1e7aae1fa2799e1cece5fd0857d8e5fafeb46562aafc9"
+    },
+    {
+      "path": "licenses/OpenH264-LICENSE.txt",
+      "bytes": 1294,
+      "sha256": "3831546ef0092ad73ca7b07a5262d8425ed4f73a4e50017daa3f4e75892dd73d"
+    },
+    {
+      "path": "licenses/optional-uploader/bcrypt/LICENSE",
+      "bytes": 10850,
+      "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
+    },
+    {
+      "path": "licenses/optional-uploader/cffi/AUTHORS",
+      "bytes": 208,
+      "sha256": "2a67a60bbfb33759d67d645ff131b8e6d6bc4cafc232d751fcac3eda4d314cc8"
+    },
+    {
+      "path": "licenses/optional-uploader/cffi/LICENSE",
+      "bytes": 1123,
+      "sha256": "5ba24ddc57067f9249add644c3afc41a5d6dc37e23433ef759d95df370b0af63"
+    },
+    {
+      "path": "licenses/optional-uploader/cryptography/LICENSE",
+      "bytes": 197,
+      "sha256": "3e0c7c091a948b82533ba98fd7cbb40432d6f1a9acbf85f5922d2f99a93ae6bb"
+    },
+    {
+      "path": "licenses/optional-uploader/cryptography/LICENSE.APACHE",
+      "bytes": 11360,
+      "sha256": "aac73b3148f6d1d7111dbca32099f68d26c644c6813ae1e4f05f6579aa2663fe"
+    },
+    {
+      "path": "licenses/optional-uploader/cryptography/LICENSE.BSD",
+      "bytes": 1532,
+      "sha256": "602c4c7482de6479dd2e9793cda275e5e63d773dacd1eca689232ab7008fb4fb"
+    },
+    {
+      "path": "licenses/optional-uploader/invoke/LICENSE",
+      "bytes": 1314,
+      "sha256": "7922f97f896f1d161e1ebf47083e304a23638361b255c6902b5e4f34eeda0dad"
+    },
+    {
+      "path": "licenses/optional-uploader/jaraco.classes/LICENSE",
+      "bytes": 1023,
+      "sha256": "86da0f01aeae46348a3c3d465195dc1ceccde79f79e87769a64b8da04b2a4741"
+    },
+    {
+      "path": "licenses/optional-uploader/jaraco.context/LICENSE",
+      "bytes": 1076,
+      "sha256": "9755a18519666e5f0f4cae3daad3d7012bcae48a600b31237d75e9fe134e6683"
+    },
+    {
+      "path": "licenses/optional-uploader/jaraco.functools/LICENSE",
+      "bytes": 1076,
+      "sha256": "9755a18519666e5f0f4cae3daad3d7012bcae48a600b31237d75e9fe134e6683"
+    },
+    {
+      "path": "licenses/optional-uploader/keyring/LICENSE",
+      "bytes": 1076,
+      "sha256": "5a57cb4db85e2a2dd88c290628908add57e3451449e0a9a71fdfb38776fd759d"
+    },
+    {
+      "path": "licenses/optional-uploader/more-itertools/LICENSE",
+      "bytes": 1053,
+      "sha256": "09f1c8c9e941af3e584d59641ea9b87d83c0cb0fd007eb5ef391a7e2643c1a46"
+    },
+    {
+      "path": "licenses/optional-uploader/paramiko/LICENSE",
+      "bytes": 26436,
+      "sha256": "5fa25bf5f395fd26e701c2e1de4ca7d162816986dc791c22f8f4226857ad1bb2"
+    },
+    {
+      "path": "licenses/optional-uploader/pycparser/LICENSE",
+      "bytes": 1543,
+      "sha256": "0c846399369ea76ddd7b5c44fe6d16497415fcf015f5cbb508c24bf98b81c5b1"
+    },
+    {
+      "path": "licenses/optional-uploader/PyNaCl/LICENSE",
+      "bytes": 9868,
+      "sha256": "77af5bbded959114b6d7a5eea518b2be364e04f4f4a95f9e87d9870c27713d24"
+    },
+    {
+      "path": "licenses/optional-uploader/PyNaCl/LICENSE.libsodium.txt",
+      "bytes": 841,
+      "sha256": "93e7cac854d71cdafc9d9e4e9f8fd28d87ae541b3dda224d7c8fe23d37875704"
+    },
+    {
+      "path": "licenses/optional-uploader/pywin32-ctypes/LICENSE.txt",
+      "bytes": 1644,
+      "sha256": "dfa83b3e2709adfcdb838d9ad55823ca674abb780e60563d9dd9544ccbf785e9"
+    },
+    {
+      "path": "licenses/Oswald-OFL-1.1.txt",
+      "bytes": 4389,
+      "sha256": "8bfde869841a78dcd89f4d7f0733ffe8b60199b6bfbfee509a45648daf1362f9"
+    },
+    {
+      "path": "licenses/pycparser-LICENSE.txt",
+      "bytes": 1529,
+      "sha256": "df8052c8bddd445d1bee064708f1a7e2cf548ae86701cda10cd3c17eabd3713e"
+    },
+    {
+      "path": "licenses/PySide6-NOTICE.txt",
+      "bytes": 721,
+      "sha256": "40ff96edcaf4cf344114a2cf71d76b07d6f61f0438818be5ce795e136c98fb8a"
+    },
+    {
+      "path": "licenses/Qt6-LICENSE.txt",
+      "bytes": 7687,
+      "sha256": "6c671e2912ec69c0832f32066c0313cee5fdc3bbcbce237822e89f3da58edd4e"
+    },
+    {
+      "path": "licenses/Qt6-SOURCE.txt",
+      "bytes": 950,
+      "sha256": "e45751ab3f7f982028fafb2bba675f2070123020fb8222a376608f40a46dd7ff"
+    },
+    {
+      "path": "licenses/Qt6-THIRD-PARTY-NOTICES.txt",
+      "bytes": 887,
+      "sha256": "b7cd1be43b32c9592a4940ea8c88d2876f2e8c7e830f7f02851e61533dff377b"
+    },
+    {
+      "path": "licenses/sounddevice-LICENSE.txt",
+      "bytes": 1063,
+      "sha256": "b6eea21bbafbaf7a2177e492f1be6b5efc6f4e708b1980773de51cdaa52f8211"
+    },
+    {
+      "path": "licenses/Wayland-Protocols-NOTICES.txt",
+      "bytes": 2875,
+      "sha256": "8ec541fda07522a0ffeb20b791f0e9e9e955c638b399a87c7a285542323ecadd"
+    },
+    {
+      "path": "public_html/.htaccess",
+      "bytes": 1312,
+      "sha256": "f999de89bf2a9792afbcb325a4ca294ec112a7f7f918f836291c5177df06cfd9"
+    },
+    {
+      "path": "public_html/about/.htaccess",
+      "bytes": 1158,
+      "sha256": "5b39c7bbf3e2813e8bf35f56b9bfa3ad82669040c3810ea58934f91df74c1363"
+    },
+    {
+      "path": "public_html/about/apple-touch-icon.png",
+      "bytes": 4177,
+      "sha256": "8cb5205861d6d0f7aacce4b46c93def773a090c5c427a9377601b915c1097b7d"
+    },
+    {
+      "path": "public_html/about/assets/logo.png",
+      "bytes": 34833,
+      "sha256": "7b749de553c58f54db358b6c05e6f2203e188b1def1e52b32d289b5ded389166"
+    },
+    {
+      "path": "public_html/about/favicon-96x96.png",
+      "bytes": 2148,
+      "sha256": "e65472f9d0e1f9a9634f93cd8e6eab630792eab7404f648464939fdf650bb2be"
+    },
+    {
+      "path": "public_html/about/favicon.ico",
+      "bytes": 15086,
+      "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936"
+    },
+    {
+      "path": "public_html/about/favicon.svg",
+      "bytes": 46675,
+      "sha256": "f0390c3ea3bb15a5bcbc844a367ae0a024fc406d025f99764926a821f82a7f9b"
+    },
+    {
+      "path": "public_html/about/index.html",
+      "bytes": 10048,
+      "sha256": "70c949e55cda344b2a57efee7806561d8bd2379849a5798244bc018741b90dc3"
+    },
+    {
+      "path": "public_html/about/script.js",
+      "bytes": 5313,
+      "sha256": "9ba79fba986fcad9892d96d20420aff9bd381869d9917ff6bcad32999342152d"
+    },
+    {
+      "path": "public_html/about/site.webmanifest",
+      "bytes": 438,
+      "sha256": "cd3fb9bd65a70d4923de7aae366003db28c69f9aceff9453db2c7e534647765b"
+    },
+    {
+      "path": "public_html/about/styles.css",
+      "bytes": 10455,
+      "sha256": "a97178c5d55f7dff2f5ff8eecf89e892c30b19bf11950ff033b4e96ddb2b609e"
+    },
+    {
+      "path": "public_html/about/web-app-manifest-192x192.png",
+      "bytes": 4025,
+      "sha256": "5498c3d20c265879082203137496afcfe75eb01c18f8069449bd061aa7de7543"
+    },
+    {
+      "path": "public_html/about/web-app-manifest-512x512.png",
+      "bytes": 13133,
+      "sha256": "4247cc1ffe01bba05fc9f4cb2a09e8d7adba471e875acde9068e3737a9460b66"
+    },
+    {
+      "path": "public_html/apple-touch-icon.png",
+      "bytes": 4177,
+      "sha256": "8cb5205861d6d0f7aacce4b46c93def773a090c5c427a9377601b915c1097b7d"
+    },
+    {
+      "path": "public_html/assets/icons/audio-lines.svg",
+      "bytes": 324,
+      "sha256": "72275bdeab6cf9e764ca81edbb1b519018324ee69b9bc13fce153f66a308e803"
+    },
+    {
+      "path": "public_html/assets/icons/badge-x.svg",
+      "bytes": 443,
+      "sha256": "6e69bea109b10420f1f323b52a66a462b961f550baac46387856d0937719bd1f"
+    },
+    {
+      "path": "public_html/assets/icons/chevron-down.svg",
+      "bytes": 231,
+      "sha256": "a302abbb83366f2a8a22744a937b3761b4ea7ec7bd65eba6d8663c1c7007b6f2"
+    },
+    {
+      "path": "public_html/assets/icons/clapperboard.svg",
+      "bytes": 429,
+      "sha256": "e4d78946cda7812f13c431c68b6d4d0077a92217c7f468667a203f237e247d7e"
+    },
+    {
+      "path": "public_html/assets/icons/cloud-upload.svg",
+      "bytes": 311,
+      "sha256": "cd92fe29cbccbbfb35d37c8d1edcfdc70a5dc3e6cb7768f320ab3aa94dd4501a"
+    },
+    {
+      "path": "public_html/assets/icons/crop.svg",
+      "bytes": 267,
+      "sha256": "a432d54aa5d0718796f6c5c7720ea0c206e8f1c7506f5353209566228c762d13"
+    },
+    {
+      "path": "public_html/assets/icons/dropdown.png",
+      "bytes": 14243,
+      "sha256": "8918f835bb6c8404932020d8d1f09ea420801a800ebd840f16d4ed0170b3b09f"
+    },
+    {
+      "path": "public_html/assets/icons/eye-off.svg",
+      "bytes": 485,
+      "sha256": "d7f5bf4389e8b1a9ab84719a46d696176013dccee4de62dededa8f941fec1229"
+    },
+    {
+      "path": "public_html/assets/icons/folder-up.svg",
+      "bytes": 373,
+      "sha256": "af923364cf7e5dce440e71605d10222e726ab05a26e621c7a579231691883a9d"
+    },
+    {
+      "path": "public_html/assets/icons/gamepad-2.svg",
+      "bytes": 680,
+      "sha256": "b0671de7afbebdafc4d655d867d9851947170b906fb187e749410039df867509"
+    },
+    {
+      "path": "public_html/assets/icons/gauge.svg",
+      "bytes": 257,
+      "sha256": "edade1e7342784b0c737cb32a434fe41bfb7c4617ecba1b44329345055bad955"
+    },
+    {
+      "path": "public_html/assets/icons/link-2-off.svg",
+      "bytes": 346,
+      "sha256": "56c0605d396eef3fcdc74295948970ac3ba14ce4a2512ccd9e953709eb4c2322"
+    },
+    {
+      "path": "public_html/assets/icons/lock-keyhole.svg",
+      "bytes": 315,
+      "sha256": "47f99e5eb871e7c54b047c7987e3af39d06928123a75efa12e950e31b55a2b5d"
+    },
+    {
+      "path": "public_html/assets/icons/monitor-play.svg",
+      "bytes": 426,
+      "sha256": "7442afcff62d2986f572f5bde40a68f47d0500984b72481362f038eb5a00f943"
+    },
+    {
+      "path": "public_html/assets/icons/palette.svg",
+      "bytes": 547,
+      "sha256": "e852f14ef91ed6ad0f5007df5e77b76f7ad4d0fb976cb32c95d1f2594bead8cc"
+    },
+    {
+      "path": "public_html/assets/icons/radio-tower.svg",
+      "bytes": 466,
+      "sha256": "944c935d04c066340695ebec275c260e316f087751e474008b1655b7381b16a1"
+    },
+    {
+      "path": "public_html/assets/icons/scissors.svg",
+      "bytes": 371,
+      "sha256": "4c831fc2c903825f68565c28ffab945c34b2c60b6c564e2ae54250e1099fa550"
+    },
+    {
+      "path": "public_html/assets/icons/share-2.svg",
+      "bytes": 394,
+      "sha256": "a60fbdeecc128885b248681da61293082d569671b6397d4cd882be967ef94159"
+    },
+    {
+      "path": "public_html/assets/icons/user-round-x.svg",
+      "bytes": 315,
+      "sha256": "c18157d9ebe386e73d4116a1fd963ef8d835580f90119dd05790bf587ca8df0e"
+    },
+    {
+      "path": "public_html/assets/icons/video.svg",
+      "bytes": 350,
+      "sha256": "d4fb6587f282c1152b953fe9494cd8ccafdf1e9f44957fbb7fe8dc7af0457597"
+    },
+    {
+      "path": "public_html/assets/icons/zap.svg",
+      "bytes": 359,
+      "sha256": "b24f5879739d46cc73275de0d73fdfe2bc64b00fe4516f6495184ef516b4820d"
+    },
+    {
+      "path": "public_html/assets/logo.png",
+      "bytes": 34833,
+      "sha256": "7b749de553c58f54db358b6c05e6f2203e188b1def1e52b32d289b5ded389166"
+    },
+    {
+      "path": "public_html/assets/team/team-01.jpg",
+      "bytes": 119994,
+      "sha256": "4b2eb8ca47312f3e47689d5c4ad6cf5e365defa90948254e48447c1e93c0dcb6"
+    },
+    {
+      "path": "public_html/assets/team/team-02.jpg",
+      "bytes": 82701,
+      "sha256": "f21db2cdee13e24153abbb2145deb5cd3defea94b4767c0e3ee18d4d2bf09935"
+    },
+    {
+      "path": "public_html/assets/team/team-03.jpg",
+      "bytes": 114504,
+      "sha256": "78d4ff62a58391fe2ce1574e9f5b7102ea845b12e0a84499b6e8ce9d5a92a423"
+    },
+    {
+      "path": "public_html/docs/.htaccess",
+      "bytes": 182,
+      "sha256": "f2ffe8c521087d3284d848012922c4e55ae1377c124e6aa2c055c724eb6a347f"
+    },
+    {
+      "path": "public_html/docs/index.html",
+      "bytes": 3753,
+      "sha256": "f0e7cf9ab392f7f2fc50d7948b5380f38f98e50ec6975b5a46e0cefaca6100d4"
+    },
+    {
+      "path": "public_html/docs/script.js",
+      "bytes": 29551,
+      "sha256": "fb61e26c9f56586dee3a4e4ae35471bb48f1e8d6d35f0223984a77179afe3baf"
+    },
+    {
+      "path": "public_html/docs/styles.css",
+      "bytes": 10449,
+      "sha256": "abaec7df079e727f2626e5bf83dab0f5415b7d1ddf5ba6f9d0b465effe0a6177"
+    },
+    {
+      "path": "public_html/downloads/assets/1685424032microsoft windows-11-icon.png",
+      "bytes": 6444,
+      "sha256": "a454c699fe6f0201e84a103ca1a43c490f54e714a4508ccd5405ff109b057f8c"
+    },
+    {
+      "path": "public_html/downloads/assets/6124995.png",
+      "bytes": 51023,
+      "sha256": "87ad4d296504fcc088fe78e6a1bacb0e394596114878fb0d86122afff4636e0e"
+    },
+    {
+      "path": "public_html/downloads/assets/favicon.svg",
+      "bytes": 46675,
+      "sha256": "f0390c3ea3bb15a5bcbc844a367ae0a024fc406d025f99764926a821f82a7f9b"
+    },
+    {
+      "path": "public_html/downloads/assets/README.txt",
+      "bytes": 305,
+      "sha256": "4cf5f82212de1947de35773e798b60caaa761049a6a8c163ba781dc154132cc7"
+    },
+    {
+      "path": "public_html/downloads/index.html",
+      "bytes": 6855,
+      "sha256": "e2571bbda4eb8b2247a130752b6db1f01bb724cb6316e09150d0b87c29c9e222"
+    },
+    {
+      "path": "public_html/downloads/script.js",
+      "bytes": 6258,
+      "sha256": "c810a4664e0565997c090b012939d33dceeeb155137ce128af69ba0d621a5d0d"
+    },
+    {
+      "path": "public_html/downloads/styles.css",
+      "bytes": 13241,
+      "sha256": "3df9dea93b2d5128b46f9d305f9df94e35568fe823ca5fcc324d49aa656e2ea0"
+    },
+    {
+      "path": "public_html/ente/.htaccess",
+      "bytes": 1158,
+      "sha256": "5b39c7bbf3e2813e8bf35f56b9bfa3ad82669040c3810ea58934f91df74c1363"
+    },
+    {
+      "path": "public_html/ente/apple-touch-icon.png",
+      "bytes": 4177,
+      "sha256": "8cb5205861d6d0f7aacce4b46c93def773a090c5c427a9377601b915c1097b7d"
+    },
+    {
+      "path": "public_html/ente/assets/discord.svg",
+      "bytes": 1374,
+      "sha256": "1d364b72c9eaf1fe37d17ca88cd8fb541308dc0f3b09e2ab3b824f380b3493d5"
+    },
+    {
+      "path": "public_html/ente/assets/fthrclips-logo.png",
+      "bytes": 34833,
+      "sha256": "7b749de553c58f54db358b6c05e6f2203e188b1def1e52b32d289b5ded389166"
+    },
+    {
+      "path": "public_html/ente/assets/youtube.svg",
+      "bytes": 459,
+      "sha256": "5038808acbbc4e6edda16cbeb1cc6dec80e4e4ee4e227e039c41229fa222aa8c"
+    },
+    {
+      "path": "public_html/ente/favicon-96x96.png",
+      "bytes": 2148,
+      "sha256": "e65472f9d0e1f9a9634f93cd8e6eab630792eab7404f648464939fdf650bb2be"
+    },
+    {
+      "path": "public_html/ente/favicon.ico",
+      "bytes": 15086,
+      "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936"
+    },
+    {
+      "path": "public_html/ente/favicon.svg",
+      "bytes": 46675,
+      "sha256": "f0390c3ea3bb15a5bcbc844a367ae0a024fc406d025f99764926a821f82a7f9b"
+    },
+    {
+      "path": "public_html/ente/index.html",
+      "bytes": 2114,
+      "sha256": "6785144769389e2e172d78e998684d999c9d72347f12966c6f6513d6b1480827"
+    },
+    {
+      "path": "public_html/ente/script.js",
+      "bytes": 4230,
+      "sha256": "c0973308eaab019a110791d1a25e5e995c9c329597b09a2210e0cd5ae3d97169"
+    },
+    {
+      "path": "public_html/ente/site.webmanifest",
+      "bytes": 460,
+      "sha256": "faa46784c6898668178a0ade4681607d424d11f7c0152a526c96da0517602a7d"
+    },
+    {
+      "path": "public_html/ente/styles.css",
+      "bytes": 2921,
+      "sha256": "3e8b2baecb2cbdea2e20db99ff552e39b0a233e59fcd394341db9af7707a2e58"
+    },
+    {
+      "path": "public_html/ente/web-app-manifest-192x192.png",
+      "bytes": 4025,
+      "sha256": "5498c3d20c265879082203137496afcfe75eb01c18f8069449bd061aa7de7543"
+    },
+    {
+      "path": "public_html/ente/web-app-manifest-512x512.png",
+      "bytes": 13133,
+      "sha256": "4247cc1ffe01bba05fc9f4cb2a09e8d7adba471e875acde9068e3737a9460b66"
+    },
+    {
+      "path": "public_html/faq/.htaccess",
+      "bytes": 1158,
+      "sha256": "5b39c7bbf3e2813e8bf35f56b9bfa3ad82669040c3810ea58934f91df74c1363"
+    },
+    {
+      "path": "public_html/faq/apple-touch-icon.png",
+      "bytes": 4177,
+      "sha256": "8cb5205861d6d0f7aacce4b46c93def773a090c5c427a9377601b915c1097b7d"
+    },
+    {
+      "path": "public_html/faq/assets/logo.png",
+      "bytes": 34833,
+      "sha256": "7b749de553c58f54db358b6c05e6f2203e188b1def1e52b32d289b5ded389166"
+    },
+    {
+      "path": "public_html/faq/favicon-96x96.png",
+      "bytes": 2148,
+      "sha256": "e65472f9d0e1f9a9634f93cd8e6eab630792eab7404f648464939fdf650bb2be"
+    },
+    {
+      "path": "public_html/faq/favicon.ico",
+      "bytes": 15086,
+      "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936"
+    },
+    {
+      "path": "public_html/faq/favicon.svg",
+      "bytes": 46675,
+      "sha256": "f0390c3ea3bb15a5bcbc844a367ae0a024fc406d025f99764926a821f82a7f9b"
+    },
+    {
+      "path": "public_html/faq/index.html",
+      "bytes": 7795,
+      "sha256": "90e63b099f02e086d6ef2f58fbfa7e69b3df17ef31c5a69b7c6afb46fb129476"
+    },
+    {
+      "path": "public_html/faq/script.js",
+      "bytes": 3740,
+      "sha256": "5aa5fecb64ee27b1b573f1865a857eebebf3e174460822a193846321810a1f2f"
+    },
+    {
+      "path": "public_html/faq/site.webmanifest",
+      "bytes": 438,
+      "sha256": "cd3fb9bd65a70d4923de7aae366003db28c69f9aceff9453db2c7e534647765b"
+    },
+    {
+      "path": "public_html/faq/styles.css",
+      "bytes": 9384,
+      "sha256": "c519f31a4d3121974075a6a470ff020d960729ff3bd8573b9ff92878a30f9eba"
+    },
+    {
+      "path": "public_html/faq/web-app-manifest-192x192.png",
+      "bytes": 4025,
+      "sha256": "5498c3d20c265879082203137496afcfe75eb01c18f8069449bd061aa7de7543"
+    },
+    {
+      "path": "public_html/faq/web-app-manifest-512x512.png",
+      "bytes": 13133,
+      "sha256": "4247cc1ffe01bba05fc9f4cb2a09e8d7adba471e875acde9068e3737a9460b66"
+    },
+    {
+      "path": "public_html/favicon-96x96.png",
+      "bytes": 2148,
+      "sha256": "e65472f9d0e1f9a9634f93cd8e6eab630792eab7404f648464939fdf650bb2be"
+    },
+    {
+      "path": "public_html/favicon.ico",
+      "bytes": 15086,
+      "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936"
+    },
+    {
+      "path": "public_html/favicon.svg",
+      "bytes": 46675,
+      "sha256": "f0390c3ea3bb15a5bcbc844a367ae0a024fc406d025f99764926a821f82a7f9b"
+    },
+    {
+      "path": "public_html/gary/.htaccess",
+      "bytes": 1158,
+      "sha256": "5b39c7bbf3e2813e8bf35f56b9bfa3ad82669040c3810ea58934f91df74c1363"
+    },
+    {
+      "path": "public_html/gary/apple-touch-icon.png",
+      "bytes": 4177,
+      "sha256": "8cb5205861d6d0f7aacce4b46c93def773a090c5c427a9377601b915c1097b7d"
+    },
+    {
+      "path": "public_html/gary/assets/gary/gary-stage-1-960.webp",
+      "bytes": 35830,
+      "sha256": "4d8c4e02d3965b653a61523394f7b05f5907e26499fe57baa9f63a0eb0ab1e4f"
+    },
+    {
+      "path": "public_html/gary/assets/gary/gary-stage-1-normalized.png",
+      "bytes": 1072083,
+      "sha256": "d1b1d152833a30e0bff6a9aa6fc02eabea7e836135bade00fb702fece19343e1"
+    },
+    {
+      "path": "public_html/gary/assets/gary/gary-stage-2-960.webp",
+      "bytes": 46708,
+      "sha256": "13e8554da2cbd9f7476e2413256e4270b6fbdd928471f8c6cba4844495de09b6"
+    },
+    {
+      "path": "public_html/gary/assets/gary/gary-stage-2-normalized.png",
+      "bytes": 871887,
+      "sha256": "a7efb40b50fc43c18dad1370f340ddf988d8ea0f6dcc4de188fdadc661d5a249"
+    },
+    {
+      "path": "public_html/gary/assets/gary/gary-stage-3-960.webp",
+      "bytes": 44184,
+      "sha256": "6d9f2fca9273c56578d4d584fb150a7b1551a4129e2d46db5ed2faeb29f939a5"
+    },
+    {
+      "path": "public_html/gary/assets/gary/gary-stage-3-normalized.png",
+      "bytes": 790167,
+      "sha256": "7bff0da8601b30d76d2fe0ae93e050a21adcb111c5276d13ace6b2614d5cba07"
+    },
+    {
+      "path": "public_html/gary/assets/gary/gary-stage-4-960.webp",
+      "bytes": 34988,
+      "sha256": "65895d8dbecdf723d59316b411436b824cb9ab72ea16110eb498563c9260c7c4"
+    },
+    {
+      "path": "public_html/gary/assets/gary/gary-stage-4-normalized.png",
+      "bytes": 983883,
+      "sha256": "e8804525e83157d887ab9c59e8966a1e15058d3f9fe179d28f17e2ac2a9541f8"
+    },
+    {
+      "path": "public_html/gary/assets/gary/gary-stage-5-960.webp",
+      "bytes": 33134,
+      "sha256": "e9496220e4ecf163997df8eae0a3aadb9431c0a723093d9b9b9405dc4fefbbc5"
+    },
+    {
+      "path": "public_html/gary/assets/gary/gary-stage-5-normalized.png",
+      "bytes": 596545,
+      "sha256": "ac28184a31734749adbed2bae40256a8c7778a3604ef9f9afa59b067baf23e67"
+    },
+    {
+      "path": "public_html/gary/assets/icons/Content-Statistic--Streamline-Core.png",
+      "bytes": 721,
+      "sha256": "de3e2dae3e2126552addb6cd86832cccfb34beb3e2b808f2eb807450e36cedb4"
+    },
+    {
+      "path": "public_html/gary/assets/icons/Heart--Streamline-Core.png",
+      "bytes": 1107,
+      "sha256": "f3e36e11fb9da7c2dbd4ce24c60975ad2a9681000ae8d70373b8579c3f06e882"
+    },
+    {
+      "path": "public_html/gary/assets/icons/Hierarchy-Line-3--Streamline-Core.png",
+      "bytes": 690,
+      "sha256": "098ed55d54b3b0df6cc88824767ce85984bc19b33a8bdad5287e510e7aa05701"
+    },
+    {
+      "path": "public_html/gary/assets/icons/Map-Fold--Streamline-Core.png",
+      "bytes": 666,
+      "sha256": "470ee736f5d6d0c0596844245f9d1ddd281865518d8f37c68f6487d5b8627396"
+    },
+    {
+      "path": "public_html/gary/assets/icons/Necklace--Streamline-Core.png",
+      "bytes": 1057,
+      "sha256": "c35924191150d4b1cf0c6e41f3c946b0b67e91380504b5220769de73558dcc10"
+    },
+    {
+      "path": "public_html/gary/assets/icons/Radioactive-1--Streamline-Core.png",
+      "bytes": 1156,
+      "sha256": "ff4df3b758dac4966f006e5d12b35ac20142d2f087855bb6c7007009f86978d6"
+    },
+    {
+      "path": "public_html/gary/assets/icons/Rain-Cloud--Streamline-Core.png",
+      "bytes": 1043,
+      "sha256": "ce2298334a75c3cce2e4b6224f68a9091111c92eccdd9dbb9a309f718085295d"
+    },
+    {
+      "path": "public_html/gary/assets/icons/Recycle-Bin-2--Streamline-Core.png",
+      "bytes": 638,
+      "sha256": "d4e5ef76604738faeac701fc05e8478950868bea0a147eca183b43e7d8c8d489"
+    },
+    {
+      "path": "public_html/gary/assets/icons/Snow-Flake--Streamline-Core.png",
+      "bytes": 1227,
+      "sha256": "c41c9a57fbc28cd7598e5144b4f74bc8e6e67f016b83ac72dfa7ef4600f8553f"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Banana--Streamline-Core.png",
+      "bytes": 1252,
+      "sha256": "df05bc6b47a03b7efae8f567aa866c343995e4c5a46bc0dbb27d264cba085062"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Biscuits--Streamline-Core.png",
+      "bytes": 1410,
+      "sha256": "d4ab90b81d3ca29140f7e9898733c06e74970dce0686f3fb6c401c2d6159b8c2"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Bomb--Streamline-Core.png",
+      "bytes": 1177,
+      "sha256": "63c439efd507d7947137b973220fd200f774bea7ac288d00f9ea02256a53f53d"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Croissant--Streamline-Core.png",
+      "bytes": 1320,
+      "sha256": "f119982aef23ba60e1d6502d831f28356a908030c63265239ded32148531f6bc"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Desert--Streamline-Core.png",
+      "bytes": 985,
+      "sha256": "2016f0afa162e9797a1cd8f2d60d91727b672ea58fd3acb9de230155ebbea3c8"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Ice-Cream-2--Streamline-Core.png",
+      "bytes": 585,
+      "sha256": "7cb9b6f5192da0baa3c43d6958a975caee32ea0addd04606184a4ac89ebc52df"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Laboratory-Test-Stool--Streamline-Ultimate.png",
+      "bytes": 820,
+      "sha256": "4215d9b961c1813fb62244854d97176c4567d92c7242d0d132bdc59e5f5c78c6"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Parachute-Drop--Streamline-Core.png",
+      "bytes": 928,
+      "sha256": "35207683d47f7381a60bcc93ac1e9e3fbfd25109b255e7883a2099bdec41319f"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Pet-Paw--Streamline-Core.png",
+      "bytes": 1244,
+      "sha256": "86fc40527abea711c4836241cfc67da9e2c8046cd956b5c93efa12261680408a"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Square--Streamline-Core.png",
+      "bytes": 344,
+      "sha256": "cb57b486dc8c4bd4eea8ce43731dbf067ca34bfa1e388dda608325d473a7aba9"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Taco-Fastfood--Streamline-Core.png",
+      "bytes": 1307,
+      "sha256": "dc78f93ad7da6e766a19d4e2e50c2317cdb89062fe890b2cbee8aa049a4205fb"
+    },
+    {
+      "path": "public_html/gary/assets/snacks/Video-Games-Flappy-Bird--Streamline-Nova.png",
+      "bytes": 1045,
+      "sha256": "5ddef3b6f6ac51b4cb3c8037de801df4147ea62184890a661e670a62e4b75b71"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/gary/gary_01.mp3",
+      "bytes": 13232,
+      "sha256": "675d7a3cae6d745a78750bb920b39a570e882e893159dae56941f4c03b2f4a97"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/gary/gary_02.mp3",
+      "bytes": 9889,
+      "sha256": "066ec086269a00b5f9543e806742e1df4ed4f188ed7e08d7e9829871cc878699"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/gary/gary_03.mp3",
+      "bytes": 11143,
+      "sha256": "3812a5ce6f9aae08a616e3e640b10d52657c35d5133b73efd135cc0984e9afda"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/gary/gary_04.mp3",
+      "bytes": 10725,
+      "sha256": "95bfe7b83afab90527794b4d331e5183583ad86390d2f29efe9e27b140b070d1"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/gary/gary_06.mp3",
+      "bytes": 75458,
+      "sha256": "f61bf27cc6776e65976fe945981cea69d468a225ef4e6df42e87f65fb4d9074b"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/gary/gary_07.mp3",
+      "bytes": 68144,
+      "sha256": "2bea7bc805f728f387783e794bd4256e716cdade4162cf6874b72be2c7ecd39e"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/gary/gary_08.mp3",
+      "bytes": 71279,
+      "sha256": "7ae9466fd9f82d4c83905ac2ba24f2ca90f91a898cb405faf618eb8549329758"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/gary/gary_09.mp3",
+      "bytes": 25121,
+      "sha256": "a7460e045052975d60a7123142df19ec66f1e0dcbf385050168b98590d06c975"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/gary/gary_10.mp3",
+      "bytes": 40795,
+      "sha256": "177e774c456e7022f498718cbfa29758d5ae303155d7e4ab164c93cfd7747cc3"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/aim_hit.ogg",
+      "bytes": 4656,
+      "sha256": "c394b46bc6737f7f7edfbfa3031ce621b7a43d498d456d6198364eee9cd3e306"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/apebble-fart-4-228244.mp3",
+      "bytes": 60186,
+      "sha256": "92d724abc4bcf4e0bd8f383f29e49177f5927d44af58842a00316ec6013f80bd"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/bar_hit.ogg",
+      "bytes": 6104,
+      "sha256": "efdd1d1e2904fb2d81259cd96bb80101caceae94be02baa4b5310714a6708b19"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/big_gary.ogg",
+      "bytes": 4880,
+      "sha256": "e3e7fc7ccd9c5cfdf77bffa05aee10d4973812076c76dc889ba2b16ea434127f"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/boss_lose.ogg",
+      "bytes": 10201,
+      "sha256": "1b1211b6360aae37ea685fee057bcabd034a749c1dfac6a9d643086d96e9b9aa"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/boss_win.ogg",
+      "bytes": 14004,
+      "sha256": "baf50beffc4cc2dbb92c9d596a22732a8b5249c7648b681c0df6d0af6c561478"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/challenge_complete.ogg",
+      "bytes": 7130,
+      "sha256": "ba31fc9a780a6908809154e0108e8d2728b5b9a6e769c8f56d61d920fba100ae"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/dino_jump.ogg",
+      "bytes": 5707,
+      "sha256": "7a3032d1dae63d1096cf2f1e59cb43e598d5229dcb9617e9d3fb13e96c78d5f2"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/dino_slam.ogg",
+      "bytes": 4588,
+      "sha256": "dab0c21eacb6536724d139c27c0d60c932c87171752dc8d24d7a826694377f94"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/drop_collect.ogg",
+      "bytes": 4656,
+      "sha256": "c394b46bc6737f7f7edfbfa3031ce621b7a43d498d456d6198364eee9cd3e306"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/iteration_start.ogg",
+      "bytes": 6616,
+      "sha256": "1dd3cf29291219ab2eed0292d5c3b06b1e102ea70821099e741fc127734ffa04"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/new_gary.ogg",
+      "bytes": 7868,
+      "sha256": "b740f507ad386a1d09bb5ca69a75231656a71375df11348fcd2d5e323b8d6727"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/sound_toggle.ogg",
+      "bytes": 6042,
+      "sha256": "aa8ad6e4745e87c84c24a0335e0e0f8629ccbbc474ccfd544fe07d7f3a1b2280"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/upgrade.ogg",
+      "bytes": 8530,
+      "sha256": "977ecead4b27cf9801aed433bfa4bdfcf49444c15990d27d2e472401a1fb2742"
+    },
+    {
+      "path": "public_html/gary/assets/sounds/UI/wrong_move.ogg",
+      "bytes": 6248,
+      "sha256": "a8d445bd96fe3842ff2dcdd42ae728330baa8928032ca5f3d5cd4b926929550a"
+    },
+    {
+      "path": "public_html/gary/favicon-96x96.png",
+      "bytes": 2148,
+      "sha256": "e65472f9d0e1f9a9634f93cd8e6eab630792eab7404f648464939fdf650bb2be"
+    },
+    {
+      "path": "public_html/gary/favicon.ico",
+      "bytes": 15086,
+      "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936"
+    },
+    {
+      "path": "public_html/gary/favicon.svg",
+      "bytes": 46675,
+      "sha256": "f0390c3ea3bb15a5bcbc844a367ae0a024fc406d025f99764926a821f82a7f9b"
+    },
+    {
+      "path": "public_html/gary/index.html",
+      "bytes": 44392,
+      "sha256": "8daf35d65598dd625083d968d9bf8a6767feb2e75abb3f7dfc522c24f501ca8d"
+    },
+    {
+      "path": "public_html/gary/privacy.html",
+      "bytes": 2956,
+      "sha256": "01067b429e191898beba8df77e03c2311f94bf386ff81531129924234eb2b00b"
+    },
+    {
+      "path": "public_html/gary/terms.html",
+      "bytes": 3099,
+      "sha256": "6d5fd8138eba9381d55c632fbcf21ef3af281439a37ca0cb66279a17220f9530"
+    },
+    {
+      "path": "public_html/gary/web-app-manifest-192x192.png",
+      "bytes": 4025,
+      "sha256": "5498c3d20c265879082203137496afcfe75eb01c18f8069449bd061aa7de7543"
+    },
+    {
+      "path": "public_html/gary/web-app-manifest-512x512.png",
+      "bytes": 13133,
+      "sha256": "4247cc1ffe01bba05fc9f4cb2a09e8d7adba471e875acde9068e3737a9460b66"
+    },
+    {
+      "path": "public_html/index.html",
+      "bytes": 56916,
+      "sha256": "aace5439c2de66ed5075629c247387ae557a57062d524a984567a5f5f388f658"
+    },
+    {
+      "path": "public_html/maintenance.html",
+      "bytes": 12022,
+      "sha256": "8412f233ca1893278d442b336a71de6fab7396f04fe8d77e2cd35d3e7389e83a"
+    },
+    {
+      "path": "public_html/roadmap.json",
+      "bytes": 2057,
+      "sha256": "531ee4ba43530cf09ab2b0f75bfd18e87bda65691ff392f6d0decb8251b40452"
+    },
+    {
+      "path": "public_html/script.js",
+      "bytes": 55782,
+      "sha256": "8f4c6fd603ebfa7f66083368f0d6ba46c91797269fd5bf59ace96b3eafc9cb59"
+    },
+    {
+      "path": "public_html/site.webmanifest",
+      "bytes": 460,
+      "sha256": "faa46784c6898668178a0ade4681607d424d11f7c0152a526c96da0517602a7d"
+    },
+    {
+      "path": "public_html/socials/.htaccess",
+      "bytes": 1158,
+      "sha256": "5b39c7bbf3e2813e8bf35f56b9bfa3ad82669040c3810ea58934f91df74c1363"
+    },
+    {
+      "path": "public_html/socials/apple-touch-icon.png",
+      "bytes": 4177,
+      "sha256": "8cb5205861d6d0f7aacce4b46c93def773a090c5c427a9377601b915c1097b7d"
+    },
+    {
+      "path": "public_html/socials/assets/logo.png",
+      "bytes": 34833,
+      "sha256": "7b749de553c58f54db358b6c05e6f2203e188b1def1e52b32d289b5ded389166"
+    },
+    {
+      "path": "public_html/socials/favicon-96x96.png",
+      "bytes": 2148,
+      "sha256": "e65472f9d0e1f9a9634f93cd8e6eab630792eab7404f648464939fdf650bb2be"
+    },
+    {
+      "path": "public_html/socials/favicon.ico",
+      "bytes": 15086,
+      "sha256": "026af246059efffd9bf899b62e898f74efb6bb6b3ae80f6a168376c42f4cc936"
+    },
+    {
+      "path": "public_html/socials/favicon.svg",
+      "bytes": 46675,
+      "sha256": "f0390c3ea3bb15a5bcbc844a367ae0a024fc406d025f99764926a821f82a7f9b"
+    },
+    {
+      "path": "public_html/socials/index.html",
+      "bytes": 5417,
+      "sha256": "8164244efc3688605d2fe775b2feda8d11da8e9be5002bc62e4297bacd0d286c"
+    },
+    {
+      "path": "public_html/socials/script.js",
+      "bytes": 3740,
+      "sha256": "5aa5fecb64ee27b1b573f1865a857eebebf3e174460822a193846321810a1f2f"
+    },
+    {
+      "path": "public_html/socials/site.webmanifest",
+      "bytes": 438,
+      "sha256": "cd3fb9bd65a70d4923de7aae366003db28c69f9aceff9453db2c7e534647765b"
+    },
+    {
+      "path": "public_html/socials/styles.css",
+      "bytes": 11588,
+      "sha256": "5e2b5e1e148405d1d400a38caaf7b0b959fe6015804be47146db2a8100528355"
+    },
+    {
+      "path": "public_html/socials/web-app-manifest-192x192.png",
+      "bytes": 4025,
+      "sha256": "5498c3d20c265879082203137496afcfe75eb01c18f8069449bd061aa7de7543"
+    },
+    {
+      "path": "public_html/socials/web-app-manifest-512x512.png",
+      "bytes": 13133,
+      "sha256": "4247cc1ffe01bba05fc9f4cb2a09e8d7adba471e875acde9068e3737a9460b66"
+    },
+    {
+      "path": "public_html/styles.css",
+      "bytes": 85134,
+      "sha256": "f3b09ed6bf0f9bce4793ad71d8fae9cb082d908f80e040c69275dfdd1bc29191"
+    },
+    {
+      "path": "public_html/web-app-manifest-192x192.png",
+      "bytes": 4025,
+      "sha256": "5498c3d20c265879082203137496afcfe75eb01c18f8069449bd061aa7de7543"
+    },
+    {
+      "path": "public_html/web-app-manifest-512x512.png",
+      "bytes": 13133,
+      "sha256": "4247cc1ffe01bba05fc9f4cb2a09e8d7adba471e875acde9068e3737a9460b66"
+    },
+    {
+      "path": "pyproject.toml",
+      "bytes": 1807,
+      "sha256": "e30ce490aeb1c36c4d41ad2ee52e3eb0faa6e53dfff79289bba8278f069dd699"
+    },
+    {
+      "path": "QUELLCODE-START-HIER.md",
+      "bytes": 1985,
+      "sha256": "8743da36752be46afb262783213e601548a50e938e747c279f0b629b415ebd1d"
+    },
+    {
+      "path": "README.md",
+      "bytes": 12588,
+      "sha256": "3f58ad8dc7c3177a66b815c3e2d70ccfa6fcfca4159836ff1c4d62f119ccb832"
+    },
+    {
+      "path": "RELEASE_NOTES.md",
+      "bytes": 5090,
+      "sha256": "e38675bfb928e5879d034cd8cbb4bd16ebf7726a19fac94570ed550938a2a4c9"
+    },
+    {
+      "path": "requirements-alpha.txt",
+      "bytes": 671,
+      "sha256": "7aacb66df84abc7a20dd49e9ad20ae9d0753dab457d8094ccbd521eaf49c39bc"
+    },
+    {
+      "path": "requirements-dev.txt",
+      "bytes": 1090,
+      "sha256": "d75c01a41db90387d4b1f0f837b46ebc632b4dd42e9eaa93df7dbd6472f9d44e"
+    },
+    {
+      "path": "requirements-uploader.txt",
+      "bytes": 338,
+      "sha256": "5d113af4c98504fee5dee5dda37c29c01ed31dd2f28876bd751516b7d53b94d3"
+    },
+    {
+      "path": "requirements.in",
+      "bytes": 613,
+      "sha256": "e775d452234a3ede34c10c2dcb98692f4e96f56de3114d9a38cfd46767acceb8"
+    },
+    {
+      "path": "requirements.txt",
+      "bytes": 225,
+      "sha256": "f99dbae02506f2b019d51e34d0d5da9bdde306207f0aebcde4b70cd5c927f184"
+    },
+    {
+      "path": "SECURITY.md",
+      "bytes": 1044,
+      "sha256": "e73257d66edfe0dcb3c2f53dc867cfb855aac4a9b7e9c601e85e038b720f2b0e"
+    },
+    {
+      "path": "tests/conftest.py",
+      "bytes": 1461,
+      "sha256": "0f01d21e0b1fe02837447636f5bf35a6ef09495522ba67d027a3b8747a6fc2ab"
+    },
+    {
+      "path": "tests/test_alpha_capabilities.py",
+      "bytes": 1197,
+      "sha256": "89f6a7c25af7835bd57b6048dc16ed85dfc0008314b5f8f79efce3d6565864e0"
+    },
+    {
+      "path": "tests/test_alpha_stability_qualification.py",
+      "bytes": 18758,
+      "sha256": "9c9f56c3565a803bccacc551c14e624cf904cdfced42be16ab63808f59772215"
+    },
+    {
+      "path": "tests/test_alpha_ui_truth.py",
+      "bytes": 23904,
+      "sha256": "75d0547d433d976b5f4a4b685613bf7d19248e4c09390e5578601b8d23e237f3"
+    },
+    {
+      "path": "tests/test_appimage_tool_fetch.py",
+      "bytes": 7442,
+      "sha256": "14f5c8b36e4184aed90ec105f15bb723eafe127b601439a6d41cb1dcd22ce406"
+    },
+    {
+      "path": "tests/test_apprun_platform_override.py",
+      "bytes": 2380,
+      "sha256": "bf67412760de28dd75a79f055f390f8e4b96880c7b206cf50f11b40e630d0547"
+    },
+    {
+      "path": "tests/test_asset_license_gate.py",
+      "bytes": 5393,
+      "sha256": "fc69c8b375dd92034e0033d4877b403eece877ad908a2de39a78451165144394"
+    },
+    {
+      "path": "tests/test_audio_manifest.py",
+      "bytes": 4990,
+      "sha256": "810f84f9bb51b771c9b800cd7ddcb3a3ce1ccb8768bc1f178447b86760887304"
+    },
+    {
+      "path": "tests/test_audio_mixer.py",
+      "bytes": 3585,
+      "sha256": "95622a280b8d5a29da54c62aae829e51bf307da9230e4d0c533b787c1e130826"
+    },
+    {
+      "path": "tests/test_av_sync_diagnostics.py",
+      "bytes": 38998,
+      "sha256": "6503012b1c717f2542f2dc060b2199cddacf8770d4104e6597613491737227ac"
+    },
+    {
+      "path": "tests/test_background_ui_pause.py",
+      "bytes": 27260,
+      "sha256": "69d93a75c005665b5172c0be0154cc4ef503307674a6ba54491f401dda491351"
+    },
+    {
+      "path": "tests/test_camera_provider_failures.py",
+      "bytes": 13759,
+      "sha256": "0b5d5d1a603641c6fbff9cbb05141e6773dd770278639106649676ff1b3cb06a"
+    },
+    {
+      "path": "tests/test_camera_recorder.py",
+      "bytes": 1412,
+      "sha256": "f583256e80e29790fc39674f5290c2a3e2ced4a1b720a21b305c80ad1d8c248a"
+    },
+    {
+      "path": "tests/test_camera_settings_failures.py",
+      "bytes": 9403,
+      "sha256": "47032cbe50d196516d304bc72a0114cf4b556c5b64e499a59408f794f70e92a9"
+    },
+    {
+      "path": "tests/test_capture_backend_detection.py",
+      "bytes": 3532,
+      "sha256": "af87eae0331038937957b490096fe64f618d04a7d2e553cff3c7affce798e925"
+    },
+    {
+      "path": "tests/test_capture_bridge.py",
+      "bytes": 13208,
+      "sha256": "6c7b6460fddfec8663b2b8d6123cf097a63a7ebacc4daf2ec39d6ac29ef69ffc"
+    },
+    {
+      "path": "tests/test_capture_card_client.py",
+      "bytes": 5942,
+      "sha256": "c2bc4e8b7dc949fa30f36404ba133ed43f4da1c1de89d7c35a6264f6fd984fe6"
+    },
+    {
+      "path": "tests/test_capture_card_notifications.py",
+      "bytes": 6239,
+      "sha256": "bf23e00cd08b2a11a417a38714b1f123448ae4fbc1b0a5d5aeee9f5dac8f6571"
+    },
+    {
+      "path": "tests/test_capture_health.py",
+      "bytes": 8550,
+      "sha256": "7a5e99536e65152b908778a464fbdae83c4ca038018e0abd81cc686956069c58"
+    },
+    {
+      "path": "tests/test_capture_health_contract.py",
+      "bytes": 2198,
+      "sha256": "ba2587af6b80d2c819cb5d0de9f980a56b47cae438c46f041694ee151f79bf1a"
+    },
+    {
+      "path": "tests/test_capture_settings_policy.py",
+      "bytes": 2985,
+      "sha256": "a26c287d5a19fd17a7ca754727c77cafe7910392f8cac84092e3bf1d7e7bd24d"
+    },
+    {
+      "path": "tests/test_capture_settings_popup.py",
+      "bytes": 17469,
+      "sha256": "75500d40d7f57b05e46a9a7f20c40c5a386218e74825c990a491d760466e119d"
+    },
+    {
+      "path": "tests/test_ci_contract.py",
+      "bytes": 4206,
+      "sha256": "ed6765d606a9886eec54ca7253a271907c8ecf46813123c71ec9721dd38e3d9d"
+    },
+    {
+      "path": "tests/test_clip_editor_timeline.py",
+      "bytes": 15202,
+      "sha256": "19a8cb7b8999d1500e21ec38d01ccbb79d49ad137af2d5b21467bf709649493c"
+    },
+    {
+      "path": "tests/test_clip_files.py",
+      "bytes": 4494,
+      "sha256": "5247fdac77f64414a6be0a4985f7b3294f57fe1c0a17245f1d9b66efaf3b6c7f"
+    },
+    {
+      "path": "tests/test_clip_grid_partial.py",
+      "bytes": 16013,
+      "sha256": "1ba622911e44b31f75a28bfec5011af01307ae014834e8c66e48a7c5160d778e"
+    },
+    {
+      "path": "tests/test_clip_grouping.py",
+      "bytes": 8487,
+      "sha256": "349dc4cc25b976521555829db9317c57a6ee12ebd85c16d8ce7bb45189f71b9f"
+    },
+    {
+      "path": "tests/test_clip_metadata_manager.py",
+      "bytes": 8320,
+      "sha256": "f53664da71730e922476281cdc8b16f9d082d2378f60dca896daee13ba0222e6"
+    },
+    {
+      "path": "tests/test_clip_readiness.py",
+      "bytes": 2766,
+      "sha256": "79cb962dbcb2cde029ceb712a09711f39c40b100cfbebb754b9d99603e506a99"
+    },
+    {
+      "path": "tests/test_clip_viewer_audio_export.py",
+      "bytes": 20505,
+      "sha256": "f6e65e7611b0e9f9002be5aff9b47b0d3530f4b6057047a5a18eec32455b8460"
+    },
+    {
+      "path": "tests/test_clip_viewer_p1_gate.py",
+      "bytes": 31845,
+      "sha256": "16382f7c6868cb77d96d71937d8b61c048b3e324d54e936cefc927380c545b27"
+    },
+    {
+      "path": "tests/test_clip_viewer_speed.py",
+      "bytes": 6747,
+      "sha256": "9d8fe584ffc4b55b5faed34985a4b6e3024aee726816da1bd07b27b6bd70ebf1"
+    },
+    {
+      "path": "tests/test_combined_audio_policy.py",
+      "bytes": 3872,
+      "sha256": "702e59d0d78db8a1e9165f55e962e4429b3eeef02f22d7d2e0329b75ba4dd38a"
+    },
+    {
+      "path": "tests/test_compositor.py",
+      "bytes": 1598,
+      "sha256": "27a1e040bf1278e56426e2849665cefabaa3c01bb87a60b63c496bc46079a918"
+    },
+    {
+      "path": "tests/test_crop_preview_async.py",
+      "bytes": 4441,
+      "sha256": "61003f2bbd2fb88c7fa91c1daee6974aaa09ef50b3d6a4163c0c2a3d0444d279"
+    },
+    {
+      "path": "tests/test_custom_clip_shortcuts.py",
+      "bytes": 3784,
+      "sha256": "2a9b3620366d104c09f704b47216721da1b69fdcfcc919ea38a559cc19832bcb"
+    },
+    {
+      "path": "tests/test_customization_reset.py",
+      "bytes": 4608,
+      "sha256": "39c92d8e6440d54ae873e2d126b97802cc05b26ddecc21e501edd2422e162120"
+    },
+    {
+      "path": "tests/test_design_overhaul_repairs.py",
+      "bytes": 3819,
+      "sha256": "b889f577aec0b88157779318d93c491e45197d69ee22db85193439b6cf9530b4"
+    },
+    {
+      "path": "tests/test_diagnostics.py",
+      "bytes": 8956,
+      "sha256": "a101ce0a4a1a2be866bae5e82218bd168b749a9b644816d9bbbbd6bda8c01713"
+    },
+    {
+      "path": "tests/test_editor_sessions.py",
+      "bytes": 30541,
+      "sha256": "aa362f93e91f5ea3810caf8192faeb2974995d5147ee273f3df37c2ed7f24fc2"
+    },
+    {
+      "path": "tests/test_editor_switch_performance.py",
+      "bytes": 15138,
+      "sha256": "9f9c7ffb3f515062b8a50c60b7a5f20b8cf3a847e9d5b766bac755868ec8a3e4"
+    },
+    {
+      "path": "tests/test_editor_video_range.py",
+      "bytes": 2727,
+      "sha256": "ad9551741b8aa844f3afb9d8ff807e69188e0d30131758c893d33cd531e0a631"
+    },
+    {
+      "path": "tests/test_encoder_capabilities.py",
+      "bytes": 14616,
+      "sha256": "fe8c1b85714266efff25c8802a6428582dd6963ec6cb5701cb213d164070174e"
+    },
+    {
+      "path": "tests/test_engine_contract_gate.py",
+      "bytes": 9166,
+      "sha256": "21fd5695a01269d2e9374b24dda6f2fa538b073be24e3c7eab3575eb7d688cea"
+    },
+    {
+      "path": "tests/test_engine_error_recovery.py",
+      "bytes": 29978,
+      "sha256": "9a8a9615080e830792469813e694d94988f56a3427b2d9e6c1eeb990c9ed5ae2"
+    },
+    {
+      "path": "tests/test_engine_startup_diagnostics.py",
+      "bytes": 3704,
+      "sha256": "241b718dfe1710a3d6a16395debeffe21d243e3786d0a2fba0185c302ae1061a"
+    },
+    {
+      "path": "tests/test_error_bar.py",
+      "bytes": 3785,
+      "sha256": "f67a4569fc396a91e9e3cad70498b3302c9215e2110dfd7d315003e14c0da24f"
+    },
+    {
+      "path": "tests/test_error_codes.py",
+      "bytes": 1137,
+      "sha256": "fd421c3d4a3359cbd8f7b7cf738e6b05d3431f0e941451aed3c9b3741c85a10e"
+    },
+    {
+      "path": "tests/test_error_recovery.py",
+      "bytes": 4319,
+      "sha256": "8cf5cf3a04c97efd42b6b8c9e20f0fea28b9ad7440ceb39dac80bc6d16755fd1"
+    },
+    {
+      "path": "tests/test_exception_gate.py",
+      "bytes": 4749,
+      "sha256": "ed49068c4ef9d8b50673dde6371af1cb722bd0987a25c595ea8fd0b0b79ff494"
+    },
+    {
+      "path": "tests/test_export_profiles.py",
+      "bytes": 2775,
+      "sha256": "dedb34de8b767d42ccef6fc1db17e8e2cce46652ddb16cb98deb75ec7371c133"
+    },
+    {
+      "path": "tests/test_export_queue.py",
+      "bytes": 12966,
+      "sha256": "fb896a5b7db0f43716bfa32877188f757e94fb09b714745f5e0145484670095f"
+    },
+    {
+      "path": "tests/test_ffmpeg_playback_origin.py",
+      "bytes": 12980,
+      "sha256": "189ef582d79be397864223e01762e383b5d3bee60005317d57a509c6027ea407"
+    },
+    {
+      "path": "tests/test_ffmpeg_tools.py",
+      "bytes": 7738,
+      "sha256": "d41084e53a98843d4fbf1b7ce0ba551172375508f499d47cb911e97293b9e766"
+    },
+    {
+      "path": "tests/test_field_diagnostics.py",
+      "bytes": 18209,
+      "sha256": "2808f582726b0562b0958db5450784fa8ec2f0fa5228f48622aa4b0c8997775d"
+    },
+    {
+      "path": "tests/test_focus_monitor.py",
+      "bytes": 723,
+      "sha256": "a5e508451f8c64bef3e18efbdab0c25523ad25b2e8c6fa5e7be3482cddbaef18"
+    },
+    {
+      "path": "tests/test_focus_monitor_compat.py",
+      "bytes": 1202,
+      "sha256": "86f61db12337a796f3a18468b3354a14d309a1f27ac18ad5223a6be311ed6283"
+    },
+    {
+      "path": "tests/test_focus_share_notifications.py",
+      "bytes": 5084,
+      "sha256": "df1bc875f4c67e273436caa05383f097a1b6c309800a9cb5a9f9218b9c49c7f0"
+    },
+    {
+      "path": "tests/test_foreground_game_detector.py",
+      "bytes": 5999,
+      "sha256": "88922be49f9e3e50a1aba33d5cd34f6abb0c854b5c9f8393e8d23eec5721ff6c"
+    },
+    {
+      "path": "tests/test_frameless_window_linux.py",
+      "bytes": 5885,
+      "sha256": "5de36ad7720c8dea6af1476c742b91fbaedad29f4753bc464e8745c861e2e0bf"
+    },
+    {
+      "path": "tests/test_game_detection_popup.py",
+      "bytes": 5729,
+      "sha256": "0ad131b5740a8537a6dc3737c19852daf1d70c3304942c7e6a415f553f1dcfac"
+    },
+    {
+      "path": "tests/test_game_detector.py",
+      "bytes": 1608,
+      "sha256": "500d48fb8c311f3b21993b6014aaf8414e68e71d4e9c02bfe9133be4f9c6d046"
+    },
+    {
+      "path": "tests/test_game_detector_compat.py",
+      "bytes": 3224,
+      "sha256": "b37bc11cfed37e612f915a173926887bf01c9a0e3e2250b04d32bda2fb7ed94a"
+    },
+    {
+      "path": "tests/test_gary_overlay.py",
+      "bytes": 1853,
+      "sha256": "22ce8b36b4688d94be0fda4a18a0ecef56bf2f5e20b4922ab8b2fc06a82281a4"
+    },
+    {
+      "path": "tests/test_grid_card_recycling.py",
+      "bytes": 9389,
+      "sha256": "9104c7743f623ceddfd14ea2b077fa348303fa2c6b6dfc1fbb27cb8a91e03e16"
+    },
+    {
+      "path": "tests/test_hotkey_config_migration.py",
+      "bytes": 2947,
+      "sha256": "c84acbe63f13659489e23056f63173570c939d51da2830b402d03588d69bc3cf"
+    },
+    {
+      "path": "tests/test_hotkey_persistence_failures.py",
+      "bytes": 10059,
+      "sha256": "879c12a1477993ce6a5b58122a3785b663e34d1145a47a872654bc85da7c92ec"
+    },
+    {
+      "path": "tests/test_hotkey_visibility_persistence.py",
+      "bytes": 4641,
+      "sha256": "7df7620f8f730807e9adb939282e2ca709e9bacaf2e10f9ba431ef9c220f6eea"
+    },
+    {
+      "path": "tests/test_hover_transitions.py",
+      "bytes": 5267,
+      "sha256": "5329a2ae298b0d1f2140c873b9194691eb887f8b40812f789f3b3564acc20591"
+    },
+    {
+      "path": "tests/test_instance_activation.py",
+      "bytes": 4047,
+      "sha256": "b0b02a011d9788358a1e1171ea1cae5eb12976c94ec232a40c3c20e07fad891a"
+    },
+    {
+      "path": "tests/test_keyboard_navigation.py",
+      "bytes": 14743,
+      "sha256": "08b3e5f0ee63df8a6255fb1f345e9082832a72083d2f71217ee91ea8fcd614e5"
+    },
+    {
+      "path": "tests/test_library_and_settings_regressions.py",
+      "bytes": 12613,
+      "sha256": "d9fbd30281b825aa4baf737dcf82207dad147945b9b8224992cce4c562cd7dd6"
+    },
+    {
+      "path": "tests/test_library_idle_performance.py",
+      "bytes": 4736,
+      "sha256": "9eb0d1203ea7a00120008c00bc374275e88e37300663c05a61ec4358c4947fe9"
+    },
+    {
+      "path": "tests/test_library_incremental_performance.py",
+      "bytes": 5144,
+      "sha256": "35c9d09bb8944354f6683af089e48665efcad4f513dfede740a171f4bb8783a6"
+    },
+    {
+      "path": "tests/test_library_ownership.py",
+      "bytes": 2607,
+      "sha256": "d1b65f2fe0b120e0d967f4b87db64ed5e45bd42ead352f1a12bc74a3f1e7a29d"
+    },
+    {
+      "path": "tests/test_library_reliability.py",
+      "bytes": 4238,
+      "sha256": "8920c8a643c701e80f322cb0fd691810d14cd77edc35e8a30a3fb350075b0393"
+    },
+    {
+      "path": "tests/test_license_gate_linux.py",
+      "bytes": 12053,
+      "sha256": "5daa71f687d6c92ca3243d2a3a040fadb54acca529de2e2561fb1c9f3e43b789"
+    },
+    {
+      "path": "tests/test_linked_media_ui_guard.py",
+      "bytes": 1683,
+      "sha256": "cfee4bcd01b3026843b311e4234cdd3b51f3b579ca4731a27dee19e49959224e"
+    },
+    {
+      "path": "tests/test_linux_alpha_runtime_policy.py",
+      "bytes": 2699,
+      "sha256": "2d1228dc2c478786dcca61e17bdef4a9b4a72438ee822109131ee18a28312734"
+    },
+    {
+      "path": "tests/test_linux_appimage_report.py",
+      "bytes": 2823,
+      "sha256": "8b16408f5bc4c241f961d2c4dc45751458f58186b9fea7384a82ccbb7f7ba936"
+    },
+    {
+      "path": "tests/test_linux_glibc_gate.py",
+      "bytes": 4744,
+      "sha256": "9076ca7803c8edfc6a4c6ccc1156c79671a5fedba3cfabda9f18f766fda47882"
+    },
+    {
+      "path": "tests/test_linux_runtime.py",
+      "bytes": 8637,
+      "sha256": "1b35b5d31b7d0d9f79b2c30c567990b85592a085833aa0426eb79c5f0262eed6"
+    },
+    {
+      "path": "tests/test_linux_tools.py",
+      "bytes": 7188,
+      "sha256": "3c4d367cc109305932c8b47d0fcfa4bad5f4f40a97b32900813ca8eaa5cd942f"
+    },
+    {
+      "path": "tests/test_main_popup_layout.py",
+      "bytes": 2688,
+      "sha256": "a11014281eeab44fe03fc552490866e16e31511044141aedae50ba4a6e269f84"
+    },
+    {
+      "path": "tests/test_media_metadata.py",
+      "bytes": 9014,
+      "sha256": "c9b3353c5ad6bbe4e7b3bc7e662b14bda790f61ffff1509378497e75f7699a69"
+    },
+    {
+      "path": "tests/test_microphone_gain_safety.py",
+      "bytes": 3485,
+      "sha256": "c975687330676189c4a36d8b08d87e20f689ce5b1cb99e60d15861ff6a619ea4"
+    },
+    {
+      "path": "tests/test_multitrack_postprocessing_contract.py",
+      "bytes": 898,
+      "sha256": "782412c9819b72cc7860249a47d18713760eff2641876b64524070561ce243d0"
+    },
+    {
+      "path": "tests/test_optional_multimedia_failures.py",
+      "bytes": 6692,
+      "sha256": "cd3177d0db576e9d52860f1f89f53146dc0a489552bc7a2a46510fc5d80ff915"
+    },
+    {
+      "path": "tests/test_optional_uploader_runtime.py",
+      "bytes": 4321,
+      "sha256": "60bc5bcf676af906fa30adb47b062fa05f4507c369d1a16fa129850c17868625"
+    },
+    {
+      "path": "tests/test_playback_mix_model.py",
+      "bytes": 26937,
+      "sha256": "06a5453749d6a6417396ada1a6a3e0ab011e742cc10b9bcbac7fbb401ffb4a91"
+    },
+    {
+      "path": "tests/test_playback_proxy.py",
+      "bytes": 4178,
+      "sha256": "c41d7588212b2a239d27ec8cffcf147cf769598f040c56c193d060be7b33fa26"
+    },
+    {
+      "path": "tests/test_post_route.py",
+      "bytes": 21645,
+      "sha256": "6ea2b8e166658834a8e5d676c63d0bc11e25ff75a45220cd493d8231a717b028"
+    },
+    {
+      "path": "tests/test_presets_manager.py",
+      "bytes": 1149,
+      "sha256": "8065a382763770ddc8d0c1e31edc2ad489b8e595ee918bad6d6780994b5039f3"
+    },
+    {
+      "path": "tests/test_preview_presentation_backpressure.py",
+      "bytes": 7364,
+      "sha256": "bd57478f1a3cdd2849463169f0a92a78798dcd599cd203eda317cbd357661034"
+    },
+    {
+      "path": "tests/test_pyside_ui_smoke.py",
+      "bytes": 4678,
+      "sha256": "3ad9ed5c346b8d8b982da4e5c6f44e90a97cf923f7ee538f7f88ca752d5262c7"
+    },
+    {
+      "path": "tests/test_qt_license_gate.py",
+      "bytes": 8436,
+      "sha256": "99e5f1377ec5592af08d5aa40afa54da1875cae7e52001cf7aff9ead79485e19"
+    },
+    {
+      "path": "tests/test_qualify_amd_isolation.py",
+      "bytes": 6563,
+      "sha256": "44cf24942c32b6b7fcf9256a11b4caffbf1185ada88b3f3abd1bff7c4f47873a"
+    },
+    {
+      "path": "tests/test_quick_packaging.py",
+      "bytes": 4133,
+      "sha256": "46f46a2b4f33c9097c2747fa3c6e92aaea3a4ffeaf31a0fb17bcb62a5b0b79b5"
+    },
+    {
+      "path": "tests/test_quick_snapshots.py",
+      "bytes": 4880,
+      "sha256": "f1c1aa48d91af1b7b94d8e9937fa41bcf3b060e19027535b02830b916b6ef67e"
+    },
+    {
+      "path": "tests/test_quick_video_preview.py",
+      "bytes": 6627,
+      "sha256": "690694e84d6d26529859e56acb99dbe0cab6ba2310456af62c24eb42db859955"
+    },
+    {
+      "path": "tests/test_save_event_loop.py",
+      "bytes": 5737,
+      "sha256": "e0cc4562fb97021ed5f05336e8bce4ddaded2edf277a1c3b33156515ded0000e"
+    },
+    {
+      "path": "tests/test_save_state.py",
+      "bytes": 16250,
+      "sha256": "1094c8db08d53205b5a23b9463ae58946dba9f244df37f87073aac711309f9b2"
+    },
+    {
+      "path": "tests/test_screenshot_request_queue.py",
+      "bytes": 1157,
+      "sha256": "b6536fe4f06c6f1f68165bef7827a1359b08d06c34dfc9004bab4e7809a47e0c"
+    },
+    {
+      "path": "tests/test_screenshot_save.py",
+      "bytes": 5791,
+      "sha256": "d8e89bbe86c4d447d0dbc3b6ac30e1edc8e5fc3a8c6fd1be01ceba20b248bfc3"
+    },
+    {
+      "path": "tests/test_screenshot_target.py",
+      "bytes": 3053,
+      "sha256": "27dd61ec07f680a22951d9c1510e55931a6a7f8545e4527b75a7f50e3fa63d7c"
+    },
+    {
+      "path": "tests/test_screenshot_workflow_contract.py",
+      "bytes": 1098,
+      "sha256": "6a4546bd988a49c9a8049b9ecaec5c032ad400713bc33ae8078aaa41d3ac3b7d"
+    },
+    {
+      "path": "tests/test_settings_camera_discovery.py",
+      "bytes": 2931,
+      "sha256": "aa9b8bdd6f4763cb907026e41df11b42c5b98dc649fb9f21469dfdb8e7452561"
+    },
+    {
+      "path": "tests/test_settings_manager.py",
+      "bytes": 5582,
+      "sha256": "c9fccb0c8bfeb18dad2ccbd267944edbce72dbbe2e204ba33a44b49c4bbfa9a1"
+    },
+    {
+      "path": "tests/test_settings_multiband.py",
+      "bytes": 2779,
+      "sha256": "0bd012cde28957e00aba1a58a8ea9c18ef88634de6a108e695e16e03c813c385"
+    },
+    {
+      "path": "tests/test_settings_transitions.py",
+      "bytes": 3633,
+      "sha256": "4bcc109d6528ceea144b222736a5089a6ba81dbb8ccbdabed58bce631fe2ca8b"
+    },
+    {
+      "path": "tests/test_sftp_provider.py",
+      "bytes": 17871,
+      "sha256": "90007a0d56c96ec3b20fb447d5a8d044719bbfa7db7c26466845b64decba6d95"
+    },
+    {
+      "path": "tests/test_shared_memory_contract.py",
+      "bytes": 3871,
+      "sha256": "08b846a1623697c3cb7a7bad03eee0ab713103063c9acaeebee45187b19c8119"
+    },
+    {
+      "path": "tests/test_shell_transitions.py",
+      "bytes": 8659,
+      "sha256": "7abe46b52bcfad1f457f5647c375799336c5048b00eef36cfeace897feba0d9d"
+    },
+    {
+      "path": "tests/test_simple_dropdowns.py",
+      "bytes": 3517,
+      "sha256": "f7c705240883cbbf24e201f4e0d1b7b0bf05a9bc1d92c00cf2526e7d755ee700"
+    },
+    {
+      "path": "tests/test_single_instance.py",
+      "bytes": 7661,
+      "sha256": "ba7e2a8fa5dd425251fd18a530a085afac2c286a1d4103822d967459709212fa"
+    },
+    {
+      "path": "tests/test_smooth_scroll_area.py",
+      "bytes": 2081,
+      "sha256": "0ea8c1bb579905c5dfade298664ac982cd9d103cd3920715d7ad2f3daba24850"
+    },
+    {
+      "path": "tests/test_stage4_export_lifecycle.py",
+      "bytes": 14055,
+      "sha256": "b77c16a5404b7cc45b976de04e1d5fabce658a97901e2f88bbec030a3e554f9b"
+    },
+    {
+      "path": "tests/test_stage4_player_lifecycle.py",
+      "bytes": 10363,
+      "sha256": "ccb17648ac5b045086fc70d65c53b043f441f52e6df3f7e771e82269f9ca625a"
+    },
+    {
+      "path": "tests/test_stage7_library_scalability.py",
+      "bytes": 13380,
+      "sha256": "583127ad092722fdc701acd6ccbd22f1854ffa1e4a99e178df78bb69b23b6c22"
+    },
+    {
+      "path": "tests/test_theme_typography.py",
+      "bytes": 2995,
+      "sha256": "a6a7382e7dd638d26237fab893f2dd694a0ef3385c88341b3e1dd2470cc5e14d"
+    },
+    {
+      "path": "tests/test_third_party_fetch.py",
+      "bytes": 4637,
+      "sha256": "58c1abab4fd735e54e98861b8e969b5358d5079d594fdec055d9f525bdfbd98a"
+    },
+    {
+      "path": "tests/test_third_party_keyboard.py",
+      "bytes": 4483,
+      "sha256": "bd57c99f37a9535e8cea367c6dbdbe60e73ef185f75167d56bce10cf0b2d15e6"
+    },
+    {
+      "path": "tests/test_timeline_thumbnail_cache.py",
+      "bytes": 3013,
+      "sha256": "d28d556318afc6d0147fac509740e498d22755a8b8d04d0b047a2d8c0305e0d4"
+    },
+    {
+      "path": "tests/test_transactional_output.py",
+      "bytes": 2459,
+      "sha256": "695ba81360d25a06b7650d433c0bae27b18731ccdb4bf71c81a005f12eab81a2"
+    },
+    {
+      "path": "tests/test_transactional_save_contract.py",
+      "bytes": 1891,
+      "sha256": "214197141678e86c8cd5a6f6d4a7a9586b0dba35e0fab4ad515980630aa6ca41"
+    },
+    {
+      "path": "tests/test_ui_consistency.py",
+      "bytes": 5484,
+      "sha256": "297813ebe0d6aec3f482a2bbcc9e6fe9e8cb49bf3db7ab21e86020734a4ce2b0"
+    },
+    {
+      "path": "tests/test_ui_efficiency.py",
+      "bytes": 13940,
+      "sha256": "d436acb5152754cdbe5dddb02c0bc3a290105b73722e801d7fde7f37182767b3"
+    },
+    {
+      "path": "tests/test_ui_memory.py",
+      "bytes": 12738,
+      "sha256": "fb33f3e82a37cf92a5f73a79ee61cb327e0069d662656469c33734c3aee441fb"
+    },
+    {
+      "path": "tests/test_ui_memory_gpu.py",
+      "bytes": 6290,
+      "sha256": "2af88253671ae78e439496fc29dfa972b75be5be3660d6cfa376ad18ef605840"
+    },
+    {
+      "path": "tests/test_ui_performance_optimizations.py",
+      "bytes": 9984,
+      "sha256": "540f7d1789afb596b4be56eb7eba1e76b4a042e79dc7917c4055c81bdc346a2b"
+    },
+    {
+      "path": "tests/test_ui_performance_presets.py",
+      "bytes": 8048,
+      "sha256": "fc8572d0da51d2541a9efdb67f4e2dd537a6c9deba6a6af28f082be095726486"
+    },
+    {
+      "path": "tests/test_ui_redesign.py",
+      "bytes": 12818,
+      "sha256": "c14a04b46b4940584c28ed75a96a53d666f8d9470d2fd719916a6809043a6ff3"
+    },
+    {
+      "path": "tests/test_upload_manager_retry.py",
+      "bytes": 7907,
+      "sha256": "71c104f36977ca3b8b48d7e08a310f9dcfad222c7f4ac530aebc9cdd47574350"
+    },
+    {
+      "path": "tests/test_upload_settings_consent.py",
+      "bytes": 12708,
+      "sha256": "a02beb5a4beeb505e45c0249b2abc678483c439569d1c33b57da68642e62f6fd"
+    },
+    {
+      "path": "tests/test_uploader_plugin_boundary.py",
+      "bytes": 11064,
+      "sha256": "f74ad8d946430f04481f60a3c0b15511a4b7b49d7541c0423b98564200ac9007"
+    },
+    {
+      "path": "tests/test_video_playback_performance.py",
+      "bytes": 14904,
+      "sha256": "0bb46f4df66274ffcd956c95c0353128a137934d5137f192c4f0041c79f3d50c"
+    },
+    {
+      "path": "tests/test_viewer_startup_seek.py",
+      "bytes": 15763,
+      "sha256": "077b4e6fda71954b8d951c92449008113abb17986115aa315424eb7f772a1766"
+    },
+    {
+      "path": "tests/test_visual_overlays.py",
+      "bytes": 9657,
+      "sha256": "cc42c6d614e1b2f976adad0be587535e5484fe43218dae653b928f1c6c15b70d"
+    },
+    {
+      "path": "tests/test_wayland_dispatch_contract.py",
+      "bytes": 3981,
+      "sha256": "6b699fd185729fecbcea193545be0edb877bdae0d1f0b7c4cdc4014ffb52671b"
+    },
+    {
+      "path": "tests/test_window_preview_backend.py",
+      "bytes": 11817,
+      "sha256": "c619e6dd8af5457325c2ecece7d3aa11c53aee6e301da3b21e360c60d0e1f26b"
+    },
+    {
+      "path": "tests/test_window_preview_ui.py",
+      "bytes": 8697,
+      "sha256": "7095d7cc6c0690d2b30104b4cf8f05800df91f0edf15c83c373feff517e0922f"
+    },
+    {
+      "path": "tests/test_windows_autostart.py",
+      "bytes": 2429,
+      "sha256": "74804fe01786234954b2ffd520644b76ae497cda06aeb45ae9d2511c8ace5801"
+    },
+    {
+      "path": "tests/test_windows_capture_smoke_runner.py",
+      "bytes": 9610,
+      "sha256": "20418e68191257b19358a77a08a883d90f5eedb221f0b233be50177285cb504b"
+    },
+    {
+      "path": "tests/test_windows_dpi_windowing.py",
+      "bytes": 9840,
+      "sha256": "5ed7bd03d37f6b573934241609da133854a94ff0ac045638c02315df6d1ad816"
+    },
+    {
+      "path": "tests/test_windows_hardware_qualification_args.py",
+      "bytes": 837,
+      "sha256": "4d957d9e1545d4aeab35de617d794bc5913f2ab4b3b3cd4bb4922718a4a4d591"
+    },
+    {
+      "path": "tests/test_windows_installer_contract.py",
+      "bytes": 2380,
+      "sha256": "7aaa4fd87a5184c2c0aa2b642e9207c1ff88b26dba6151e383bfa646330e3acf"
+    },
+    {
+      "path": "tests/test_windows_lifecycle_contract.py",
+      "bytes": 3072,
+      "sha256": "d22c1117bb10d56ed6b30b0deb5949df0b1aa548b73d765bfb00de710d490a1d"
+    },
+    {
+      "path": "tests/test_windows_microphone_devices.py",
+      "bytes": 7919,
+      "sha256": "805c9da35c0ea4a55c5418dac43398b2e3c169abb92bf2be54ef610ea4cfc69a"
+    },
+    {
+      "path": "tests/test_windows_monitor.py",
+      "bytes": 10456,
+      "sha256": "eb3d4ab588ca9b13ec3d2c6d356d070d86734212ca46aa143f7ecc34d6f15c9b"
+    },
+    {
+      "path": "tests/test_windows_native_hotkeys.py",
+      "bytes": 10528,
+      "sha256": "fd6ce91ecaa6fcac5a19aa691971192c7738ab82fdaf31863a7dd7a49d6410cc"
+    },
+    {
+      "path": "tests/test_windows_storage_paths.py",
+      "bytes": 24222,
+      "sha256": "f542167a292ee96da25eb5bd103968d9425e5a160a27404e4fc9d1eb1c8573bf"
+    },
+    {
+      "path": "tests/test_windows_troubleshooting_docs.py",
+      "bytes": 10644,
+      "sha256": "20a86e156ffd6a43d8f1b391ac39657a2c19ccf4074f464c14e5c3962d01bf84"
+    },
+    {
+      "path": "tests/test_x11_monitor.py",
+      "bytes": 3181,
+      "sha256": "f74266798f53398e8dad9c88df61f83516af4df88d9c561dbe1fd0a2224b349c"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "bytes": 12525,
+      "sha256": "f5162f7208591533e4b5a142753ead49f80d7fa5f4f82411d96eb5458d9bd69c"
+    },
+    {
+      "path": "tools/amd_isolation_smoke.cpp",
+      "bytes": 40397,
+      "sha256": "d6950857d430a7b4c0ae6381a40deb915c3f5f225126c58f3ed3cae8dff98d4b"
+    },
+    {
+      "path": "tools/appimage_tool_manifest.json",
+      "bytes": 1398,
+      "sha256": "d354b6df5b7785dc58cb4d54211b0215f30bac954dae4867b7be5b1a6fc087b8"
+    },
+    {
+      "path": "tools/benchmark_ui_timeline.py",
+      "bytes": 2154,
+      "sha256": "1de6efcff1c4f82eb440d21a030da7bb87064f2f3dd7ba901c7407175cf81a59"
+    },
+    {
+      "path": "tools/build_optional_uploaders.py",
+      "bytes": 7226,
+      "sha256": "8f7566a8a44d818fbd0e19ca0e616fb5bebd169e7558e7ae081992799cd3ed49"
+    },
+    {
+      "path": "tools/build_preview_shaders.py",
+      "bytes": 575,
+      "sha256": "dd1512b982821dac77b9bb07cb1dbbeadc6b71afe52307a7d19bf9062d8e41af"
+    },
+    {
+      "path": "tools/build_windows_installer.py",
+      "bytes": 6401,
+      "sha256": "6975b46444892e2de8ffb3eb063c68f9322fdde6d5b35f5e1c943b00d6f5990b"
+    },
+    {
+      "path": "tools/fetch_third_party.py",
+      "bytes": 24624,
+      "sha256": "decddc59080e7c0a90e4af3fcd9bafe82ad09742cf134bcaa0a33a104f0148dc"
+    },
+    {
+      "path": "tools/ffmpeg_manifest.json",
+      "bytes": 1984,
+      "sha256": "b08bd9056fca791555c8da604a6f442cbf4ec1de879a722df915a6fd7db3f410"
+    },
+    {
+      "path": "tools/ffmpeg_manifest_linux.json",
+      "bytes": 9113,
+      "sha256": "3b0ce1e5e2c94f583e06d559cfd7e5e74d48055de1c7cdd443616318dc1c4afd"
+    },
+    {
+      "path": "tools/finalize_native_audio_retest.py",
+      "bytes": 15150,
+      "sha256": "8f1d79235026a0b4c36d528f466be198efeae9b81b3f4c1784b2508f74c5c1a6"
+    },
+    {
+      "path": "tools/generate_installer_assets.py",
+      "bytes": 3340,
+      "sha256": "39e374e772191a0a88c0ca4a8c1a3e406521223696998f5874c5e69ed62a5bdf"
+    },
+    {
+      "path": "tools/generate_release_assets.py",
+      "bytes": 19237,
+      "sha256": "02d36102cbc2f0451b3b31c1e460e9d6544fa031860dd7f82eab2030be2e4537"
+    },
+    {
+      "path": "tools/linux_appimage_report.sh",
+      "bytes": 2708,
+      "sha256": "b8e80844632c51c9cd57033adf6d09e0040467a8b45a388e80a4803727fda808"
+    },
+    {
+      "path": "tools/linux_release_baseline.json",
+      "bytes": 88,
+      "sha256": "8f6aee7ce89b93ea6133e65bc952d58277baf62b8ca7ac3c568a14f76ae497d2"
+    },
+    {
+      "path": "tools/linux_system_report.sh",
+      "bytes": 7110,
+      "sha256": "0af7a5a7270c1bb8ca5c88c75a21925093d340e2078f0500020a628e66bf22c5"
+    },
+    {
+      "path": "tools/measure_playback_latency.py",
+      "bytes": 7905,
+      "sha256": "4bf3bba5485adec175c4d221123063f149080c9adfc172933553856e9de7b410"
+    },
+    {
+      "path": "tools/package_source.py",
+      "bytes": 5438,
+      "sha256": "04b083df7c3329e095c164e49fe9311c1ef2dfb6cc16e00c46b789bd70d29107"
+    },
+    {
+      "path": "tools/profile_clip_grid_scroll.py",
+      "bytes": 6992,
+      "sha256": "ca572414e59a92cb6bbfbd4474aad1532975de229bb9c6d732d8c704750f4102"
+    },
+    {
+      "path": "tools/qt_runtime_manifest.json",
+      "bytes": 3792,
+      "sha256": "cb1a647c951cf03921700b40665df592a734f8eb3bd0c8488e1bdc8ddda2bbfb"
+    },
+    {
+      "path": "tools/qualify_alpha_stability.py",
+      "bytes": 64779,
+      "sha256": "1010efa7c5454805a4fcc91731961aa13a39c3db226dafab75dfaec2d9b98d62"
+    },
+    {
+      "path": "tools/qualify_amd_isolation.py",
+      "bytes": 25994,
+      "sha256": "154b5185331a9b0a98118f03c8ad7b01a3dc898df99dd5ef49a2bde801773ad0"
+    },
+    {
+      "path": "tools/qualify_windows_hardware.py",
+      "bytes": 27120,
+      "sha256": "f42b6d1a067916995f017eb8b5e6cd6fd7c67a7384cc2c5b8226b08325ad0a1d"
+    },
+    {
+      "path": "tools/release_asset_manifest.json",
+      "bytes": 94837,
+      "sha256": "898a7bf57a7484eaae16120af94d7ee5c01f3c2212664195cc0e937aae6e3f15"
+    },
+    {
+      "path": "tools/render_ui_preview.py",
+      "bytes": 6781,
+      "sha256": "9dc9d476376e30840fed84c09635277fe7fe43ec44d3e17be700e70c193ea2e5"
+    },
+    {
+      "path": "tools/run_windows_capture_smoke.py",
+      "bytes": 17784,
+      "sha256": "bbe68f1e468e9259d517dac7e50ec7ea32d445f216e36c7224f2c3901ec7d446"
+    },
+    {
+      "path": "tools/run_windows_focus_capture_smoke.py",
+      "bytes": 3219,
+      "sha256": "3ca5ab323cf759c54d18bf18887cf561835272f518f2c605e764322cfc8ce6bd"
+    },
+    {
+      "path": "tools/run_windows_recording_smoke.py",
+      "bytes": 2904,
+      "sha256": "9cdf07056d6e1d9a75be996029f47cd1d8155022a6463c7d1b055e10da009e7b"
+    },
+    {
+      "path": "tools/scan_repo_hygiene.py",
+      "bytes": 7497,
+      "sha256": "edd781d1806a192d6c992bb98667fcb4393716bf78b9d14b0ea6a55d8e7fa94d"
+    },
+    {
+      "path": "tools/update_dev_shortcut.ps1",
+      "bytes": 1649,
+      "sha256": "4fcb728307e43a00d3b36b5ee586775ec9b32840a55f5c7274e649b412d38295"
+    },
+    {
+      "path": "tools/update_latest_build_shortcut.ps1",
+      "bytes": 1132,
+      "sha256": "0c23b05270d098b998fedd19d1b59013b3a18b32528da8802c642cbcb7cb362c"
+    },
+    {
+      "path": "tools/verify_engine_response_contract.py",
+      "bytes": 11155,
+      "sha256": "0f8a92a3f16899e86761df19ac6c60b514d1831879ba842a490eae69a8ec8368"
+    },
+    {
+      "path": "tools/verify_exception_handling.py",
+      "bytes": 7615,
+      "sha256": "826f492f60f9aeba7f8842b7de265b2956c575d526644bf2288a33749b0294c5"
+    },
+    {
+      "path": "tools/verify_linux_glibc.py",
+      "bytes": 8078,
+      "sha256": "91f6603cec3952f79ee4d8bc470f7257776e1ab68b646d94c5609b4981f24b61"
+    },
+    {
+      "path": "tools/verify_release_licenses.py",
+      "bytes": 41271,
+      "sha256": "456b3b31c69a86c6be2f6577603b609f32b279beafe1d5a5a3c5d38fd3d10009"
+    },
+    {
+      "path": "tools/verify_shared_memory_contract.py",
+      "bytes": 11303,
+      "sha256": "72a3e541d34a25d79398474848ea0ed75ceeec91b06f272b4a96edd17774430b"
+    },
+    {
+      "path": "tools/verify_version_consistency.py",
+      "bytes": 5673,
+      "sha256": "4ebadd009c41f374f01c0b46a756e34346915b969496b348b77e887ca7252b76"
+    },
+    {
+      "path": "tools/verify_windows_installer_lifecycle.py",
+      "bytes": 20644,
+      "sha256": "b6803b7bc4fbf58b76d20def5bda479d56a74915b0889d85c2d0d41cd78d230f"
+    },
+    {
+      "path": "tools/windows_capture_smoke.cpp",
+      "bytes": 5183,
+      "sha256": "3e499ec7003d86a89509d30bdc1f227f8ac4ab21ff91028c708264cf40f39093"
+    },
+    {
+      "path": "tools/windows_focus_capture_smoke.cpp",
+      "bytes": 6186,
+      "sha256": "a06e2a42ce6e2ab7090144a2d6bf34c547cb1de7a3b51d8b3484d9b621bd434e"
+    },
+    {
+      "path": "tools/windows_recording_smoke.cpp",
+      "bytes": 4938,
+      "sha256": "7e767756030c53d33bf3418a296f8489ba0b012c9cc33ec17bb329694d232bd2"
+    },
+    {
+      "path": "UI_PORT.md",
+      "bytes": 3780,
+      "sha256": "7552bc4c11c81f80c7b5f639844099b8522da1fa39e766db9f54ace2b9f5119c"
+    }
+  ]
+}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ui.style import set_theme_style
+
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
@@ -148,16 +150,15 @@ class GameCropDialog(QDialog):
         self.setWindowTitle(f'Crop profile — {game_name}')
         self.setModal(True)
         self.resize(820, 590)
-        self.setStyleSheet(f'QDialog {{ background: {Colors.BG}; }}')
+        set_theme_style(self, lambda: (f'QDialog {{ background: {Colors.BG}; }}'))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
 
         title = QLabel(f'CROP PROFILE · {game_name.upper()}')
-        title.setStyleSheet(
-            f'color:{Colors.TEXT}; font-family:{Fonts.DISPLAY}; '
-            f'font-weight:bold; font-size:18px; letter-spacing:2px;')
+        set_theme_style(title, lambda: (f'color:{Colors.TEXT}; font-family:{Fonts.DISPLAY}; '
+            f'font-weight:bold; font-size:18px; letter-spacing:2px;'))
         layout.addWidget(title)
         self.canvas = CropSelectionCanvas(preview, profile)
         self.canvas.selection_changed.connect(self._update_readout)
@@ -165,28 +166,28 @@ class GameCropDialog(QDialog):
 
         controls = QHBoxLayout()
         self.enabled_check = QCheckBox('Apply this crop when capturing this game')
-        self.enabled_check.setStyleSheet(checkbox_qss())
+        set_theme_style(self.enabled_check, lambda: (checkbox_qss()))
         self.enabled_check.setChecked(
             bool(profile.get('enabled', True)) if isinstance(profile, dict) else True)
         controls.addWidget(self.enabled_check)
         controls.addStretch(1)
         self.readout = QLabel()
-        self.readout.setStyleSheet(label_body(Colors.TEXT_DIM, Fonts.SIZE_LABEL))
+        set_theme_style(self.readout, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_LABEL)))
         controls.addWidget(self.readout)
         layout.addLayout(controls)
 
         actions = QHBoxLayout()
-        reset = QPushButton('RESET TO FULL FRAME')
-        reset.setStyleSheet(button_outline_qss())
+        reset = QPushButton('Reset to full frame')
+        set_theme_style(reset, lambda: (button_outline_qss()))
         reset.clicked.connect(self.canvas.reset_selection)
         actions.addWidget(reset)
         actions.addStretch(1)
-        cancel = QPushButton('CANCEL')
-        cancel.setStyleSheet(button_outline_qss())
+        cancel = QPushButton('Cancel')
+        set_theme_style(cancel, lambda: (button_outline_qss()))
         cancel.clicked.connect(self.reject)
         actions.addWidget(cancel)
-        save = QPushButton('SAVE PROFILE')
-        save.setStyleSheet(button_primary_qss())
+        save = QPushButton('Save profile')
+        set_theme_style(save, lambda: (button_primary_qss()))
         save.clicked.connect(self.accept)
         actions.addWidget(save)
         layout.addLayout(actions)

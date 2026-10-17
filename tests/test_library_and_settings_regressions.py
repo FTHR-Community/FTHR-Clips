@@ -60,14 +60,100 @@ def test_many_small_date_sections_do_not_reserve_offscreen_card_budget(
         qtbot.waitUntil(lambda: scroll.verticalScrollBar().maximum() > 0)
         assert not grid._section_grids
         assert len(grid._virtual_sections) == 4
-        scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
-        qtbot.wait(50)
+        scrollbar = scroll.verticalScrollBar()
+
+        def layout_is_stable():
+            return (
+                scrollbar.maximum() > 0
+                and scrollbar.value() <= scrollbar.maximum()
+                and all(canvas.height() > 0
+                        for canvas in grid._virtual_sections.values())
+            )
+
+        def has_materialized_prefix(prefix):
+            return any(
+                os.path.basename(path).startswith(prefix)
+                for path in grid._thumb_widgets
+            )
+
+        qtbot.waitUntil(layout_is_stable, timeout=3000)
+        scrollbar.setValue(scrollbar.maximum())
+        qtbot.waitUntil(
+            lambda: scrollbar.value() == scrollbar.maximum()
+            and has_materialized_prefix('3-'),
+            timeout=3000,
+        )
+        scrollbar.setValue(0)
+        qtbot.waitUntil(
+            lambda: scrollbar.value() == 0 and has_materialized_prefix('0-'),
+            timeout=3000,
+        )
+        assert len(grid._thumb_widgets) <= clip_grid._MAX_MATERIALIZED_CARDS
+    finally:
+        grid.shutdown()
+
+
+def test_virtual_scroll_requeues_after_expired_materialization_budget(
+        qtbot, monkeypatch, tmp_path):
+    """A deadline miss must schedule another update that makes progress."""
+    monkeypatch.setattr(clip_grid.ClipGrid, '_start_thumbnail_worker', lambda *_: None)
+    # This scheduler test drives the scroll state directly; avoid leaving the
+    # production constructor's single-shot hookup queued after widget teardown.
+    monkeypatch.setattr(clip_grid.ClipGrid, '_connect_scroll_updates', lambda *_: None)
+    for section in range(4):
+        for i in range(30):
+            path = tmp_path / f'{section}-{i}.mp4'
+            path.touch()
+            stamp = 1_700_000_000 - section * 86400
+            os.utime(path, (stamp, stamp))
+
+    scroll = QScrollArea()
+    qtbot.addWidget(scroll)
+    scroll.resize(1100, 600)
+    scroll.setWidgetResizable(True)
+    grid = clip_grid.ClipGrid(_settings(tmp_path))
+    scroll.setWidget(grid)
+    scroll.show()
+    try:
+        qtbot.waitUntil(lambda: grid._active_scan_worker is None)
+        scrollbar = scroll.verticalScrollBar()
+        qtbot.waitUntil(lambda: scrollbar.maximum() > 0, timeout=3000)
+        qtbot.waitUntil(
+            lambda: all(canvas.height() > 0
+                        for canvas in grid._virtual_sections.values()),
+            timeout=3000,
+        )
+
+        scrollbar.setValue(scrollbar.maximum())
+        # The scrollbar callback only queues the update; stop that timer so the
+        # two scheduler turns below remain deterministic and directly observable.
+        grid._virtual_update_timer.stop()
+        grid._scrolling = True
+
+        clock_values = iter((10.0, 10.005))
+
+        def expired_clock():
+            try:
+                return next(clock_values)
+            except StopIteration:
+                return 11.0
+
+        monkeypatch.setattr(clip_grid.time, 'perf_counter', expired_clock)
         grid._update_virtualized_cards()
-        assert any('3-' in os.path.basename(path) for path in grid._thumb_widgets)
-        scroll.verticalScrollBar().setValue(0)
-        qtbot.wait(50)
+        assert not any(
+            os.path.basename(path).startswith('3-')
+            for path in grid._thumb_widgets
+        )
+        assert grid._virtual_update_timer.isActive()
+
+        # Let the queued retry be represented by the next explicit scheduler
+        # turn. A fresh deadline must now materialize the visible bottom section.
+        grid._virtual_update_timer.stop()
         grid._update_virtualized_cards()
-        assert any('0-' in os.path.basename(path) for path in grid._thumb_widgets)
+        assert any(
+            os.path.basename(path).startswith('3-')
+            for path in grid._thumb_widgets
+        )
         assert len(grid._thumb_widgets) <= clip_grid._MAX_MATERIALIZED_CARDS
     finally:
         grid.shutdown()
@@ -116,6 +202,7 @@ def test_settings_apply_repaints_existing_scroll_surfaces_and_controls(
         for color in ('#ff55ff', '#125637'):
             theme.set_color('BG', color)
             theme.set_color('SURFACE_2', color)
+            theme.set_color('SURFACE_3', color)
             theme.set_color('ACCENT', '#abcdef')
             combo = page.preset_combo
             selected = combo.currentIndex()
@@ -182,7 +269,7 @@ def test_diagnostic_zip_drag_uses_native_copy_file_url(qtbot, monkeypatch, tmp_p
     button.mouseMoveEvent(event)
     qtbot.mouseRelease(button, Qt.MouseButton.LeftButton)
     assert len(drags) == 1
-    assert 'EXPORT AGAIN' in button.text()
+    assert 'export again' in button.text()
 
 
 @pytest.mark.parametrize('outcome', ['success', 'cancelled', 'failed'])

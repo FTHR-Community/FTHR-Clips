@@ -44,21 +44,30 @@ class _SlowStream:
     def __init__(self, lines, delay=0.01):
         self._lines = iter(lines)
         self._delay = delay
+        self._closed = threading.Event()
+        self._read_started = threading.Event()
 
     def readline(self):
+        self._read_started.set()
+        if self._closed.is_set():
+            return ''
         try:
             line = next(self._lines)
         except StopIteration:
             return ''
-        time.sleep(self._delay)
+        if self._closed.wait(self._delay):
+            return ''
         return line
+
+    def close(self):
+        self._closed.set()
 
 
 class _StreamingProcess:
-    def __init__(self, duration=0.45):
+    def __init__(self, duration=0.45, delay=0.005):
         self.stdout = _SlowStream(
             [f'out_time_ms={index * 10000}\n' for index in range(1, 101)],
-            delay=0.005)
+            delay=delay)
         self.stderr = StringIO(''.join(f'stderr-{index}\n' for index in range(1000)))
         self.returncode = None
         self._deadline = time.monotonic() + duration
@@ -196,6 +205,31 @@ def test_stderr_flood_keeps_newest_tail_and_progress_alive(tmp_path):
     assert len(result.stderr_tail) <= 256
 
 
+def test_export_job_closes_slow_reader_when_process_finishes(tmp_path):
+    staged = tmp_path / 'job.partial.mp4'
+    final = tmp_path / 'job.mp4'
+    staged.write_bytes(b'valid')
+    process = _StreamingProcess(duration=0.03, delay=0.20)
+    job = ExportJob(
+        ['ffmpeg', str(staged)], staged, final,
+        popen_factory=_factory(process), stderr_limit=256,
+        inactivity_timeout=0.08,
+        validate_output=lambda path: None,
+    )
+    result_holder = []
+    runner = threading.Thread(
+        target=lambda: result_holder.append(job.run(duration=1.0)))
+    runner.start()
+    assert process.stdout._read_started.wait(timeout=1)
+    runner.join(timeout=2)
+
+    assert not runner.is_alive()
+    assert result_holder and result_holder[0].state is ExportState.COMPLETED
+    assert not any(
+        thread.name.startswith('fthr-export-') and thread.is_alive()
+        for thread in threading.enumerate())
+
+
 def test_export_job_cancel_during_execution_reaps_process(tmp_path):
     staged = tmp_path / 'job.partial.mp4'
     final = tmp_path / 'job.mp4'
@@ -278,43 +312,14 @@ def test_export_job_cancel_wins_if_requested_during_commit(tmp_path):
     assert not staged.exists()
 
 
-def test_editor_export_button_stays_enabled_as_cancel_control():
-    class _Worker:
-        def is_alive(self):
-            return True
-
-    class _Button:
-        def __init__(self):
-            self.text = None
-            self.enabled = None
-
-        def setText(self, value):
-            self.text = value
-
-        def setEnabled(self, value):
-            self.enabled = value
-
-    class _Job:
-        def __init__(self):
-            self.cancelled = False
-
-        def cancel(self):
-            self.cancelled = True
-
-    cancel_event = threading.Event()
-    job = _Job()
-    button = _Button()
+def test_editor_export_button_submits_another_independent_job():
+    calls = []
     viewer = type('Viewer', (), {
-        '_export_thread': _Worker(), '_export_cancel': cancel_event,
-        '_export_job': job, 'export_btn': button,
-        '_export_clip': lambda self: (_ for _ in ()).throw(AssertionError()),
+        '_export_clip': lambda self: calls.append('queued'),
     })()
     ClipViewer._on_export_button(viewer)
-
-    assert cancel_event.is_set()
-    assert job.cancelled is True
-    assert button.text == 'CANCELLING…'
-    assert button.enabled is False
+    ClipViewer._on_export_button(viewer)
+    assert calls == ['queued', 'queued']
 
 
 def test_export_job_launch_failure_is_terminal(tmp_path):

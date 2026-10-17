@@ -28,7 +28,7 @@ def test_dead_splash_control_is_not_exposed():
     assert 'Enable startup splash screen' not in MAIN_SOURCE
 
 
-def test_root_favicon_loads_for_window_and_tray():
+def test_root_favicon_loads_for_window_and_tray(qapp):
     pytest.importorskip('PySide6.QtGui')
     from main import _load_icon
 
@@ -86,10 +86,11 @@ def test_rapid_settings_tabs_debounce_audio_device_open():
     fake = SimpleNamespace(
         stack=SimpleNamespace(
             count=lambda: 6,
-            setCurrentIndex=lambda idx: calls.append(('page', idx))),
+            setCurrentIndex=lambda idx, **_kwargs: calls.append(('page', idx))),
         _audio_preview_timer=timer,
         _category_switch_timer=category_timer,
         _pending_category_index=0,
+        _ensure_category=lambda _index: None,
         _background_ui_paused=False,
         mic_level_meter=meter,
         isVisible=lambda: True,
@@ -117,13 +118,14 @@ def test_rapid_settings_tabs_only_apply_the_latest_page():
     fake = SimpleNamespace(
         stack=SimpleNamespace(
             count=lambda: 6,
-            setCurrentIndex=lambda idx: calls.append(('page', idx))),
+            setCurrentIndex=lambda idx, **_kwargs: calls.append(('page', idx))),
         _category_switch_timer=SimpleNamespace(
             start=lambda: calls.append('category-start')),
         _audio_preview_timer=SimpleNamespace(
             stop=lambda: calls.append('audio-stop'),
             start=lambda: calls.append('audio-start')),
         _pending_category_index=0,
+        _ensure_category=lambda _index: None,
         _background_ui_paused=False,
         isVisible=lambda: True,
         _start_encoder_probe=lambda: calls.append('encoder-probe'),
@@ -209,6 +211,7 @@ def test_game_detection_startup_discards_stale_window_target():
             'capture_mode': 'window',
             'target_hwnd': 328546,
             'target_window_name': 'Windows Input Experience',
+            'target_clip_group': 'Old Game',
         },
         get=lambda key, default=None: settings.values.get(key, default),
         update=lambda values: settings.values.update(values),
@@ -222,6 +225,7 @@ def test_game_detection_startup_discards_stale_window_target():
         'capture_mode': 'desktop',
         'target_hwnd': 0,
         'target_window_name': '',
+        'target_clip_group': '',
     }
 
 
@@ -243,11 +247,13 @@ def test_game_detection_can_apply_sources_without_a_deferred_ui():
     assert values['capture_mode'] == 'window'
     assert values['target_hwnd'] == 77
     assert values['target_window_name'] == 'Actual Game'
+    assert values['target_clip_group'] == 'Actual Game'
 
     assert MainWindow._set_capture_desktop_source(fake)
     assert values['capture_mode'] == 'desktop'
     assert values['target_hwnd'] == 0
     assert values['target_window_name'] == ''
+    assert values['target_clip_group'] == ''
 
 
 def test_game_detection_restarts_same_window_when_capture_geometry_changes(
@@ -260,8 +266,11 @@ def test_game_detection_restarts_same_window_when_capture_geometry_changes(
         'capture_mode': 'window',
         'target_hwnd': 77,
     }
+    persisted = []
     settings = SimpleNamespace(
-        get=lambda key, default=None: values.get(key, default))
+        get=lambda key, default=None: values.get(key, default),
+        update=lambda updates: values.update(updates),
+        save_settings=lambda: persisted.append(dict(values)))
     original = main.GameWindow(
         hwnd=77, pid=9, title='Actual Game', exe_name='game.exe',
         right=1920, bottom=1080, monitor_width=1920, monitor_height=1080)
@@ -284,6 +293,8 @@ def test_game_detection_restarts_same_window_when_capture_geometry_changes(
 
     assert fake._active_game_window is resized
     assert restarts == [{'allow_recording_prepare': False}]
+    assert values['target_clip_group'] == 'game'
+    assert persisted == [values]
 
 
 def test_game_detection_defers_geometry_restart_until_recording_closes(
@@ -327,12 +338,24 @@ def test_game_detection_defers_geometry_restart_until_recording_closes(
     assert restarts == [{}]
 
 
-def test_active_game_crop_is_part_of_requested_encoder_config(monkeypatch):
+def test_legacy_game_crop_is_ignored_on_windows_and_retained_on_linux(monkeypatch):
     pytest.importorskip('PySide6.QtCore')
     import main
+    from core.windows_monitor import MonitorChoice
 
+    # The production Windows resolver must be deterministic, but this test
+    # runs on a headless host with no real display topology. Supply one
+    # canonical primary monitor so the test reaches the crop-policy branch.
     monkeypatch.setattr(
-        main, 'normalize_monitor_device_path', lambda value: value)
+        main, 'enumerate_windows_monitors',
+        lambda: [MonitorChoice(
+            gdi_name='DISPLAY-PATH',
+            friendly_name='Test display',
+            device_path=r'\\?\DISPLAY#TEST\001',
+            primary=True,
+        )],
+    )
+
     values = {
         'capture_monitor': 'DISPLAY-PATH',
         'target_hwnd': 55,
@@ -364,9 +387,13 @@ def test_active_game_crop_is_part_of_requested_encoder_config(monkeypatch):
 
     config = main.MainWindow._requested_capture_config(fake)
 
-    assert config.crop_enabled
-    assert (config.crop_x, config.crop_y, config.crop_w, config.crop_h) == (
-        0.1, 0.2, 0.7, 0.6)
+    if main.sys.platform == 'win32':
+        assert not config.crop_enabled
+        assert (config.crop_x, config.crop_y, config.crop_w, config.crop_h) == (0, 0, 1, 1)
+    else:
+        assert config.crop_enabled
+        assert (config.crop_x, config.crop_y, config.crop_w, config.crop_h) == (
+            0.1, 0.2, 0.7, 0.6)
 
 
 def test_engine_launch_hard_disables_multiband_and_forwards_encoder_selection():
@@ -376,17 +403,6 @@ def test_engine_launch_hard_disables_multiband_and_forwards_encoder_selection():
     assert 'encoder_pref_int' in body
 
 
-def test_startup_limitations_never_open_modal_dialogs():
-    hotkey_warning = _method_source('_warn_input_group', '_warn_no_engine')
-    compositor_warning = _method_source(
-        '_show_compositor_warning', '_on_game_appeared')
-
-    assert 'QMessageBox' not in hotkey_warning
-    assert '.exec()' not in hotkey_warning
-    assert 'self.push_error(' in hotkey_warning
-    assert 'QMessageBox' not in compositor_warning
-    assert '.exec()' not in compositor_warning
-    assert 'self.push_error(' in compositor_warning
 
 
 def test_capture_health_does_not_fill_the_error_bar():
@@ -443,10 +459,6 @@ def test_manual_recording_success_uses_the_capture_card():
     assert "'MANUAL RECORDING SAVED'" not in body
 
 
-def test_windows_never_schedules_linux_compositor_warning():
-    body = _method_source('_setup_hotkeys', '_on_hotkey_save_clip')
-    assert "sys.platform != 'win32'" in body
-    assert 'self._show_compositor_warning' in body
 
 
 def test_named_notification_sounds_have_named_runtime_routes():

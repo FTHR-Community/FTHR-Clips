@@ -402,6 +402,51 @@ def test_sparse_source_gate_runs_before_overlay_or_crop(
     assert completed == [clip_path]
 
 
+def test_source_probe_exception_fails_closed_before_worker_or_cfr(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    clip_path = str(tmp_path / 'probe-error.mp4')
+    Path(clip_path).write_bytes(b'source')
+    worker_calls: list[str] = []
+    normalized: list[str] = []
+    failures: list[tuple[str, str]] = []
+    warnings: list[tuple[str, str]] = []
+    completions: list[tuple[str, dict[str, object]]] = []
+    ready = threading.Event()
+
+    def _probe(_path):
+        raise RuntimeError('synthetic ffprobe failure')
+
+    monkeypatch.setattr(main_module, 'probe_video_metadata', _probe)
+    host = SimpleNamespace(
+        _mux_threads=[],
+        _clip_readiness=SimpleNamespace(
+            finalization_failed=lambda path, message, **_kwargs:
+                failures.append((path, message))),
+        _normalize_clip_to_cfr=lambda path: normalized.append(path),
+        _record_finalization_warning=lambda path, message:
+            warnings.append((path, message)),
+        _complete_clip_finalization=lambda path, _duration, **kwargs:
+            completions.append((path, kwargs)),
+    )
+
+    def _worker(*_args):
+        worker_calls.append('called')
+
+    worker = MainWindow._spawn_mux_thread(
+        host, _worker, (clip_path, 30, 0.0, ready, None))
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert worker_calls == []
+    assert normalized == []
+    assert ready.is_set()
+    assert len(failures) == 1
+    assert failures[0][0] == clip_path
+    assert 'validation failed' in failures[0][1]
+    assert warnings
+    assert completions == [(clip_path, {'already_normalized': True})]
+
+
 def test_inconclusive_cfr_repair_uses_bounded_background_ffmpeg_invocation(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     clip_path = tmp_path / 'vfr.mp4'

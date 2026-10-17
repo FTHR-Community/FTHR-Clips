@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTHRClips Socials</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="icon" type="image/png" sizes="96x96" href="favicon-96x96.png">
+    <link rel="shortcut icon" href="favicon.ico">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+    <link rel="manifest" href="site.webmanifest">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <canvas class="dot-field" id="dotField" aria-hidden="true"></canvas>
+
+    <nav class="site-nav">
+        <a class="logo" href="https://fthrclips.com" aria-label="Back to FTHRClips">
+            <img src="assets/logo.png" alt="FTHR">
+        </a>
+        <div class="nav-links" aria-label="Primary">
+            <a href="https://fthrclips.com">Main Site</a>
+            <a href="https://about.fthrclips.com" target="_blank" rel="noopener noreferrer">Legal Notice</a>
+        </div>
+        <button class="nav-hc-btn" id="hcToggle" aria-label="Toggle high contrast mode" title="High contrast mode">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/>
+            </svg>
+            HC
+        </button>
+    </nav>
+
+    <main class="social-page">
+        <section class="social-shell animate-in" aria-labelledby="pageTitle">
+            <div class="identity-panel">
+                <a class="brand-mark" href="https://fthrclips.com" aria-label="Visit FTHRClips main site">
+                    <img src="assets/logo.png" alt="FTHR">
+                </a>
+                <div>
+                    <p class="label">Links & Socials</p>
+                    <h1 id="pageTitle">FTHRClips</h1>
+                    <p class="intro">Updates, clips, community posts, and the places where FTHR shows up before the public build does.</p>
+                </div>
+                <div class="status-strip">
+                    <span>System Status</span>
+                    <strong>Closed Development</strong>
+                </div>
+            </div>
+
+            <div class="links-panel" aria-label="Social links">
+                <a class="social-link" href="https://www.tiktok.com/@fthrclips" target="_blank" rel="noopener noreferrer">
+                    <span class="link-number">01</span>
+                    <span class="link-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M14 4v9.2a4.2 4.2 0 1 1-4.2-4.2"/><path d="M14 4c.8 3.1 2.6 5 5.5 5.3"/></svg>
+                    </span>
+                    <span class="link-copy">
+                        <span class="link-name">FTHRClips TikTok</span>
+                        <span class="link-meta">Official product account</span>
+                    </span>
+                    <span class="link-arrow" aria-hidden="true">+</span>
+                </a>
+
+            <div class="links-panel" aria-label="Social links">
+                <a class="social-link" href="https://www.youtube.com/@fthrclips" target="_blank" rel="noopener noreferrer">
+                    <span class="link-number">01</span>
+                    <span class="link-icon" aria-hidden="true">
+                    </span>
+                    <span class="link-copy">
+                        <span class="link-name">FTHRClips YouTube</span>
+                        <span class="link-meta">Official product account</span>
+                    </span>
+                    <span class="link-arrow" aria-hidden="true">+</span>
+                </a>
+
+                <a class="social-link social-link-discord" href="https://discord.gg/rSYzZWvhcA" target="_blank" rel="noopener noreferrer">
+                    <span class="link-number">02</span>
+                    <span class="link-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M7.5 8.2a13 13 0 0 1 3.1-.9l.5 1a11.7 11.7 0 0 1 1.8 0l.5-1a13 13 0 0 1 3.1.9c1.7 2.6 2.2 5.1 2 7.7a11.8 11.8 0 0 1-3.8 1.9l-.8-1.3c.4-.2.8-.4 1.2-.7a8.5 8.5 0 0 1-6.2 0c.4.3.8.5 1.2.7l-.8 1.3a11.8 11.8 0 0 1-3.8-1.9c-.2-2.6.3-5.1 2-7.7z"/><circle cx="9.8" cy="13" r=".9" fill="currentColor" stroke="none"/><circle cx="14.2" cy="13" r=".9" fill="currentColor" stroke="none"/></svg>
+                    </span>
+                    <span class="link-copy">
+                        <span class="link-name">Discord</span>
+                        <span class="link-meta">Community and development updates</span>
+                    </span>
+                    <span class="link-arrow" aria-hidden="true">+</span>
+                </a>
+            </div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <a href="https://fthrclips.com">Back to FTHR</a>
+        <span>©2026 FTHR-Software // ALL RIGHTS RESERVED</span>
+    </footer>
+
+    <script src="script.js" defer></script>
+</body>
+</html>

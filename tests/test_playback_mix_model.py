@@ -175,14 +175,19 @@ def test_application_gain_is_a_delta_against_hidden_default_mix():
     chrome, discord, base = sources
 
     filters, _ = ffmpeg_mix_filter(sources, {}, 100)
-    assert '0:a:0]volume=1.000000' in filters[2]
-    assert '0:a:1]volume=0.000000' in filters[0]
-    assert '0:a:2]volume=0.000000' in filters[1]
+    assert filters[0] == (
+        '[0:a:1]aresample=first_pts=0:async=0,volume=0.000000[src0]')
+    assert filters[1] == (
+        '[0:a:2]aresample=first_pts=0:async=0,volume=0.000000[src1]')
+    assert filters[2] == (
+        '[0:a:0]aresample=first_pts=0:async=0,volume=1.000000[src2]')
 
     states = {chrome.source_id: SourceMixState(muted=True)}
     filters, _ = ffmpeg_mix_filter(sources, states, 100)
-    assert '0:a:1]volume=-1.000000' in filters[0]
-    assert '0:a:2]volume=0.000000' in filters[1]
+    assert filters[0] == (
+        '[0:a:1]aresample=first_pts=0:async=0,volume=-1.000000[src0]')
+    assert filters[1] == (
+        '[0:a:2]aresample=first_pts=0:async=0,volume=0.000000[src1]')
     assert base.editable is False
     assert discord.editable is True
 

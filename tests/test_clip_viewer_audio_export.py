@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import math
 import json
 from pathlib import Path
 import subprocess
 import sys
+from array import array
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'FTHR_UI'))
@@ -12,6 +16,125 @@ sys.path.insert(0, str(ROOT / 'FTHR_UI'))
 from core.playback_mix_model import PlaybackSource
 from core.transactional_output import commit_staged_output, create_staged_output_path
 from ui.clip_viewer import ClipViewer, VolumePopup
+
+
+def _run_export_probe(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+    result = subprocess.run(command, capture_output=True, timeout=60)
+    if result.returncode:
+        pytest.fail(result.stderr.decode(errors='replace')[-3000:])
+    return result
+
+
+def _marker_expression(frequency: float, markers: tuple[float, ...],
+                       sample_rate: int, duration: float) -> str:
+    windows = '+'.join(
+        f'between(t\\,{marker}\\,{marker + 0.05})'
+        for marker in markers)
+    return (
+        f'aevalsrc=0.7*sin(2*PI*{frequency}*t)*if({windows}\\,1\\,0):'
+        f's={sample_rate}:d={duration}')
+
+
+def _make_late_source(ffmpeg: str, path: Path, *, system_offset: float = 0.0,
+                      mic_offset: float = 0.5, mic_sample_rate: int = 48000,
+                      mic_duration: float = 3.2) -> None:
+    video = (
+        'color=c=black:s=64x48:r=60:d=4,drawbox=x=0:y=0:w=64:h=48:'
+        'color=white:t=fill:enable=between(t\\,0.4\\,0.45)+'
+        'between(t\\,1.8\\,1.85)+between(t\\,3.0\\,3.05)')
+    system = _marker_expression(440.0, (0.4, 1.8, 3.0), 48000, 4.0)
+    microphone = _marker_expression(
+        880.0, (0.8, 1.8, 2.8), mic_sample_rate, mic_duration)
+    _run_export_probe([
+        ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'lavfi', '-i', video,
+        '-itsoffset', str(system_offset), '-f', 'lavfi', '-i', system,
+        '-itsoffset', str(mic_offset), '-f', 'lavfi', '-i', microphone,
+        '-map', '0:v', '-map', '1:a', '-map', '2:a',
+        '-c:v', 'mpeg4', '-q:v', '5', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', '-b:a', '192k', '-shortest', str(path),
+    ])
+
+
+def _decode_marker_centers(ffmpeg: str, media: Path, audio_ordinal: int,
+                           output: Path, frequency: float) -> list[float]:
+    _run_export_probe([
+        ffmpeg, '-hide_banner', '-loglevel', 'error', '-y', '-i', str(media),
+        '-map', f'0:a:{audio_ordinal}', '-f', 'f32le', '-ac', '1', '-ar',
+        '48000', str(output),
+    ])
+    samples = array('f')
+    with output.open('rb') as stream:
+        samples.fromfile(stream, output.stat().st_size // samples.itemsize)
+    rate = 48000
+    block_size = rate // 100
+    kernel = tuple(
+        (math.cos(2.0 * math.pi * frequency * index / rate),
+         -math.sin(2.0 * math.pi * frequency * index / rate))
+        for index in range(block_size))
+    magnitudes = []
+    for offset in range(0, len(samples) - block_size + 1, block_size):
+        block = samples[offset:offset + block_size]
+        real = sum(sample * cosine
+                   for sample, (cosine, _sine) in zip(block, kernel,
+                                                       strict=True))
+        imag = sum(sample * sine
+                   for sample, (_cosine, sine) in zip(block, kernel,
+                                                      strict=True))
+        magnitudes.append(math.hypot(real, imag) / block_size)
+    active = [index for index, value in enumerate(magnitudes) if value > 0.05]
+    groups: list[list[int]] = []
+    for index in active:
+        if not groups or index != groups[-1][-1] + 1:
+            groups.append([index])
+        else:
+            groups[-1].append(index)
+    return [
+        (group[0] + group[-1] + 1) * block_size / (2 * rate)
+        for group in groups
+    ]
+
+
+def _first_decoded_audio_timestamp(ffprobe: str, media: Path,
+                                   ordinal: int) -> float:
+    result = _run_export_probe([
+        ffprobe, '-v', 'error', '-select_streams', f'a:{ordinal}',
+        '-show_frames', '-show_entries',
+        'frame=best_effort_timestamp_time,pts_time', '-of', 'json',
+        str(media),
+    ])
+    frames = json.loads(result.stdout).get('frames', [])
+    for frame in frames:
+        for field in ('best_effort_timestamp_time', 'pts_time'):
+            value = frame.get(field)
+            if value not in (None, 'N/A'):
+                return float(value)
+    raise AssertionError(f'no decoded timestamp for audio stream {ordinal}')
+
+
+def _export_viewer(source: Path):
+    return type('Viewer', (), {
+        'clip_path': str(source),
+        '_audio_tracks': (('system', 0), ('mic', 1)),
+        '_playback_sources': (
+            PlaybackSource('system', 'System Audio', 'system', 1, 0),
+            PlaybackSource('mic', 'Microphone', 'microphone', 2, 1),
+        ),
+        '_source_volumes': {'system': 100, 'mic': 100},
+        '_source_mutes': {'system': False, 'mic': False},
+        '_master_volume': 100,
+    })()
+
+
+def _markers_in_ranges(markers: list[float],
+                       ranges: list[tuple[float, float]]) -> list[float]:
+    result: list[float] = []
+    output_offset = 0.0
+    for start, end in ranges:
+        result.extend(output_offset + marker - start for marker in markers
+                      if start <= marker < end)
+        output_offset += end - start
+    return result
 
 
 def test_dynamic_volume_popup_has_real_source_mute_controls(qtbot):
@@ -125,6 +248,180 @@ def test_export_uses_current_source_gain_mute_master_and_limiter():
     assert 'volume=0.000000' in joined
     assert 'alimiter=limit=0.98' in joined
     assert 'volume=0.500000[aout]' in joined
+
+
+@pytest.mark.parametrize('late_stream', ('microphone', 'system'))
+def test_build_export_cmd_preserves_late_audio_stream_origin(tmp_path, late_stream):
+    """A delayed source marker must retain its native stream offset."""
+    try:
+        from core.ffmpeg_tools import get_ffmpeg_exe, get_ffprobe_exe
+        ffmpeg = get_ffmpeg_exe()
+        ffprobe = get_ffprobe_exe()
+    except Exception as error:
+        pytest.skip(f'no reviewed FFmpeg runtime: {error}')
+
+    source = tmp_path / f'late-{late_stream}-origin-source.mp4'
+    offsets = {
+        'microphone': {'system_offset': 0.0, 'mic_offset': 0.5},
+        'system': {'system_offset': 0.5, 'mic_offset': 0.0,
+                   'mic_duration': 4.0},
+    }
+    _make_late_source(ffmpeg, source, **offsets[late_stream])
+    viewer = _export_viewer(source)
+    output = tmp_path / 'late-origin-export.mp4'
+    command = ClipViewer._build_export_cmd(
+        viewer, ffmpeg, 0.0, 4.0, str(output), None, ['-c:v', 'copy'])
+    _run_export_probe(command)
+
+    target_ordinal = 1 if late_stream == 'microphone' else 0
+    target_frequency = 880.0 if late_stream == 'microphone' else 440.0
+    native_pcm = tmp_path / f'{late_stream}.f32'
+    exported_pcm = tmp_path / 'exported.f32'
+    native = _decode_marker_centers(
+        ffmpeg, source, target_ordinal, native_pcm, target_frequency)
+    origin = _first_decoded_audio_timestamp(ffprobe, source, target_ordinal)
+    exported = _decode_marker_centers(
+        ffmpeg, output, 0, exported_pcm, target_frequency)
+
+    expected = [center + origin for center in native]
+    reference = ([1.325, 2.325, 3.325] if late_stream == 'microphone'
+                 else [0.925, 2.325, 3.525])
+    assert expected == pytest.approx(reference, abs=0.03)
+    assert exported == pytest.approx(expected, abs=0.03)
+
+
+def test_build_export_cmd_keeps_aligned_audio_markers(tmp_path):
+    """The timestamp normalization must not move already aligned streams."""
+    from core.ffmpeg_tools import get_ffmpeg_exe, get_ffprobe_exe
+
+    ffmpeg = get_ffmpeg_exe()
+    ffprobe = get_ffprobe_exe()
+    source = tmp_path / 'aligned-source.mp4'
+    _make_late_source(ffmpeg, source, mic_offset=0.0)
+    viewer = _export_viewer(source)
+    output = tmp_path / 'aligned-export.mp4'
+    command = ClipViewer._build_export_cmd(
+        viewer, ffmpeg, 0.0, 4.0, str(output), None, ['-c:v', 'copy'])
+    _run_export_probe(command)
+
+    native_pcm = tmp_path / 'aligned-native.f32'
+    exported_pcm = tmp_path / 'aligned-exported.f32'
+    native = _decode_marker_centers(ffmpeg, source, 1, native_pcm, 880.0)
+    origin = _first_decoded_audio_timestamp(ffprobe, source, 1)
+    exported = _decode_marker_centers(
+        ffmpeg, output, 0, exported_pcm, 880.0)
+    assert exported == pytest.approx(
+        [marker + origin for marker in native], abs=0.03)
+
+
+def test_build_export_cmd_single_late_stream_keeps_origin(tmp_path):
+    """A filtered export with only the delayed source retains its origin."""
+    from core.ffmpeg_tools import get_ffmpeg_exe, get_ffprobe_exe
+
+    ffmpeg = get_ffmpeg_exe()
+    ffprobe = get_ffprobe_exe()
+    source = tmp_path / 'single-late-source.mp4'
+    _make_late_source(ffmpeg, source)
+    viewer = _export_viewer(source)
+    viewer._audio_tracks = (('mic', 1),)
+    viewer._playback_sources = (viewer._playback_sources[1],)
+    output = tmp_path / 'single-late-export.mp4'
+    command = ClipViewer._build_export_cmd(
+        viewer, ffmpeg, 0.0, 4.0, str(output), None, ['-c:v', 'copy'])
+    _run_export_probe(command)
+
+    native_pcm = tmp_path / 'single-native.f32'
+    exported_pcm = tmp_path / 'single-exported.f32'
+    native = _decode_marker_centers(ffmpeg, source, 1, native_pcm, 880.0)
+    origin = _first_decoded_audio_timestamp(ffprobe, source, 1)
+    exported = _decode_marker_centers(
+        ffmpeg, output, 0, exported_pcm, 880.0)
+    assert exported == pytest.approx(
+        [marker + origin for marker in native], abs=0.03)
+
+
+def test_build_export_cmd_preserves_origins_across_multiple_segments(tmp_path):
+    """The shared mix is normalized before segment trim/concat."""
+    from core.ffmpeg_tools import get_ffmpeg_exe, get_ffprobe_exe
+
+    ffmpeg = get_ffmpeg_exe()
+    ffprobe = get_ffprobe_exe()
+    source = tmp_path / 'multi-segment-source.mp4'
+    _make_late_source(ffmpeg, source)
+    viewer = _export_viewer(source)
+    segments = [(0.0, 1.0), (1.5, 3.5)]
+    output = tmp_path / 'multi-segment-export.mp4'
+    command = ClipViewer._build_export_cmd(
+        viewer, ffmpeg, 0.0, 3.5, str(output), None,
+        ['-c:v', 'mpeg4', '-q:v', '5'],
+        segments=segments)
+    _run_export_probe(command)
+
+    expected: dict[float, list[float]] = {}
+    for frequency, ordinal in ((440.0, 0), (880.0, 1)):
+        native_pcm = tmp_path / f'native-{int(frequency)}.f32'
+        native = _decode_marker_centers(
+            ffmpeg, source, ordinal, native_pcm, frequency)
+        origin = _first_decoded_audio_timestamp(ffprobe, source, ordinal)
+        expected[frequency] = _markers_in_ranges(
+            [marker + origin for marker in native], segments)
+    for frequency in expected:
+        exported_pcm = tmp_path / f'exported-{int(frequency)}.f32'
+        exported = _decode_marker_centers(
+            ffmpeg, output, 0, exported_pcm, frequency)
+        assert exported == pytest.approx(expected[frequency], abs=0.03)
+
+
+@pytest.mark.parametrize('start_s,end_s', ((0.25, 3.75), (1.5, 3.5)))
+def test_build_export_cmd_preserves_origins_when_trim_starts_before_or_after(
+        tmp_path, start_s, end_s):
+    """Input seeking keeps markers relative to either trim boundary."""
+    from core.ffmpeg_tools import get_ffmpeg_exe, get_ffprobe_exe
+
+    ffmpeg = get_ffmpeg_exe()
+    ffprobe = get_ffprobe_exe()
+    source = tmp_path / f'trim-{start_s}.mp4'
+    _make_late_source(ffmpeg, source)
+    viewer = _export_viewer(source)
+    output = tmp_path / f'trim-{start_s}-export.mp4'
+    command = ClipViewer._build_export_cmd(
+        viewer, ffmpeg, start_s, end_s - start_s, str(output), None,
+        ['-c:v', 'copy'])
+    _run_export_probe(command)
+
+    native_pcm = tmp_path / 'trim-native.f32'
+    exported_pcm = tmp_path / 'trim-exported.f32'
+    native = _decode_marker_centers(ffmpeg, source, 1, native_pcm, 880.0)
+    origin = _first_decoded_audio_timestamp(ffprobe, source, 1)
+    expected = _markers_in_ranges(
+        [marker + origin for marker in native], [(start_s, end_s)])
+    exported = _decode_marker_centers(
+        ffmpeg, output, 0, exported_pcm, 880.0)
+    assert exported == pytest.approx(expected, abs=0.03)
+
+
+def test_build_export_cmd_preserves_origins_when_resampling_mic(tmp_path):
+    """Per-input timestamp normalization also survives 44.1 kHz input."""
+    from core.ffmpeg_tools import get_ffmpeg_exe, get_ffprobe_exe
+
+    ffmpeg = get_ffmpeg_exe()
+    ffprobe = get_ffprobe_exe()
+    source = tmp_path / 'resampled-source.mp4'
+    _make_late_source(ffmpeg, source, mic_sample_rate=44100)
+    viewer = _export_viewer(source)
+    output = tmp_path / 'resampled-export.mp4'
+    command = ClipViewer._build_export_cmd(
+        viewer, ffmpeg, 0.0, 4.0, str(output), None, ['-c:v', 'copy'])
+    _run_export_probe(command)
+
+    native_pcm = tmp_path / 'resampled-native.f32'
+    exported_pcm = tmp_path / 'resampled-exported.f32'
+    native = _decode_marker_centers(ffmpeg, source, 1, native_pcm, 880.0)
+    origin = _first_decoded_audio_timestamp(ffprobe, source, 1)
+    exported = _decode_marker_centers(
+        ffmpeg, output, 0, exported_pcm, 880.0)
+    assert exported == pytest.approx(
+        [marker + origin for marker in native], abs=0.03)
 
 
 def test_mixed_export_is_transactional_and_preserve_mapping_keeps_stems(tmp_path):

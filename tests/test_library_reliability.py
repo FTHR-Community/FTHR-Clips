@@ -17,13 +17,13 @@ def test_ready_clip_opens_before_thumbnail_and_only_once(qtbot, tmp_path):
     qtbot.addWidget(card)
     opened = []
     card.opened.connect(lambda *args: opened.append(args))
-    qtbot.mouseClick(card, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(card.thumb_label, Qt.MouseButton.LeftButton)
     assert len(opened) == 1
     card.set_video_thumbnail('', 0)
     assert len(opened) == 1
     assert card.duration_label.text() == '--:--'
     card.set_ready(False)
-    qtbot.mouseClick(card, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(card.thumb_label, Qt.MouseButton.LeftButton)
     assert len(opened) == 1
 
 

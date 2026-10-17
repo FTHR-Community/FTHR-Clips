@@ -1,6 +1,8 @@
 #include "audio_packet_ring.h"
 #include "audio_source_model.h"
+#include "audio_timeline.h"
 #include "clip_audio_manifest.h"
+#include "save_clip_task.h"
 #include "transactional_save.h"
 
 #include <cstdlib>
@@ -127,6 +129,100 @@ void EncodedPacketRingIsBoundedAndSnapshotsOverlap() {
     CheckAudio(stats.accepted_packets > 0 && stats.rejected_empty_packets == 1
                    && stats.rejected_regressing_packets == 1,
         "AAC ring exposes rejection counters for diagnostics");
+}
+
+void EncodedTrackAssemblyPreservesSignedPresentationOrigin() {
+    constexpr uint32_t sample_rate = 48000;
+    const auto source = Source(
+        "69696969-6969-4696-8696-969696969696", "Default Mix",
+        fthr::AudioSourceType::System);
+
+    // A source beginning at 45 seconds overlaps a 30..60 second clip only
+    // after its beginning. The production track's signed start is retained so
+    // MuxEncodedClip's -presentation_start offset places the first packet at
+    // +15 seconds instead of moving it to the video boundary.
+    fthr::EncodedAudioPacketRing late_ring(
+        source.identity.id, 12, {sample_rate, 2, "fltp"}, 90);
+    late_ring.SetCodecExtradata({0x12, 0x10});
+    CheckAudio(late_ring.Push({{0x31}, 0, 1024}),
+        "late source ring accepts the first AAC packet");
+    CheckAudio(late_ring.Push({{0x32}, 1024, 1024}),
+        "late source ring accepts the second AAC packet");
+    const auto late_range = fthr::MapAudioSourcePresentationRange(
+        30.0, 60.0, 45ULL * 10'000'000ULL, sample_rate);
+    const auto late_track = fthr::TakeEncodedAudioTrackForPresentationRange(
+        source, late_ring, late_range);
+    CheckAudio(late_track.valid()
+                   && late_track.presentation_start_pts_samples == -720000
+                   && late_track.snapshot.packets.size() == 2
+                   && late_track.snapshot.first_pts_samples == 0
+                   && late_track.snapshot.last_pts_samples == 2048,
+        "Default Mix assembly keeps the late source's signed range and packet bounds");
+    CheckAudio(-late_track.presentation_start_pts_samples == 720000
+                   && late_track.snapshot.packets.front().pts_samples
+                          - late_track.presentation_start_pts_samples == 720000,
+        "the production mux offset places the first late-source packet at +15 seconds");
+
+    fthr::EncodedAudioPacketRing aligned_ring(
+        source.identity.id, 12, {sample_rate, 2, "fltp"}, 90);
+    aligned_ring.Push({{0x41}, 0, 1024});
+    const auto aligned_range = fthr::MapAudioSourcePresentationRange(
+        30.0, 60.0, 30ULL * 10'000'000ULL, sample_rate);
+    const auto aligned_track = fthr::TakeEncodedAudioTrackForPresentationRange(
+        source, aligned_ring, aligned_range);
+    CheckAudio(aligned_track.valid()
+                   && aligned_track.presentation_start_pts_samples == 0
+                   && aligned_track.snapshot.first_pts_samples == 0
+                   && -aligned_track.presentation_start_pts_samples == 0,
+        "an aligned source retains zero presentation offset");
+
+    // A source already active before the clip has a positive source-timeline
+    // start. The packet itself remains untrimmed at that source PTS.
+    fthr::EncodedAudioPacketRing preroll_ring(
+        source.identity.id, 12, {sample_rate, 2, "fltp"}, 90);
+    preroll_ring.Push({{0x51}, 48000, 1024});
+    const auto preroll_range = fthr::MapAudioSourcePresentationRange(
+        30.0, 60.0, 29ULL * 10'000'000ULL, sample_rate);
+    const auto preroll_track = fthr::TakeEncodedAudioTrackForPresentationRange(
+        source, preroll_ring, preroll_range);
+    CheckAudio(preroll_track.valid()
+                   && preroll_track.presentation_start_pts_samples == 48000
+                   && preroll_track.snapshot.first_pts_samples == 48000
+                   && preroll_track.snapshot.last_pts_samples == 49024
+                   && -preroll_track.presentation_start_pts_samples == -48000,
+        "a source before the window retains its positive source offset");
+
+    // AAC encoder delay is allowed to precede the source origin. A negative
+    // source range must select the pre-roll packet rather than clamp to zero.
+    fthr::EncodedAudioPacketRing encoder_delay_ring(
+        source.identity.id, 12, {sample_rate, 2, "fltp"}, 90);
+    encoder_delay_ring.Push({{0x61}, -1024, 1024});
+    encoder_delay_ring.Push({{0x62}, 0, 1024});
+    const auto encoder_delay_range = fthr::MapAudioSourcePresentationRange(
+        30.0, 60.0, 30ULL * 10'000'000ULL + 213333ULL, sample_rate);
+    const auto encoder_delay_track =
+        fthr::TakeEncodedAudioTrackForPresentationRange(
+            source, encoder_delay_ring, encoder_delay_range);
+    CheckAudio(encoder_delay_track.valid()
+                   && encoder_delay_track.presentation_start_pts_samples == -1024
+                   && encoder_delay_track.snapshot.first_pts_samples == -1024
+                   && encoder_delay_track.snapshot.last_pts_samples == 1024
+                   && encoder_delay_track.snapshot.packets.size() == 2
+                   && -encoder_delay_track.presentation_start_pts_samples == 1024,
+        "negative AAC pre-roll remains selected with a positive mux offset");
+
+    // If the requested window ends before the source begins, a signed range
+    // must be empty. A zero-clamped range would incorrectly select this packet.
+    fthr::EncodedAudioPacketRing future_ring(
+        source.identity.id, 12, {sample_rate, 2, "fltp"}, 90);
+    future_ring.Push({{0x71}, 0, 1024});
+    const auto future_range = fthr::MapAudioSourcePresentationRange(
+        0.0, 10.0, 45ULL * 10'000'000ULL, sample_rate);
+    const auto future_track = fthr::TakeEncodedAudioTrackForPresentationRange(
+        source, future_ring, future_range);
+    CheckAudio(!future_track.valid() && future_track.snapshot.packets.empty()
+                   && future_track.presentation_start_pts_samples == -2160000,
+        "a clip entirely before a source produces an empty signed-range snapshot");
 }
 
 void PairedPublicationProtectsTheManifestContract() {
@@ -265,6 +361,7 @@ int RunAudioSourceModelTests() {
     EndedHistorySurvivesAndGenerationDoesNotMix();
     SourceLimitAndSanitizationStaySafe();
     EncodedPacketRingIsBoundedAndSnapshotsOverlap();
+    EncodedTrackAssemblyPreservesSignedPresentationOrigin();
     PairedPublicationProtectsTheManifestContract();
     NativeManifestBindsTheTemporaryMediaWithoutPrivatePaths();
     std::cout << "AUDIT-050 audio source model tests: " << audio_source_checks

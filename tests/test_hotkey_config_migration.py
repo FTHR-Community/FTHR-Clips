@@ -30,7 +30,7 @@ def test_recording_has_separate_start_and_stop_hotkey_dispatch():
 def test_unset_recording_hotkey_is_not_registered(monkeypatch):
     registrations = []
     monkeypatch.setattr(
-        'FTHR_UI.core.hotkey_manager.keyboard.add_hotkey',
+        'FTHR_UI.core.hotkey_manager.HotkeyManager._register_windows_hotkey',
         lambda *args: registrations.append(args))
     manager = HotkeyManager.__new__(HotkeyManager)
 

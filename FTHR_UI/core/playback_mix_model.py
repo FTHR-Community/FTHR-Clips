@@ -300,7 +300,9 @@ def ffmpeg_mix_filter(
     for index, source in enumerate(selected):
         gain = source_gain(source, states)
         label = f'src{index}'
-        filters.append(f'[0:a:{source.audio_index}]volume={gain:.6f}[{label}]')
+        filters.append(
+            f'[0:a:{source.audio_index}]aresample=first_pts=0:async=0,'
+            f'volume={gain:.6f}[{label}]')
         input_labels.append(f'[{label}]')
     active = active_source_count(selected, states)
     headroom = headroom_for_active_sources(active)

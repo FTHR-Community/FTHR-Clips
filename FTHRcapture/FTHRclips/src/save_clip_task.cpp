@@ -1,10 +1,31 @@
 // FTHR Capture Engine - SaveClipQueue implementation
 
 #include "save_clip_task.h"
+#include "audio_timeline.h"
+
+#include <algorithm>
 #include <iostream>
 
 
 namespace fthr {
+
+
+EncodedAudioTrack TakeEncodedAudioTrackForPresentationRange(
+    const AudioSourceMetadata& source,
+    const EncodedAudioPacketRing& ring,
+    const AudioSourcePresentationRange& range) {
+    // Preserve the signed source origin. A negative start represents either
+    // leading silence before a late source or AAC encoder pre-roll.
+    const int64_t start_pts_samples = range.start_pts_samples;
+    const int64_t end_pts_samples = std::max<int64_t>(
+        start_pts_samples + 1, range.end_pts_samples);
+
+    EncodedAudioTrack track;
+    track.source = source;
+    track.snapshot = ring.TakeSnapshot(start_pts_samples, end_pts_samples);
+    track.presentation_start_pts_samples = start_pts_samples;
+    return track;
+}
 
 
 // SaveClipQueue construction

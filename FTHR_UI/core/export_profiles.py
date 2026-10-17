@@ -11,6 +11,7 @@ from collections import deque
 import json
 import math
 import os
+import sys
 from pathlib import Path
 import subprocess
 import threading
@@ -104,8 +105,8 @@ class ExportPreset:
 
 DISCORD_PRESET = ExportPreset(
     preset_id='discord',
-    name='Discord · 10 MB',
-    target_size_mb=10.0,
+    name='Discord · 20 MB' if sys.platform == 'win32' else 'Discord · 10 MB',
+    target_size_mb=20.0 if sys.platform == 'win32' else 10.0,
     target_fps=60.0,
     video_codec='h264',
     audio_bitrate_kbps=96,
@@ -465,7 +466,7 @@ def compress_media(source_path: str | Path, output_path: str | Path,
 
 
 def provider_limit_mb(provider: str) -> int | None:
-    return {'lustful': 100, 'catbox': 200}.get(str(provider or '').lower())
+    return {'catbox': 200}.get(str(provider or '').lower())
 
 
 def provider_compression_preset(provider: str) -> ExportPreset:

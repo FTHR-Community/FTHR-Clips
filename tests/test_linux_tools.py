@@ -124,6 +124,19 @@ def test_report_lists_every_known_tool():
         assert name in rep
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='Linux helper report')
+def test_report_does_not_claim_feature_helpers_block_startup(tmp_path, monkeypatch):
+    monkeypatch.setenv('PATH', str(tmp_path))
+    linux_tools.reset_cache()
+
+    report = linux_tools.report()
+
+    hyprctl_line = next(
+        line for line in report.splitlines() if 'hyprctl' in line)
+    assert 'feature-only' in hyprctl_line
+    assert 'required' not in hyprctl_line
+
+
 def test_windows_never_resolves_linux_tools(monkeypatch, tmp_path):
     """A same-named .exe on Windows must not be picked up by accident."""
     monkeypatch.setattr(linux_tools.sys, 'platform', 'win32')

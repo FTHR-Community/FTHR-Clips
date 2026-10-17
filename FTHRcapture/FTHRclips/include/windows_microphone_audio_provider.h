@@ -12,7 +12,10 @@
 #include "audio_format_converter.h"
 #include "audio_timeline.h"
 #include "save_clip_task.h"
+#include "replay_pause_clock.h"
 
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -34,7 +37,8 @@ struct WindowsMicrophoneEndpoint {
 // choose to display active endpoints only while retaining a missing explicit ID
 // in settings so it is never silently rebound to a different microphone.
 bool EnumerateWindowsMicrophoneEndpoints(
-    std::vector<WindowsMicrophoneEndpoint>* endpoints, std::string* error);
+    std::vector<WindowsMicrophoneEndpoint>* endpoints, std::string* error,
+    bool render = false);
 
 struct WindowsMicrophoneAudioProviderConfig {
     uint64_t generation = 0;
@@ -49,7 +53,50 @@ struct WindowsMicrophoneAudioProviderConfig {
     // Capture/input gain only. It is burned exactly once into newly captured
     // microphone samples and is never reused as an editor/export gain.
     float input_gain = 1.0f;
+    bool downmix_mono = false;
     AudioSourceMetadata source;
+    std::shared_ptr<ReplayPauseClock> replay_pause_clock;
+};
+
+// Downmix canonical interleaved stereo samples and duplicate mono to both
+// channels. This preserves the shared stereo encoder/mixer contract.
+void DownmixWindowsMicrophoneToMono(float* samples, size_t sample_count);
+
+// Applies the configured capture gain exactly once.  The input gain is
+// clamped to the supported 0..2 range, but samples are intentionally not
+// limited afterward; diagnostics must be able to expose over-range input.
+void ApplyWindowsMicrophoneInputGain(float* samples, size_t sample_count,
+                                     float configured_gain);
+
+// Bounded timing/flag evidence for the native WASAPI capture loop.  These
+// counters deliberately describe observations made by FTHR; the processing
+// threshold is not an OS-level underrun claim.
+struct WindowsMicrophoneProcessingDiagnosticsSnapshot {
+    uint32_t capture_buffer_frames = 0;
+    uint64_t capture_buffer_duration_100ns = 0;
+    uint64_t timestamp_error_count = 0;
+    uint64_t max_packet_processing_duration_100ns = 0;
+    uint64_t packet_processing_at_or_above_buffer_duration_count = 0;
+};
+
+class WindowsMicrophoneProcessingDiagnosticsAccumulator {
+public:
+    static uint64_t CaptureBufferDuration100ns(uint32_t buffer_frames,
+                                               uint32_t sample_rate);
+    static bool ProcessingDurationMeetsBuffer(uint64_t processing_duration_100ns,
+                                              uint64_t buffer_duration_100ns);
+
+    void ConfigureCaptureBuffer(uint32_t buffer_frames, uint32_t sample_rate);
+    void ObservePacket(bool timestamp_error, uint64_t processing_duration_100ns);
+    WindowsMicrophoneProcessingDiagnosticsSnapshot Snapshot() const;
+    void Reset();
+
+private:
+    std::atomic<uint32_t> capture_buffer_frames_{0};
+    std::atomic<uint64_t> capture_buffer_duration_100ns_{0};
+    std::atomic<uint64_t> timestamp_error_count_{0};
+    std::atomic<uint64_t> max_packet_processing_duration_100ns_{0};
+    std::atomic<uint64_t> packet_processing_at_or_above_buffer_duration_count_{0};
 };
 
 struct WindowsMicrophoneRuntimeInfo {
@@ -70,6 +117,19 @@ struct WindowsMicrophoneRuntimeInfo {
     uint64_t encoder_error_count = 0;
     uint64_t rejected_packet_count = 0;
     uint64_t largest_no_packet_gap_100ns = 0;
+    uint64_t synthetic_silence_frame_count = 0;
+    uint64_t skipped_input_frame_count = 0;
+    uint64_t resampler_correction_count = 0;
+    uint64_t normal_jitter_absorbed_count = 0;
+    uint64_t hard_discontinuity_recovery_count = 0;
+    AudioCorrectionDistributionSnapshot silence_corrections;
+    AudioCorrectionDistributionSnapshot skip_corrections;
+    AudioCorrectionDistributionSnapshot resampler_corrections;
+    float configured_input_gain = 1.0f;
+    AudioSignalMetricsSnapshot native_input_signal;
+    AudioSignalMetricsSnapshot converter_output_signal;
+    AudioSignalMetricsSnapshot encoder_input_signal;
+    WindowsMicrophoneProcessingDiagnosticsSnapshot processing_diagnostics;
 };
 
 class WindowsMicrophoneAudioProvider {
@@ -85,6 +145,7 @@ public:
     bool IsRunning() const;
     std::string last_error() const;
     WindowsMicrophoneRuntimeInfo runtime_info() const;
+    AudioCorrectionEventSnapshot correction_events() const;
 
     // A track is returned only when the provider has native AAC history for
     // the requested video interval.  The source metadata is updated with the

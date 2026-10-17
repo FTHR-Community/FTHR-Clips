@@ -18,6 +18,7 @@
 #include <mutex>
 
 #include "encoded_video_config.h"
+#include "replay_save_diagnostics.h"
 
 
 namespace fthr {
@@ -75,10 +76,40 @@ namespace fthr {
         double qpc_start_s = 0.0;
         double qpc_end_s   = 0.0;
         int64_t presentation_start_pts = 0;
+        // Actual video presentation interval corresponding to
+        // presentation_start_pts through last_pts + one PTS tick. This is
+        // deliberately independent from target_end_qpc: that requested
+        // boundary remains the stale-end/health guard and is not a captured
+        // frame when the newest packet is older than the request.
         double presentation_start_qpc_s = 0.0;
         double presentation_end_qpc_s = 0.0;
         double media_end_qpc_s = 0.0;
         bool full_history = false;
+
+        // Bounded, save-time selection evidence.  These fields are internal
+        // diagnostics only and never cross the shared-memory ABI.
+        replay_save::SnapshotOutcome selection_outcome =
+            replay_save::SnapshotOutcome::Unknown;
+        uint32_t selection_attempts = 0;
+        bool internal_consistency = true;
+        size_t scanned_packet_count = 0;
+        size_t eligible_packet_count = 0;
+        size_t keyframe_count = 0;
+        size_t ring_count = 0;
+        size_t ring_capacity = 0;
+        uint64_t ring_head = 0;
+        uint64_t snapshot_start_ring_head = 0;
+        size_t snapshot_start_ring_count = 0;
+        uint64_t snapshot_start_ring_generation = 0;
+        uint64_t snapshot_end_ring_head = 0;
+        size_t snapshot_end_ring_count = 0;
+        uint64_t snapshot_end_ring_generation = 0;
+        int64_t oldest_wall_qpc = 0;
+        int64_t newest_wall_qpc = 0;
+        int64_t requested_start_qpc = 0;
+        int64_t target_end_qpc = 0;
+        int64_t interval_spanned_qpc = 0;
+        bool valid_starting_keyframe = false;
     };
 
 

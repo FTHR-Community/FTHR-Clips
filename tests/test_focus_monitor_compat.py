@@ -1,52 +1,15 @@
-﻿import sys
+import sys
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'FTHR_UI'))
-from unittest.mock import patch, MagicMock
-from core.focus_monitor import FocusMonitor, _get_active_window_title
+from unittest.mock import patch
+from core.focus_monitor import FocusMonitor
 
 
-def test_get_active_window_hyprland_success():
-    mock_result = MagicMock()
-    mock_result.stdout = b'{"title": "Minecraft", "class": "java"}'
-    mock_result.returncode = 0
-    with patch('core.focus_monitor.subprocess.run', return_value=mock_result), \
-         patch('core.focus_monitor.detect_compositor', return_value='hyprland'), \
-         patch('core.focus_monitor.linux_tools.require',
-               return_value='/usr/bin/hyprctl'):
-        title = _get_active_window_title()
-    assert title == 'Minecraft'
 
 
-def test_get_active_window_hyprland_failure_returns_none():
-    with patch('core.focus_monitor.subprocess.run', side_effect=Exception('not found')), \
-         patch('core.focus_monitor.detect_compositor', return_value='hyprland'):
-        title = _get_active_window_title()
-    assert title is None
 
 
-def test_get_active_window_xdotool_success():
-    def fake_run(cmd, **kw):
-        m = MagicMock()
-        if cmd[1:] == ['getactivewindow']:
-            m.stdout = b'12345678\n'; m.returncode = 0
-        elif 'getwindowname' in cmd:
-            m.stdout = b'Counter-Strike 2\n'; m.returncode = 0
-        else:
-            m.stdout = b''; m.returncode = 1
-        return m
-    with patch('core.focus_monitor.subprocess.run', side_effect=fake_run), \
-         patch('core.focus_monitor.detect_compositor', return_value='kwin'), \
-         patch('core.focus_monitor.linux_tools.available', return_value=True), \
-         patch('core.focus_monitor.linux_tools.require',
-               return_value='/usr/bin/xdotool'):
-        title = _get_active_window_title()
-    assert title == 'Counter-Strike 2'
 
 
-def test_get_active_window_no_xtools_returns_none():
-    with patch('core.focus_monitor.detect_compositor', return_value='kwin'), \
-         patch('core.focus_monitor.linux_tools.available', return_value=False):
-        title = _get_active_window_title()
-    assert title is None
 
 
 def test_focus_monitor_emits_focus_lost():

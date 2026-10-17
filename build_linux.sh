@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build_output"
 APPDIR="$BUILD_DIR/AppDir"
+GLIBC_MANIFEST="$SCRIPT_DIR/tools/linux_release_baseline.json"
 
 # Prefer the project-local Linux venv when present so packaging runs in the same
 # environment that installed PyInstaller/PySide6. This avoids stale Windows or
@@ -33,7 +34,7 @@ echo ""
 
 # 1. Check requirements
 echo ">>> Checking dependencies..."
-for cmd in cmake gcc pkg-config wayland-scanner curl readelf file; do
+for cmd in cmake gcc pkg-config wayland-scanner readelf file patchelf sha256sum; do
     command -v "$cmd" >/dev/null 2>&1 || {
         echo "ERROR: '$cmd' not found."
         exit 1
@@ -52,13 +53,14 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
     exit 1
 }
 
-pkg-config --exists libavcodec libpulse-simple wayland-client || {
-    echo "ERROR: Missing C++ build deps (ffmpeg / pulseaudio / wayland)."
-    echo "  Arch:          sudo pacman -S ffmpeg libpulse wayland"
+pkg-config --exists libavcodec libpulse-simple wayland-client \
+        libpipewire-0.3 dbus-1 || {
+    echo "ERROR: Missing C++ build deps (ffmpeg / pulseaudio / wayland / pipewire / dbus)."
+    echo "  Arch:          sudo pacman -S ffmpeg libpulse wayland pipewire dbus patchelf"
     echo "  Debian/Ubuntu: sudo apt install libavcodec-dev libavformat-dev \\"
     echo "                   libavutil-dev libavdevice-dev libswscale-dev \\"
     echo "                   libswresample-dev libpulse-dev libwayland-dev \\"
-    echo "                   wayland-protocols"
+    echo "                   wayland-protocols libpipewire-0.3-dev libdbus-1-dev patchelf"
     exit 1
 }
 
@@ -272,10 +274,12 @@ cat > "$APPDIR/AppRun" <<'APPRUN_EOF'
 #!/bin/sh
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
-if [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    export QT_QPA_PLATFORM="wayland"
-elif [ -n "${DISPLAY:-}" ]; then
-    export QT_QPA_PLATFORM="xcb"
+if [ -z "${QT_QPA_PLATFORM:-}" ]; then
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        export QT_QPA_PLATFORM="wayland"
+    elif [ -n "${DISPLAY:-}" ]; then
+        export QT_QPA_PLATFORM="xcb"
+    fi
 fi
 
 export PYTHONUNBUFFERED=1
@@ -336,15 +340,19 @@ if ! "$PYTHON_BIN" "$SCRIPT_DIR/tools/verify_release_licenses.py" --appdir "$APP
     exit 1
 fi
 
-# 7. Download appimagetool
-APPIMAGETOOL="$BUILD_DIR/appimagetool-x86_64.AppImage"
-if [ ! -f "$APPIMAGETOOL" ]; then
-    echo ""
-    echo ">>> Downloading appimagetool..."
-    curl -L --progress-bar -o "$APPIMAGETOOL" \
-        "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-    chmod +x "$APPIMAGETOOL"
+# 7. Fetch the pinned AppImage packer and type-2 runtime. The fetcher verifies
+# both size and SHA-256 from tools/appimage_tool_manifest.json and replaces
+# downloads atomically. Do not let appimagetool resolve a mutable runtime URL.
+echo ""
+echo ">>> Ensuring pinned AppImage tooling is present..."
+if ! "$PYTHON_BIN" "$SCRIPT_DIR/tools/fetch_third_party.py" --appimagetool-linux; then
+    echo "ERROR: could not obtain the verified AppImage tooling." >&2
+    exit 1
 fi
+APPIMAGETOOL="$BUILD_DIR/appimagetool-x86_64.AppImage"
+APPIMAGE_RUNTIME="$BUILD_DIR/runtime-x86_64"
+[ -x "$APPIMAGETOOL" ] || { echo "ERROR: verified appimagetool is not executable." >&2; exit 1; }
+[ -x "$APPIMAGE_RUNTIME" ] || { echo "ERROR: verified AppImage runtime is not executable." >&2; exit 1; }
 
 # 8. Pack AppImage
 echo ""
@@ -353,6 +361,7 @@ OUTPUT="$BUILD_DIR/FTHRClips-${APP_VERSION}-x86_64.AppImage"
 LINUX_STAGE="$HOME/fthr-appimage-build"
 NATIVE_APPDIR="$LINUX_STAGE/AppDir"
 NATIVE_TOOL="$LINUX_STAGE/appimagetool-x86_64.AppImage"
+NATIVE_RUNTIME="$LINUX_STAGE/runtime-x86_64"
 NATIVE_OUTPUT="$LINUX_STAGE/FTHR-Clips-Linux-x86_64.AppImage"
 
 # AppImage tooling is unreliable when its source tree lives on a Windows mount
@@ -364,29 +373,52 @@ NATIVE_OUTPUT="$LINUX_STAGE/FTHR-Clips-Linux-x86_64.AppImage"
 }
 mkdir -p "$LINUX_STAGE"
 rm -rf "$NATIVE_APPDIR"
-rm -f "$NATIVE_OUTPUT" "$OUTPUT"
+rm -f "$NATIVE_OUTPUT" "$OUTPUT" "$OUTPUT.sha256"
 cp -a "$APPDIR" "$NATIVE_APPDIR"
 cp "$APPIMAGETOOL" "$NATIVE_TOOL"
-chmod +x "$NATIVE_TOOL" "$NATIVE_APPDIR/AppRun"
+cp "$APPIMAGE_RUNTIME" "$NATIVE_RUNTIME"
+chmod +x "$NATIVE_TOOL" "$NATIVE_RUNTIME" "$NATIVE_APPDIR/AppRun"
 
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 \
-    "$NATIVE_TOOL" "$NATIVE_APPDIR" "$NATIVE_OUTPUT"
+    "$NATIVE_TOOL" --runtime-file "$NATIVE_RUNTIME" \
+    "$NATIVE_APPDIR" "$NATIVE_OUTPUT"
 [ -f "$NATIVE_OUTPUT" ] || {
     echo "ERROR: appimagetool reported success but produced no AppImage." >&2
     exit 1
 }
 cp "$NATIVE_OUTPUT" "$OUTPUT"
 
+# The AppImage is not publishable until both the frozen AppDir and the final
+# ELF image satisfy the release baseline.  Keep this before checksum creation
+# and the success banner so a failed portability check cannot look like a
+# releasable artifact.
+echo ""
+echo ">>> Verifying Linux glibc baseline..."
+if ! "$PYTHON_BIN" "$SCRIPT_DIR/tools/verify_linux_glibc.py" \
+    --manifest "$GLIBC_MANIFEST" \
+    --target "$APPDIR" \
+    --target "$OUTPUT"; then
+    rm -f "$NATIVE_OUTPUT" "$OUTPUT" "$OUTPUT.sha256"
+    echo "ERROR: Linux glibc baseline verification failed; refusing to publish the AppImage." >&2
+    exit 1
+fi
+
+OUTPUT_NAME="$(basename "$OUTPUT")"
+CHECKSUM="$OUTPUT.sha256"
+OUTPUT_SHA256="$(sha256sum "$OUTPUT" | awk '{print $1}')"
+printf '%s  %s\n' "$OUTPUT_SHA256" "$OUTPUT_NAME" > "$CHECKSUM"
+
 SIZE="$(du -sh "$OUTPUT" | cut -f1)"
 echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║              FTHR Clips Linux AppImage Ready                ║"
-echo "╠══════════════════════════════════════════════════════════════╣"
-printf "║  Output: %-52s║\n" "build_output/FTHRClips-${APP_VERSION}-x86_64.AppImage"
-printf "║  Size:   %-52s║\n" "$SIZE"
-echo "╠══════════════════════════════════════════════════════════════╣"
-echo "║  Linux-only — contains the Linux capture engine only.       ║"
-echo "║                                                              ║"
-echo "║  For global hotkeys (one-time):                             ║"
-echo "║    sudo usermod -aG input \$USER  (then re-login)            ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
+echo "╔═════════════════════════════════════════════════════════════════════╗"
+echo "║                   FTHR Clips Linux AppImage Ready                   ║"
+echo "╠═════════════════════════════════════════════════════════════════════╣"
+printf "║  Output: %-59s║\n" "build_output/$OUTPUT_NAME"
+printf "║  SHA256: %-59s║\n" "build_output/${OUTPUT_NAME}.sha256"
+printf "║  Size:   %-59s║\n" "$SIZE"
+echo "╠═════════════════════════════════════════════════════════════════════╣"
+echo "║  Linux-only — contains the Linux capture engine only.               ║"
+echo "║                                                                     ║"
+echo "║  For global hotkeys (one-time):                                     ║"
+echo "║    sudo usermod -aG input \$USER  (then re-login)                    ║"
+echo "╚═════════════════════════════════════════════════════════════════════╝"

@@ -8,9 +8,12 @@
 #include "replay_encoder.h"
 #include "wgc_frame_lease.h"
 #include "capture_focus_policy.h"
+#include "replay_pause_clock.h"
 #include <thread>
 #include <chrono>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -21,6 +24,7 @@
 #include <vector>
 
 int RunAmfReplayEncoderTests();
+int RunSoftwareReplayEncoderTests();
 int RunQsvReplayEncoderTests();
 int RunWindowsReplayPolicyTests();
 int RunAudioSourceModelTests();
@@ -29,6 +33,7 @@ int RunWindowsProcessLoopbackAudioProviderTests();
 int RunWindowsMicrophoneAudioProviderTests();
 int RunAudioFormatConverterTests();
 int RunWindowsCaptureBorderPolicyTests();
+int RunWindowsCaptureBackendPolicyTests();
 int RunContinuousRecordingWriterTests();
 int RunNvencInputLifecycleTests();
 int RunCaptureScaleGeometryTests();
@@ -118,6 +123,54 @@ public:
 private:
     std::vector<MonitorTopologyEntry> entries_;
 };
+
+void LiveWindowsDesktopAdapterSmoke() {
+    fthr::monitor::WindowsMonitorTopologySource source;
+    const auto topology = source.QueryActiveTopology();
+    Check(topology.ok(), "real Windows desktop topology query");
+    IDXGIFactory1* factory = nullptr;
+    Check(SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))), "real DXGI factory");
+    for (const auto& entry : topology.monitors) {
+        Check(entry.active && entry.hmonitor && entry.width && entry.height, "real live desktop bounds");
+        MonitorResolver resolver(source);
+        Check(resolver.Resolve(entry.monitor_device_path).ok(), "real persistent monitor resolution");
+        Check(resolver.Resolve(fthr::monitor::DesktopMonitorIdentity(entry)).ok(), "real fallback alias resolution");
+        IDXGIAdapter1* adapter = nullptr; std::string detail;
+        Check(fthr::monitor::OpenSelectedDxgiAdapter(factory, entry, &adapter, detail), "real adapter lookup without opening an output");
+        if (adapter) adapter->Release();
+    }
+    factory->Release();
+    std::cout << "Live Windows desktop adapter smoke: " << topology.monitors.size() << " monitor(s)" << std::endl;
+}
+
+void LiveDesktopSurvivesMissingPnpMetadata() {
+    auto live = Monitor(L"", {}, 0, 0, 0x123, L"\\\\.\\DISPLAY2", true);
+    live.width = 1280; live.height = 1024; live.adapter_luid_available = false;
+    auto source_path = Monitor(L"", {7, 0}, 2, 3, 0, live.source_gdi_name.c_str());
+    source_path.active = false; // targetAvailable/PnP state is not live-desktop availability.
+    auto result = fthr::monitor::BuildLiveMonitorTopology({live}, {source_path}, {});
+    Check(result.ok() && result.monitors.size() == 1, "live desktop survives disabled PnP");
+    Check(result.monitors[0].adapter_luid == AdapterLuid{7, 0}, "CCD source supplies adapter without DXGI output");
+    Check(result.monitors[0].monitor_device_path == L"fthr-monitor:123:display2", "explicit handle-qualified fallback identity");
+    FakeTopologySource topology(result.monitors);
+    MonitorResolver resolver(topology);
+    Check(resolver.Resolve(L"fthr-monitor:123:display2").ok(), "fallback selection resolves");
+    auto enriched = result.monitors[0]; enriched.monitor_device_path = L"PATH-NEW";
+    topology.Set({enriched});
+    Check(resolver.Resolve(L"fthr-monitor:123:display2").ok(), "fallback survives restored PnP metadata");
+    enriched.hmonitor = 0x124; topology.Set({enriched});
+    Check(!resolver.Resolve(L"fthr-monitor:123:display2").ok(), "stale handle requires reselection");
+    const DxgiOutputIdentity output{{8, 0}, live.hmonitor, live.source_gdi_name, 1};
+    result = fthr::monitor::BuildLiveMonitorTopology({live}, {}, {output});
+    Check(result.ok() && result.monitors[0].adapter_luid == AdapterLuid{8, 0}, "DXGI adapter metadata fallback");
+    Check(!fthr::monitor::BuildLiveMonitorTopology({live}, {source_path}, {output}).ok(), "conflicting adapters rejected");
+    auto other = source_path; other.source_id++;
+    Check(!fthr::monitor::BuildLiveMonitorTopology({live}, {source_path, other}, {}).ok(), "ambiguous source rejected");
+    Check(fthr::monitor::BuildLiveMonitorTopology({}, {source_path}, {output}).monitors.empty(), "disconnected targets do not create desktop choices");
+    auto selected = result.monitors[0];
+    auto stale = output; stale.hmonitor++;
+    Check(!fthr::monitor::ResolveDxgiOutput(selected, {stale}).ok(), "DXGI requires matching handle and GDI name");
+}
 
 void OneMonitorOneAdapter() {
     FakeTopologySource source({Monitor(L"PATH-A", {1, 0}, 0, 10, 100, L"DISPLAY1", true)});
@@ -333,6 +386,7 @@ void RecentDxgiEvidencePublishesCompleteBoundedEvents() {
     event.acquire_end_qpc = 125;
     event.acquire_hresult = S_OK;
     event.acquired = true;
+    event.pacing_accepted = true;
     event.release_attempted = true;
     event.release_hresult = S_OK;
     event.resource_token = 7;
@@ -343,6 +397,8 @@ void RecentDxgiEvidencePublishesCompleteBoundedEvents() {
     Check(snapshot.size() == 1
               && snapshot.front().acquired
               && snapshot.front().release_attempted
+              && snapshot.front().pacing_accepted
+              && !snapshot.front().pacing_rejected
               && snapshot.front().release_hresult == S_OK
               && snapshot.front().resource_token == 7,
           "one successful DXGI event retains acquire and release evidence");
@@ -397,6 +453,18 @@ void DxgiFrameMetadataAndTextureContractsRejectFalseFrames() {
     Check(std::string(fthr::dxgi::PipelineStallCode(
               Boundary::EncoderOutputStalled)) == "ENCODER_OUTPUT_STALLED",
           "encoder-output stall keeps its stable diagnostic taxonomy");
+    Check(fthr::dxgi::IsDxgiAliveButDesktopStatic(
+              true, true, true, false, true),
+          "recent S_OK pointer-only activity keeps a static DXGI desktop alive");
+    Check(fthr::dxgi::IsDxgiAliveButDesktopStatic(
+              true, true, true, true, false),
+          "recent DXGI WAIT_TIMEOUT keeps a static desktop alive");
+    Check(!fthr::dxgi::IsDxgiAliveButDesktopStatic(
+              true, true, true, false, false),
+          "S_OK without recent pointer-only activity is not exempted");
+    Check(!fthr::dxgi::IsDxgiAliveButDesktopStatic(
+              true, true, false, true, true),
+          "pending encoder work prevents the static DXGI exemption");
     Check(!fthr::dxgi::IsFatalDuplicationRecreateFailure(E_ACCESSDENIED),
           "secure-desktop access denial remains bounded-retryable");
     Check(fthr::dxgi::IsFatalDuplicationRecreateFailure(
@@ -686,6 +754,62 @@ void NativeNvencLowLatencyConfigurationIsCodecSpecific() {
           "AV1 explicitly signals studio-range BT.709 SDR");
 }
 
+void NativeNvencSupportsHighFrameRateMatrix() {
+    for (const uint32_t fps : {30u, 60u, 120u, 144u}) {
+        for (const auto codec : {
+                 VideoCodec::H264, VideoCodec::HEVC, VideoCodec::AV1}) {
+            NV_ENC_CONFIG config = {};
+            Check(fthr::ConfigureNvencCodec(codec, fps, config),
+                "NVENC codec policy accepts the tested frame-rate matrix");
+            uint32_t time_scale = 0;
+            bool timing_enabled = false;
+            switch (codec) {
+            case VideoCodec::H264:
+                time_scale = config.encodeCodecConfig.h264Config
+                    .h264VUIParameters.timeScale;
+                timing_enabled = time_scale != 0;
+                break;
+            case VideoCodec::HEVC:
+                time_scale = config.encodeCodecConfig.hevcConfig
+                    .hevcVUIParameters.timeScale;
+                timing_enabled = time_scale != 0;
+                break;
+            case VideoCodec::AV1:
+                timing_enabled = config.encodeCodecConfig.av1Config
+                    .enableTimingInfo != 0;
+                break;
+            }
+            Check(config.gopLength == fps
+                    && timing_enabled
+                    && ((codec == VideoCodec::AV1)
+                        || time_scale == fps * 2),
+                "NVENC publishes the requested high frame rate timing");
+        }
+    }
+
+    for (const auto resolution : {
+             std::pair<uint32_t, uint32_t>{1920, 1080},
+             std::pair<uint32_t, uint32_t>{2560, 1440},
+             std::pair<uint32_t, uint32_t>{3840, 2160}}) {
+        for (const uint32_t fps : {30u, 60u, 120u, 144u}) {
+            const auto config = fthr::BuildNvencVideoConfig(
+                VideoCodec::H264, resolution.first, resolution.second,
+                fps, 200'000, {});
+            Check(config.width == resolution.first
+                    && config.height == resolution.second
+                    && config.frame_rate.numerator
+                        == static_cast<int32_t>(fps)
+                    && config.frame_rate.denominator == 1
+                    && config.time_base.numerator == 1
+                    && config.time_base.denominator
+                        == static_cast<int32_t>(fps)
+                    && config.bitrate_kbps == 200'000
+                    && fthr::IsValidEncodedVideoConfig(config),
+                "NVENC video config preserves resolution/FPS requests including 4K120");
+        }
+    }
+}
+
 void NativeNvencVideoConfigsPropagateCodecData() {
     const std::vector<uint8_t> h264_extra{1, 100, 0, 31};
     const std::vector<uint8_t> hevc_extra{0, 0, 0, 1, 64};
@@ -710,6 +834,42 @@ void NativeNvencVideoConfigsPropagateCodecData() {
               && av1.packet_format == EncodedPacketFormat::LowOverheadObu
               && av1.codec_extradata == av1_extra,
           "AV1 config propagates its sequence header OBUs");
+
+    const std::pair<uint32_t, uint32_t> resolutions[] = {
+        {1920, 1080}, {2560, 1440}, {3840, 2160},
+    };
+    const uint32_t frame_rates[] = {30, 60, 120, 144};
+    for (const auto codec_and_extra : {
+             std::pair<VideoCodec, const std::vector<uint8_t>*>(
+                 VideoCodec::H264, &h264_extra),
+             std::pair<VideoCodec, const std::vector<uint8_t>*>(
+                 VideoCodec::HEVC, &hevc_extra),
+             std::pair<VideoCodec, const std::vector<uint8_t>*>(
+                 VideoCodec::AV1, &av1_extra)}) {
+        for (const auto resolution : resolutions) {
+            for (const uint32_t fps : frame_rates) {
+                const auto config = fthr::BuildNvencVideoConfig(
+                    codec_and_extra.first,
+                    resolution.first,
+                    resolution.second,
+                    fps,
+                    200'000,
+                    *codec_and_extra.second);
+                Check(config.width == resolution.first
+                        && config.height == resolution.second
+                        && config.frame_rate.numerator
+                            == static_cast<int32_t>(fps)
+                        && config.frame_rate.denominator == 1
+                        && config.time_base.numerator == 1
+                        && config.time_base.denominator
+                            == static_cast<int32_t>(fps)
+                        && config.bitrate_kbps == 200'000
+                        && config.codec_extradata == *codec_and_extra.second
+                        && fthr::IsValidEncodedVideoConfig(config),
+                    "NVENC config preserves the resolution/FPS matrix including 4K120");
+            }
+        }
+    }
 }
 
 void H264CodecMapsCorrectly() {
@@ -764,19 +924,226 @@ void PacketTimingAndKeyframeMetadataRemainUnchanged() {
 }
 
 void CodecNeutralRingKeepsTimestampIntervalSelection() {
-    EncodedRingBuffer ring(16, 1, 1000);
+    // This fixture uses the same 60-fps / 1:60 time base as production NVENC.
+    // The previous five-packet 1-fps fixture was inconsistent with its 60-fps
+    // config and could only assert the requested wall interval, not the actual
+    // selected video PTS boundary.
+    constexpr int64_t qpc_frequency = 1'000'000;
+    constexpr uint32_t fps = 60;
+    constexpr int64_t first_qpc = 1'000'000;
+    constexpr int64_t pts_epoch = 100'000;
+    constexpr uint32_t frame_count = fps * 6 + 1;
+    EncodedRingBuffer ring(frame_count + 120, fps, qpc_frequency);
     ring.SetVideoConfig(VideoConfig(VideoCodec::H264));
     const uint8_t packet[] = {1};
-    for (int64_t second = 1; second <= 5; ++second) {
-        ring.Push(packet, sizeof(packet), second - 1,
-                  second == 1 || second == 4, second * 1000);
+    for (uint32_t frame = 0; frame < frame_count; ++frame) {
+        const int64_t qpc = first_qpc
+            + (static_cast<int64_t>(frame) * qpc_frequency) / fps;
+        ring.Push(packet, sizeof(packet), pts_epoch + frame,
+                  frame % fps == 0, qpc);
     }
 
-    const auto snapshot = ring.TakeSnapshotByTime(2, 5000);
-    Check(snapshot.full_history && snapshot.presentation_start_qpc_s == 3.0,
-          "AUDIT-042 timestamp boundary remains two seconds before save");
-    Check(!snapshot.packets.empty() && snapshot.packets.front().is_keyframe,
-          "timestamp selection retains decoder keyframe pre-roll");
+    const int64_t latest_qpc = first_qpc
+        + (static_cast<int64_t>(frame_count - 1) * qpc_frequency) / fps;
+    const int64_t expected_end_qpc = latest_qpc
+        + static_cast<int64_t>(std::llround(
+            static_cast<double>(qpc_frequency) / fps));
+    auto check_snapshot = [&](int64_t target_end_qpc,
+                              const char* message) {
+        const int64_t requested_start_qpc =
+            target_end_qpc - 2 * qpc_frequency;
+        const uint32_t presentation_start_frame = frame_count - 2 * fps;
+        uint32_t first_requested_frame = 0;
+        while (first_requested_frame < frame_count
+               && first_qpc
+                      + (static_cast<int64_t>(first_requested_frame)
+                          * qpc_frequency) / fps
+                   < requested_start_qpc) {
+            ++first_requested_frame;
+        }
+        const uint32_t mapping_frame = std::max(
+            presentation_start_frame, first_requested_frame);
+        const int64_t expected_start_pts =
+            pts_epoch + static_cast<int64_t>(presentation_start_frame);
+        const int64_t mapping_qpc = first_qpc
+            + (static_cast<int64_t>(mapping_frame) * qpc_frequency) / fps;
+        const int64_t pts_delta_qpc = static_cast<int64_t>(std::llround(
+            static_cast<double>(mapping_frame - presentation_start_frame)
+                * qpc_frequency / fps));
+        const int64_t expected_start_qpc = mapping_qpc - pts_delta_qpc;
+        const double qpc_tolerance_s = 2.0 / qpc_frequency;
+        const auto snapshot = ring.TakeSnapshotByTime(2, target_end_qpc);
+        Check(snapshot.full_history
+                  && snapshot.presentation_start_pts == expected_start_pts
+                  && std::abs(snapshot.presentation_start_qpc_s
+                      - static_cast<double>(expected_start_qpc)
+                          / qpc_frequency) < qpc_tolerance_s
+                  && std::abs(snapshot.presentation_end_qpc_s
+                      - static_cast<double>(expected_end_qpc)
+                          / qpc_frequency) < qpc_tolerance_s,
+              message);
+        Check(snapshot.presentation_start_qpc_s
+                  < snapshot.presentation_end_qpc_s,
+              "presentation clock has a positive selected video interval");
+        if (target_end_qpc > latest_qpc) {
+            const double requested_end_s =
+                static_cast<double>(target_end_qpc) / qpc_frequency;
+            const double one_tick_s =
+                static_cast<double>(expected_end_qpc - latest_qpc)
+                    / qpc_frequency;
+            Check(snapshot.presentation_end_qpc_s <= requested_end_s + one_tick_s,
+                  "requested stale target does not become an invented captured frame");
+        }
+        Check(!snapshot.packets.empty() && snapshot.packets.front().is_keyframe,
+              "timestamp selection retains decoder keyframe pre-roll");
+    };
+
+    // No stale end, accepted sub-second stale end, boundary stale end, and a
+    // fractional target between source frames all use actual packet PTS/QPC.
+    check_snapshot(latest_qpc,
+                   "no-stale audio boundary follows selected video PTS/QPC");
+    check_snapshot(latest_qpc + 500'000,
+                   "accepted stale audio boundary follows selected video PTS/QPC");
+    check_snapshot(latest_qpc + 1'000'000,
+                   "one-second stale audio boundary remains video-anchored");
+    check_snapshot(latest_qpc + 13'000,
+                   "fractional stale target maps to a real video PTS boundary");
+
+    // A buffer that has not yet accumulated the requested duration must keep
+    // its decoder-start PTS/QPC as the presentation start; it must not derive
+    // a wall-clock boundary that is absent from the partial history.
+    EncodedRingBuffer partial(frame_count, fps, qpc_frequency);
+    Check(partial.SetVideoConfig(VideoConfig(VideoCodec::H264)),
+          "partial-history boundary fixture publishes a valid config");
+    for (uint32_t frame = 0; frame <= fps; ++frame) {
+        const int64_t qpc = first_qpc
+            + (static_cast<int64_t>(frame) * qpc_frequency) / fps;
+        Check(partial.Push(packet, sizeof(packet), pts_epoch + frame,
+                           frame % fps == 0, qpc),
+              "partial-history boundary fixture publishes every packet");
+    }
+    const int64_t partial_latest_qpc = first_qpc + qpc_frequency;
+    const int64_t partial_end_qpc = partial_latest_qpc
+        + static_cast<int64_t>(std::llround(
+            static_cast<double>(qpc_frequency) / fps));
+    const auto partial_snapshot = partial.TakeSnapshotByTime(
+        2, partial_latest_qpc);
+    Check(!partial_snapshot.full_history
+              && partial_snapshot.presentation_start_pts == pts_epoch
+              && std::abs(partial_snapshot.presentation_start_qpc_s
+                  - static_cast<double>(first_qpc) / qpc_frequency)
+                  < 2.0 / qpc_frequency
+              && std::abs(partial_snapshot.presentation_end_qpc_s
+                  - static_cast<double>(partial_end_qpc) / qpc_frequency)
+                  < 2.0 / qpc_frequency,
+          "partial history keeps the actual decoder start and exclusive video end");
+}
+
+void RingPresentationClockMatchesSelectedVideoPtsAcrossRates() {
+    constexpr int64_t qpc_frequency = 1'000'000;
+    constexpr int64_t first_qpc = 2'000'000;
+    constexpr int64_t pts_epoch = 700'000;
+    const uint8_t packet[] = {2};
+    for (const uint32_t fps : {60u, 120u, 144u}) {
+        const uint32_t frame_count = fps * 6 + 1;
+        EncodedRingBuffer ring(frame_count + fps, fps, qpc_frequency);
+        auto config = VideoConfig(VideoCodec::H264);
+        config.frame_rate = {static_cast<int32_t>(fps), 1};
+        config.time_base = {1, static_cast<int32_t>(fps)};
+        Check(ring.SetVideoConfig(config),
+              "high-rate boundary fixture publishes a valid config");
+        for (uint32_t frame = 0; frame < frame_count; ++frame) {
+            const int64_t qpc = first_qpc
+                + (static_cast<int64_t>(frame) * qpc_frequency) / fps;
+            Check(ring.Push(packet, sizeof(packet), pts_epoch + frame,
+                            frame % fps == 0, qpc),
+                  "high-rate boundary fixture publishes every packet");
+        }
+        const int64_t latest_qpc = first_qpc
+            + (static_cast<int64_t>(frame_count - 1) * qpc_frequency) / fps;
+        const int64_t target_end_qpc = latest_qpc + 500'000;
+        const int64_t requested_start_qpc = target_end_qpc
+            - 2 * qpc_frequency;
+        const uint32_t presentation_start_frame = frame_count - 2 * fps;
+        uint32_t first_requested_frame = 0;
+        while (first_requested_frame < frame_count
+               && first_qpc
+                      + (static_cast<int64_t>(first_requested_frame)
+                          * qpc_frequency) / fps
+                   < requested_start_qpc) {
+            ++first_requested_frame;
+        }
+        const uint32_t mapping_frame = std::max(
+            presentation_start_frame, first_requested_frame);
+        const int64_t expected_start_pts =
+            pts_epoch + static_cast<int64_t>(presentation_start_frame);
+        const int64_t mapping_qpc = first_qpc
+            + (static_cast<int64_t>(mapping_frame) * qpc_frequency) / fps;
+        const int64_t pts_delta_qpc = static_cast<int64_t>(std::llround(
+            static_cast<double>(mapping_frame - presentation_start_frame)
+                * qpc_frequency / fps));
+        const int64_t expected_start_qpc = mapping_qpc - pts_delta_qpc;
+        const int64_t expected_end_qpc = latest_qpc
+            + static_cast<int64_t>(std::llround(
+                static_cast<double>(qpc_frequency) / fps));
+        const double qpc_tolerance_s = 2.0 / qpc_frequency;
+        const auto snapshot = ring.TakeSnapshotByTime(2, target_end_qpc);
+        Check(snapshot.presentation_start_pts == expected_start_pts
+                  && std::abs(snapshot.presentation_start_qpc_s
+                      - static_cast<double>(expected_start_qpc)
+                          / qpc_frequency) < qpc_tolerance_s
+                  && std::abs(snapshot.presentation_end_qpc_s
+                      - static_cast<double>(expected_end_qpc)
+                          / qpc_frequency) < qpc_tolerance_s,
+              "60/120/144-fps presentation clock uses actual video PTS ticks");
+    }
+}
+
+void RingPresentationClockUsesConfiguredNonIntegerTimebase() {
+    constexpr int64_t qpc_frequency = 1'000'000;
+    constexpr int64_t first_qpc = 3'000'000;
+    constexpr int64_t pts_epoch = 900'000;
+    constexpr uint32_t frame_count = 360;
+    constexpr int32_t rate_num = 60'000;
+    constexpr int32_t rate_den = 1'001;
+    const uint8_t packet[] = {3};
+
+    EncodedRingBuffer ring(frame_count + 120, 60, qpc_frequency);
+    auto config = VideoConfig(VideoCodec::H264);
+    config.frame_rate = {rate_num, rate_den};
+    config.time_base = {rate_den, rate_num};
+    Check(ring.SetVideoConfig(config),
+          "non-integer-timebase boundary fixture publishes a valid config");
+    const auto qpc_for_frame = [](uint32_t frame) {
+        return first_qpc + static_cast<int64_t>(std::llround(
+            static_cast<double>(frame) * qpc_frequency * rate_den
+                / rate_num));
+    };
+    for (uint32_t frame = 0; frame < frame_count; ++frame) {
+        Check(ring.Push(packet, sizeof(packet), pts_epoch + frame,
+                        frame % 60 == 0, qpc_for_frame(frame)),
+              "non-integer-timebase boundary fixture publishes every packet");
+    }
+
+    const int64_t latest_qpc = qpc_for_frame(frame_count - 1);
+    const int64_t target_end_qpc = latest_qpc + 500'000;
+    const int64_t expected_start_pts = pts_epoch
+        + static_cast<int64_t>(frame_count) - 119;
+    const uint32_t expected_start_frame =
+        static_cast<uint32_t>(expected_start_pts - pts_epoch);
+    const int64_t expected_end_qpc = latest_qpc
+        + static_cast<int64_t>(std::llround(
+            static_cast<double>(qpc_frequency) * rate_den / rate_num));
+    const auto snapshot = ring.TakeSnapshotByTime(2, target_end_qpc);
+    Check(snapshot.full_history
+              && snapshot.presentation_start_pts == expected_start_pts
+              && std::abs(snapshot.presentation_start_qpc_s
+                  - static_cast<double>(qpc_for_frame(expected_start_frame))
+                      / qpc_frequency) < 2.0 / qpc_frequency
+              && std::abs(snapshot.presentation_end_qpc_s
+                  - static_cast<double>(expected_end_qpc) / qpc_frequency)
+                  < 2.0 / qpc_frequency,
+          "presentation clock honors a non-integer video time base and PTS gap");
 }
 
 void RingKeepsOneImmutableConfigPerGeneration() {
@@ -821,6 +1188,29 @@ void ReplayEncoderInterfaceIsPolymorphic() {
 } // namespace
 
 void FocusPauseAndDeferredRecordingConfig() {
+    if (!fthr::ShouldUseCompactReplayPauseClock(true, false, false)
+        || fthr::ShouldUseCompactReplayPauseClock(true, true, false)
+        || fthr::ShouldUseCompactReplayPauseClock(true, false, true)
+        || fthr::ShouldUseCompactReplayPauseClock(false, false, false))
+        std::abort();
+    fthr::ReplayPauseClock replay_clock(30);
+    constexpr int64_t second = 10'000'000;
+    replay_clock.Observe(true, 10 * second);
+    if (replay_clock.Map(100 * second) != 10 * second) std::abort();
+    if (replay_clock.MapAudio(second, second, 48'000 * 20, 1024, 48'000)) std::abort();
+    replay_clock.Observe(false, 110 * second);
+    if (replay_clock.Map(115 * second) != 15 * second) std::abort();
+    const auto audio_pts = replay_clock.MapAudio(
+        second, second, 48'000 * 114, 1024, 48'000);
+    if (!audio_pts || *audio_pts != 48'000 * 14) std::abort();
+    // Delayed AAC output overlapping a completed pause must still be dropped.
+    if (replay_clock.MapAudio(second, second, 48'000 * 50, 1024, 48'000)) std::abort();
+    replay_clock.Observe(true, 120 * second);
+    replay_clock.Observe(false, 125 * second);
+    if (replay_clock.Map(126 * second) != 21 * second) std::abort();
+    // Pruning old pause spans retains the cumulative offset for future media.
+    replay_clock.Observe(false, 200 * second);
+    if (replay_clock.Map(201 * second) != 96 * second) std::abort();
     fthr::CaptureFocusPolicy focus;
     auto transition = focus.Observe(false);
     if (transition.paused || transition.resumed || transition.discard_queued_frames)
@@ -841,6 +1231,34 @@ void FocusPauseAndDeferredRecordingConfig() {
             || fthr::ReplayWatchdogSuspended(fthr::CAPTURE_HEALTH_ACTIVE))
             std::abort();
     }
+    // Raw-coordinate generations keep the same focus transitions, while the
+    // independent foreground boundary drops all queued pre-resume frames.
+    fthr::CaptureFocusPolicy raw_focus;
+    const auto initial = raw_focus.Observe(false);
+    const auto paused = raw_focus.Observe(true);
+    const auto resumed = raw_focus.Observe(false);
+    if (initial.paused || !paused.paused || !paused.discard_queued_frames
+        || !resumed.resumed || !resumed.discard_queued_frames)
+        std::abort();
+    constexpr int64_t foreground_since = 500;
+    constexpr int64_t pre_resume_frame = 499;
+    constexpr int64_t post_resume_frame = 500;
+    if (!(pre_resume_frame < foreground_since
+        && post_resume_frame >= foreground_since))
+        std::abort();
+    // Raw mode keeps video, system mix, microphone, process-loopback and save
+    // correlation on one unchanged QPC coordinate; no compact correction is
+    // applied to any member of the generation.
+    constexpr int64_t raw_video_qpc = 7'500;
+    constexpr int64_t raw_system_qpc = 7'500;
+    constexpr int64_t raw_microphone_qpc = 7'500;
+    constexpr int64_t raw_process_qpc = 7'500;
+    constexpr int64_t raw_save_qpc = 7'500;
+    if (!(raw_video_qpc == raw_system_qpc
+        && raw_video_qpc == raw_microphone_qpc
+        && raw_video_qpc == raw_process_qpc
+        && raw_video_qpc == raw_save_qpc))
+        std::abort();
     fthr::EncodedRingBuffer ring(8, 60, 1000);
     fthr::EncodedVideoConfig output;
     if (ring.WaitForVideoConfig(output, std::chrono::milliseconds(1))) std::abort();
@@ -859,6 +1277,8 @@ void FocusPauseAndDeferredRecordingConfig() {
 
 int main() {
     FocusPauseAndDeferredRecordingConfig();
+    LiveWindowsDesktopAdapterSmoke();
+    LiveDesktopSurvivesMissingPnpMetadata();
     OneMonitorOneAdapter();
     WgcFrameLeaseReturnsEveryPoolSlot();
     TwoMonitorsSameAdapter();
@@ -884,6 +1304,7 @@ int main() {
     NativeNvencCodecSelectionCoversNvidiaMatrix();
     UnsupportedNvencCodecIsRejected();
     NativeNvencLowLatencyConfigurationIsCodecSpecific();
+    NativeNvencSupportsHighFrameRateMatrix();
     NativeNvencVideoConfigsPropagateCodecData();
     H264CodecMapsCorrectly();
     HevcConfigIsProductionEnabled();
@@ -891,8 +1312,11 @@ int main() {
     RingStoresAndSnapshotsGenericConfig();
     PacketTimingAndKeyframeMetadataRemainUnchanged();
     CodecNeutralRingKeepsTimestampIntervalSelection();
+    RingPresentationClockMatchesSelectedVideoPtsAcrossRates();
+    RingPresentationClockUsesConfiguredNonIntegerTimebase();
     RingKeepsOneImmutableConfigPerGeneration();
     ReplayEncoderInterfaceIsPolymorphic();
+    RunSoftwareReplayEncoderTests();
     const int amf_checks = RunAmfReplayEncoderTests();
     const int qsv_checks = RunQsvReplayEncoderTests();
     const int policy_checks = RunWindowsReplayPolicyTests();
@@ -902,6 +1326,7 @@ int main() {
     const int windows_microphone_checks = RunWindowsMicrophoneAudioProviderTests();
     const int audio_format_checks = RunAudioFormatConverterTests();
     const int capture_border_checks = RunWindowsCaptureBorderPolicyTests();
+    const int capture_backend_checks = RunWindowsCaptureBackendPolicyTests();
     const int recording_checks = RunContinuousRecordingWriterTests();
     const int nvenc_lifecycle_checks = RunNvencInputLifecycleTests();
     const int capture_scale_checks = RunCaptureScaleGeometryTests();
@@ -909,6 +1334,7 @@ int main() {
               << (checks + amf_checks + qsv_checks + policy_checks + audio_source_checks
                   + windows_audio_checks + windows_process_loopback_checks)
                   + windows_microphone_checks + audio_format_checks + capture_border_checks
+                  + capture_backend_checks
                   + recording_checks
                   + nvenc_lifecycle_checks
                   + capture_scale_checks

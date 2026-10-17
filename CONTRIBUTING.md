@@ -252,4 +252,3 @@ explains an ordering rule worth keeping.
 These conventions follow the practical guidance in the
 [Google C++ style guide](https://google.github.io/styleguide/cppguide#Comments)
 and the [Linux kernel commenting guide](https://docs.kernel.org/process/coding-style.html#commenting).
-

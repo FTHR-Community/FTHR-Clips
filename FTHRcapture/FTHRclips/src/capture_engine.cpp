@@ -25,6 +25,7 @@
 #include "capture_engine.h"
 #include "capture_focus_policy.h"
 #include "wgc_frame_lease.h"
+#include "wgc_cadence_wait.h"
 #include "hardware_encoder.h"
 #include "encoded_video_config_ffmpeg.h"
 #include "video_encoder.h"
@@ -40,6 +41,9 @@
 #include "windows_native_error.h"
 #include "replay_interval.h"
 #include "replay_health.h"
+#include "encoded_replay_health.h"
+#include "replay_save_diagnostics.h"
+#include "capture_pipeline_health.h"
 #include "frame_rate_scheduler.h"
 #include "capture_scale_geometry.h"
 #include <iostream>
@@ -49,8 +53,10 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <iomanip>
 #include <sstream>
 #include <filesystem>
+#include <limits>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -82,6 +88,134 @@ namespace fthr {
             std::ostringstream value;
             value << "{\"high_part\":" << luid.high_part
                   << ",\"low_part\":" << luid.low_part << '}';
+            return value.str();
+        }
+
+        std::string AudioSignalMetricsJson(
+            const AudioSignalMetricsSnapshot& signal) {
+            std::ostringstream value;
+            value << "{\"chunks\":" << signal.chunks
+                  << ",\"frames\":" << signal.frames
+                  << ",\"samples\":" << signal.samples
+                  << ",\"finite_samples\":" << signal.finite_samples
+                  << ",\"channels\":" << signal.channels
+                  << ",\"peak\":" << signal.peak
+                  << ",\"rms\":" << signal.rms
+                  << ",\"dc_offset\":" << signal.dc_offset
+                  << ",\"clipping_samples\":" << signal.clipping_samples
+                  << ",\"clipping_ratio\":" << signal.clipping_ratio
+                  << ",\"nan_samples\":" << signal.nan_samples
+                  << ",\"inf_samples\":" << signal.inf_samples
+                  << ",\"near_silence_samples\":"
+                  << signal.near_silence_samples
+                  << ",\"near_silence_ratio\":" << signal.near_silence_ratio
+                  << ",\"channel_rms_left\":" << signal.channel_rms[0]
+                  << ",\"channel_rms_right\":" << signal.channel_rms[1]
+                  << '}';
+            return value.str();
+        }
+
+        std::string AudioCorrectionDistributionJson(
+            const AudioCorrectionDistributionSnapshot& correction) {
+            std::ostringstream value;
+            value << "{\"event_count\":" << correction.event_count
+                  << ",\"total_magnitude_frames\":"
+                  << correction.total_magnitude_frames
+                  << ",\"signed_total_frames\":"
+                  << correction.signed_total_frames
+                  << ",\"max_single_frames\":"
+                  << correction.max_single_frames
+                  << ",\"buckets\":{\"1\":" << correction.buckets[0]
+                  << ",\"2_4\":" << correction.buckets[1]
+                  << ",\"5_16\":" << correction.buckets[2]
+                  << ",\"17_64\":" << correction.buckets[3]
+                  << ",\"65_256\":" << correction.buckets[4]
+                  << ",\"257_plus\":" << correction.buckets[5]
+                  << "}}";
+            return value.str();
+        }
+
+        std::string AudioCorrectionLargestJson(
+            const AudioCorrectionLargest& largest) {
+            std::ostringstream value;
+            value << "{\"present\":" << (largest.present ? "true" : "false")
+                  << ",\"correction_frames\":" << largest.correction_frames
+                  << ",\"correction_qpc_100ns\":"
+                  << largest.correction_qpc_100ns
+                  << ",\"clip_relative_time_ms\":"
+                  << std::setprecision(12) << largest.clip_relative_time_ms << '}';
+            return value.str();
+        }
+
+        std::string AudioCorrectionClipSummaryJson(
+            uint32_t task_id, const AudioCorrectionClipSummary& summary) {
+            std::ostringstream value;
+            value << std::setprecision(12)
+                  << "{\"subsystem\":\"audio\","
+                  << "\"event\":\"continuity_corrections_in_clip\","
+                  << "\"state\":\"OBSERVED\","
+                  << "\"task_id\":" << task_id << ','
+                  << "\"selected_window_start_qpc_100ns\":"
+                  << summary.selected_start_qpc_100ns
+                  << ",\"selected_window_end_qpc_100ns\":"
+                  << summary.selected_end_qpc_100ns
+                  << ",\"system_corrections_inside_clip\":"
+                  << summary.system_corrections_inside_clip
+                  << ",\"mic_corrections_inside_clip\":"
+                  << summary.mic_corrections_inside_clip
+                  << ",\"system_inserted_frames_inside_clip\":"
+                  << summary.system_inserted_frames_inside_clip
+                  << ",\"system_skipped_frames_inside_clip\":"
+                  << summary.system_skipped_frames_inside_clip
+                  << ",\"mic_inserted_frames_inside_clip\":"
+                  << summary.mic_inserted_frames_inside_clip
+                  << ",\"mic_skipped_frames_inside_clip\":"
+                  << summary.mic_skipped_frames_inside_clip
+                  << ",\"largest_system_correction_inside_clip\":"
+                  << AudioCorrectionLargestJson(
+                         summary.largest_system_correction_inside_clip)
+                  << ",\"largest_mic_correction_inside_clip\":"
+                  << AudioCorrectionLargestJson(
+                         summary.largest_mic_correction_inside_clip)
+                  << ",\"maximum_correction_density_250ms_event_count\":"
+                  << summary.maximum_density_250ms.event_count
+                  << ",\"maximum_correction_density_250ms_corrected_frames\":"
+                  << summary.maximum_density_250ms.corrected_frames
+                  << ",\"maximum_correction_density_1s_event_count\":"
+                  << summary.maximum_density_1s.event_count
+                  << ",\"maximum_correction_density_1s_corrected_frames\":"
+                  << summary.maximum_density_1s.corrected_frames
+                  << ",\"system_events_overwritten\":"
+                  << summary.system_events_overwritten
+                  << ",\"mic_events_overwritten\":"
+                  << summary.mic_events_overwritten
+                  << ",\"events\":[";
+            for (size_t index = 0; index < summary.events.size(); ++index) {
+                if (index != 0) value << ',';
+                const auto& event = summary.events[index];
+                value << "{\"source\":\""
+                      << AudioCorrectionSourceName(event.source)
+                      << "\",\"direction\":\""
+                      << AudioCorrectionDirectionName(event.direction)
+                      << "\",\"correction_qpc_100ns\":"
+                      << event.correction_qpc_100ns
+                      << ",\"packet_qpc_100ns\":" << event.packet_qpc_100ns
+                      << ",\"expected_qpc_100ns\":"
+                      << event.expected_qpc_100ns
+                      << ",\"correction_frames\":"
+                      << event.correction_frames
+                      << ",\"correction_ms\":" << event.correction_ms
+                      << ",\"cumulative_signed_correction_frames\":"
+                      << event.cumulative_signed_correction_frames
+                      << ",\"time_since_previous_correction_ms\":"
+                      << event.time_since_previous_correction_ms
+                      << ",\"swr_compensation_active_or_recent\":"
+                      << (event.swr_compensation_active_or_recent
+                          ? "true" : "false")
+                      << ",\"clip_relative_time_ms\":"
+                      << event.clip_relative_time_ms << '}';
+            }
+            value << "]}";
             return value.str();
         }
 
@@ -321,7 +455,6 @@ namespace fthr {
         , crop_width_(0)
         , crop_height_(0)
         , target_hwnd_(0)
-        , focus_gated_(false)
         , fps_(60)
         , buffer_seconds_(30)
         , target_width_(0)
@@ -347,6 +480,54 @@ namespace fthr {
 
     void CaptureEngine::SetCaptureFailure(std::string detail) {
         last_capture_failure_detail_ = std::move(detail);
+    }
+
+    void CaptureEngine::InvalidateDxgiReplayCache() noexcept {
+        dxgi_replay_cadence_.Invalidate();
+        dxgi_replay_cache_armed_.store(false, std::memory_order_release);
+        if (dxgi_replay_texture_) {
+            dxgi_replay_texture_->Release();
+            dxgi_replay_texture_ = nullptr;
+        }
+    }
+
+    bool CaptureEngine::EnsureDxgiReplayTexture(
+        const D3D11_TEXTURE2D_DESC& source) {
+        if (!device_ || !context_ || source.Width == 0 || source.Height == 0
+            || source.SampleDesc.Count != 1) {
+            SetCaptureFailure(
+                "DXGI owned replay texture requires a valid single-sample source");
+            return false;
+        }
+        if (dxgi_replay_texture_) {
+            D3D11_TEXTURE2D_DESC cached{};
+            dxgi_replay_texture_->GetDesc(&cached);
+            if (cached.Width != source.Width || cached.Height != source.Height
+                || cached.Format != source.Format) {
+                dxgi_replay_texture_->Release();
+                dxgi_replay_texture_ = nullptr;
+            }
+        }
+        if (dxgi_replay_texture_) return true;
+
+        D3D11_TEXTURE2D_DESC owned{};
+        owned.Width = source.Width;
+        owned.Height = source.Height;
+        owned.MipLevels = 1;
+        owned.ArraySize = 1;
+        owned.Format = source.Format;
+        owned.SampleDesc.Count = 1;
+        owned.Usage = D3D11_USAGE_DEFAULT;
+        const HRESULT result = device_->CreateTexture2D(
+            &owned, nullptr, &dxgi_replay_texture_);
+        if (FAILED(result) || !dxgi_replay_texture_) {
+            dxgi_replay_texture_ = nullptr;
+            SetCaptureFailure(diagnostics::FormatHResultFailure(
+                "ID3D11Device::CreateTexture2D(DXGI owned replay image)",
+                result));
+            return false;
+        }
+        return true;
     }
 
     void CaptureEngine::EmitRecentDxgiEvidence(const char* reason) const {
@@ -425,6 +606,8 @@ namespace fthr {
                  << ",\"last_present_qpc\":" << event.last_present_qpc
                  << ",\"presentation_gap_qpc\":"
                  << event.presentation_gap_qpc
+                 << ",\"accumulated_frames\":"
+                 << event.accumulated_frames
                  << ",\"acquire_hresult\":"
                  << event.acquire_hresult
                  << ",\"acquire_hresult_hex\":\"0x"
@@ -433,6 +616,10 @@ namespace fthr {
                  << (event.acquired ? "true" : "false")
                  << ",\"timed_out\":"
                  << (event.timed_out ? "true" : "false")
+                 << ",\"pacing_accepted\":"
+                 << (event.pacing_accepted ? "true" : "false")
+                 << ",\"pacing_rejected\":"
+                 << (event.pacing_rejected ? "true" : "false")
                  << ",\"release_attempted\":"
                  << (event.release_attempted ? "true" : "false")
                  << ",\"release_api\":\""
@@ -534,6 +721,9 @@ namespace fthr {
         case ReplayStartupError::CrossAdapterPathUnavailable:
             diagnostic_error = "ENCODER_ADAPTER_MISMATCH";
             break;
+        case ReplayStartupError::CaptureTargetUnavailable:
+            diagnostic_error = "CAPTURE_TARGET_UNAVAILABLE";
+            break;
         case ReplayStartupError::EncoderInitFailed:
             if (startup_encoder_backend_ == "native-nvenc") {
                 diagnostic_error = "ENCODER_NVENC_INIT_FAILED";
@@ -589,6 +779,9 @@ namespace fthr {
         startup_codec_ = VideoCodecName(config.video_codec);
         fps_ = config.framerate;
         buffer_seconds_ = config.buffer_seconds;
+        capture_mode_ = config.capture_mode;
+        configured_target_width_ = config.target_width;
+        configured_target_height_ = config.target_height;
         target_width_ = config.target_width;
         target_height_ = config.target_height;
         bitrate_kbps_ = config.bitrate_kbps;
@@ -602,7 +795,12 @@ namespace fthr {
         capture_timeouts_.store(0);
         capture_frames_released_.store(0);
         pointer_only_frames_.store(0);
+        dxgi_coalesced_extra_frames_.store(0);
         source_textures_received_.store(0);
+        dxgi_held_presentations_.store(0);
+        dxgi_resampled_presentations_.store(0);
+        dxgi_replay_cache_armed_.store(false, std::memory_order_relaxed);
+        wgc_repeated_frame_observations_.store(0);
         conversion_submissions_.store(0);
         conversion_completions_.store(0);
         video_packets_produced_.store(0);
@@ -612,6 +810,17 @@ namespace fthr {
         capture_restart_count_.store(0);
         capture_recovery_attempts_.store(0);
         capture_recovery_failures_.store(0);
+        capture_start_qpc_.store(0, std::memory_order_relaxed);
+        generation_start_qpc_.store(0, std::memory_order_relaxed);
+        last_source_frame_qpc_.store(0, std::memory_order_relaxed);
+        last_dxgi_completed_qpc_.store(0, std::memory_order_relaxed);
+        last_dxgi_pointer_only_completed_qpc_.store(
+            0, std::memory_order_relaxed);
+        last_dxgi_presentation_qpc_.store(0, std::memory_order_relaxed);
+        last_encoder_submission_qpc_.store(0, std::memory_order_relaxed);
+        last_encoded_output_qpc_.store(0, std::memory_order_relaxed);
+        last_ring_insertion_qpc_.store(0, std::memory_order_relaxed);
+        encoder_failure_count_.store(0, std::memory_order_relaxed);
 
         std::cout << "[CaptureEngine] Initializing..." << std::endl;
         std::cout << "  FPS        : " << fps_ << std::endl;
@@ -625,12 +834,11 @@ namespace fthr {
         std::cout << "  Codec      : " << VideoCodecName(config.video_codec)
                   << std::endl;
 
-        // Prefer borderless WGC, falling back to DXGI if its border remains required.
-        // Regular windows try CreateForWindow first, then monitor capture. Known
-        // protected games use monitor capture with a foreground gate to avoid
-        // recording the desktop after focus leaves the selected game.
+        // Keep backend policy tied to the selected source. Only desktop Auto may
+        // switch from WGC to DXGI; a window target must never degrade to a full
+        // monitor capture, except protected targets that require WGC monitor capture.
         target_hwnd_ = config.target_hwnd;
-        focus_gated_ = false;
+        replay_audio_origin_100ns_.store(0);
         const auto report_wgc_fallback = [this](
             const char* from_backend, const char* to_backend) {
             std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\","
@@ -643,70 +851,124 @@ namespace fthr {
                       << diagnostics::JsonEscape(last_capture_failure_detail_)
                       << "\"}" << std::endl;
         };
-
-        if (config.capture_mode == CaptureConfig::CaptureModeEnum::WINDOW
-            && target_hwnd_ != 0
-            && IsAntiCheatProtected(reinterpret_cast<HWND>(target_hwnd_)))
-        {
-            std::cout << "[CaptureEngine] Anti-cheat protected game detected — "
-                      << "using WGC monitor capture (focus-gated)" << std::endl;
-            wgc_active_ = true;
-            focus_gated_ = true;
-            if (!InitializeWGC()) {
-                report_wgc_fallback("WGC_MONITOR", "DXGI_OUTPUT_DUPLICATION");
-                std::cerr << "[CaptureEngine] WGC unavailable — "
-                          << "falling back to DXGI desktop capture" << std::endl;
-                wgc_active_ = false;
-                focus_gated_ = false;
-                if (!InitializeD3D11()) {
-                    std::cerr << "[CaptureEngine] D3D11 initialization failed" << std::endl;
-                    return FailStartup(
-                        ReplayStartupError::CaptureAdapterUnsupported,
-                        "The selected monitor could not be opened on its exact "
-                        "display adapter.");
-                }
-            }
+        const bool window_mode = config.capture_mode
+            == CaptureConfig::CaptureModeEnum::WINDOW;
+        const bool protected_window = window_mode && target_hwnd_ != 0
+            && IsAntiCheatProtected(reinterpret_cast<HWND>(target_hwnd_));
+        const auto capture_plan = PlanWindowsCaptureStartup(
+            window_mode, target_hwnd_ != 0, protected_window,
+            config.capture_backend_preference);
+        focus_gated_ = capture_plan.focus_gated;
+        replay_pause_clock_ = ShouldUseCompactReplayPauseClock(
+                focus_gated_, config.audio_enabled,
+                config.separate_audio_enabled)
+            ? std::make_shared<ReplayPauseClock>(buffer_seconds_) : nullptr;
+        if (replay_pause_clock_) {
+            LARGE_INTEGER now{}, frequency{};
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&frequency);
+            replay_pause_clock_->Observe(
+                GetForegroundWindow() != reinterpret_cast<HWND>(target_hwnd_),
+                ReplayPauseClock::Scale(now.QuadPart, 10'000'000, frequency.QuadPart));
         }
-        else if (config.capture_mode == CaptureConfig::CaptureModeEnum::WINDOW
-            && target_hwnd_ != 0)
-        {
+        if (!capture_plan.supported) {
+            std::string detail;
+            switch (capture_plan.failure) {
+            case WindowsCapturePolicyFailure::MissingWindowTarget:
+                detail = "capture_mode=WINDOW requires a valid HWND; no desktop "
+                    "capture fallback was attempted.";
+                break;
+            case WindowsCapturePolicyFailure::WindowRequiresWgc:
+                detail = "The forced DXGI backend captures a desktop monitor and "
+                    "cannot preserve the selected Window target. Choose WGC, or "
+                    "select Desktop capture explicitly if the full monitor is intended.";
+                break;
+            case WindowsCapturePolicyFailure::UnknownPreference:
+                detail = "The requested Windows capture backend preference is invalid.";
+                break;
+            case WindowsCapturePolicyFailure::None:
+                detail = "The selected Windows capture source is unavailable.";
+                break;
+            }
+            return FailStartup(
+                ReplayStartupError::CaptureTargetUnavailable, std::move(detail));
+        }
+
+        if (protected_window) {
+            std::cout << "[CaptureEngine] Protected game detected — using "
+                      << "WGC monitor capture with replay-preserving focus pauses" << std::endl;
+        } else if (window_mode) {
             std::cout << "[CaptureEngine] Mode: Window Capture  HWND=0x"
                       << std::hex << target_hwnd_ << std::dec << std::endl;
-            wgc_active_ = true;
-            if (!InitializeWindowCapture()) {
-                report_wgc_fallback("WGC_WINDOW", "WGC_MONITOR");
-                std::cerr << "[CaptureEngine] Window capture init failed — "
-                          << "falling back to WGC monitor capture" << std::endl;
-                target_hwnd_ = 0;
-                if (!InitializeWGC()) {
-                    report_wgc_fallback(
-                        "WGC_MONITOR", "DXGI_OUTPUT_DUPLICATION");
-                    std::cerr << "[CaptureEngine] WGC unavailable — falling back to DXGI" << std::endl;
-                    wgc_active_ = false;
-                    if (!InitializeD3D11()) {
-                        std::cerr << "[CaptureEngine] D3D11 initialization failed" << std::endl;
-                        return FailStartup(
-                            ReplayStartupError::CaptureAdapterUnsupported,
-                            "The selected capture source could not be opened on "
-                            "a supported display adapter.");
-                    }
-                }
-            }
+        } else {
+            std::cout << "[CaptureEngine] Mode: Desktop Capture" << std::endl;
         }
-        else {
-            std::cout << "[CaptureEngine] Mode: Desktop Capture (WGC monitor)" << std::endl;
-            wgc_active_ = true;
-            if (!InitializeWGC()) {
-                report_wgc_fallback("WGC_MONITOR", "DXGI_OUTPUT_DUPLICATION");
-                std::cerr << "[CaptureEngine] WGC unavailable — falling back to DXGI" << std::endl;
+
+        const auto initialize_capture_backend = [this](
+            WindowsCaptureBackend backend) {
+            switch (backend) {
+            case WindowsCaptureBackend::WgcWindow:
+                wgc_active_ = true;
+                return InitializeWindowCapture();
+            case WindowsCaptureBackend::WgcMonitor:
+                wgc_active_ = true;
+                return InitializeWGC();
+            case WindowsCaptureBackend::DxgiDesktop:
                 wgc_active_ = false;
-                if (!InitializeD3D11()) {
-                    std::cerr << "[CaptureEngine] D3D11 initialization failed" << std::endl;
+                return InitializeD3D11();
+            case WindowsCaptureBackend::None:
+                return false;
+            }
+            return false;
+        };
+
+        if (!initialize_capture_backend(capture_plan.primary)) {
+            const std::string primary_failure = last_capture_failure_detail_;
+            if (capture_plan.fallback != WindowsCaptureBackend::None) {
+                report_wgc_fallback(
+                    WindowsCaptureBackendName(capture_plan.primary),
+                    WindowsCaptureBackendName(capture_plan.fallback));
+                std::cerr << "[CaptureEngine] WGC monitor initialization failed; "
+                          << "trying DXGI on the same selected monitor" << std::endl;
+                if (!initialize_capture_backend(capture_plan.fallback)) {
+                    const std::string fallback_failure =
+                        last_capture_failure_detail_;
                     return FailStartup(
                         ReplayStartupError::CaptureAdapterUnsupported,
-                        "The selected monitor could not be opened on its exact "
-                        "display adapter.");
+                        "The selected desktop monitor could not be initialized "
+                        "by WGC or DXGI on its exact display adapter. WGC failure: "
+                        + primary_failure + "; DXGI failure: " + fallback_failure);
                 }
+            } else if (window_mode) {
+                const char* target_kind = protected_window
+                    ? "protected Window capture requires focus-gated WGC monitor capture"
+                    : "Window capture requires WGC window capture";
+                std::string detail = target_kind;
+                detail += "; the requested target was not captured. Select Desktop "
+                    "capture explicitly only if capturing the entire monitor is intended. "
+                    "No monitor or DXGI fallback was attempted.";
+                detail += " Native capture failure: ";
+                detail += primary_failure.empty()
+                    ? "no native failure detail was reported."
+                    : primary_failure;
+                return FailStartup(
+                    ReplayStartupError::CaptureTargetUnavailable,
+                    std::move(detail));
+            } else {
+                const auto code = capture_plan.primary
+                        == WindowsCaptureBackend::WgcMonitor
+                    ? "WGC" : "DXGI";
+                std::string detail = std::string(
+                    "The explicitly requested ") + code
+                    + " desktop capture backend could not initialize the "
+                      "selected monitor on its exact display adapter. Native "
+                      "capture failure: ";
+                detail += primary_failure.empty()
+                    ? "no native failure detail was reported."
+                    : primary_failure;
+                return FailStartup(
+                    ReplayStartupError::CaptureAdapterUnsupported,
+                    std::move(detail));
             }
         }
 
@@ -749,7 +1011,8 @@ namespace fthr {
                 "source and codec. Cross-adapter AMD/Intel and raw replay "
                 "fallbacks are disabled.");
         }
-        if (!selection.same_adapter
+        if (selection.backend != ReplayEncoderBackend::Software
+            && !selection.same_adapter
             && scaling_mode_ == 1
             && (scale_geometry.destination.width != target_width_
                 || scale_geometry.destination.height != target_height_)) {
@@ -799,9 +1062,19 @@ namespace fthr {
             }
             const bool ring_inserted = encoded_ring_->Push(
                 data, size, pts, is_keyframe, wall_qpc);
+            LARGE_INTEGER arrival{};
+            QueryPerformanceCounter(&arrival);
+            const auto health_qpc = replay_pause_clock_ ? arrival.QuadPart : wall_qpc;
             video_packets_produced_.fetch_add(1, std::memory_order_relaxed);
+            if (wall_qpc > 0) {
+                last_encoded_output_qpc_.store(health_qpc, std::memory_order_release);
+            }
             if (ring_inserted) {
                 video_ring_insertions_.fetch_add(1, std::memory_order_relaxed);
+                if (wall_qpc > 0) {
+                    last_ring_insertion_qpc_.store(
+                        health_qpc, std::memory_order_release);
+                }
             }
 
             std::shared_ptr<ContinuousRecordingWriter> writer;
@@ -817,7 +1090,12 @@ namespace fthr {
         ID3D11Device* encoder_device = device_;
         ID3D11DeviceContext* encoder_context = context_;
         replay_encoder_cpu_input_ = !selection.same_adapter;
-        if (replay_encoder_cpu_input_) {
+        if (selection.backend == ReplayEncoderBackend::Software) {
+            if (!EnsureStagingTexture()) {
+                return FailStartup(ReplayStartupError::EncoderInitFailed,
+                    "Software encoding could not create the capture readback texture.");
+            }
+        } else if (replay_encoder_cpu_input_) {
             std::string encoder_device_diagnostic;
             if (!CreateD3D11DeviceForVendor(
                     EncoderVendor::Nvidia,
@@ -933,6 +1211,7 @@ namespace fthr {
         do {
             AudioCaptureConfig audio_cfg;
             audio_cfg.bitrate_kbps = 128;
+            audio_cfg.device_id = config.playback_endpoint_id;
 
             if (!audio_capture_.Initialize(nullptr, audio_cfg)) {
                 std::cerr << "[CaptureEngine] AudioCapture init failed - "
@@ -972,6 +1251,19 @@ namespace fthr {
                     audio_capture_.GetSampleRate(), audio_capture_.GetChannels(),
                     audio_cfg.bitrate_kbps,
                     [this](const uint8_t* data, uint32_t size, int64_t pts) {
+                        if (replay_pause_clock_) {
+                            const auto origin = audio_capture_.GetTimelineOriginQpc100ns();
+                            if (!origin) return;
+                            auto replay_origin = replay_audio_origin_100ns_.load();
+                            if (!replay_origin) {
+                                replay_origin = replay_pause_clock_->Map(origin);
+                                replay_audio_origin_100ns_.store(replay_origin);
+                            }
+                            const auto mapped = replay_pause_clock_->MapAudio(
+                                origin, replay_origin, pts, 1024, audio_capture_.GetSampleRate());
+                            if (!mapped) return;
+                            pts = *mapped;
+                        }
                         if (default_mix_audio_ring_) {
                             default_mix_audio_ring_->Push(
                                 {std::vector<uint8_t>(data, data + size), pts, 1024});
@@ -1037,10 +1329,12 @@ namespace fthr {
                 microphone_config.use_default_endpoint = config.microphone_endpoint_id.empty();
                 microphone_config.retention_seconds = buffer_seconds_;
                 microphone_config.bitrate_kbps = 96;
+                microphone_config.downmix_mono = config.microphone_mono;
                 microphone_config.input_gain = std::clamp(
                     static_cast<float>(config.microphone_gain_percent) / 100.0f,
                     0.0f, 2.0f);
                 microphone_config.source = microphone_audio_metadata_;
+                microphone_config.replay_pause_clock = replay_pause_clock_;
                 microphone_audio_source_ = std::make_unique<WindowsMicrophoneAudioProvider>(
                     std::move(microphone_config));
                 if (!microphone_audio_source_->Start()) {
@@ -1194,8 +1488,16 @@ namespace fthr {
 
         // Start video capture and save-clip threads.
         // Audio is already running so both clocks start together.
+        wgc_repeated_frame_observations_.store(0, std::memory_order_relaxed);
         running_.store(true);
         capture_generation_.fetch_add(1);
+        LARGE_INTEGER capture_start_qpc{};
+        if (QueryPerformanceCounter(&capture_start_qpc)) {
+            capture_start_qpc_.store(capture_start_qpc.QuadPart,
+                std::memory_order_release);
+            generation_start_qpc_.store(capture_start_qpc.QuadPart,
+                std::memory_order_release);
+        }
         capture_health_flags_.store(CAPTURE_HEALTH_ACTIVE);
 
         // Select capture loop: WGC image sampling or DXGI acquisition.
@@ -1326,11 +1628,29 @@ namespace fthr {
         uint64_t previous_acquire_attempts = 0;
         uint64_t previous_acquired = 0;
         uint64_t previous_submissions = 0;
+        uint64_t previous_ring_insertions = 0;
+        uint64_t previous_frames_dropped = 0;
+        uint64_t previous_pointer_only_frames = 0;
+        uint64_t previous_pointer_only_watchdog = pointer_only_frames_.load(
+            std::memory_order_relaxed);
+        uint32_t previous_recovery_attempts = 0;
+        uint32_t previous_capture_generation = capture_generation_.load(
+            std::memory_order_relaxed);
+        uint64_t snapshot_previous_packets = 0;
+        uint64_t snapshot_previous_acquired = 0;
+        uint64_t snapshot_previous_submissions = 0;
+        uint64_t snapshot_previous_ring_insertions = 0;
+        uint64_t snapshot_previous_dxgi_coalesced_extra_frames = 0;
+        uint64_t snapshot_previous_dxgi_acquire_successes = 0;
+        uint64_t snapshot_previous_dxgi_acquire_timeouts = 0;
+        uint64_t snapshot_previous_dxgi_held_presentations = 0;
         auto last_output_progress = clock::now();
         auto last_stall_progress = last_output_progress;
         auto last_acquire_progress = clock::now();
         auto last_acquired_progress = clock::now();
         auto last_submission_progress = clock::now();
+        auto last_ring_progress = clock::now();
+        auto last_pointer_only_progress = clock::now();
         auto last_health_snapshot = clock::now();
         bool snapshot_emitted = false;
 
@@ -1347,6 +1667,7 @@ namespace fthr {
                 last_acquire_progress = recovering_now;
                 last_acquired_progress = recovering_now;
                 last_submission_progress = recovering_now;
+                last_ring_progress = recovering_now;
                 continue;
             }
             const uint64_t packets = video_packets_produced_.load(
@@ -1356,6 +1677,8 @@ namespace fthr {
             const uint64_t acquired = source_textures_received_.load(
                 std::memory_order_relaxed);
             const uint64_t submissions = frames_captured_.load(
+                std::memory_order_relaxed);
+            const uint64_t ring_insertions = video_ring_insertions_.load(
                 std::memory_order_relaxed);
             const auto now = clock::now();
             if (acquire_attempts != previous_acquire_attempts) {
@@ -1370,7 +1693,19 @@ namespace fthr {
                 previous_submissions = submissions;
                 last_submission_progress = now;
             }
+            if (ring_insertions != previous_ring_insertions) {
+                previous_ring_insertions = ring_insertions;
+                last_ring_progress = now;
+            }
+            const uint64_t pointer_only_watchdog = pointer_only_frames_.load(
+                std::memory_order_relaxed);
+            if (pointer_only_watchdog != previous_pointer_only_watchdog) {
+                previous_pointer_only_watchdog = pointer_only_watchdog;
+                last_pointer_only_progress = now;
+            }
             if (now - last_health_snapshot >= std::chrono::seconds(10)) {
+                const auto observation_interval_ms = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(now - last_health_snapshot).count();
                 last_health_snapshot = now;
                 const auto acquired_age = std::chrono::duration_cast<
                     std::chrono::milliseconds>(now - last_acquired_progress).count();
@@ -1379,15 +1714,290 @@ namespace fthr {
                 const auto output_age = std::chrono::duration_cast<
                     std::chrono::milliseconds>(
                         now - last_output_progress).count();
+                const auto ring_age = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(
+                        now - last_ring_progress).count();
+                const uint32_t health = capture_health_flags_.load(
+                    std::memory_order_relaxed);
+                const uint64_t dropped = frames_dropped_.load(
+                    std::memory_order_relaxed);
+                const uint64_t pointer_only = pointer_only_frames_.load(
+                    std::memory_order_relaxed);
+                const uint32_t recovery_attempts = capture_recovery_attempts_.load(
+                    std::memory_order_relaxed);
+                const uint32_t capture_generation = capture_generation_.load(
+                    std::memory_order_relaxed);
+                const uint64_t dxgi_coalesced_extra_frames =
+                    dxgi_coalesced_extra_frames_.load(
+                        std::memory_order_relaxed);
+                const uint64_t interval_dxgi_coalesced_extra_frames =
+                    capture_pipeline_health::SaturatingDifference(
+                        dxgi_coalesced_extra_frames,
+                        snapshot_previous_dxgi_coalesced_extra_frames);
+                const uint64_t dxgi_acquire_successes =
+                    capture_acquire_successes_.load(
+                        std::memory_order_relaxed);
+                const uint64_t dxgi_acquire_timeouts = capture_timeouts_.load(
+                    std::memory_order_relaxed);
+                const uint64_t interval_dxgi_acquire_successes =
+                    capture_pipeline_health::SaturatingDifference(
+                        dxgi_acquire_successes,
+                        snapshot_previous_dxgi_acquire_successes);
+                const uint64_t interval_dxgi_acquire_timeouts =
+                    capture_pipeline_health::SaturatingDifference(
+                        dxgi_acquire_timeouts,
+                        snapshot_previous_dxgi_acquire_timeouts);
+                const uint64_t dxgi_held_presentations =
+                    dxgi_held_presentations_.load(std::memory_order_relaxed);
+                const uint64_t interval_dxgi_held_presentations =
+                    capture_pipeline_health::SaturatingDifference(
+                        dxgi_held_presentations,
+                        snapshot_previous_dxgi_held_presentations);
+                const uint64_t dxgi_resampled_presentations =
+                    dxgi_resampled_presentations_.load(
+                        std::memory_order_relaxed);
+                const uint64_t interval_pointer_only_frames =
+                    capture_pipeline_health::SaturatingDifference(
+                        pointer_only, previous_pointer_only_frames);
+                const uint64_t interval_image_acquire_successes =
+                    capture_pipeline_health::SaturatingDifference(
+                        interval_dxgi_acquire_successes,
+                        interval_pointer_only_frames);
+                const uint64_t interval_pacing_drops =
+                    capture_pipeline_health::SaturatingDifference(
+                        capture_pipeline_health::SaturatingDifference(
+                            dropped, previous_frames_dropped),
+                        interval_pointer_only_frames);
+                const uint64_t interval_recovery_attempts =
+                    recovery_attempts >= previous_recovery_attempts
+                    ? recovery_attempts - previous_recovery_attempts : 0;
+                const uint64_t interval_generation_resets =
+                    capture_generation >= previous_capture_generation
+                    ? static_cast<uint64_t>(capture_generation)
+                        - previous_capture_generation : 0;
+                previous_frames_dropped = dropped;
+                previous_pointer_only_frames = pointer_only;
+                previous_recovery_attempts = recovery_attempts;
+                previous_capture_generation = capture_generation;
+                const auto encoder_diagnostics = replay_encoder_
+                    ? replay_encoder_->GetDiagnostics()
+                    : ReplayEncoderDiagnostics{};
+                const bool encoder_diagnostics_observed = replay_encoder_ != nullptr
+                    && (encoder_diagnostics.encode_attempts > 0
+                        || encoder_diagnostics.packets_produced > 0);
+                const bool encoder_idle = encoder_diagnostics_observed
+                    && encoder_diagnostics.pending_resources == 0
+                    && encoder_diagnostics.queued_outputs == 0
+                    && encoder_diagnostics.locked_bitstreams == 0
+                    && encoder_diagnostics.submit_stage == 0
+                    && encoder_diagnostics.drain_stage == 0;
+                const bool has_pending_work = replay_encoder_ != nullptr
+                    && (encoder_diagnostics.pending_resources > 0
+                        || encoder_diagnostics.queued_outputs > 0
+                        || encoder_diagnostics.locked_bitstreams > 0
+                        || encoder_diagnostics.submit_stage > 0
+                        || encoder_diagnostics.drain_stage > 0);
+                const HRESULT last_capture_hresult = static_cast<HRESULT>(
+                    last_capture_hresult_.load(std::memory_order_relaxed));
+                LARGE_INTEGER health_qpc{};
+                LARGE_INTEGER health_qpc_frequency{};
+                const bool health_clock_valid =
+                    QueryPerformanceCounter(&health_qpc)
+                    && QueryPerformanceFrequency(&health_qpc_frequency)
+                    && health_qpc.QuadPart > 0
+                    && health_qpc_frequency.QuadPart > 0;
+                int64_t maximum_api_gap_qpc = 0;
+                if (health_clock_valid && fps_ > 0) {
+                    const int64_t frequency = health_qpc_frequency.QuadPart;
+                    const int64_t fps = static_cast<int64_t>(fps_);
+                    const int64_t nominal_period = frequency / fps
+                        + (frequency % fps != 0 ? 1 : 0);
+                    const int64_t four_periods = nominal_period
+                        <= (std::numeric_limits<int64_t>::max)() / 4
+                        ? nominal_period * 4
+                        : (std::numeric_limits<int64_t>::max)();
+                    const int64_t quarter_second = frequency / 4
+                        + (frequency % 4 != 0 ? 1 : 0);
+                    maximum_api_gap_qpc = std::max(
+                        quarter_second, four_periods);
+                }
+                const int64_t last_dxgi_completed_qpc =
+                    last_dxgi_completed_qpc_.load(std::memory_order_acquire);
+                const int64_t last_dxgi_pointer_only_qpc =
+                    last_dxgi_pointer_only_completed_qpc_.load(
+                        std::memory_order_acquire);
+                const auto qpc_is_recent = [&](int64_t qpc) {
+                    return health_clock_valid && maximum_api_gap_qpc > 0
+                        && qpc > 0 && qpc <= health_qpc.QuadPart
+                        && health_qpc.QuadPart - qpc <= maximum_api_gap_qpc;
+                };
+                const bool api_completion_recent = qpc_is_recent(
+                    last_dxgi_completed_qpc);
+                const bool acquire_loop_recent = !wgc_active_
+                    && api_completion_recent;
+                const bool wait_timeout_current = !wgc_active_
+                    && api_completion_recent
+                    && last_capture_hresult == DXGI_ERROR_WAIT_TIMEOUT;
+                const bool pointer_only_recent = !wgc_active_
+                    && qpc_is_recent(last_dxgi_pointer_only_qpc);
+                const bool idle_evidence = !wgc_active_
+                    && dxgi::IsDxgiAliveButDesktopStatic(
+                        packets > 0, acquire_loop_recent, encoder_idle,
+                        wait_timeout_current, pointer_only_recent);
+                capture_pipeline_health::Snapshot pipeline;
+                pipeline.backend_failed =
+                    (health & CAPTURE_HEALTH_BACKEND_FAILED) != 0;
+                pipeline.intentional_pause_or_recovery =
+                    ReplayWatchdogSuspended(health);
+                pipeline.wgc_backend = wgc_active_;
+                pipeline.expected_fps = static_cast<double>(fps_);
+                pipeline.observation_interval_ms = observation_interval_ms;
+                pipeline.source_frames = acquired;
+                pipeline.raw_source_frame_delta = wgc_active_
+                    ? capture_pipeline_health::SaturatingDifference(
+                        acquired, snapshot_previous_acquired)
+                    : interval_image_acquire_successes;
+                pipeline.accepted_source_frame_delta =
+                    capture_pipeline_health::SaturatingDifference(
+                        acquired, snapshot_previous_acquired);
+                pipeline.pacing_drop_frames =
+                    capture_pipeline_health::SaturatingDifference(
+                        dropped, pointer_only);
+                pipeline.interval_pacing_drops = interval_pacing_drops;
+                pipeline.interval_recovery_attempts = interval_recovery_attempts;
+                pipeline.interval_generation_resets = interval_generation_resets;
+                pipeline.repeated_frame_observations =
+                    wgc_repeated_frame_observations_.load(
+                        std::memory_order_relaxed);
+                pipeline.held_presentation_observations =
+                    interval_dxgi_held_presentations;
+                pipeline.api_completion_recent = api_completion_recent;
+                pipeline.dxgi_replay_cache_armed =
+                    dxgi_replay_cache_armed_.load(std::memory_order_acquire);
+                pipeline.encoder_submissions = submissions;
+                pipeline.encoded_packets = packets;
+                pipeline.replay_ring_insertions = ring_insertions;
+                pipeline.source_age_ms = acquired_age;
+                pipeline.encoder_submission_age_ms = submission_age;
+                pipeline.encoded_output_age_ms = output_age;
+                pipeline.replay_ring_insertion_age_ms = ring_age;
+                pipeline.acquire_loop_recent = acquire_loop_recent;
+                pipeline.wait_timeout_current = wait_timeout_current;
+                pipeline.pointer_only_recent = pointer_only_recent;
+                pipeline.idle_evidence = idle_evidence;
+                pipeline.encoder_idle = encoder_idle;
+                pipeline.has_pending_work = has_pending_work;
+                const auto classification = capture_pipeline_health::Classify(
+                    pipeline);
+                const bool diagnostic_candidate =
+                    capture_pipeline_health::IsDiagnosticCandidate(
+                        classification);
                 std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\","
                           << "\"event\":\"capture_health_snapshot\","
                           << "\"frames_acquired\":" << acquired << ','
                           << "\"frames_submitted\":" << submissions << ','
                           << "\"frames_dropped\":" << frames_dropped_.load() << ','
+                          << "\"capture_generation\":" << capture_generation << ','
+                          << "\"observation_interval_ms\":"
+                          << observation_interval_ms << ','
+                          << "\"accepted_source_fps\":"
+                          << (observation_interval_ms > 0
+                              ? static_cast<double>(pipeline.accepted_source_frame_delta)
+                                  * 1000.0 / observation_interval_ms : 0.0) << ','
+                          << "\"raw_source_frame_delta\":"
+                          << pipeline.raw_source_frame_delta << ','
+                          << "\"encoder_input_fps\":"
+                          << (observation_interval_ms > 0
+                              ? static_cast<double>(
+                                  capture_pipeline_health::SaturatingDifference(
+                                      submissions, snapshot_previous_submissions))
+                                  * 1000.0 / observation_interval_ms : 0.0) << ','
+                          << "\"encoded_output_fps\":"
+                          << (observation_interval_ms > 0
+                              ? static_cast<double>(
+                                  capture_pipeline_health::SaturatingDifference(
+                                      packets, snapshot_previous_packets))
+                                  * 1000.0 / observation_interval_ms : 0.0) << ','
+                          << "\"replay_ring_fps\":"
+                          << (observation_interval_ms > 0
+                              ? static_cast<double>(
+                                  capture_pipeline_health::SaturatingDifference(
+                                      ring_insertions, snapshot_previous_ring_insertions))
+                                  * 1000.0 / observation_interval_ms : 0.0) << ','
+                          << "\"pacing_drop_frames\":"
+                          << pipeline.pacing_drop_frames << ','
+                          << "\"interval_pacing_drops\":"
+                          << interval_pacing_drops << ','
+                          << "\"interval_pointer_only_frames\":"
+                          << interval_pointer_only_frames << ','
+                          << "\"interval_recovery_attempts\":"
+                          << interval_recovery_attempts << ','
+                          << "\"interval_generation_resets\":"
+                          << interval_generation_resets << ','
+                          << "\"dxgi_coalesced_extra_frames\":"
+                          << dxgi_coalesced_extra_frames << ','
+                          << "\"interval_dxgi_coalesced_extra_frames\":"
+                          << interval_dxgi_coalesced_extra_frames << ','
+                          << "\"dxgi_acquire_successes\":"
+                          << dxgi_acquire_successes << ','
+                          << "\"dxgi_acquire_timeouts\":"
+                          << dxgi_acquire_timeouts << ','
+                          << "\"interval_dxgi_acquire_successes\":"
+                          << interval_dxgi_acquire_successes << ','
+                          << "\"interval_dxgi_acquire_timeouts\":"
+                          << interval_dxgi_acquire_timeouts << ','
+                          << "\"dxgi_held_presentations\":"
+                          << dxgi_held_presentations << ','
+                          << "\"interval_dxgi_held_presentations\":"
+                          << interval_dxgi_held_presentations << ','
+                          << "\"dxgi_resampled_presentations\":"
+                          << dxgi_resampled_presentations << ','
+                          << "\"dxgi_acquire_success_fps\":"
+                          << (observation_interval_ms > 0
+                              ? static_cast<double>(interval_dxgi_acquire_successes)
+                                  * 1000.0 / observation_interval_ms : 0.0) << ','
                           << "\"stale_frame_observations\":"
                           << content_suspicious_streak_.load() << ','
                           << "\"duplicate_frame_observations\":"
-                          << "\"unavailable:not_measured\","
+                          << wgc_repeated_frame_observations_.load() << ','
+                          << "\"replay_ring_insertions\":"
+                          << ring_insertions << ','
+                          << "\"replay_ring_rejections\":"
+                          << capture_pipeline_health::SaturatingDifference(
+                                 packets, ring_insertions) << ','
+                          << "\"pipeline_classification\":\""
+                          << capture_pipeline_health::ClassificationName(
+                                 classification) << "\","
+                          << "\"diagnostic_candidate\":"
+                          << (diagnostic_candidate ? "true" : "false") << ','
+                          << "\"acquire_loop_recent\":"
+                          << (pipeline.acquire_loop_recent ? "true" : "false") << ','
+                          << "\"api_completion_recent\":"
+                          << (pipeline.api_completion_recent ? "true" : "false") << ','
+                          << "\"dxgi_replay_cache_armed\":"
+                          << (pipeline.dxgi_replay_cache_armed ? "true" : "false") << ','
+                          << "\"last_source_qpc\":"
+                          << last_source_frame_qpc_.load(
+                                 std::memory_order_acquire) << ','
+                          << "\"last_presentation_qpc\":"
+                          << last_dxgi_presentation_qpc_.load(
+                                 std::memory_order_acquire) << ','
+                          << "\"last_dxgi_completed_qpc\":"
+                          << last_dxgi_completed_qpc << ','
+                          << "\"wait_timeout_current\":"
+                          << (pipeline.wait_timeout_current ? "true" : "false") << ','
+                          << "\"pointer_only_recent\":"
+                          << (pipeline.pointer_only_recent ? "true" : "false") << ','
+                          << "\"idle_evidence\":"
+                          << (pipeline.idle_evidence ? "true" : "false") << ','
+                          << "\"encoder_diagnostics_observed\":"
+                          << (encoder_diagnostics_observed ? "true" : "false") << ','
+                          << "\"encoder_idle\":"
+                          << (pipeline.encoder_idle ? "true" : "false") << ','
+                          << "\"encoder_has_pending_work\":"
+                          << (pipeline.has_pending_work ? "true" : "false") << ','
+                          << "\"last_capture_hresult\":"
+                          << static_cast<int32_t>(last_capture_hresult) << ','
                           << "\"pointer_only_frames\":"
                           << pointer_only_frames_.load() << ','
                           << "\"encoder_submissions\":" << submissions << ','
@@ -1396,6 +2006,8 @@ namespace fthr {
                           << "\"last_encoder_submission_age_ms\":"
                           << submission_age << ','
                           << "\"last_encoded_output_age_ms\":" << output_age << ','
+                          << "\"last_replay_ring_insertion_age_ms\":"
+                          << ring_age << ','
                           << "\"capture_restart_count\":"
                           << capture_restart_count_.load() << ','
                           << "\"capture_recovery_attempts\":"
@@ -1404,11 +2016,29 @@ namespace fthr {
                           << capture_recovery_failures_.load() << ','
                           << "\"encoder_restart_count\":0}"
                           << std::endl;
+                snapshot_previous_packets = packets;
+                snapshot_previous_acquired = acquired;
+                snapshot_previous_submissions = submissions;
+                snapshot_previous_ring_insertions = ring_insertions;
+                snapshot_previous_dxgi_coalesced_extra_frames =
+                    dxgi_coalesced_extra_frames;
+                snapshot_previous_dxgi_acquire_successes =
+                    dxgi_acquire_successes;
+                snapshot_previous_dxgi_acquire_timeouts =
+                    dxgi_acquire_timeouts;
+                snapshot_previous_dxgi_held_presentations =
+                    dxgi_held_presentations;
 
                 if (audio_active_) {
                     const uint64_t system_packets = audio_capture_.GetPacketCount();
                     const uint64_t system_discontinuities =
                         audio_capture_.GetDiscontinuityCount();
+                    const auto system_silence_corrections =
+                        audio_capture_.GetSilenceCorrectionDistribution();
+                    const auto system_skip_corrections =
+                        audio_capture_.GetSkipCorrectionDistribution();
+                    const auto system_resampler_corrections =
+                        audio_capture_.GetResamplerCorrectionDistribution();
                     std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"audio\","
                               << "\"event\":\"audio_health_snapshot\","
                               << "\"source\":\"system_audio\","
@@ -1458,7 +2088,35 @@ namespace fthr {
                               << "\"first_packet_timestamp_100ns\":"
                               << audio_capture_.GetFirstPacketQpc100ns() << ','
                               << "\"last_packet_timestamp_100ns\":"
-                              << audio_capture_.GetLastPacketQpc100ns() << "}"
+                              << audio_capture_.GetLastPacketQpc100ns() << ','
+                              << "\"synthetic_silence_frames\":"
+                              << audio_capture_.GetSyntheticSilenceFrameCount() << ','
+                              << "\"skipped_input_frames\":"
+                              << audio_capture_.GetSkippedInputFrameCount() << ','
+                              << "\"resampler_correction_count\":"
+                              << audio_capture_.GetResamplerCorrectionCount() << ','
+                              << "\"normal_jitter_absorbed_count\":"
+                              << audio_capture_.GetNormalJitterAbsorbedCount() << ','
+                              << "\"hard_discontinuity_recovery_count\":"
+                              << audio_capture_.GetHardDiscontinuityRecoveryCount() << ','
+                              << "\"silence_correction_distribution\":"
+                              << AudioCorrectionDistributionJson(
+                                     system_silence_corrections) << ','
+                              << "\"skip_correction_distribution\":"
+                              << AudioCorrectionDistributionJson(
+                                     system_skip_corrections) << ','
+                              << "\"resampler_correction_distribution\":"
+                              << AudioCorrectionDistributionJson(
+                                     system_resampler_corrections) << ','
+                              << "\"native_input_signal\":"
+                              << AudioSignalMetricsJson(
+                                     audio_capture_.GetNativeInputSignalMetrics()) << ','
+                              << "\"converter_output_signal\":"
+                              << AudioSignalMetricsJson(
+                                     audio_capture_.GetCanonicalOutputSignalMetrics()) << ','
+                              << "\"encoder_input_signal\":"
+                              << AudioSignalMetricsJson(
+                                     audio_capture_.GetEncoderInputSignalMetrics()) << "}"
                               << std::endl;
                 }
                 if (microphone_audio_source_) {
@@ -1494,6 +2152,19 @@ namespace fthr {
                                      microphone.input_format.sample_format)
                               << "\","
                               << "\"packet_count\":" << microphone.packet_count << ','
+                              << "\"capture_buffer_frames\":"
+                              << microphone.processing_diagnostics.capture_buffer_frames << ','
+                              << "\"capture_buffer_duration_100ns\":"
+                              << microphone.processing_diagnostics.capture_buffer_duration_100ns
+                              << ','
+                              << "\"timestamp_error_count\":"
+                              << microphone.processing_diagnostics.timestamp_error_count << ','
+                              << "\"max_packet_processing_duration_100ns\":"
+                              << microphone.processing_diagnostics
+                                     .max_packet_processing_duration_100ns << ','
+                              << "\"packet_processing_at_or_above_buffer_duration_count\":"
+                              << microphone.processing_diagnostics
+                                     .packet_processing_at_or_above_buffer_duration_count << ','
                               << "\"converted_frames\":"
                               << microphone.converted_frame_count << ','
                               << "\"encoded_packets\":"
@@ -1514,6 +2185,33 @@ namespace fthr {
                               << microphone.last_packet_qpc_100ns << ','
                               << "\"max_drift_samples\":"
                               << microphone.max_observed_drift_samples << ','
+                              << "\"configured_input_gain\":"
+                              << microphone.configured_input_gain << ','
+                              << "\"synthetic_silence_frames\":"
+                              << microphone.synthetic_silence_frame_count << ','
+                              << "\"skipped_input_frames\":"
+                              << microphone.skipped_input_frame_count << ','
+                              << "\"resampler_correction_count\":"
+                              << microphone.resampler_correction_count << ','
+                              << "\"normal_jitter_absorbed_count\":"
+                              << microphone.normal_jitter_absorbed_count << ','
+                              << "\"hard_discontinuity_recovery_count\":"
+                              << microphone.hard_discontinuity_recovery_count << ','
+                              << "\"silence_correction_distribution\":"
+                              << AudioCorrectionDistributionJson(
+                                     microphone.silence_corrections) << ','
+                              << "\"skip_correction_distribution\":"
+                              << AudioCorrectionDistributionJson(
+                                     microphone.skip_corrections) << ','
+                              << "\"resampler_correction_distribution\":"
+                              << AudioCorrectionDistributionJson(
+                                     microphone.resampler_corrections) << ','
+                              << "\"native_input_signal\":"
+                              << AudioSignalMetricsJson(microphone.native_input_signal) << ','
+                              << "\"converter_output_signal\":"
+                              << AudioSignalMetricsJson(microphone.converter_output_signal) << ','
+                              << "\"encoder_input_signal\":"
+                              << AudioSignalMetricsJson(microphone.encoder_input_signal) << ','
                               << "\"failed\":"
                               << (microphone.failed ? "true" : "false") << "}"
                               << std::endl;
@@ -1537,19 +2235,25 @@ namespace fthr {
             const auto encoder = replay_encoder_
                 ? replay_encoder_->GetDiagnostics()
                 : ReplayEncoderDiagnostics{};
-            const bool dxgi_is_alive_but_desktop_is_static =
-                !awaiting_first_packet
-                && static_cast<HRESULT>(last_capture_hresult_.load(
-                    std::memory_order_relaxed)) == DXGI_ERROR_WAIT_TIMEOUT
-                && now - last_acquire_progress < std::chrono::seconds(1)
-                && encoder.pending_resources == 0
+            const bool encoder_idle = encoder.pending_resources == 0
                 && encoder.queued_outputs == 0
+                && encoder.locked_bitstreams == 0
                 && encoder.submit_stage == 0
                 && encoder.drain_stage == 0;
+            const bool encoder_has_pending_work = !encoder_idle;
+            const bool dxgi_is_alive_but_desktop_is_static =
+                dxgi::IsDxgiAliveButDesktopStatic(
+                    !awaiting_first_packet,
+                    now - last_acquire_progress < std::chrono::seconds(1),
+                    encoder_idle,
+                    static_cast<HRESULT>(last_capture_hresult_.load(
+                        std::memory_order_relaxed)) == DXGI_ERROR_WAIT_TIMEOUT,
+                    now - last_pointer_only_progress < std::chrono::seconds(1));
             if (dxgi_is_alive_but_desktop_is_static) {
                 // Desktop Duplication reports only changed frames. Repeated
-                // WAIT_TIMEOUT with a live acquire loop and an empty encoder
-                // is expected and must not be diagnosed as a replay stall.
+                // WAIT_TIMEOUT or S_OK pointer-only activity with a live
+                // acquire loop and an empty encoder is expected and must not
+                // be diagnosed as a replay stall.
                 last_stall_progress = now;
                 continue;
             }
@@ -1578,6 +2282,9 @@ namespace fthr {
                 << static_cast<uint32_t>(removed_reason) << std::dec
                 << " encoder_submit_stage=" << encoder.submit_stage
                 << " encoder_drain_stage=" << encoder.drain_stage
+                << " backpressure=" << encoder.backpressure_events
+                << " backend_errors=" << encoder.backend_errors
+                << " device_removed_errors=" << encoder.device_removed_errors
                 << " slots_acquired=" << encoder.input_slots_acquired
                 << " map=" << encoder.maps_succeeded << '/'
                 << encoder.map_attempts
@@ -1604,11 +2311,6 @@ namespace fthr {
             const bool encoder_received_recent_submission =
                 submissions > 0
                 && now - last_submission_progress <= std::chrono::seconds(2);
-            const bool encoder_has_pending_work =
-                encoder.pending_resources > 0
-                || encoder.queued_outputs > 0
-                || encoder.locked_bitstreams > 0
-                || encoder.drain_stage != 0;
             const auto stall_boundary = dxgi::ClassifyPipelineStall(
                 capture_stalled, acquired > 0,
                 encoder_received_recent_submission,
@@ -1625,7 +2327,13 @@ namespace fthr {
                       << "\"encoded_packets\":" << packets << ','
                       << "\"capture_stage\":" << capture_thread_stage_.load() << ','
                       << "\"encoder_submit_stage\":" << encoder.submit_stage << ','
-                      << "\"encoder_drain_stage\":" << encoder.drain_stage << "}"
+                      << "\"encoder_drain_stage\":" << encoder.drain_stage << ','
+                      << "\"encoder_backpressure_events\":"
+                      << encoder.backpressure_events << ','
+                      << "\"encoder_backend_errors\":"
+                      << encoder.backend_errors << ','
+                      << "\"encoder_device_removed_errors\":"
+                      << encoder.device_removed_errors << "}"
                       << std::endl;
             snapshot_emitted = true;
             SetCaptureFailure(std::string(diagnostic_code)
@@ -1748,9 +2456,26 @@ namespace fthr {
         SharedMemoryLayout* shared_memory) {
 
         const auto save_request_started = std::chrono::steady_clock::now();
+        // Allocate the request identity before any readiness gate so a rejected
+        // save can be correlated with the same ID a queued task would use.
+        const uint32_t save_request_id = next_task_id_.fetch_add(1);
+        LARGE_INTEGER save_qpc{};
+        LARGE_INTEGER save_qpc_frequency{};
+        QueryPerformanceCounter(&save_qpc);
+        QueryPerformanceFrequency(&save_qpc_frequency);
 
         const uint32_t health = capture_health_flags_.load();
-        if (health & CAPTURE_HEALTH_PAUSED) {
+        if ((health & CAPTURE_HEALTH_PAUSED) && !replay_pause_clock_) {
+            std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
+                      << "\"event\":\"save_rejected\",\"state\":\"FAILED\","
+                      << "\"save_request_id\":" << save_request_id
+                      << ",\"request_timestamp_qpc\":" << save_qpc.QuadPart
+                      << ",\"requested_duration_seconds\":" << duration_seconds
+                      << ",\"stage\":\"precondition\",\"writer_invoked\":false"
+                      << ",\"reason\":\"capture_paused\""
+                      << ",\"classification\":\"OTHER_PROVEN_REASON\""
+                      << ",\"diagnostic_schema\":\"precondition_minimal\"}"
+                      << std::endl;
             SetEngineError(shared_memory,
                 L"Game capture is paused while the game is in the background. "
                 L"Return to the game before saving.");
@@ -1759,46 +2484,366 @@ namespace fthr {
         if (!running_.load() ||
             (health & (CAPTURE_HEALTH_BACKEND_FAILED |
                        CAPTURE_HEALTH_RECOVERING))) {
+            std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
+                      << "\"event\":\"save_rejected\",\"state\":\"FAILED\","
+                      << "\"save_request_id\":" << save_request_id
+                      << ",\"request_timestamp_qpc\":" << save_qpc.QuadPart
+                      << ",\"requested_duration_seconds\":" << duration_seconds
+                      << ",\"stage\":\"precondition\",\"writer_invoked\":false"
+                      << ",\"reason\":\"capture_not_running\""
+                      << ",\"classification\":\"OTHER_PROVEN_REASON\""
+                      << ",\"diagnostic_schema\":\"precondition_minimal\"}"
+                      << std::endl;
             SetEngineError(shared_memory,
                 L"Capture is not receiving new frames. Restart capture before saving.");
             return false;
         }
         std::cout << "[CaptureEngine] SaveClip: " << duration_seconds << "s" << std::endl;
 
-        LARGE_INTEGER save_qpc{};
-        LARGE_INTEGER save_qpc_frequency{};
-        QueryPerformanceCounter(&save_qpc);
-        QueryPerformanceFrequency(&save_qpc_frequency);
         const double save_qpc_s = save_qpc_frequency.QuadPart > 0
             ? static_cast<double>(save_qpc.QuadPart)
                 / static_cast<double>(save_qpc_frequency.QuadPart)
             : 0.0;
 
+        const auto emit_replay_save_diagnostic =
+            [&](const char* event_name,
+                const EncodedRingSnapshot& snapshot,
+                const replay_health::Report* health_report,
+                const char* stage,
+                bool writer_invoked) -> replay_save::Classification {
+            replay_save::RuntimeEvidence runtime;
+            runtime.capture_running = running_.load(std::memory_order_relaxed);
+            runtime.now_qpc = save_qpc.QuadPart;
+            runtime.qpc_frequency = save_qpc_frequency.QuadPart;
+            runtime.capture_start_qpc = capture_start_qpc_.load(
+                std::memory_order_acquire);
+            runtime.generation_start_qpc = generation_start_qpc_.load(
+                std::memory_order_acquire);
+            runtime.last_source_frame_qpc = last_source_frame_qpc_.load(
+                std::memory_order_acquire);
+            runtime.last_encoder_submission_qpc = last_encoder_submission_qpc_.load(
+                std::memory_order_acquire);
+            runtime.last_encoded_output_qpc = last_encoded_output_qpc_.load(
+                std::memory_order_acquire);
+            runtime.last_ring_insertion_qpc = last_ring_insertion_qpc_.load(
+                std::memory_order_acquire);
+            runtime.source_frames = source_textures_received_.load(
+                std::memory_order_relaxed);
+            runtime.encoder_submissions = frames_captured_.load(
+                std::memory_order_relaxed);
+            runtime.encoded_packets = video_packets_produced_.load(
+                std::memory_order_relaxed);
+            runtime.ring_insertions = video_ring_insertions_.load(
+                std::memory_order_relaxed);
+            runtime.encoder_failures = encoder_failure_count_.load(
+                std::memory_order_relaxed);
+            runtime.capture_generation = capture_generation_.load(
+                std::memory_order_relaxed);
+            runtime.capture_restart_count = capture_restart_count_.load(
+                std::memory_order_relaxed);
+            const auto classification = replay_save::Classify(
+                health_report ? health_report->failure : replay_health::Failure::Empty,
+                health_report ? health_report->timeline_subtype
+                              : replay_health::TimelineSubtype::None,
+                {snapshot.selection_outcome}, runtime,
+                static_cast<double>(duration_seconds));
+            const auto age_ms = [&](int64_t qpc) -> double {
+                const double seconds = replay_save::AgeSeconds(
+                    save_qpc.QuadPart, qpc, save_qpc_frequency.QuadPart);
+                return seconds >= 0.0 ? seconds * 1000.0 : -1.0;
+            };
+            std::ostringstream json;
+            json << std::setprecision(12)
+                 << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
+                 << "\"event\":\""
+                 << diagnostics::JsonEscape(event_name ? event_name : "replay_save")
+                 << "\",\"state\":\"FAILED\",\"save_request_id\":"
+                 << save_request_id
+                 << ",\"request_timestamp_qpc\":" << save_qpc.QuadPart
+                 << ",\"requested_duration_seconds\":" << duration_seconds
+                 << ",\"stage\":\"" << stage << "\""
+                 << ",\"writer_invoked\":"
+                 << (writer_invoked ? "true" : "false")
+                 << ",\"error_code\":\""
+                 << (health_report ? "CLIP_REPLAY_VIDEO_INSUFFICIENT"
+                                    : "CLIP_SAVE_FAILED")
+                 << "\",\"packet_count\":"
+                 << (health_report ? health_report->packet_count : 0)
+                 << ",\"reason\":\""
+                 << (health_report
+                     ? replay_health::FailureName(health_report->failure)
+                     : replay_save::SnapshotOutcomeName(
+                           snapshot.selection_outcome))
+                 << "\""
+                 << ",\"actual_coverage_seconds\":"
+                 << (health_report ? health_report->actual_coverage_s : 0.0)
+                 << ",\"largest_gap_seconds\":"
+                 << (health_report ? health_report->largest_gap_s : 0.0)
+                 << ",\"largest_wall_gap_seconds\":"
+                 << (health_report ? health_report->largest_wall_gap_s : 0.0)
+                 << ",\"largest_pts_gap_seconds\":"
+                 << (health_report ? health_report->largest_pts_gap_s : 0.0)
+                 << ",\"effective_packet_rate\":"
+                 << (health_report ? health_report->effective_packet_rate : 0.0)
+                 << ",\"effective_packet_rate_measured\":"
+                 << (health_report
+                     && health_report->effective_packet_rate_measured
+                     ? "true" : "false")
+                 << ",\"capture_mode\":\""
+                 << (capture_mode_ == CaptureConfig::CaptureModeEnum::WINDOW
+                     ? "WINDOW" : "DESKTOP") << "\""
+                 << ",\"capture_backend\":\""
+                 << diagnostics::JsonEscape(startup_capture_backend_) << "\""
+                 << ",\"encoder_backend\":\""
+                 << diagnostics::JsonEscape(startup_encoder_backend_) << "\""
+                 << ",\"encoder\":\""
+                 << diagnostics::JsonEscape(nvenc_active_
+                     ? GetActiveEncoderName() : "unavailable:not_active") << "\""
+                 << ",\"codec\":\""
+                 << diagnostics::JsonEscape(startup_codec_) << "\""
+                 << ",\"configured_fps\":" << fps_
+                 << ",\"configured_target_width\":"
+                 << configured_target_width_
+                 << ",\"configured_target_height\":"
+                 << configured_target_height_
+                 << ",\"actual_source_width\":" << width_
+                 << ",\"actual_source_height\":" << height_
+                 << ",\"actual_encoded_width\":" << target_width_
+                 << ",\"actual_encoded_height\":" << target_height_
+                 << ",\"capture_generation\":" << runtime.capture_generation
+                 << ",\"replay_ring_generation\":"
+                 << snapshot.capture_generation
+                 << ",\"capture_restart_count\":"
+                 << runtime.capture_restart_count
+                 << ",\"capture_running\":"
+                 << (runtime.capture_running ? "true" : "false")
+                 << ",\"capture_generation_age_ms\":"
+                 << age_ms(runtime.generation_start_qpc)
+                 << ",\"capture_start_age_ms\":"
+                 << age_ms(runtime.capture_start_qpc)
+                 << ",\"source_frame_age_ms\":"
+                 << age_ms(runtime.last_source_frame_qpc)
+                 << ",\"encoder_submission_age_ms\":"
+                 << age_ms(runtime.last_encoder_submission_qpc)
+                 << ",\"encoded_output_age_ms\":"
+                 << age_ms(runtime.last_encoded_output_qpc)
+                 << ",\"ring_insertion_age_ms\":"
+                 << age_ms(runtime.last_ring_insertion_qpc)
+                  << ",\"last_source_qpc\":"
+                  << runtime.last_source_frame_qpc
+                  << ",\"last_presentation_qpc\":"
+                  << last_dxgi_presentation_qpc_.load(
+                         std::memory_order_acquire)
+                  << ",\"last_dxgi_completed_qpc\":"
+                  << last_dxgi_completed_qpc_.load(
+                         std::memory_order_acquire)
+                  << ",\"dxgi_replay_cache_armed\":"
+                  << (dxgi_replay_cache_armed_.load(
+                          std::memory_order_acquire) ? "true" : "false")
+                  << ",\"dxgi_held_presentations\":"
+                  << dxgi_held_presentations_.load(
+                         std::memory_order_relaxed)
+                  << ",\"dxgi_resampled_presentations\":"
+                  << dxgi_resampled_presentations_.load(
+                         std::memory_order_relaxed)
+                 << ",\"source_frames\":" << runtime.source_frames
+                 << ",\"capture_acquire_attempts\":"
+                 << capture_acquire_attempts_.load(std::memory_order_relaxed)
+                 << ",\"capture_acquire_successes\":"
+                 << capture_acquire_successes_.load(std::memory_order_relaxed)
+                 << ",\"capture_timeouts\":"
+                 << capture_timeouts_.load(std::memory_order_relaxed)
+                 << ",\"capture_recovery_attempts\":"
+                 << capture_recovery_attempts_.load(std::memory_order_relaxed)
+                 << ",\"capture_recovery_failures\":"
+                 << capture_recovery_failures_.load(std::memory_order_relaxed)
+                 << ",\"encoder_submissions\":"
+                 << runtime.encoder_submissions
+                 << ",\"encoded_packets\":" << runtime.encoded_packets
+                 << ",\"ring_insertions\":" << runtime.ring_insertions
+                 << ",\"encoder_failures\":" << runtime.encoder_failures
+                 << ",\"pre_encode_drops\":"
+                 << frames_dropped_.load(std::memory_order_relaxed)
+                 << ",\"queue_occupancy\":" << save_clip_queue_.GetQueueDepth()
+                 << ",\"queue_capacity\":" << save_clip_queue_.GetCapacity()
+                 << ",\"queue_overflow_status\":\"unavailable:not_exposed\""
+                 << ",\"snapshot_outcome\":\""
+                 << replay_save::SnapshotOutcomeName(snapshot.selection_outcome)
+                 << "\",\"selection_attempts\":" << snapshot.selection_attempts
+                 << ",\"internal_consistency\":"
+                 << (snapshot.internal_consistency ? "true" : "false")
+                 << ",\"scanned_packet_count\":"
+                 << snapshot.scanned_packet_count
+                 << ",\"eligible_packet_count\":"
+                 << snapshot.eligible_packet_count
+                 << ",\"keyframe_count\":" << snapshot.keyframe_count
+                 << ",\"ring_count\":" << snapshot.ring_count
+                 << ",\"ring_capacity\":" << snapshot.ring_capacity
+                 << ",\"ring_head\":" << snapshot.ring_head
+                 << ",\"oldest_wall_qpc\":" << snapshot.oldest_wall_qpc
+                 << ",\"newest_wall_qpc\":" << snapshot.newest_wall_qpc
+                 << ",\"requested_start_qpc\":" << snapshot.requested_start_qpc
+                 << ",\"target_end_qpc\":" << snapshot.target_end_qpc
+                 << ",\"interval_spanned_qpc\":"
+                 << snapshot.interval_spanned_qpc
+                 << ",\"valid_starting_keyframe\":"
+                 << (snapshot.valid_starting_keyframe ? "true" : "false")
+                 << ",\"full_history\":"
+                 << (snapshot.full_history ? "true" : "false")
+                 << ",\"classification\":\""
+                 << replay_save::ClassificationName(classification) << "\""
+                 << ",\"failed_predicate\":\""
+                 << (health_report
+                     ? replay_health::FailureName(health_report->failure)
+                     : "SNAPSHOT_SELECTION") << "\""
+                 << ",\"failed_actual\":";
+            if (!health_report) {
+                json << "\"" << replay_save::SnapshotOutcomeName(
+                    snapshot.selection_outcome) << "\"";
+            } else if (health_report->failure
+                       == replay_health::Failure::InsufficientCoverage) {
+                json << health_report->actual_coverage_s;
+            } else if (health_report->failure
+                       == replay_health::Failure::LargeTimelineGap) {
+                json << health_report->largest_gap_s;
+            } else if (health_report->failure
+                       == replay_health::Failure::LowEffectiveRate) {
+                json << health_report->effective_packet_rate;
+            } else if (health_report->failure
+                       == replay_health::Failure::StaleEnd) {
+                json << health_report->end_staleness_s;
+            } else {
+                json << "\"" << replay_health::TimelineSubtypeName(
+                    health_report->timeline_subtype) << "\"";
+            }
+            json << ",\"failed_required\":";
+            if (!health_report) {
+                json << "\"VALID\"";
+            } else if (health_report->failure
+                       == replay_health::Failure::InsufficientCoverage) {
+                json << health_report->required_min_coverage_s;
+            } else if (health_report->failure
+                       == replay_health::Failure::LargeTimelineGap) {
+                json << health_report->max_allowed_gap_s;
+            } else if (health_report->failure
+                       == replay_health::Failure::LowEffectiveRate) {
+                json << health_report->minimum_effective_rate;
+            } else if (health_report->failure
+                       == replay_health::Failure::StaleEnd) {
+                json << health_report->allowed_end_staleness_s;
+            } else {
+                json << "\"monotonic timeline\"";
+            }
+            json
+                 << ",\"timeline_subtype\":\""
+                 << (health_report
+                     ? replay_health::TimelineSubtypeName(
+                           health_report->timeline_subtype)
+                     : "NONE") << "\""
+                 << ",\"before_snapshot\":{\"ring_head\":"
+                 << snapshot.snapshot_start_ring_head << ",\"ring_count\":"
+                 << snapshot.snapshot_start_ring_count << ",\"ring_generation\":"
+                 << snapshot.snapshot_start_ring_generation << "}"
+                 << ",\"after_snapshot\":{\"ring_head\":"
+                 << snapshot.snapshot_end_ring_head << ",\"ring_count\":"
+                 << snapshot.snapshot_end_ring_count << ",\"ring_generation\":"
+                 << snapshot.snapshot_end_ring_generation
+                 << ",\"outcome\":\""
+                 << replay_save::SnapshotOutcomeName(snapshot.selection_outcome)
+                 << "\",\"packet_count\":" << snapshot.packets.size()
+                 << "}"
+                 << ",\"replay_health\":";
+            if (!health_report) {
+                json << "null";
+            } else {
+                json << "{\"accepted\":"
+                     << (health_report->accepted ? "true" : "false")
+                     << ",\"packet_count\":" << health_report->packet_count
+                     << ",\"wall_coverage_s\":"
+                     << health_report->wall_coverage_s
+                     << ",\"media_coverage_s\":"
+                     << health_report->actual_coverage_s
+                     << ",\"first_wall_qpc\":"
+                     << health_report->first_wall_qpc
+                     << ",\"last_wall_qpc\":"
+                     << health_report->last_wall_qpc
+                     << ",\"first_pts\":" << health_report->first_pts
+                     << ",\"last_pts\":" << health_report->last_pts
+                     << ",\"required_min_coverage_s\":"
+                     << health_report->required_min_coverage_s
+                     << ",\"largest_gap_s\":"
+                     << health_report->largest_gap_s
+                     << ",\"largest_wall_gap_s\":"
+                     << health_report->largest_wall_gap_s
+                     << ",\"largest_wall_gap_start_qpc\":"
+                     << health_report->largest_wall_gap_start_qpc
+                     << ",\"largest_wall_gap_end_qpc\":"
+                     << health_report->largest_wall_gap_end_qpc
+                     << ",\"largest_pts_gap_s\":"
+                     << health_report->largest_pts_gap_s
+                     << ",\"largest_pts_gap_start\":"
+                     << health_report->largest_pts_gap_start
+                     << ",\"largest_pts_gap_end\":"
+                     << health_report->largest_pts_gap_end
+                     << ",\"max_allowed_gap_s\":"
+                     << health_report->max_allowed_gap_s
+                     << ",\"intervals_over_gap_threshold\":"
+                     << health_report->intervals_over_gap_threshold
+                     << ",\"effective_packet_rate\":"
+                     << health_report->effective_packet_rate
+                     << ",\"effective_packet_rate_measured\":"
+                     << (health_report->effective_packet_rate_measured
+                         ? "true" : "false")
+                     << ",\"minimum_effective_rate\":"
+                     << health_report->minimum_effective_rate
+                     << ",\"end_staleness_s\":"
+                     << health_report->end_staleness_s
+                     << ",\"allowed_end_staleness_s\":"
+                     << health_report->allowed_end_staleness_s
+                     << ",\"wall_monotonic\":"
+                     << (health_report->wall_monotonic ? "true" : "false")
+                     << ",\"pts_monotonic\":"
+                     << (health_report->pts_monotonic ? "true" : "false")
+                     << ",\"generation\":" << health_report->generation
+                     << ",\"generation_continuous\":"
+                     << (health_report->generation_continuous ? "true" : "false")
+                     << "}";
+            }
+            json << "}";
+            std::cout << json.str() << std::endl;
+            return classification;
+        };
+
         // NVENC path - mux only, no encoding
         if (nvenc_active_) {
+            const auto replay_save_qpc = replay_pause_clock_
+                ? replay_pause_clock_->MapQpc(save_qpc.QuadPart, save_qpc_frequency.QuadPart)
+                : save_qpc.QuadPart;
             const auto publish_timeout = std::chrono::milliseconds(
                 std::max<uint32_t>(100, 3000 / std::max<uint32_t>(fps_, 1)));
             if (!encoded_ring_->WaitUntilPublished(
-                    save_qpc.QuadPart, publish_timeout)) {
+                    replay_save_qpc, publish_timeout)) {
                 std::cerr << "[SaveClip] Encoder publication did not reach the "
                              "save boundary within "
                           << publish_timeout.count() << "ms; using the latest "
                              "published packet" << std::endl;
             }
             EncodedRingSnapshot snapshot = encoded_ring_->TakeSnapshotByTime(
-                duration_seconds, save_qpc.QuadPart);
+                duration_seconds, replay_save_qpc);
 
             if (snapshot.packets.empty()) {
-                SetEngineError(shared_memory,
-                    L"The replay buffer is rebuilding after a capture transition. "
-                    L"Let the game capture a moment of footage, then try again.");
                 std::cerr << "[SaveClip] Encoded ring buffer empty - nothing to save" << std::endl;
-                std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
-                          << "\"event\":\"ring_selection_failed\","
-                          << "\"state\":\"FAILED\","
-                          << "\"error_code\":\"CLIP_SAVE_FAILED\","
-                          << "\"packet_count\":0}"
-                          << std::endl;
+                const auto classification = emit_replay_save_diagnostic(
+                    "ring_selection_failed", snapshot, nullptr,
+                    "selection", false);
+                std::wstring message =
+                    L"Replay save rejected (";
+                for (const char* c = replay_save::ClassificationName(classification);
+                     *c; ++c) {
+                    message.push_back(static_cast<wchar_t>(*c));
+                }
+                message += L"). Export Diagnostic Report for details.";
+                SetEngineError(shared_memory, message.c_str());
                 return false;
             }
 
@@ -1807,33 +2852,10 @@ namespace fthr {
             // the actual packet timeline before handing it to the mux worker;
             // otherwise a handful of stale packets can be expanded into a
             // misleading multi-second clip by downstream CFR processing.
-            const auto replay_config = snapshot.video_config;
-            replay_health::Input replay_health_input;
-            replay_health_input.requested_duration_seconds = duration_seconds;
-            replay_health_input.expected_fps =
-                replay_config.frame_rate.denominator > 0
-                ? static_cast<double>(replay_config.frame_rate.numerator)
-                    / static_cast<double>(replay_config.frame_rate.denominator)
-                : static_cast<double>(fps_);
-            replay_health_input.wall_qpc_frequency = save_qpc_frequency.QuadPart;
-            replay_health_input.target_end_wall_qpc = save_qpc.QuadPart;
-            replay_health_input.pts_per_second = replay_config.time_base.numerator > 0
-                ? static_cast<double>(replay_config.time_base.denominator)
-                    / static_cast<double>(replay_config.time_base.numerator)
-                : static_cast<double>(std::llround(
-                      replay_health_input.expected_fps));
-            replay_health_input.full_history = snapshot.full_history;
-            replay_health_input.packets.reserve(snapshot.packets.size());
-            for (const auto& packet : snapshot.packets) {
-                // Decoder keyframe pre-roll is intentionally part of the mux
-                // snapshot, but it is not presentation coverage. Excluding it
-                // keeps the health decision tied to the requested interval.
-                if (packet.pts < snapshot.presentation_start_pts) {
-                    continue;
-                }
-                replay_health_input.packets.push_back({
-                    packet.wall_qpc, packet.pts, packet.generation});
-            }
+            const auto replay_health_input =
+                encoded_replay_health::MakeInput(
+                    snapshot, duration_seconds, static_cast<double>(fps_),
+                    save_qpc_frequency.QuadPart, replay_save_qpc);
             const auto replay_health_report = replay_health::Evaluate(
                 replay_health_input);
             if (!replay_health_report.accepted) {
@@ -1845,29 +2867,17 @@ namespace fthr {
                           << "s, largest_gap=" << replay_health_report.largest_gap_s
                           << "s, rate=" << replay_health_report.effective_packet_rate
                           << " fps" << std::endl;
-                std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
-                          << "\"event\":\"replay_health_rejected\","
-                          << "\"state\":\"FAILED\","
-                          << "\"error_code\":\"CLIP_REPLAY_VIDEO_INSUFFICIENT\","
-                          << "\"reason\":\""
-                          << replay_health::FailureName(replay_health_report.failure)
-                          << "\",\"packet_count\":"
-                          << replay_health_report.packet_count
-                          << ",\"requested_duration_seconds\":"
-                          << duration_seconds << ",\"actual_coverage_seconds\":"
-                          << replay_health_report.actual_coverage_s
-                          << ",\"largest_gap_seconds\":"
-                          << replay_health_report.largest_gap_s
-                          << ",\"effective_packet_rate\":"
-                          << replay_health_report.effective_packet_rate
-                          << ",\"full_history\":"
-                          << (replay_health_report.full_history ? "true" : "false")
-                          << ",\"generation_continuous\":"
-                          << (replay_health_report.generation_continuous
-                              ? "true" : "false") << "}" << std::endl;
-                SetEngineError(shared_memory,
-                    L"Replay video history is insufficient or discontinuous; "
-                    L"the clip was not written. Keep capture running and try again.");
+                const auto classification = emit_replay_save_diagnostic(
+                    "replay_health_rejected", snapshot,
+                    &replay_health_report, "health", false);
+                EmitRecentDxgiEvidence("replay_health_rejected");
+                std::wstring message = L"Replay save rejected (";
+                for (const char* c = replay_save::ClassificationName(classification);
+                     *c; ++c) {
+                    message.push_back(static_cast<wchar_t>(*c));
+                }
+                message += L"). Export Diagnostic Report for details.";
+                SetEngineError(shared_memory, message.c_str());
                 return false;
             }
 
@@ -1881,7 +2891,7 @@ namespace fthr {
             task.fps = fps_;
             task.separate_audio_enabled = separate_audio_enabled_;
             task.shared_memory = shared_memory;
-            task.task_id = next_task_id_.fetch_add(1);
+            task.task_id = save_request_id;
 
             // Populate the QPC epoch so MuxEncodedClip can convert video PTS
             // to wall-clock seconds and align audio to it exactly.
@@ -1896,23 +2906,22 @@ namespace fthr {
             const double end_qpc_s = task.encoded_snapshot.presentation_end_qpc_s;
             if (audio_active_ && default_mix_audio_ring_
                     && !audio_capture_.IsDeviceLost()) {
-                const uint64_t origin_qpc = audio_capture_.GetTimelineOriginQpc100ns();
+                const uint64_t origin_qpc = replay_pause_clock_
+                    ? replay_audio_origin_100ns_.load()
+                    : audio_capture_.GetTimelineOriginQpc100ns();
                 const uint32_t sample_rate = audio_capture_.GetSampleRate();
                 if (origin_qpc > 0 && start_qpc_s > 0.0 && end_qpc_s > start_qpc_s
                         && sample_rate > 0) {
                     const auto range = MapAudioSourcePresentationRange(
                         start_qpc_s, end_qpc_s, origin_qpc, sample_rate);
-                    const int64_t start_pts = std::max<int64_t>(0, range.start_pts_samples);
-                    const int64_t end_pts = std::max(start_pts + 1, range.end_pts_samples);
-                    task.encoded_audio_snapshot = default_mix_audio_ring_->TakeSnapshot(
-                        start_pts, end_pts);
-                    task.audio_presentation_start_pts_samples = start_pts;
+                    auto default_mix_track =
+                        TakeEncodedAudioTrackForPresentationRange(
+                            default_mix_audio_source_, *default_mix_audio_ring_, range);
+                    task.encoded_audio_snapshot = default_mix_track.snapshot;
+                    task.audio_presentation_start_pts_samples =
+                        default_mix_track.presentation_start_pts_samples;
                     task.has_encoded_audio = task.encoded_audio_snapshot.valid();
                     if (task.has_encoded_audio) {
-                        EncodedAudioTrack default_mix_track;
-                        default_mix_track.source = default_mix_audio_source_;
-                        default_mix_track.snapshot = task.encoded_audio_snapshot;
-                        default_mix_track.presentation_start_pts_samples = start_pts;
                         // The source interval reflects the packet timeline that
                         // actually survived in this clip, not a guessed requested
                         // duration.  Default Mix is a real aggregate loopback
@@ -1930,11 +2939,17 @@ namespace fthr {
                         task.encoded_audio_tracks.push_back(std::move(default_mix_track));
                         std::cout << "[SaveClip] Persistent AAC snapshot: "
                             << task.encoded_audio_snapshot.packets.size()
-                            << " packets, PTS " << start_pts << " - " << end_pts
+                            << " packets, PTS "
+                            << task.audio_presentation_start_pts_samples << " - "
+                            << std::max(task.audio_presentation_start_pts_samples + 1,
+                                        range.end_pts_samples)
                             << std::endl;
                     } else {
                         std::cerr << "[SaveClip] Default Mix AAC ring had no packets for "
-                            << "presentation PTS " << start_pts << " - " << end_pts
+                            << "presentation PTS "
+                            << task.audio_presentation_start_pts_samples << " - "
+                            << std::max(task.audio_presentation_start_pts_samples + 1,
+                                        range.end_pts_samples)
                             << std::endl;
                     }
                 } else {
@@ -2000,6 +3015,254 @@ namespace fthr {
                 }
             }
 
+            // Correlate only the bounded hard continuity-edit history with the
+            // exact encoded video presentation window. This is save-time
+            // diagnostics; it does not inspect or alter audio samples.
+            if (start_qpc_s > 0.0 && end_qpc_s > start_qpc_s) {
+                const uint64_t selected_start_qpc_100ns = static_cast<uint64_t>(
+                    std::llround(start_qpc_s * 10'000'000.0));
+                const uint64_t selected_end_qpc_100ns = static_cast<uint64_t>(
+                    std::llround(end_qpc_s * 10'000'000.0));
+                AudioCorrectionEventSnapshot microphone_corrections;
+                if (microphone_audio_source_) {
+                    microphone_corrections =
+                        microphone_audio_source_->correction_events();
+                }
+                const auto correction_summary = SummarizeAudioCorrections(
+                    audio_capture_.GetCorrectionEvents(), microphone_corrections,
+                    selected_start_qpc_100ns, selected_end_qpc_100ns);
+                std::cout << "FTHR_DIAGNOSTIC_EVENT "
+                          << AudioCorrectionClipSummaryJson(
+                                 task.task_id, correction_summary)
+                          << std::endl;
+            }
+
+            // Preserve one bounded, authoritative account of the selected
+            // media window before any stream is independently rebased for MP4.
+            // Video is measured in raw QPC plus encoder PTS; audio source
+            // metadata has already mapped packet PTS back to that same QPC
+            // domain. No samples or per-packet records are emitted.
+            struct SaveAudioTimelineEvidence {
+                bool available = false;
+                int64_t first_pts = 0;
+                int64_t last_packet_pts = 0;
+                int64_t end_pts = 0;
+                uint32_t sample_rate = 0;
+                size_t packet_count = 0;
+                MediaTimelineRange qpc_range;
+            };
+            const auto audio_evidence = [](const EncodedAudioTrack* track) {
+                SaveAudioTimelineEvidence evidence;
+                if (!track || !track->valid() || track->snapshot.packets.empty()
+                        || track->snapshot.format.sample_rate == 0) {
+                    return evidence;
+                }
+                evidence.available = true;
+                evidence.first_pts = track->snapshot.first_pts_samples;
+                evidence.last_packet_pts =
+                    track->snapshot.packets.back().pts_samples;
+                evidence.end_pts = track->snapshot.last_pts_samples;
+                evidence.sample_rate = track->snapshot.format.sample_rate;
+                evidence.packet_count = track->snapshot.packets.size();
+                if (track->source.state.first_active_100ns > 0
+                        && track->source.state.last_active_100ns
+                            >= track->source.state.first_active_100ns) {
+                    evidence.qpc_range = {
+                        static_cast<double>(track->source.state.first_active_100ns)
+                            / 10'000'000.0,
+                        static_cast<double>(track->source.state.last_active_100ns)
+                            / 10'000'000.0,
+                        true};
+                }
+                return evidence;
+            };
+
+            const EncodedAudioTrack* system_track = nullptr;
+            const EncodedAudioTrack* microphone_track = nullptr;
+            for (const auto& track : task.encoded_audio_tracks) {
+                if (!system_track
+                        && track.source.identity.type == AudioSourceType::System) {
+                    system_track = &track;
+                } else if (!microphone_track
+                        && track.source.identity.type == AudioSourceType::Microphone) {
+                    microphone_track = &track;
+                }
+            }
+            const auto system_timeline = audio_evidence(system_track);
+            const auto microphone_timeline = audio_evidence(microphone_track);
+
+            MediaTimelineRange video_qpc_range;
+            int64_t video_first_pts = 0;
+            int64_t video_last_pts = 0;
+            int64_t video_decode_first_pts = 0;
+            double video_duration_s = 0.0;
+            const auto& video_snapshot = task.encoded_snapshot;
+            const auto& video_config = video_snapshot.video_config;
+            const double video_tick_s = video_config.time_base.denominator > 0
+                ? static_cast<double>(video_config.time_base.numerator)
+                    / static_cast<double>(video_config.time_base.denominator)
+                : 0.0;
+            if (!video_snapshot.packets.empty() && save_qpc_frequency.QuadPart > 0
+                    && video_tick_s > 0.0) {
+                const auto presentation_packet = std::find_if(
+                    video_snapshot.packets.begin(), video_snapshot.packets.end(),
+                    [&](const EncodedRingPacket& packet) {
+                        return packet.pts >= video_snapshot.presentation_start_pts;
+                    });
+                if (presentation_packet != video_snapshot.packets.end()) {
+                    const auto& last = video_snapshot.packets.back();
+                    video_decode_first_pts = video_snapshot.packets.front().pts;
+                    video_first_pts = presentation_packet->pts;
+                    video_last_pts = last.pts;
+                    video_duration_s = static_cast<double>(
+                        video_last_pts - video_first_pts + 1) * video_tick_s;
+                    video_qpc_range = {
+                        static_cast<double>(presentation_packet->wall_qpc)
+                            / static_cast<double>(save_qpc_frequency.QuadPart),
+                        static_cast<double>(last.wall_qpc)
+                            / static_cast<double>(save_qpc_frequency.QuadPart)
+                            + video_tick_s,
+                        true};
+                }
+            }
+
+            MediaTimelineRange combined_audio_qpc_range;
+            for (const auto* source : {&system_timeline, &microphone_timeline}) {
+                if (!source->qpc_range.valid) continue;
+                if (!combined_audio_qpc_range.valid) {
+                    combined_audio_qpc_range = source->qpc_range;
+                } else {
+                    combined_audio_qpc_range.start_s = std::min(
+                        combined_audio_qpc_range.start_s, source->qpc_range.start_s);
+                    combined_audio_qpc_range.end_s = std::max(
+                        combined_audio_qpc_range.end_s, source->qpc_range.end_s);
+                }
+            }
+            const auto combined_sync = EvaluateAvSyncTimeline(
+                start_qpc_s, end_qpc_s, video_qpc_range,
+                combined_audio_qpc_range, video_snapshot.generation_continuous);
+            const auto system_sync = EvaluateAvSyncTimeline(
+                start_qpc_s, end_qpc_s, video_qpc_range,
+                system_timeline.qpc_range, video_snapshot.generation_continuous);
+            const auto microphone_sync = EvaluateAvSyncTimeline(
+                start_qpc_s, end_qpc_s, video_qpc_range,
+                microphone_timeline.qpc_range, video_snapshot.generation_continuous);
+
+            const auto json_number_or_null = [](bool available, double value) {
+                if (!available || !std::isfinite(value)) return std::string("null");
+                std::ostringstream stream;
+                stream << std::setprecision(12) << value;
+                return stream.str();
+            };
+            const auto json_integer_or_null = [](bool available, int64_t value) {
+                return available ? std::to_string(value) : std::string("null");
+            };
+            const auto audio_duration = [](const SaveAudioTimelineEvidence& source) {
+                return source.available && source.sample_rate > 0
+                    ? static_cast<double>(source.end_pts - source.first_pts)
+                        / static_cast<double>(source.sample_rate)
+                    : 0.0;
+            };
+            std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
+                      << "\"event\":\"pre_mux_av_timeline\",\"state\":\"OBSERVED\","
+                      << "\"task_id\":" << task.task_id
+                      << ",\"save_request_id\":" << task.task_id
+                      << ",\"selected_window_start_qpc\":"
+                      << json_number_or_null(start_qpc_s > 0.0, start_qpc_s)
+                      << ",\"selected_window_end_qpc\":"
+                      << json_number_or_null(end_qpc_s > start_qpc_s, end_qpc_s)
+                      << ",\"capture_generation\":"
+                      << video_snapshot.capture_generation
+                      << ",\"generation_continuous\":"
+                      << (video_snapshot.generation_continuous ? "true" : "false")
+                      << ",\"video_decode_first_pts\":"
+                      << json_integer_or_null(video_qpc_range.valid, video_decode_first_pts)
+                      << ",\"video_first_pts\":"
+                      << json_integer_or_null(video_qpc_range.valid, video_first_pts)
+                      << ",\"video_last_pts\":"
+                      << json_integer_or_null(video_qpc_range.valid, video_last_pts)
+                      << ",\"video_duration\":"
+                      << json_number_or_null(video_qpc_range.valid, video_duration_s)
+                      << ",\"system_audio_first_pts\":"
+                      << json_integer_or_null(system_timeline.available,
+                             system_timeline.first_pts)
+                      << ",\"system_audio_last_pts\":"
+                      << json_integer_or_null(system_timeline.available,
+                             system_timeline.last_packet_pts)
+                      << ",\"system_audio_end_pts\":"
+                      << json_integer_or_null(system_timeline.available,
+                             system_timeline.end_pts)
+                      << ",\"system_audio_duration\":"
+                      << json_number_or_null(system_timeline.available,
+                             audio_duration(system_timeline))
+                      << ",\"mic_first_pts\":"
+                      << json_integer_or_null(microphone_timeline.available,
+                             microphone_timeline.first_pts)
+                      << ",\"mic_last_pts\":"
+                      << json_integer_or_null(microphone_timeline.available,
+                             microphone_timeline.last_packet_pts)
+                      << ",\"mic_end_pts\":"
+                      << json_integer_or_null(microphone_timeline.available,
+                             microphone_timeline.end_pts)
+                      << ",\"mic_duration\":"
+                      << json_number_or_null(microphone_timeline.available,
+                             audio_duration(microphone_timeline))
+                      << ",\"video_start_relative_to_window\":"
+                      << json_number_or_null(combined_sync.valid,
+                             combined_sync.video_start_relative_to_window_ms / 1000.0)
+                      << ",\"video_end_relative_to_window\":"
+                      << json_number_or_null(combined_sync.valid,
+                             combined_sync.video_end_relative_to_window_ms / 1000.0)
+                      << ",\"system_start_relative_to_window\":"
+                      << json_number_or_null(system_sync.valid,
+                             system_sync.audio_start_relative_to_window_ms / 1000.0)
+                      << ",\"system_end_relative_to_window\":"
+                      << json_number_or_null(system_sync.valid,
+                             system_sync.audio_end_relative_to_window_ms / 1000.0)
+                      << ",\"mic_start_relative_to_window\":"
+                      << json_number_or_null(microphone_sync.valid,
+                             microphone_sync.audio_start_relative_to_window_ms / 1000.0)
+                      << ",\"mic_end_relative_to_window\":"
+                      << json_number_or_null(microphone_sync.valid,
+                             microphone_sync.audio_end_relative_to_window_ms / 1000.0)
+                      << ",\"video_start_relative_to_window_ms\":"
+                      << json_number_or_null(combined_sync.valid,
+                             combined_sync.video_start_relative_to_window_ms)
+                      << ",\"video_end_relative_to_window_ms\":"
+                      << json_number_or_null(combined_sync.valid,
+                             combined_sync.video_end_relative_to_window_ms)
+                      << ",\"system_start_relative_to_window_ms\":"
+                      << json_number_or_null(system_sync.valid,
+                             system_sync.audio_start_relative_to_window_ms)
+                      << ",\"system_end_relative_to_window_ms\":"
+                      << json_number_or_null(system_sync.valid,
+                             system_sync.audio_end_relative_to_window_ms)
+                      << ",\"mic_start_relative_to_window_ms\":"
+                      << json_number_or_null(microphone_sync.valid,
+                             microphone_sync.audio_start_relative_to_window_ms)
+                      << ",\"mic_end_relative_to_window_ms\":"
+                      << json_number_or_null(microphone_sync.valid,
+                             microphone_sync.audio_end_relative_to_window_ms)
+                      << ",\"pre_mux_av_start_delta_ms\":"
+                      << json_number_or_null(combined_sync.valid,
+                             combined_sync.av_start_delta_ms)
+                      << ",\"pre_mux_av_end_delta_ms\":"
+                      << json_number_or_null(combined_sync.valid,
+                             combined_sync.av_end_delta_ms)
+                      << ",\"pre_mux_system_av_start_delta_ms\":"
+                      << json_number_or_null(system_sync.valid,
+                             system_sync.av_start_delta_ms)
+                      << ",\"pre_mux_system_av_end_delta_ms\":"
+                      << json_number_or_null(system_sync.valid,
+                             system_sync.av_end_delta_ms)
+                      << ",\"pre_mux_mic_av_start_delta_ms\":"
+                      << json_number_or_null(microphone_sync.valid,
+                             microphone_sync.av_start_delta_ms)
+                      << ",\"pre_mux_mic_av_end_delta_ms\":"
+                      << json_number_or_null(microphone_sync.valid,
+                             microphone_sync.av_end_delta_ms) << "}"
+                      << std::endl;
+
             const uint32_t diagnostic_task_id = task.task_id;
             const size_t diagnostic_video_packets =
                 task.encoded_snapshot.packets.size();
@@ -2013,10 +3276,12 @@ namespace fthr {
                           << "\"event\":\"save_queue_rejected\","
                           << "\"state\":\"FAILED\","
                           << "\"error_code\":\"CLIP_SAVE_FAILED\","
+                          << "\"save_request_id\":" << diagnostic_task_id << ','
                           << "\"queue_depth\":"
                           << save_clip_queue_.GetQueueDepth() << ','
                           << "\"queue_capacity\":"
-                          << save_clip_queue_.GetCapacity() << "}"
+                          << save_clip_queue_.GetCapacity()
+                          << ",\"queue_overflow_status\":\"unavailable:not_exposed\"}"
                           << std::endl;
                 return false;
             }
@@ -2027,6 +3292,7 @@ namespace fthr {
                       << "\"event\":\"ring_selection_completed\","
                       << "\"state\":\"QUEUED\","
                       << "\"task_id\":" << diagnostic_task_id << ','
+                      << "\"save_request_id\":" << diagnostic_task_id << ','
                       << "\"requested_duration_seconds\":" << duration_seconds << ','
                       << "\"video_packet_count\":"
                       << diagnostic_video_packets << ','
@@ -2051,6 +3317,16 @@ namespace fthr {
 
         if (snap_count == 0) {
             std::cerr << "[SaveClip] Ring buffer is empty" << std::endl;
+            std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
+                      << "\"event\":\"ring_selection_failed\","
+                      << "\"state\":\"FAILED\","
+                      << "\"save_request_id\":" << save_request_id
+                      << ",\"stage\":\"selection\","
+                      << "\"snapshot_outcome\":\"EMPTY_RING\","
+                      << "\"classification\":\"OTHER_PROVEN_REASON\","
+                      << "\"writer_invoked\":false,\"ring_count\":0,"
+                      << "\"ring_capacity\":" << max_frames_ << "}"
+                      << std::endl;
             return false;
         }
 
@@ -2080,7 +3356,7 @@ namespace fthr {
         task.scaling_mode = scaling_mode_;
         task.separate_audio_enabled = separate_audio_enabled_;
         task.shared_memory = shared_memory;
-        task.task_id = next_task_id_.fetch_add(1);
+        task.task_id = save_request_id;
 
         // The public alpha does not automatically select the raw-video path.
         // Preserve its video-only behavior instead of reintroducing a long
@@ -2093,6 +3369,16 @@ namespace fthr {
             SetEngineError(shared_memory,
                 L"The clip save queue is full or shutting down. Wait for the "
                 L"current save to finish, then try again.");
+            std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
+                      << "\"event\":\"save_queue_rejected\","
+                      << "\"state\":\"FAILED\","
+                      << "\"save_request_id\":" << save_request_id
+                      << ",\"stage\":\"selection\","
+                      << "\"classification\":\"OTHER_PROVEN_REASON\","
+                      << "\"queue_depth\":" << save_clip_queue_.GetQueueDepth()
+                      << ",\"queue_capacity\":" << save_clip_queue_.GetCapacity()
+                      << ",\"queue_overflow_status\":\"unavailable:not_exposed\""
+                      << "}" << std::endl;
             return false;
         }
         std::wcout << L"[SaveClip] Raw task queued: " << path << std::endl;
@@ -3275,6 +4561,12 @@ namespace fthr {
                 recovery_cutoff_qpc = now.QuadPart;
             }
         }
+        if (replay_pause_clock_) {
+            LARGE_INTEGER frequency{};
+            QueryPerformanceFrequency(&frequency);
+            recovery_cutoff_qpc = replay_pause_clock_->MapQpc(
+                recovery_cutoff_qpc, frequency.QuadPart);
+        }
         if (encoded_ring_) encoded_ring_->Clear(recovery_cutoff_qpc);
         replay_config_publish_failed_.store(false);
         ring_head_.store(0, std::memory_order_release);
@@ -3393,6 +4685,8 @@ namespace fthr {
                   << "\"current_width\":" << current_width << ','
                   << "\"current_height\":" << current_height << "}"
                   << std::endl;
+        if (decision == dxgi::RecoveryDecision::DimensionsChanged)
+            capture_health_flags_.fetch_or(CAPTURE_HEALTH_RECONFIGURE_REQUIRED);
         if (decision != dxgi::RecoveryDecision::RecreateDuplication) {
             detail = std::string("recovery contract rejected: ")
                 + dxgi::RecoveryDecisionName(decision);
@@ -3458,6 +4752,12 @@ namespace fthr {
 
     bool CaptureEngine::RecoverDxgiDuplication(
         const char* api_call, HRESULT trigger) {
+        // Recovery is a generation boundary: the cached texture and all
+        // completed-call evidence belong to the old duplication object.
+        InvalidateDxgiReplayCache();
+        last_dxgi_completed_qpc_.store(0, std::memory_order_release);
+        last_dxgi_pointer_only_completed_qpc_.store(
+            0, std::memory_order_release);
         // Mark the boundary before clearing the ring. A delayed encoder
         // callback must not be mistaken for current history while recovery is
         // in progress; ClearReplayForRecovery also records this QPC cutoff.
@@ -3520,6 +4820,15 @@ namespace fthr {
         if (result.outcome == dxgi::RecoveryOutcome::Recovered) {
             const uint32_t generation = capture_generation_.fetch_add(
                 1, std::memory_order_acq_rel) + 1;
+            LARGE_INTEGER generation_start_qpc{};
+            if (QueryPerformanceCounter(&generation_start_qpc)) {
+                generation_start_qpc_.store(generation_start_qpc.QuadPart,
+                    std::memory_order_release);
+            }
+            last_source_frame_qpc_.store(0, std::memory_order_release);
+            last_encoder_submission_qpc_.store(0, std::memory_order_release);
+            last_encoded_output_qpc_.store(0, std::memory_order_release);
+            last_ring_insertion_qpc_.store(0, std::memory_order_release);
             const uint32_t restart = capture_restart_count_.fetch_add(
                 1, std::memory_order_relaxed) + 1;
             last_capture_hresult_.store(S_OK, std::memory_order_relaxed);
@@ -3549,7 +4858,8 @@ namespace fthr {
         }
 
         capture_recovery_failures_.fetch_add(1, std::memory_order_relaxed);
-        capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+        capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED
+            | (capture_health_flags_.load() & CAPTURE_HEALTH_RECONFIGURE_REQUIRED));
         SetCaptureFailure(last_detail.empty()
             ? "DXGI duplication recovery failed without backend detail"
             : last_detail);
@@ -3651,24 +4961,74 @@ namespace fthr {
 
         std::cout << "[CaptureThread] Started (DXGI path)." << std::endl;
 
-        LARGE_INTEGER qpc_freq;
-        QueryPerformanceFrequency(&qpc_freq);
+        LARGE_INTEGER qpc_freq{};
+        if (!QueryPerformanceFrequency(&qpc_freq)
+            || qpc_freq.QuadPart <= 0) {
+            SetCaptureFailure("QueryPerformanceFrequency failed for DXGI cadence");
+            capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+            running_.store(false);
+            InvalidateDxgiReplayCache();
+            return;
+        }
+        dxgi_replay_cadence_.Configure(fps_, qpc_freq.QuadPart);
+        uint32_t previous_generation = capture_generation_.load(
+            std::memory_order_relaxed);
+        dxgi_replay_cadence_.SetGeneration(previous_generation);
 
-        const double  target_ms = 1000.0 / static_cast<double>(fps_);
-        const int64_t target_qpc = static_cast<int64_t>(
-            (target_ms / 1000.0) * static_cast<double>(qpc_freq.QuadPart));
-
-        FrameRateScheduler frame_scheduler(target_qpc);
+        // Keep timer precision local to this paced DXGI thread. Avoid the
+        // process-wide timeBeginPeriod side effect, which would also affect
+        // unrelated capture/audio workers. Resolve CreateWaitableTimerExW at
+        // runtime so older SDK declarations still build; the normal timer and
+        // sleep paths remain safe fallbacks when high-resolution timers are
+        // unavailable on the host.
+        using CreateWaitableTimerExFn = HANDLE (WINAPI*)(
+            LPSECURITY_ATTRIBUTES, LPCWSTR, DWORD, DWORD);
+        HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+        auto create_waitable_timer_ex = kernel32
+            ? reinterpret_cast<CreateWaitableTimerExFn>(GetProcAddress(
+                  kernel32, "CreateWaitableTimerExW"))
+            : nullptr;
+        DWORD high_resolution_create_error = ERROR_SUCCESS;
+        if (!kernel32) {
+            high_resolution_create_error = GetLastError();
+        } else if (!create_waitable_timer_ex) {
+            high_resolution_create_error = ERROR_PROC_NOT_FOUND;
+        }
+        HANDLE cadence_timer = create_waitable_timer_ex
+            ? (SetLastError(ERROR_SUCCESS), create_waitable_timer_ex(
+                  nullptr, nullptr, 0x00000002u, TIMER_ALL_ACCESS))
+            : nullptr;
+        if (create_waitable_timer_ex && !cadence_timer) {
+            high_resolution_create_error = GetLastError();
+        }
+        DWORD ordinary_create_error = ERROR_SUCCESS;
+        const char* cadence_timer_mode = cadence_timer
+            ? "high_resolution" : "sleep";
+        if (!cadence_timer) {
+            SetLastError(ERROR_SUCCESS);
+            cadence_timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+            if (cadence_timer) {
+                cadence_timer_mode = "ordinary";
+            } else {
+                ordinary_create_error = GetLastError();
+            }
+        }
+        std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\","
+                  << "\"event\":\"dxgi_cadence_timer_initialized\","
+                  << "\"timer_mode\":\"" << cadence_timer_mode << "\","
+                  << "\"high_resolution_create_error\":"
+                  << high_resolution_create_error << ','
+                  << "\"ordinary_create_error\":"
+                  << ordinary_create_error << "}" << std::endl;
 
         std::cout << "[CaptureThread] " << fps_ << " fps ("
-            << target_ms << " ms/frame)  "
+            << (1000.0 / static_cast<double>(std::max<uint32_t>(1, fps_)))
+            << " ms/frame, sampled DXGI acquisition)  "
             << (nvenc_active_ ? GetActiveEncoderName() : "software")
             << " path" << std::endl;
 
         uint32_t consecutive_acquire_errors = 0;
         int64_t previous_present_qpc = 0;
-        uint32_t previous_generation = capture_generation_.load(
-            std::memory_order_relaxed);
         if (replay_encoder_) {
             replay_encoder_->SetCaptureGeneration(previous_generation);
         }
@@ -3682,6 +5042,8 @@ namespace fthr {
             if (generation != previous_generation) {
                 // A recovery starts a fresh history. Do not report a
                 // presentation gap across the old and new duplication.
+                InvalidateDxgiReplayCache();
+                dxgi_replay_cadence_.SetGeneration(generation);
                 previous_generation = generation;
                 previous_present_qpc = 0;
                 previous_resource_identity = nullptr;
@@ -3690,6 +5052,93 @@ namespace fthr {
                 }
             }
 
+            LARGE_INTEGER cadence_now{};
+            if (!QueryPerformanceCounter(&cadence_now)) {
+                SetCaptureFailure("QueryPerformanceCounter failed for DXGI cadence");
+                capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+                running_.store(false);
+                InvalidateDxgiReplayCache();
+                break;
+            }
+            const auto schedule = dxgi_replay_cadence_.Schedule(
+                cadence_now.QuadPart);
+            if (!schedule.due) {
+                if (schedule.wait_qpc > 0) {
+                    // Every blocking slice is bounded so shutdown and QPC
+                    // deadlines are rechecked at least every 50 ms. A timer
+                    // timeout merely returns to Schedule; it never authorizes
+                    // an acquire or a held presentation by itself.
+                    const int64_t max_wait_slice_qpc = std::max<int64_t>(
+                        1, qpc_freq.QuadPart / 20);
+                    const int64_t wait_slice_qpc = std::min<int64_t>(
+                        schedule.wait_qpc, max_wait_slice_qpc);
+                    if (cadence_timer) {
+                        const long double wait_100ns = std::ceil(
+                            static_cast<long double>(wait_slice_qpc)
+                            * 10000000.0L
+                            / static_cast<long double>(qpc_freq.QuadPart));
+                        if (wait_100ns > 0.0L
+                            && wait_100ns
+                                <= static_cast<long double>(
+                                    (std::numeric_limits<int64_t>::max)())) {
+                            LARGE_INTEGER due_time{};
+                            // Also cap the relative Win32 timer to 50 ms; the
+                            // QPC slice cap above keeps the scheduler interval
+                            // bounded even when timer conversion rounds up.
+                            const int64_t bounded_wait_100ns =
+                                std::min<int64_t>(500000, std::max<int64_t>(
+                                    1, static_cast<int64_t>(wait_100ns)));
+                            due_time.QuadPart = -std::max<int64_t>(
+                                1, bounded_wait_100ns);
+                            if (SetWaitableTimer(
+                                    cadence_timer, &due_time, 0, nullptr,
+                                    nullptr, FALSE)) {
+                                const DWORD wait_result = WaitForSingleObject(
+                                    cadence_timer, 50);
+                                if (wait_result == WAIT_OBJECT_0
+                                    || wait_result == WAIT_TIMEOUT) {
+                                    continue;
+                                }
+                                const DWORD wait_error = wait_result == WAIT_FAILED
+                                    ? GetLastError() : ERROR_GEN_FAILURE;
+                                std::cout << "FTHR_DIAGNOSTIC_EVENT {"
+                                          << "\"subsystem\":\"capture\","
+                                          << "\"event\":\"dxgi_cadence_timer_disabled\","
+                                          << "\"timer_mode\":\""
+                                          << cadence_timer_mode << "\","
+                                          << "\"win32_error\":"
+                                          << wait_error << "}" << std::endl;
+                            } else {
+                                const DWORD timer_error = GetLastError();
+                                std::cout << "FTHR_DIAGNOSTIC_EVENT {"
+                                          << "\"subsystem\":\"capture\","
+                                          << "\"event\":\"dxgi_cadence_timer_disabled\","
+                                          << "\"timer_mode\":\""
+                                          << cadence_timer_mode << "\","
+                                          << "\"win32_error\":"
+                                          << timer_error << "}" << std::endl;
+                            }
+                        }
+                    }
+                    if (cadence_timer) {
+                        // A set/wait error is reported once, then the timer is
+                        // retired so the bounded sleep fallback cannot spam.
+                        // (Successful signals and timeouts returned above.)
+                        CancelWaitableTimer(cadence_timer);
+                        CloseHandle(cadence_timer);
+                        cadence_timer = nullptr;
+                    }
+                    if (!cadence_timer) {
+                        const double wait_seconds =
+                            static_cast<double>(wait_slice_qpc)
+                            / static_cast<double>(qpc_freq.QuadPart);
+                        std::this_thread::sleep_for(
+                            std::min(std::chrono::duration<double>(wait_seconds),
+                                std::chrono::duration<double>(0.050)));
+                    }
+                }
+                continue;
+            }
             capture_loop_iterations_.fetch_add(1, std::memory_order_relaxed);
 
             DXGI_OUTDUPL_FRAME_INFO info{};
@@ -3706,7 +5155,7 @@ namespace fthr {
             }
             LARGE_INTEGER acquire_start_qpc{};
             QueryPerformanceCounter(&acquire_start_qpc);
-            HRESULT hr = duplication_->AcquireNextFrame(33, &info, &resource);
+            HRESULT hr = duplication_->AcquireNextFrame(0, &info, &resource);
             LARGE_INTEGER acquire_end_qpc{};
             QueryPerformanceCounter(&acquire_end_qpc);
             last_capture_hresult_.store(
@@ -3725,6 +5174,12 @@ namespace fthr {
             recent_event.acquire_end_qpc = acquire_end_qpc.QuadPart;
             recent_event.last_present_qpc = present_qpc;
             recent_event.presentation_gap_qpc = presentation_gap_qpc;
+            recent_event.accumulated_frames = info.AccumulatedFrames;
+            if (info.AccumulatedFrames > 1) {
+                dxgi_coalesced_extra_frames_.fetch_add(
+                    static_cast<uint64_t>(info.AccumulatedFrames) - 1,
+                    std::memory_order_relaxed);
+            }
             recent_event.acquire_hresult = static_cast<int32_t>(hr);
             if (resource && resource != previous_resource_identity) {
                 previous_resource_identity = resource;
@@ -3747,13 +5202,50 @@ namespace fthr {
                 dxgi_recent_evidence_.Record(recent_event);
             }
 
+            dxgi_replay::Presentation presentation;
+            int64_t presentation_qpc = 0;
+            ID3D11Texture2D* source_texture = nullptr;
             if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
                 capture_timeouts_.fetch_add(1, std::memory_order_relaxed);
+                dxgi_replay::AcquireResult result;
+                result.generation = generation;
+                result.call_start_qpc = acquire_start_qpc.QuadPart;
+                result.call_end_qpc = acquire_end_qpc.QuadPart;
+                result.observation = dxgi_replay::Observation::WaitTimeout;
+                presentation = dxgi_replay_cadence_.Complete(
+                    schedule.tick, result);
+                dxgi_replay_cache_armed_.store(
+                    dxgi_replay_cadence_.HasSeed(),
+                    std::memory_order_release);
+                last_dxgi_completed_qpc_.store(
+                    acquire_end_qpc.QuadPart, std::memory_order_release);
+                if (presentation.present) {
+                    source_texture = dxgi_replay_texture_;
+                    presentation_qpc = presentation.qpc;
+                } else if (!dxgi_replay_cadence_.HasSeed()) {
+                    InvalidateDxgiReplayCache();
+                }
                 capture_thread_stage_.store(0, std::memory_order_relaxed);
-                continue;
+                if (!presentation.present) continue;
             }
 
+            // WAIT_TIMEOUT can still authorize presenting the already-owned
+            // texture, but it did not acquire a frame/resource. Keep every
+            // successful-acquire path and its FrameLease entirely separate so
+            // a held timeout never reaches failed-HRESULT recovery handling or
+            // attempts ReleaseFrame on a frame it does not own.
+            if (hr != DXGI_ERROR_WAIT_TIMEOUT) {
             if (hr == DXGI_ERROR_ACCESS_LOST) {
+                dxgi_replay::AcquireResult result;
+                result.generation = generation;
+                result.call_start_qpc = acquire_start_qpc.QuadPart;
+                result.call_end_qpc = acquire_end_qpc.QuadPart;
+                result.observation = dxgi_replay::Observation::Failure;
+                dxgi_replay_cadence_.Complete(schedule.tick, result);
+                InvalidateDxgiReplayCache();
+                last_dxgi_completed_qpc_.store(0, std::memory_order_release);
+                last_dxgi_pointer_only_completed_qpc_.store(
+                    0, std::memory_order_release);
                 capture_thread_stage_.store(0, std::memory_order_relaxed);
                 if (RecoverDxgiDuplication(
                         "IDXGIOutputDuplication::AcquireNextFrame", hr)) {
@@ -3765,6 +5257,16 @@ namespace fthr {
             }
 
             if (FAILED(hr)) {
+                dxgi_replay::AcquireResult result;
+                result.generation = generation;
+                result.call_start_qpc = acquire_start_qpc.QuadPart;
+                result.call_end_qpc = acquire_end_qpc.QuadPart;
+                result.observation = dxgi_replay::Observation::Failure;
+                dxgi_replay_cadence_.Complete(schedule.tick, result);
+                InvalidateDxgiReplayCache();
+                last_dxgi_completed_qpc_.store(0, std::memory_order_release);
+                last_dxgi_pointer_only_completed_qpc_.store(
+                    0, std::memory_order_release);
                 std::cerr << "[CaptureThread] AcquireNextFrame failed: 0x"
                     << std::hex << hr << std::dec << std::endl;
                 if (++consecutive_acquire_errors >= 100) {
@@ -3784,7 +5286,7 @@ namespace fthr {
                     running_.store(false);
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                capture_thread_stage_.store(0, std::memory_order_relaxed);
                 continue;
             }
             consecutive_acquire_errors = 0;
@@ -3792,6 +5294,21 @@ namespace fthr {
             capture_thread_stage_.store(2, std::memory_order_relaxed);
             dxgi::FrameLease<IDXGIResource, IDXGIOutputDuplication> frame(
                 resource, duplication_);
+            int64_t release_completion_qpc = 0;
+            const auto fail_scheduled_acquire = [&]() {
+                dxgi_replay::AcquireResult result;
+                result.generation = generation;
+                result.call_start_qpc = acquire_start_qpc.QuadPart;
+                LARGE_INTEGER failed_completion{};
+                QueryPerformanceCounter(&failed_completion);
+                result.call_end_qpc = failed_completion.QuadPart;
+                result.observation = dxgi_replay::Observation::Failure;
+                dxgi_replay_cadence_.Complete(schedule.tick, result);
+                InvalidateDxgiReplayCache();
+                last_dxgi_completed_qpc_.store(0, std::memory_order_release);
+                last_dxgi_pointer_only_completed_qpc_.store(
+                    0, std::memory_order_release);
+            };
             const auto finish_frame = [this, &frame, &recent_event]() {
                 frame.ReleaseResource();
                 const bool owned = frame.owns_frame();
@@ -3804,11 +5321,21 @@ namespace fthr {
                         1, std::memory_order_relaxed);
                 }
                 if (release == DXGI_ERROR_ACCESS_LOST) {
+                    InvalidateDxgiReplayCache();
+                    last_dxgi_completed_qpc_.store(
+                        0, std::memory_order_release);
+                    last_dxgi_pointer_only_completed_qpc_.store(
+                        0, std::memory_order_release);
                     capture_thread_stage_.store(0, std::memory_order_relaxed);
                     return RecoverDxgiDuplication(
                         "IDXGIOutputDuplication::ReleaseFrame", release);
                 }
                 if (FAILED(release)) {
+                    InvalidateDxgiReplayCache();
+                    last_dxgi_completed_qpc_.store(
+                        0, std::memory_order_release);
+                    last_dxgi_pointer_only_completed_qpc_.store(
+                        0, std::memory_order_release);
                     SetCaptureFailure(diagnostics::FormatHResultFailure(
                         "IDXGIOutputDuplication::ReleaseFrame", release));
                     std::cout << "FTHR_DIAGNOSTIC_EVENT {"
@@ -3832,7 +5359,13 @@ namespace fthr {
             if (!resource) {
                 SetCaptureFailure(
                     "AcquireNextFrame succeeded without a desktop resource");
-                finish_frame();
+                const bool released = finish_frame();
+                if (released && capture_generation_.load(
+                        std::memory_order_acquire) != generation) {
+                    capture_thread_stage_.store(0, std::memory_order_relaxed);
+                    continue;
+                }
+                fail_scheduled_acquire();
                 capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
                 running_.store(false);
                 break;
@@ -3845,51 +5378,201 @@ namespace fthr {
                 recent_event.pointer_only = true;
                 pointer_only_frames_.fetch_add(1, std::memory_order_relaxed);
                 frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+                const bool released = finish_frame();
+                if (!released) {
+                    fail_scheduled_acquire();
+                    break;
+                }
+                if (capture_generation_.load(std::memory_order_acquire)
+                    != generation) {
+                    InvalidateDxgiReplayCache();
+                    capture_thread_stage_.store(0, std::memory_order_relaxed);
+                    continue;
+                }
+                LARGE_INTEGER completed{};
+                QueryPerformanceCounter(&completed);
+                release_completion_qpc = completed.QuadPart;
+                dxgi_replay::AcquireResult result;
+                result.generation = generation;
+                result.call_start_qpc = acquire_start_qpc.QuadPart;
+                result.call_end_qpc = release_completion_qpc;
+                result.observation = dxgi_replay::Observation::PointerOnly;
+                result.release_succeeded = true;
+                presentation = dxgi_replay_cadence_.Complete(
+                    schedule.tick, result);
+                dxgi_replay_cache_armed_.store(
+                    dxgi_replay_cadence_.HasSeed(),
+                    std::memory_order_release);
+                last_dxgi_completed_qpc_.store(
+                    release_completion_qpc, std::memory_order_release);
+                last_dxgi_pointer_only_completed_qpc_.store(
+                    release_completion_qpc, std::memory_order_release);
+                if (presentation.present) {
+                    source_texture = dxgi_replay_texture_;
+                    presentation_qpc = presentation.qpc;
+                } else if (!dxgi_replay_cadence_.HasSeed()) {
+                    InvalidateDxgiReplayCache();
+                }
                 capture_thread_stage_.store(0, std::memory_order_relaxed);
-                if (!finish_frame()) break;
-                continue;
+                if (!presentation.present) continue;
+            } else {
+                recent_event.pacing_accepted = true;
+                winrt::com_ptr<ID3D11Texture2D> acquired_texture;
+                hr = frame.resource()->QueryInterface(
+                    __uuidof(ID3D11Texture2D), acquired_texture.put_void());
+                if (FAILED(hr) || !acquired_texture) {
+                    const bool released = finish_frame();
+                    if (released && capture_generation_.load(
+                            std::memory_order_acquire) != generation) {
+                        InvalidateDxgiReplayCache();
+                        capture_thread_stage_.store(0,
+                            std::memory_order_relaxed);
+                        continue;
+                    }
+                    dxgi_replay::AcquireResult result;
+                    result.generation = generation;
+                    result.call_start_qpc = acquire_start_qpc.QuadPart;
+                    result.call_end_qpc = release_completion_qpc;
+                    result.observation = dxgi_replay::Observation::Image;
+                    result.release_succeeded = released;
+                    result.cache_copy_succeeded = false;
+                    if (released) {
+                        LARGE_INTEGER completed{};
+                        QueryPerformanceCounter(&completed);
+                        result.call_end_qpc = completed.QuadPart;
+                        last_dxgi_completed_qpc_.store(
+                            completed.QuadPart, std::memory_order_release);
+                    } else {
+                        last_dxgi_completed_qpc_.store(0,
+                            std::memory_order_release);
+                    }
+                    dxgi_replay_cadence_.Complete(schedule.tick, result);
+                    InvalidateDxgiReplayCache();
+                    capture_thread_stage_.store(0, std::memory_order_relaxed);
+                    if (!released) break;
+                    continue;
+                }
+
+                D3D11_TEXTURE2D_DESC recent_texture_desc{};
+                acquired_texture->GetDesc(&recent_texture_desc);
+                recent_event.width = recent_texture_desc.Width;
+                recent_event.height = recent_texture_desc.Height;
+                recent_event.format = static_cast<uint32_t>(
+                    recent_texture_desc.Format);
+                if (!ValidateCaptureTexture(acquired_texture.get(), "DXGI")) {
+                    acquired_texture = nullptr;
+                    const bool released = finish_frame();
+                    if (!released) {
+                        fail_scheduled_acquire();
+                        break;
+                    }
+                    if (capture_generation_.load(std::memory_order_acquire)
+                        != generation) {
+                        InvalidateDxgiReplayCache();
+                        capture_thread_stage_.store(0,
+                            std::memory_order_relaxed);
+                        continue;
+                    }
+                    fail_scheduled_acquire();
+                    ClearReplayForRecovery();
+                    capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+                    running_.store(false);
+                    break;
+                }
+                source_textures_received_.fetch_add(1,
+                    std::memory_order_relaxed);
+                if (present_qpc > 0) {
+                    // Preserve the source's actual presentation timestamp.
+                    // Resampling, when needed, affects only encoder presentation.
+                    last_source_frame_qpc_.store(
+                        present_qpc, std::memory_order_release);
+                }
+                capture_thread_stage_.store(3, std::memory_order_relaxed);
+                if (!EnsureDxgiReplayTexture(recent_texture_desc)) {
+                    acquired_texture = nullptr;
+                    const bool released = finish_frame();
+                    if (!released) {
+                        fail_scheduled_acquire();
+                        break;
+                    }
+                    if (capture_generation_.load(std::memory_order_acquire)
+                        != generation) {
+                        InvalidateDxgiReplayCache();
+                        capture_thread_stage_.store(0,
+                            std::memory_order_relaxed);
+                        continue;
+                    }
+                    fail_scheduled_acquire();
+                    ClearReplayForRecovery();
+                    capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+                    running_.store(false);
+                    break;
+                }
+                context_->CopyResource(dxgi_replay_texture_, acquired_texture.get());
+                const HRESULT device_reason = device_->GetDeviceRemovedReason();
+                acquired_texture = nullptr;
+                const bool released = finish_frame();
+                if (!released) {
+                    fail_scheduled_acquire();
+                    break;
+                }
+                if (capture_generation_.load(std::memory_order_acquire)
+                    != generation) {
+                    InvalidateDxgiReplayCache();
+                    capture_thread_stage_.store(0, std::memory_order_relaxed);
+                    continue;
+                }
+                LARGE_INTEGER completed{};
+                QueryPerformanceCounter(&completed);
+                release_completion_qpc = completed.QuadPart;
+                if (FAILED(device_reason)) {
+                    SetCaptureFailure(diagnostics::FormatHResultFailure(
+                        "ID3D11Device::GetDeviceRemovedReason(DXGI replay copy)",
+                        device_reason));
+                    fail_scheduled_acquire();
+                    ClearReplayForRecovery();
+                    capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+                    running_.store(false);
+                    break;
+                }
+                dxgi_replay::AcquireResult result;
+                result.generation = generation;
+                result.call_start_qpc = acquire_start_qpc.QuadPart;
+                result.call_end_qpc = release_completion_qpc;
+                result.source_qpc = present_qpc;
+                result.observation = dxgi_replay::Observation::Image;
+                result.release_succeeded = true;
+                result.cache_copy_succeeded = true;
+                presentation = dxgi_replay_cadence_.Complete(
+                    schedule.tick, result);
+                dxgi_replay_cache_armed_.store(
+                    dxgi_replay_cadence_.HasSeed(),
+                    std::memory_order_release);
+                last_dxgi_completed_qpc_.store(
+                    release_completion_qpc, std::memory_order_release);
+                last_dxgi_pointer_only_completed_qpc_.store(
+                    0, std::memory_order_release);
+                if (presentation.present) {
+                    source_texture = dxgi_replay_texture_;
+                    presentation_qpc = presentation.qpc;
+                } else if (!dxgi_replay_cadence_.HasSeed()) {
+                    InvalidateDxgiReplayCache();
+                }
+                if (!presentation.present) {
+                    capture_thread_stage_.store(0, std::memory_order_relaxed);
+                    continue;
+                }
+            }
             }
 
-            // Frame rate limiting BEFORE QueryInterface.
-            // At high game FPS (e.g. 300fps, 60fps target) most frames are dropped.
-            // QueryInterface is a COM call with real overhead; paying it on every
-            // dropped frame wastes ~240 roundtrips/sec. Checking QPC first means
-            // dropped frames cost only resource->Release() + ReleaseFrame().
-            LARGE_INTEGER now;
-            QueryPerformanceCounter(&now);
-            if (!frame_scheduler.ShouldCapture(now.QuadPart)) {
-                capture_thread_stage_.store(0, std::memory_order_relaxed);
-                frames_dropped_.fetch_add(1, std::memory_order_relaxed);
-                if (!finish_frame()) break;
-                continue;
-            }
-
-            ID3D11Texture2D* tex = nullptr;
-            hr = frame.resource()->QueryInterface(__uuidof(ID3D11Texture2D),
-                reinterpret_cast<void**>(&tex));
-            frame.ReleaseResource();
-
-            if (FAILED(hr) || !tex) {
-                capture_thread_stage_.store(0, std::memory_order_relaxed);
-                if (!finish_frame()) break;
-                continue;
-            }
-            D3D11_TEXTURE2D_DESC recent_texture_desc{};
-            tex->GetDesc(&recent_texture_desc);
-            recent_event.width = recent_texture_desc.Width;
-            recent_event.height = recent_texture_desc.Height;
-            recent_event.format = static_cast<uint32_t>(
-                recent_texture_desc.Format);
-            if (!ValidateCaptureTexture(tex, "DXGI")) {
-                tex->Release();
-                finish_frame();
-                ClearReplayForRecovery();
+            if (!source_texture || presentation_qpc <= 0) {
+                InvalidateDxgiReplayCache();
+                SetCaptureFailure(
+                    "DXGI replay policy selected a missing texture or invalid presentation QPC");
                 capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
                 running_.store(false);
                 break;
             }
-            source_textures_received_.fetch_add(1, std::memory_order_relaxed);
-            capture_thread_stage_.store(3, std::memory_order_relaxed);
 
             if (nvenc_active_ && !replay_encoder_cpu_input_) {
                 // Same-adapter compressed replay path (native NVENC or AMF).
@@ -3897,25 +5580,26 @@ namespace fthr {
                 // readback or upload on the normal AMD path.
                 capture_thread_stage_.store(4, std::memory_order_relaxed);
                 conversion_submissions_.fetch_add(1, std::memory_order_relaxed);
-                ID3D11Texture2D* encode_texture = PrepareEncodeTexture(tex);
+                ID3D11Texture2D* encode_texture =
+                    PrepareEncodeTexture(source_texture);
                 if (encode_texture)
                     conversion_completions_.fetch_add(1, std::memory_order_relaxed);
                 capture_thread_stage_.store(5, std::memory_order_relaxed);
                 const bool encoded = encode_texture && EncodeGpuReplayTexture(
                     encode_texture,
-                    info.LastPresentTime.QuadPart,
+                    presentation_qpc,
                     frames_captured_.load(std::memory_order_relaxed) + 1);
-                tex->Release();
-                const bool frame_finished = finish_frame();
                 capture_thread_stage_.store(0, std::memory_order_relaxed);
-                if (!encoded || !frame_finished) break;
+                if (!encoded) {
+                    InvalidateDxgiReplayCache();
+                    break;
+                }
             }
             else if (nvenc_active_ && replay_encoder_cpu_input_) {
                 // Legacy cross-adapter NVENC input: read back the Intel staging texture
                 // for CPU transfer to NVIDIA. Map must wait for the GPU copy; DO_NOT_WAIT
                 // can reject every frame when called immediately after CopyResource.
-                context_->CopyResource(staging_texture_, tex);
-                tex->Release();
+                context_->CopyResource(staging_texture_, source_texture);
                 capture_thread_stage_.store(4, std::memory_order_relaxed);
 
                 D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -3923,13 +5607,13 @@ namespace fthr {
                 if (FAILED(hr)) {
                     std::cerr << "[CaptureThread] Texture map failed (Optimus): 0x"
                         << std::hex << hr << std::dec << std::endl;
+                    InvalidateDxgiReplayCache();
                     capture_thread_stage_.store(0, std::memory_order_relaxed);
-                    if (!finish_frame()) break;
                     continue;
                 }
                 if (!ValidateMappedCaptureRowPitch(mapped.RowPitch, "DXGI")) {
                     context_->Unmap(staging_texture_, 0);
-                    finish_frame();
+                    InvalidateDxgiReplayCache();
                     ClearReplayForRecovery();
                     capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
                     running_.store(false);
@@ -3947,7 +5631,7 @@ namespace fthr {
                     encoded = replay_encoder_->EncodeFrameCPU(
                         encode_data,
                         mapped.RowPitch,
-                        info.LastPresentTime.QuadPart);
+                        presentation_qpc);
                     if (!encoded && attempt < 3) {
                         std::cerr << "[CaptureThread] Transient hybrid encoder "
                                   << "submission failure; retrying (" << attempt
@@ -3958,17 +5642,17 @@ namespace fthr {
                 context_->Unmap(staging_texture_, 0);
                 conversion_submissions_.fetch_add(1, std::memory_order_relaxed);
                 conversion_completions_.fetch_add(1, std::memory_order_relaxed);
-                const bool frame_finished = finish_frame();
                 if (!encoded) {
+                    InvalidateDxgiReplayCache();
                     FailReplayEncoder("hybrid NVENC CPU-input submission");
                     break;
                 }
-                if (!frame_finished) break;
+                last_encoder_submission_qpc_.store(
+                    presentation_qpc, std::memory_order_release);
             }
             else {
                 // Legacy raw path: copy to staging, then map and copy to the frame pool.
-                context_->CopyResource(staging_texture_, tex);
-                tex->Release();
+                context_->CopyResource(staging_texture_, source_texture);
                 capture_thread_stage_.store(4, std::memory_order_relaxed);
 
                 D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -3976,13 +5660,13 @@ namespace fthr {
                 if (FAILED(hr)) {
                     std::cerr << "[CaptureThread] Texture map failed: 0x"
                         << std::hex << hr << std::dec << std::endl;
+                    InvalidateDxgiReplayCache();
                     capture_thread_stage_.store(0, std::memory_order_relaxed);
-                    if (!finish_frame()) break;
                     continue;
                 }
                 if (!ValidateMappedCaptureRowPitch(mapped.RowPitch, "DXGI")) {
                     context_->Unmap(staging_texture_, 0);
-                    finish_frame();
+                    InvalidateDxgiReplayCache();
                     ClearReplayForRecovery();
                     capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
                     running_.store(false);
@@ -4017,7 +5701,25 @@ namespace fthr {
                 size_t prev = ring_count_.load(std::memory_order_relaxed);
                 if (prev < max_frames_)
                     ring_count_.fetch_add(1, std::memory_order_relaxed);
-                if (!finish_frame()) break;
+            }
+
+            if (!dxgi_replay_cadence_.CommitPresentation(presentation_qpc)) {
+                InvalidateDxgiReplayCache();
+                SetCaptureFailure(
+                    "DXGI replay presentation timestamp was not increasing");
+                capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+                running_.store(false);
+                break;
+            }
+            last_dxgi_presentation_qpc_.store(
+                presentation_qpc, std::memory_order_release);
+            if (presentation.held) {
+                dxgi_held_presentations_.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            if (presentation.resampled_source_qpc) {
+                dxgi_resampled_presentations_.fetch_add(
+                    1, std::memory_order_relaxed);
             }
 
             uint64_t fc = frames_captured_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -4029,7 +5731,12 @@ namespace fthr {
 
         std::cout << "[CaptureThread] Stopped. Total frames: "
                   << frames_captured_.load() << std::endl;
-        if (capture_health_flags_.load() != CAPTURE_HEALTH_BACKEND_FAILED)
+        InvalidateDxgiReplayCache();
+        if (cadence_timer) {
+            CancelWaitableTimer(cadence_timer);
+            CloseHandle(cadence_timer);
+        }
+        if (!(capture_health_flags_.load() & CAPTURE_HEALTH_BACKEND_FAILED))
             capture_health_flags_.store(CAPTURE_HEALTH_NONE);
     }
 
@@ -4200,6 +5907,13 @@ namespace fthr {
                 0,
                 nullptr);
         }
+        if (present_qpc > 0) {
+            LARGE_INTEGER submission{};
+            QueryPerformanceCounter(&submission);
+            last_encoder_submission_qpc_.store(
+                replay_pause_clock_ ? submission.QuadPart : present_qpc,
+                std::memory_order_release);
+        }
         if (!replay_encoder_->EncodeFrame(present_qpc)) {
             FailReplayEncoder("hardware frame submission");
             return false;
@@ -4212,6 +5926,7 @@ namespace fthr {
     }
 
     void CaptureEngine::FailReplayEncoder(const char* operation) {
+        encoder_failure_count_.fetch_add(1, std::memory_order_relaxed);
         ClearReplayForRecovery();
         capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
         running_.store(false);
@@ -4291,10 +6006,12 @@ namespace fthr {
 
         IDXGIAdapter1* capture_adapter = nullptr;
         std::string output_diagnostic;
-        if (!monitor::OpenSelectedDxgiOutput(
-                factory, resolved_monitor_, &capture_adapter, selected_output,
-                &resolved_dxgi_output_,
-                output_diagnostic)) {
+        const bool wgc = std::string(backend_name) == "WGC";
+        const bool opened = wgc
+            ? monitor::OpenSelectedDxgiAdapter(factory, resolved_monitor_, &capture_adapter, output_diagnostic)
+            : monitor::OpenSelectedDxgiOutput(factory, resolved_monitor_, &capture_adapter,
+                selected_output, &resolved_dxgi_output_, output_diagnostic);
+        if (!opened) {
             std::cerr << '[' << backend_name << "] "
                       << monitor::ToString(
                              monitor::MonitorResolveError::OutputResolutionFailed)
@@ -4311,7 +6028,7 @@ namespace fthr {
                 "IDXGIAdapter1::GetDesc1(selected capture adapter)", hr);
             SetCaptureFailure(failure);
             std::cerr << '[' << backend_name << "] " << failure << std::endl;
-            (*selected_output)->Release();
+            if (*selected_output) (*selected_output)->Release();
             *selected_output = nullptr;
             capture_adapter->Release();
             factory->Release();
@@ -4327,7 +6044,7 @@ namespace fthr {
                 "D3D11CreateDevice(selected monitor adapter)", hr);
             SetCaptureFailure(failure);
             std::cerr << '[' << backend_name << "] " << failure << std::endl;
-            (*selected_output)->Release();
+            if (*selected_output) (*selected_output)->Release();
             *selected_output = nullptr;
             capture_adapter->Release();
             factory->Release();
@@ -4341,6 +6058,14 @@ namespace fthr {
             capture_desc.AdapterLuid.HighPart};
         capture_device_adapter_luid_available_ = true;
         nvidia_device_ = capture_adapter_vendor_ == EncoderVendor::Nvidia;
+        if (wgc) {
+            width_ = resolved_monitor_.width;
+            height_ = resolved_monitor_.height;
+            resolved_desktop_coordinates_ = {resolved_monitor_.left, resolved_monitor_.top,
+                resolved_monitor_.left + static_cast<LONG>(width_),
+                resolved_monitor_.top + static_cast<LONG>(height_)};
+            resolved_desktop_coordinates_available_ = true;
+        } else {
         DXGI_OUTPUT_DESC output_desc{};
         hr = (*selected_output)->GetDesc(&output_desc);
         if (FAILED(hr)) {
@@ -4348,7 +6073,7 @@ namespace fthr {
                 "IDXGIOutput::GetDesc(selected output)", hr);
             SetCaptureFailure(failure);
             std::cerr << '[' << backend_name << "] " << failure << std::endl;
-            (*selected_output)->Release();
+            if (*selected_output) (*selected_output)->Release();
             *selected_output = nullptr;
             capture_adapter->Release();
             factory->Release();
@@ -4363,6 +6088,7 @@ namespace fthr {
         resolved_desktop_coordinates_ = output_desc.DesktopCoordinates;
         resolved_desktop_coordinates_available_ = true;
 
+        }
         capture_adapter->Release();
         factory->Release();
         std::cout << '[' << backend_name << "] Selected output ready: "
@@ -4406,7 +6132,7 @@ namespace fthr {
         if (!InitializeMonitorCaptureDevice("WGC", &selected_output)) {
             return false;
         }
-        selected_output->Release();
+        if (selected_output) selected_output->Release();
         selected_output = nullptr;
         last_capture_failure_detail_.clear();
         const HMONITOR hmonitor = reinterpret_cast<HMONITOR>(
@@ -4455,6 +6181,9 @@ namespace fthr {
             // message pump is required.
             current_api = "GraphicsCaptureItem::Size";
             auto sz = wgc_state_->item.Size();
+            if (sz.Width <= 0 || sz.Height <= 0) throw winrt::hresult_error(E_INVALIDARG);
+            width_ = static_cast<uint32_t>(sz.Width);
+            height_ = static_cast<uint32_t>(sz.Height);
             current_api = "Direct3D11CaptureFramePool::CreateFreeThreaded";
             wgc_state_->frame_pool =
                 winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
@@ -4463,14 +6192,15 @@ namespace fthr {
                     2,
                     sz);
 
-            // Apply border policy before StartCapture; reject WGC if suppression fails
-            // so Initialize can select DXGI.
+            // Apply the optional border opt-out before StartCapture. A missing
+            // or denied opt-out retains this WGC target and the OS privacy border;
+            // only a required session failure rejects the WGC attempt.
             current_api = "Direct3D11CaptureFramePool::CreateCaptureSession";
             wgc_state_->session =
                 wgc_state_->frame_pool.CreateCaptureSession(wgc_state_->item);
             if (!ApplyCaptureBorderPolicy("monitor")) {
-                std::cerr << "[WGC] Windows privacy border would remain visible; "
-                             "falling back to border-free DXGI capture."
+                std::cerr << "[WGC] Required monitor capture session unavailable; "
+                             "the WGC attempt remains fatal."
                           << std::endl;
                 ShutdownWGC();
                 ShutdownD3D11();
@@ -4513,14 +6243,32 @@ namespace fthr {
     }
 
 
-    // Request border suppression before StartCapture and verify the live session.
-    // If the runtime still requires a border, callers fall back to DXGI.
+    // Request the optional border suppression before StartCapture and verify the
+    // live session. An optional interface/property failure retains the OS privacy
+    // border and the requested WGC target; only an unavailable required session
+    // returns false.
 
     bool CaptureEngine::ApplyCaptureBorderPolicy(const char* capture_target) {
-        if (!wgc_state_ || !wgc_state_->session) return false;
-
         CaptureBorderPolicyInput input;
+        input.session_available = wgc_state_ && static_cast<bool>(wgc_state_->session);
         input.session_interface_checked = true;
+        std::string optional_failure_detail;
+        if (!input.session_available) {
+            if (last_capture_failure_detail_.empty()) {
+                SetCaptureFailure(
+                    "api_call=Direct3D11CaptureFramePool::CreateCaptureSession "
+                    "result=session_unavailable");
+            }
+            const auto decision = EvaluateCaptureBorderPolicy(input);
+            std::cout << "[CaptureBorderPolicy] target="
+                      << (capture_target ? capture_target : "unknown")
+                      << " capture_allowed="
+                      << (decision.capture_allowed ? "true" : "false")
+                      << " border_status=required_session_unavailable"
+                      << " reason=" << CaptureBorderPolicyReasonName(decision.reason)
+                      << std::endl;
+            return decision.capture_allowed;
+        }
         try {
             auto session3 = wgc_state_->session.try_as<
                 winrt::Windows::Graphics::Capture::IGraphicsCaptureSession3>();
@@ -4535,47 +6283,55 @@ namespace fthr {
                     input.border_required_after_attempt =
                         session3.IsBorderRequired();
                 } catch (winrt::hresult_error const& error) {
-                    SetCaptureFailure(diagnostics::FormatHResultFailure(
+                    optional_failure_detail = diagnostics::FormatHResultFailure(
                         "IGraphicsCaptureSession3::IsBorderRequired",
-                        error.code().value));
+                        error.code().value);
                     input.property_set_succeeded = false;
                 } catch (...) {
-                    SetCaptureFailure(
-                        "api_call=IGraphicsCaptureSession3::IsBorderRequired exception=unknown");
+                    optional_failure_detail =
+                        "api_call=IGraphicsCaptureSession3::IsBorderRequired exception=unknown";
                     input.property_set_succeeded = false;
                 }
             }
         } catch (winrt::hresult_error const& error) {
-            SetCaptureFailure(diagnostics::FormatHResultFailure(
+            optional_failure_detail = diagnostics::FormatHResultFailure(
                 "GraphicsCaptureSession::QueryInterface(IGraphicsCaptureSession3)",
-                error.code().value));
+                error.code().value);
             input.session_interface_available = false;
         } catch (...) {
-            SetCaptureFailure(
-                "api_call=GraphicsCaptureSession::QueryInterface(IGraphicsCaptureSession3) exception=unknown");
+            optional_failure_detail =
+                "api_call=GraphicsCaptureSession::QueryInterface(IGraphicsCaptureSession3) exception=unknown";
             input.session_interface_available = false;
         }
         const auto decision = EvaluateCaptureBorderPolicy(input);
+        const char* border_status = decision.effective_borderless
+            ? "verified_borderless" : "os_privacy_border_retained";
 
-        std::cout << "[CaptureBorderPolicy] target=" << capture_target
+        std::cout << "[CaptureBorderPolicy] target="
+                  << (capture_target ? capture_target : "unknown")
                   << " session_interface="
                   << (input.session_interface_available ? "available" : "unavailable")
                   << " property_attempted=" << (input.property_attempted ? "true" : "false")
                   << " property_set=" << (input.property_set_succeeded ? "true" : "false")
                   << " border_required="
                   << (input.border_required_after_attempt ? "true" : "false")
-                  << " effective=" << (decision.effective_borderless ? "true" : "false")
+                  << " capture_allowed="
+                  << (decision.capture_allowed ? "true" : "false")
+                  << " border_status=" << border_status
+                  << " effective_borderless="
+                  << (decision.effective_borderless ? "true" : "false")
                   << " reason=" << CaptureBorderPolicyReasonName(decision.reason)
+                  << (optional_failure_detail.empty() ? "" : " optional_failure=")
+                  << optional_failure_detail
                   << std::endl;
 
-        if (!decision.effective_borderless
-            && last_capture_failure_detail_.empty()) {
+        if (!decision.capture_allowed) {
             SetCaptureFailure(
                 std::string("api_call=IGraphicsCaptureSession3::IsBorderRequired result=")
                 + CaptureBorderPolicyReasonName(decision.reason));
         }
 
-        return decision.effective_borderless;
+        return decision.capture_allowed;
     }
 
 
@@ -4620,21 +6376,29 @@ namespace fthr {
         // desktop. Never retain a surface borrowed from the WGC frame pool.
         const auto interval = std::chrono::microseconds(1000000 / fps_);
         auto next_tick = std::chrono::steady_clock::now();
+        WgcCadenceWait cadence_wait;
+        std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\","
+                  << "\"event\":\"wgc_cadence_timer_initialized\","
+                  << "\"timer_mode\":\""
+                  << (cadence_wait.HighResolution() ? "high_resolution" : "condition_variable")
+                  << "\"}" << std::endl;
         winrt::com_ptr<ID3D11Texture2D> latest_texture;
-        uint64_t repeated_frames = 0;
         if (replay_encoder_) {
             replay_encoder_->SetCaptureGeneration(
                 capture_generation_.load(std::memory_order_relaxed));
         }
         uint32_t consecutive_frame_errors = 0;
         CaptureFocusPolicy focus_policy;
+        LARGE_INTEGER focus_frequency{};
+        QueryPerformanceFrequency(&focus_frequency);
+        int64_t foreground_since_100ns = 0;
 
         while (running_.load(std::memory_order_relaxed)) {
 
             next_tick += interval;
             {
                 std::unique_lock<std::mutex> lk(wgc_frame_mutex_);
-                wgc_frame_cv_.wait_until(lk, next_tick, [this] {
+                cadence_wait.WaitUntil(next_tick, wgc_frame_cv_, lk, [this] {
                     return monitor_source_invalidated_.load(std::memory_order_acquire)
                         || !running_.load(std::memory_order_relaxed);
                 });
@@ -4665,7 +6429,12 @@ namespace fthr {
                           << std::endl;
                 SetCaptureFailure(std::string("selected WGC ") + source_kind
                     + " capture item closed");
-                capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+                monitor::WindowsMonitorTopologySource topology;
+                monitor::MonitorResolver resolver(topology);
+                const bool monitor_still_live = wgc_state_->monitor_item
+                    && resolver.Resolve(monitor_device_path_).ok();
+                capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED
+                    | (monitor_still_live ? CAPTURE_HEALTH_RECONFIGURE_REQUIRED : 0));
                 ClearReplayForRecovery();
                 running_.store(false);
                 break;
@@ -4678,23 +6447,48 @@ namespace fthr {
                 winrt::check_hresult(device_->GetDeviceRemovedReason());
                 const auto focus = focus_policy.Observe(focus_gated_ && target_hwnd_ != 0
                     && GetForegroundWindow() != reinterpret_cast<HWND>(target_hwnd_));
+                LARGE_INTEGER focus_now{};
+                QueryPerformanceCounter(&focus_now);
+                const auto raw_focus_time = ReplayPauseClock::Scale(
+                    focus_now.QuadPart, 10'000'000, focus_frequency.QuadPart);
+                if (replay_pause_clock_) {
+                    replay_pause_clock_->Observe(focus.paused, raw_focus_time);
+                }
+                // Keep this raw boundary independent of compact replay time so
+                // audio-enabled generations also reject pre-resume WGC frames.
+                if (focus.paused) foreground_since_100ns = 0;
+                else if (!foreground_since_100ns) foreground_since_100ns = raw_focus_time;
                 if (focus.paused) {
                     latest_texture = nullptr;
                     capture_health_flags_.fetch_or(CAPTURE_HEALTH_PAUSED);
                 } else if (focus.resumed) {
-                    // Start fresh history after a focus gap. Joining pre-tab
-                    // and post-tab packets creates a sparse timeline that the
-                    // save validator correctly rejects. Do not reuse an image
-                    // from the desktop while waiting for a new game frame.
                     latest_texture = nullptr;
-                    ClearReplayForRecovery();
-                    capture_generation_.fetch_add(1, std::memory_order_acq_rel);
-                    if (replay_encoder_) replay_encoder_->SetCaptureGeneration(
-                        capture_generation_.load(std::memory_order_acquire));
-                    if (replay_encoder_) replay_encoder_->RequestKeyframe();
+                    if (!replay_pause_clock_) {
+                        // Raw-coordinate generations cannot bridge a focus gap:
+                        // start a fresh generation and publish a keyframe boundary.
+                        ClearReplayForRecovery();
+                        capture_generation_.fetch_add(1, std::memory_order_acq_rel);
+                        LARGE_INTEGER generation_start_qpc{};
+                        if (QueryPerformanceCounter(&generation_start_qpc)) {
+                            generation_start_qpc_.store(
+                                generation_start_qpc.QuadPart,
+                                std::memory_order_release);
+                        }
+                        last_source_frame_qpc_.store(0, std::memory_order_release);
+                        last_encoder_submission_qpc_.store(0, std::memory_order_release);
+                        last_encoded_output_qpc_.store(0, std::memory_order_release);
+                        last_ring_insertion_qpc_.store(0, std::memory_order_release);
+                        if (replay_encoder_) replay_encoder_->SetCaptureGeneration(
+                            capture_generation_.load(std::memory_order_acquire));
+                        if (replay_encoder_) replay_encoder_->RequestKeyframe();
+                        std::cout << "[CaptureThread/WGC] Game focus restored; rebuilding replay history."
+                                  << std::endl;
+                    } else if (replay_encoder_) {
+                        replay_encoder_->RequestKeyframe();
+                    }
                     capture_health_flags_.fetch_and(~CAPTURE_HEALTH_PAUSED);
-                    std::cout << "[CaptureThread/WGC] Game focus restored; rebuilding replay history."
-                              << std::endl;
+                } else {
+                    capture_health_flags_.fetch_and(~CAPTURE_HEALTH_PAUSED);
                 }
                 bool new_image = false;
                 // Drain both slots at each tick. Notifications can coalesce;
@@ -4704,6 +6498,8 @@ namespace fthr {
                     if (!frame) break;
                     wgc::FrameLease frame_lease(frame);
                     if (focus.discard_queued_frames) continue;
+                    if (focus_gated_ && frame.SystemRelativeTime().count()
+                            < foreground_since_100ns) continue;
                     current_frame_api = "Direct3D11CaptureFrame::ContentSize";
                     const auto content_size = frame.ContentSize();
                     if (content_size.Width != static_cast<int32_t>(width_)
@@ -4726,7 +6522,8 @@ namespace fthr {
                                   << std::endl;
                         SetCaptureFailure(std::string("WGC ") + source_kind
                             + " dimensions changed; a fresh capture generation is required");
-                        capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+                        capture_health_flags_.store(WgcSizeMismatchHealthFlags(
+                            wgc_state_->monitor_item));
                         ClearReplayForRecovery();
                         running_.store(false);
                         break;
@@ -4774,6 +6571,13 @@ namespace fthr {
                 } // Close every borrowed frame before encoding the owned copy.
                 if (!running_.load(std::memory_order_relaxed)) break;
                 if (!latest_texture) continue;
+                // Focus may change while draining the frame pool. Never submit
+                // that tick's monitor image after the protected game loses focus.
+                if (focus_gated_ && GetForegroundWindow()
+                        != reinterpret_cast<HWND>(target_hwnd_)) {
+                    latest_texture = nullptr;
+                    continue;
+                }
 
                 // Do not publish a cached image after the item changes size.
                 current_frame_api = "GraphicsCaptureItem::Size";
@@ -4781,23 +6585,36 @@ namespace fthr {
                 if (live_size.Width != static_cast<int32_t>(width_)
                     || live_size.Height != static_cast<int32_t>(height_)) {
                     SetCaptureFailure("WGC source dimensions changed; restart required");
-                    capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+                    capture_health_flags_.store(WgcSizeMismatchHealthFlags(
+                        wgc_state_->monitor_item));
                     ClearReplayForRecovery();
                     running_.store(false);
                     break;
                 }
                 capture_health_flags_.fetch_or(CAPTURE_HEALTH_ACTIVE);
-                if (!new_image) ++repeated_frames;
+                if (!new_image) {
+                    wgc_repeated_frame_observations_.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
                 const auto& tex = latest_texture;
                 LARGE_INTEGER now;
                 QueryPerformanceCounter(&now);
+                const auto replay_qpc = replay_pause_clock_
+                    ? replay_pause_clock_->MapQpc(now.QuadPart, focus_frequency.QuadPart)
+                    : now.QuadPart;
+                if (new_image && now.QuadPart > 0) {
+                    // Cached WGC images are encoded repeatedly for pacing, but
+                    // only a newly acquired image advances source progress.
+                    last_source_frame_qpc_.store(
+                        now.QuadPart, std::memory_order_release);
+                }
 
                 if (nvenc_active_ && !replay_encoder_cpu_input_) {
                     // Same-adapter compressed replay (native NVENC or AMF).
                     // A GPU CopyResource feeds the encoder-owned texture.
                     ID3D11Texture2D* encode_texture = PrepareEncodeTexture(tex.get());
                     if (!encode_texture || !EncodeGpuReplayTexture(
-                            encode_texture, now.QuadPart,
+                            encode_texture, replay_qpc,
                             frames_captured_.load(std::memory_order_relaxed) + 1)) {
                         break;
                     }
@@ -4831,11 +6648,15 @@ namespace fthr {
 
                     const uint8_t* encode_data = CropMappedData(
                         static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch);
+                    if (now.QuadPart > 0) {
+                        last_encoder_submission_qpc_.store(
+                            now.QuadPart, std::memory_order_release);
+                    }
                     bool encoded = false;
                     for (uint32_t attempt = 1; attempt <= 3 && !encoded; ++attempt) {
                         encoded = replay_encoder_->EncodeFrameCPU(
                             encode_data,
-                            mapped.RowPitch, now.QuadPart);
+                            mapped.RowPitch, replay_qpc);
                         if (!encoded && attempt < 3) {
                             std::cerr << "[CaptureThread/WGC] Transient hybrid encoder "
                                       << "submission failure; retrying (" << attempt
@@ -4922,8 +6743,9 @@ namespace fthr {
 
         std::cout << "[CaptureThread/WGC] Stopped. Frames captured: "
                   << frames_captured_.load() << " repeated idle frames: "
-                  << repeated_frames << std::endl;
-        if (capture_health_flags_.load() != CAPTURE_HEALTH_BACKEND_FAILED)
+                  << wgc_repeated_frame_observations_.load(
+                         std::memory_order_relaxed) << std::endl;
+        if (!(capture_health_flags_.load() & CAPTURE_HEALTH_BACKEND_FAILED))
             capture_health_flags_.store(CAPTURE_HEALTH_NONE);
 
         winrt::uninit_apartment();
@@ -5104,14 +6926,15 @@ namespace fthr {
                     2,
                     sz);
 
-            // Apply monitor capture border policy; return false for DXGI fallback
-            // if the runtime requires a border.
+            // Apply the optional border opt-out before StartCapture. A missing
+            // or denied opt-out retains this requested HWND and the OS privacy
+            // border; only a required session failure rejects window capture.
             current_api = "Direct3D11CaptureFramePool::CreateCaptureSession";
             wgc_state_->session =
                 wgc_state_->frame_pool.CreateCaptureSession(wgc_state_->item);
             if (!ApplyCaptureBorderPolicy("window")) {
-                std::cerr << "[WinCapture] Windows privacy border would remain visible; "
-                             "falling back to border-free monitor capture."
+                std::cerr << "[WinCapture] Required WGC window session unavailable; "
+                             "the requested HWND remains required; no monitor/DXGI fallback."
                           << std::endl;
                 ShutdownWGC();
                 ShutdownD3D11();
@@ -5208,6 +7031,7 @@ namespace fthr {
     // ShutdownD3D11 - unchanged
 
     void CaptureEngine::ShutdownD3D11() {
+        InvalidateDxgiReplayCache();
         if (health_staging_texture_) {
             health_staging_texture_->Release();
             health_staging_texture_ = nullptr;

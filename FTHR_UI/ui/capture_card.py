@@ -14,7 +14,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor, QPainter, QPen, QFont, QFontDatabase, QFontMetrics,
-    QLinearGradient, QPainterPath,
+    QLinearGradient,
 )
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -65,16 +65,18 @@ def _load_notification_fonts() -> None:
     global _NOTIFICATION_FONTS_LOADED
     if _NOTIFICATION_FONTS_LOADED:
         return
-    if _FONT_ASSET.exists():
-        QFontDatabase.addApplicationFont(str(_FONT_ASSET))
+    paths = [*_FONT_ASSET.parent.glob('*.ttf'),
+             *ThemeManager().get_custom_font_paths().values()]
+    for path in dict.fromkeys(paths):
+        QFontDatabase.addApplicationFont(str(path))
     _NOTIFICATION_FONTS_LOADED = True
 
 
 def _body_font(size: int, weight=QFont.Weight.Normal) -> QFont:
-    # Keep the detached notification card on the same display system as the
-    # main app. Its process loads the bundled Oswald asset independently.
     family = ThemeManager().get_font('body') or 'Oswald'
-    return QFont(family, size, weight)
+    font = QFont(family, size, weight)
+    font.setFamilies([family, 'Segoe UI', 'Noto Sans', 'DejaVu Sans'])
+    return font
 
 
 def _resolve_sound(key: str) -> Path:
@@ -255,7 +257,7 @@ class CaptureCard(QWidget):
                 _SOUND_VOLUME_KEYS[key], 100))
         except Exception:
             volume = 100
-        _play_sound(_resolve_sound(key), volume)
+        _play_sound(_resolve_sound(key), _master_volume(volume))
 
     def show_prompt(self, text: str,
                     hold_duration_ms: int = _DEFAULT_HOLD_DURATION_MS) -> None:
@@ -348,7 +350,7 @@ class CaptureCard(QWidget):
                     _SOUND_VOLUME_KEYS[sound_key], 100))
             except Exception:
                 volume = 100
-            _play_sound(_resolve_sound(sound_key), volume)
+            _play_sound(_resolve_sound(sound_key), _master_volume(volume))
 
         # The helper process remains alive as a lightweight sound host when
         # card visuals are disabled. Keep this after sound dispatch so all
@@ -500,14 +502,15 @@ class CaptureCard(QWidget):
         hl_font = QFont(
             ThemeManager().get_font('display') or 'Oswald',
             headline_size,
-            QFont.Weight.Bold,
+            QFont.Weight.DemiBold,
         )
-        hl_font.setLetterSpacing(
-            QFont.SpacingType.AbsoluteSpacing, 1.0 if self._compact else 1.4)
+        hl_font.setFamilies([ThemeManager().get_font('display'),
+                             'Segoe UI', 'Noto Sans', 'DejaVu Sans'])
+        hl_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
         p.setFont(hl_font)
         p.setPen(self._c_text)
         headline = QFontMetrics(hl_font).elidedText(
-            self._headline,
+            self._headline.capitalize(),
             Qt.TextElideMode.ElideRight,
             w - headline_x - 12,
         )
@@ -552,30 +555,10 @@ class CaptureCard(QWidget):
         p.end()
 
     def _draw_camera(self, p: QPainter, x: int, y: int, size: int) -> None:
-        """Render a video-camera icon matching the SVG in capturecard.html."""
-        scale = size / 24.0
-        pen = QPen(self._c_text)
-        pen.setWidthF(1.6 * scale)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-
-        # Body rect: SVG x=2,y=6,w=14,h=12,rx=1.5
-        p.drawRoundedRect(
-            int(x + 2*scale), int(y + 6*scale),
-            int(14*scale),    int(12*scale),
-            1.5*scale, 1.5*scale,
-        )
-
-        # Viewfinder triangle: M16 10 l5 -3 v10 l-5 -3 V10
-        path = QPainterPath()
-        path.moveTo(x + 16*scale, y + 10*scale)
-        path.lineTo(x + 21*scale, y +  7*scale)
-        path.lineTo(x + 21*scale, y + 17*scale)
-        path.lineTo(x + 16*scale, y + 13*scale)
-        path.closeSubpath()
-        p.drawPath(path)
+        """Render the supplied camera SVG with capture-card text tint."""
+        from ui.icons import icon_pixmap
+        pixmap = icon_pixmap('camera.png', size, self._c_text.name())
+        p.drawPixmap(x, y, pixmap)
 
     def _draw_stats(self, p: QPainter, top: int) -> None:
         """Three-column stats with vertical separators."""
@@ -615,3 +598,11 @@ class CaptureCard(QWidget):
                 sep_x = cx + col_w - 2
                 p.setPen(QPen(self._c_divider, 1))
                 p.drawLine(sep_x, top + 2, sep_x, top + 34)
+
+
+def _master_volume(volume):
+    try:
+        master = max(0, min(100, int(SettingsManager().get('sound_volume_master', 100))))
+    except (TypeError, ValueError):
+        master = 100
+    return round(max(0, min(100, volume)) * master / 100)

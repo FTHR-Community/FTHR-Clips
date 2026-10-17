@@ -1,7 +1,7 @@
 """Coordinate optional upload packages through local subprocess IPC.
 
 Core owns consent, extraction, settings, and queueing. Network requests
-run in the uploader; hardware identity requires its separate capability.
+run in the uploader.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ from typing import Any, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from core.clip_files import is_completed_video_path, iter_safe_tree
+from core.settings_manager import clips_directory_from
+from core.field_diagnostics import emit_event
 from core.clip_readiness import (
     ClipReadinessRegistry,
     ClipReadinessState,
@@ -38,11 +40,7 @@ from core.export_profiles import (
     provider_limit_mb,
 )
 from core.uploader_bundle_manifest import (
-    EXPECTED_HARDWARE_BUNDLE_SHA256,
     EXPECTED_UPLOADER_BUNDLE_SHA256,
-    HARDWARE_PLUGIN_ID,
-    HARDWARE_PLUGIN_VERSION,
-    HARDWARE_POLICY_VERSION,
     UPLOADER_PLUGIN_ID,
     UPLOADER_PLUGIN_VERSION,
     UPLOADER_PRIVACY_VERSION,
@@ -54,19 +52,14 @@ _LOCAL_APP_DATA = Path(os.environ.get(
     'LOCALAPPDATA', str(Path.home() / 'AppData' / 'Local')))
 _PLUGIN_DATA_ROOT = _LOCAL_APP_DATA / 'FTHR Clips' / 'plugins'
 _UPLOADER_ROOT = _PLUGIN_DATA_ROOT / 'uploader'
-_HARDWARE_ROOT = _PLUGIN_DATA_ROOT / 'hardware-identity'
 _UPLOADER_ACTIVATION_FILE = _UPLOADER_ROOT / 'activation.json'
-_HARDWARE_ACTIVATION_FILE = _HARDWARE_ROOT / 'activation.json'
 
 _SETTINGS_FILE = Path.home() / '.fthr' / 'uploader' / 'settings.json'
 _HISTORY_FILE = Path.home() / '.fthr' / 'uploader' / 'upload_history.json'
-_CREDENTIALS_FILE = Path.home() / '.fthr' / 'uploader' / 'credentials.json'
 _LEGACY_HISTORY_FILE = Path.home() / '.fthr' / 'upload_history.json'
-_CLIPS_DIR = Path.home() / 'FTHR_Clips'
 _WRITE_SETTLE_S = 30
 
 CATBOX_LEGAL_VERSION = 'catbox-legal-2021-03-06'
-LUSTFUL_LEGAL_VERSION = 'lustful-legal-2026-07-27'
 
 _DEFAULT_SETTINGS: dict[str, Any] = {
     'upload_enabled': False,
@@ -74,6 +67,13 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     'catbox_userhash': '',
     'upload_server_url': '',
     'upload_auth_header': '',
+    'sftp_host': '',
+    'sftp_port': 22,
+    'sftp_username': '',
+    'sftp_directory': '.',
+    'sftp_fingerprint': '',
+    'sftp_public_enabled': False,
+    'sftp_public_base_url': '',
     'upload_mode': 'manual',
     'upload_interval_value': 5,
     'upload_interval_unit': 'minutes',
@@ -84,10 +84,6 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     'uploader_accepted_at': '',
     'catbox_legal_accepted_version': '',
     'catbox_legal_accepted_at': '',
-    'lustful_legal_accepted_version': '',
-    'lustful_legal_accepted_at': '',
-    'lustful_hardware_policy_accepted_version': '',
-    'lustful_hardware_policy_accepted_at': '',
 }
 
 _LEGACY_UPLOAD_KEYS = (
@@ -99,6 +95,10 @@ _LEGACY_UPLOAD_KEYS = (
     'upload_interval_unit',
     'upload_auto_delete',
 )
+
+# Optional test/integration override. Normal application settings always carry
+# a resolved clips_directory, so this is not an independent storage fallback.
+_CLIPS_DIR: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -126,17 +126,6 @@ def _uploader_spec() -> _BundleSpec:
     )
 
 
-def _hardware_spec() -> _BundleSpec:
-    return _BundleSpec(
-        label='FTHR Lustful Hardware Identity',
-        filename='FTHR-Hardware-Identity.fthrplugin',
-        plugin_id=HARDWARE_PLUGIN_ID,
-        plugin_version=HARDWARE_PLUGIN_VERSION,
-        expected_sha256=EXPECTED_HARDWARE_BUNDLE_SHA256,
-        entrypoint='FTHR Hardware Identity.exe',
-        install_root=_HARDWARE_ROOT,
-        receipt_path=_HARDWARE_ACTIVATION_FILE,
-    )
 
 
 def _sha256(path: Path) -> str:
@@ -201,6 +190,7 @@ class UploadManager(QObject):
         self._interval_scan_thread: threading.Thread | None = None
         self._interval_scan_cancel = threading.Event()
         self._in_flight: set[str] = set()
+        self._local_mutations: set[str] = set()
         self._in_flight_lock = threading.Lock()
         self._history: dict[str, Any] = {}
         self._history_mtime_ns = -1
@@ -212,10 +202,13 @@ class UploadManager(QObject):
         return self._settings.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
+        if key == 'sftp_password':
+            raise ValueError('SFTP passwords must be stored through the credential vault.')
         self._settings[key] = value
 
     def save_settings(self) -> bool:
         try:
+            self._settings.pop('sftp_password', None)
             _atomic_json(_SETTINGS_FILE, self._settings)
             self.refresh_settings()
             return True
@@ -224,21 +217,22 @@ class UploadManager(QObject):
             return False
 
     def clips_directory(self) -> Path:
-        configured = self._core_settings.get('clips_directory', '')
-        if configured:
-            try:
-                return Path(configured).expanduser().resolve(strict=False)
-            except (OSError, TypeError, ValueError):
-                # A malformed core setting must not break the optional uploader;
-                # retain its historical fallback root for this scan.
-                pass
-        return _CLIPS_DIR
+        return clips_directory_from(
+            self._core_settings, missing_default=_CLIPS_DIR)
 
     def _load_settings(self) -> dict[str, Any]:
         if not _SETTINGS_FILE.is_file():
             return dict(_DEFAULT_SETTINGS)
         try:
-            return {**_DEFAULT_SETTINGS, **_read_object(_SETTINGS_FILE)}
+            settings = {**_DEFAULT_SETTINGS, **_read_object(_SETTINGS_FILE)}
+            settings.pop('sftp_password', None)
+            settings = {key: value for key, value in settings.items()
+                        if not key.startswith('lustful_')}
+            if settings.get('upload_provider') not in {
+                    'catbox', 'custom', 'own_server', 'your_server', 'sftp'}:
+                settings['upload_enabled'] = False
+                settings['upload_provider'] = 'catbox'
+            return settings
         except (OSError, ValueError, TypeError):
             return dict(_DEFAULT_SETTINGS)
 
@@ -296,9 +290,6 @@ class UploadManager(QObject):
         _, terms, privacy = self._inspect_bundle(_uploader_spec())
         return terms, privacy
 
-    def hardware_legal_text(self) -> tuple[str, str]:
-        _, terms, privacy = self._inspect_bundle(_hardware_spec())
-        return terms, privacy
 
     def _is_installed(self, spec: _BundleSpec) -> bool:
         try:
@@ -333,15 +324,6 @@ class UploadManager(QObject):
             # A malformed legal receipt is never treated as current consent.
             return False
 
-    def is_hardware_identity_installed(self) -> bool:
-        if not self._is_installed(_hardware_spec()):
-            return False
-        try:
-            receipt = _read_object(_HARDWARE_ACTIVATION_FILE)
-            return receipt.get('policy_version') == HARDWARE_POLICY_VERSION
-        except (OSError, ValueError, TypeError):
-            # A malformed capability receipt is never treated as current consent.
-            return False
 
     def _activate_bundle(
             self,
@@ -468,23 +450,6 @@ class UploadManager(QObject):
         self.plugin_state_changed.emit(True, True)
         return True, message
 
-    def activate_hardware_identity(
-            self,
-            accepted_policy_version: str) -> tuple[bool, str]:
-        if accepted_policy_version != HARDWARE_POLICY_VERSION:
-            return False, 'The Lustful hardware-identity notice was not accepted.'
-        ok, message = self._activate_bundle(
-            _hardware_spec(),
-            {'policy_version': accepted_policy_version},
-        )
-        if not ok:
-            return False, message
-        self._settings['lustful_hardware_policy_accepted_version'] = accepted_policy_version
-        self._settings['lustful_hardware_policy_accepted_at'] = (
-            datetime.now(timezone.utc).isoformat(timespec='seconds'))
-        if not self.save_settings():
-            return False, 'Hardware Identity was installed, but consent could not be saved.'
-        return True, message
 
     def set_plugin_enabled(self, enabled: bool) -> tuple[bool, str]:
         if enabled and not self.is_plugin_installed():
@@ -499,10 +464,9 @@ class UploadManager(QObject):
         return True, 'Upload Extension enabled.' if enabled else 'Upload Extension disabled.'
 
     def record_provider_consent(self, provider: str, version: str) -> bool:
-        if provider not in {'catbox', 'lustful'}:
+        if provider not in {'catbox'}:
             return False
-        expected = CATBOX_LEGAL_VERSION if provider == 'catbox' else LUSTFUL_LEGAL_VERSION
-        if version != expected:
+        if version != CATBOX_LEGAL_VERSION:
             return False
         self._settings[f'{provider}_legal_accepted_version'] = version
         self._settings[f'{provider}_legal_accepted_at'] = (
@@ -510,8 +474,8 @@ class UploadManager(QObject):
         return self.save_settings()
 
     def provider_consent_current(self, provider: str) -> bool:
-        expected = CATBOX_LEGAL_VERSION if provider == 'catbox' else LUSTFUL_LEGAL_VERSION
-        return self.get(f'{provider}_legal_accepted_version', '') == expected
+        return (provider == 'catbox' and
+                self.get('catbox_legal_accepted_version', '') == CATBOX_LEGAL_VERSION)
 
     def _migrate_legacy_state(self) -> None:
         legacy = getattr(self._core_settings, 'settings', {})
@@ -570,12 +534,6 @@ class UploadManager(QObject):
             'activation_id': receipt['activation_id'],
             **(payload or {}),
         }
-        if self.is_hardware_identity_installed():
-            hardware = self._activation(_hardware_spec())
-            request['hardware_identity'] = {
-                'receipt': str(_HARDWARE_ACTIVATION_FILE),
-                'activation_id': hardware['activation_id'],
-            }
         creation_flags = (
             getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == 'win32' else 0)
         completed = subprocess.run(
@@ -694,7 +652,8 @@ class UploadManager(QObject):
     def _enqueue(self, path: str, event: threading.Event,
                  *, task_kind: str = 'upload') -> None:
         with self._in_flight_lock:
-            if self.is_uploaded(path) or path in self._in_flight:
+            if (self.is_uploaded(path) or path in self._in_flight
+                    or path in self._local_mutations):
                 return
             self._in_flight.add(path)
         self._queue.put((task_kind, path, event))
@@ -901,8 +860,14 @@ class UploadManager(QObject):
                 path = str(item)
                 if not self.is_uploaded(path):
                     self.enqueue_upload(path)
-        except OSError:
-            # A temporarily unavailable clips directory is retried next interval.
+        except OSError as error:
+            # Do not silently scan a different root; report a bounded reason
+            # and let the next interval retry the configured storage location.
+            if not cancel_event.is_set() and not self._stop_event.is_set():
+                detail = f'{type(error).__name__}: {error}'[:200]
+                emit_event(
+                    'upload', 'library_scan_unavailable', state='RETRYING',
+                    reason='storage_unavailable', detail=detail)
             return
         finally:
             with self._interval_scan_lock:
@@ -950,33 +915,39 @@ class UploadManager(QObject):
                 pass
         return True
 
-    def local_account(self) -> dict[str, Any] | None:
-        try:
-            value = _read_object(_CREDENTIALS_FILE)
-        except (OSError, ValueError, TypeError):
-            # No valid local credentials simply means the account is disconnected.
-            return None
-        return value if value.get('account_id') and value.get('hwid') else None
 
     # Settings UI actions
 
-    def account_action(
-            self,
-            mode: str,
-            account_id: str) -> tuple[bool, dict[str, Any], str]:
-        response = self._invoke_plugin(mode, {'account_id': account_id}, timeout=60)
-        data = response.get('data')
-        return (
-            bool(response.get('ok')),
-            dict(data) if isinstance(data, dict) else {},
-            str(response.get('message', '')),
-        )
-
-    def logout_account(self) -> tuple[bool, str]:
-        response = self._invoke_plugin('logout', timeout=30)
+    def sftp_credentials(self, config: dict[str, Any], *, forget: bool = False) -> tuple[bool, str]:
+        response = self._invoke_plugin(
+            'sftp_forget' if forget else 'sftp_save', {'config': config}, timeout=30)
         return bool(response.get('ok')), str(response.get('message', ''))
+
+
 
     def test_connection(self, config: dict[str, Any]) -> tuple[bool, str]:
         response = self._invoke_plugin(
-            'test_connection', {'config': config}, timeout=30)
+            'test_connection', {'config': config}, timeout=75)
         return bool(response.get('ok')), str(response.get('message', ''))
+
+    def begin_local_mutation(self, path: str) -> bool:
+        """Reserve a clip against uploads while the library renames/deletes it."""
+        with self._in_flight_lock:
+            if path in self._in_flight:
+                return False
+            self._local_mutations.add(path)
+            return True
+
+
+    def end_local_mutation(self, path: str) -> None:
+        with self._in_flight_lock:
+            self._local_mutations.discard(path)
+
+
+    def rename_history_path(self, old_path: str, new_path: str) -> None:
+        """Keep the returned provider link attached to a renamed local clip."""
+        history = dict(self._load_history())
+        if old_path in history:
+            history[new_path] = history.pop(old_path)
+            _atomic_json(_HISTORY_FILE, history)
+            self._invalidate_history()

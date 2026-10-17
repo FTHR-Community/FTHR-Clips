@@ -1,0 +1,14 @@
+# Optional uploader build dependencies only; do not add SSH clients to Core.
+paramiko==4.0.0
+keyring==25.7.0
+bcrypt==5.0.0
+cryptography==50.0.1
+invoke==3.0.3
+PyNaCl==1.6.2
+cffi==2.0.0
+pycparser==3.0
+jaraco.classes==3.4.0
+jaraco.context==6.1.2
+jaraco.functools==4.6.0
+more-itertools==11.1.0
+pywin32-ctypes==0.2.3 ; sys_platform == 'win32'

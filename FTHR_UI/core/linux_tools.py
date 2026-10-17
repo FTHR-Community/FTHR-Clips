@@ -108,8 +108,11 @@ def report() -> str:
     lines = ['[Tools] External Linux helper resolution:']
     for name in sorted(_TOOLS):
         t = tool(name)
-        kind = 'required' if t.required else 'optional'
+        # These dependencies gate only the named feature. Calling them
+        # "required" in the startup report made KDE users reasonably assume
+        # that a missing Hyprland helper prevented FTHR from opening.
+        kind = 'feature-only' if t.required else 'optional'
         where = t.path if t.path else 'NOT FOUND'
-        lines.append(f'[Tools]   {name:<9} {kind:<8} {where}')
+        lines.append(f'[Tools]   {name:<9} {kind:<12} {where}')
     lines.append(f'[Tools]   PATH={os.environ.get("PATH", "")}')
     return '\n'.join(lines)

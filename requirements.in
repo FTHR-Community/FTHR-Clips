@@ -16,6 +16,5 @@ numpy>=2.4,<3
 sounddevice>=0.5,<0.6
 
 # Input
-# Windows global hotkeys. On Linux the app uses its own evdev/socket path
-# (core/hotkey_manager.py) and this is only a fallback.
+# Windows keyboard integration.
 keyboard>=0.13.5,<0.14

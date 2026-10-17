@@ -14,3 +14,10 @@ FTHR Clips brand icon
 The files FTHR_UI/assets/favicon.ico and FTHR_UI/assets/fthr_logo.ico were
 supplied by the workspace owner for use as the FTHR Clips application,
 executable, tray, shortcut, and Windows installer icon.
+
+Gary Mode cat image
+===================
+
+The file FTHR_UI/assets/gatze.png was supplied by the workspace owner on
+2026-10-15 for use as the occasional alternate Gary Mode image, including
+in packaged FTHR Clips builds. The supplied PNG is included unchanged.

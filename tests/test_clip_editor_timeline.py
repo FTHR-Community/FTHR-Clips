@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import MethodType, SimpleNamespace
+import pytest
 
 from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
@@ -14,6 +15,7 @@ from ui.clip_viewer import (
     LiveVideoPreview,
     StretchDialog,
     TrimSlider,
+    TimelineSegment,
     _editor_snapshot_from_draft,
     _editor_snapshot_to_draft,
     _video_filter_chain,
@@ -81,6 +83,48 @@ def test_repeated_scrub_requests_restart_the_seek_debounce():
     assert viewer._seek_timer.starts == 2
 
 
+def test_hidden_segments_seek_zoom_and_restore_in_source_time(qtbot):
+    timeline = TrimSlider(10_000)
+    qtbot.addWidget(timeline)
+    timeline.resize(828, 116)
+    timeline.segments = [TimelineSegment(0, .2), TimelineSegment(.2, .6, True),
+                         TimelineSegment(.6, 1)]
+    original = [(s.start_pct, s.end_pct, s.deleted) for s in timeline.segments]
+    timeline.set_hide_deleted_segments(True)
+    assert timeline._pct_from_x(414) == pytest.approx(.7)
+    assert timeline._overview_pct_from_x(414) == pytest.approx(.7)
+    assert timeline._display_to_source(1 / 3) == pytest.approx(.6)
+    timeline.show()
+    seeks = []
+    timeline.seek_requested.connect(seeks.append)
+    QTest.mouseClick(timeline, Qt.MouseButton.LeftButton, pos=QPoint(414, 56))
+    assert seeks[-1] == pytest.approx(.7)
+    assert timeline.selected_segment == 2
+    timeline.set_zoom(2, .7)
+    assert timeline._pct_from_x(414) == pytest.approx(.7)
+    timeline.pan(1)
+    timeline.ensure_visible(.1)
+    assert timeline.view_start_pct <= timeline._source_to_display(.1)
+    assert not timeline.grab().isNull()
+    timeline.set_hide_deleted_segments(False)
+    assert [(s.start_pct, s.end_pct, s.deleted) for s in timeline.segments] == original
+    timeline.selected_segment = 1
+    assert timeline.toggle_selected_deleted()
+    assert timeline.kept_ranges() == [(0, .2), (.2, .6), (.6, 1)]
+
+
+def test_hidden_leading_and_trailing_segments_leave_endpoints_selectable(qtbot):
+    timeline = TrimSlider(10_000)
+    qtbot.addWidget(timeline)
+    timeline.segments = [TimelineSegment(0, .2, True), TimelineSegment(.2, .8),
+                         TimelineSegment(.8, 1, True)]
+    timeline.set_hide_deleted_segments(True)
+    assert timeline._display_to_source(0) == .2
+    assert timeline._display_to_source(1) == .8
+    assert timeline._segment_index_at(.2) == 1
+    assert timeline._segment_index_at(.8) == 1
+
+
 def test_split_delete_and_restore_are_non_destructive(qtbot):
     timeline = TrimSlider(10_000)
     qtbot.addWidget(timeline)
@@ -115,7 +159,8 @@ def test_timeline_context_menu_targets_the_right_clicked_segment(qtbot):
     actions = menu.actions()
 
     assert timeline.selected_segment == 1
-    assert [action.text() for action in actions] == ['Split here', 'Delete segment']
+    assert [action.text() for action in actions if not action.isSeparator()] == [
+        'Split here', 'Delete segment', 'Hide deleted segments']
     assert all(action.isEnabled() for action in actions)
 
     actions[0].trigger()

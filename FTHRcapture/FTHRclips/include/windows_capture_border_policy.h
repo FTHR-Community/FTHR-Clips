@@ -10,6 +10,7 @@ namespace fthr {
 
 enum class CaptureBorderPolicyReason : uint8_t {
     NotWgc,
+    SessionUnavailable,
     SessionOptOutAttemptRequired,
     SessionInterfaceUnavailable,
     SessionPropertyFailed,
@@ -19,6 +20,7 @@ enum class CaptureBorderPolicyReason : uint8_t {
 
 struct CaptureBorderPolicyInput {
     bool wgc_session = true;
+    bool session_available = true;
     bool session_interface_checked = false;
     bool session_interface_available = false;
     bool property_attempted = false;
@@ -27,6 +29,7 @@ struct CaptureBorderPolicyInput {
 };
 
 struct CaptureBorderPolicyDecision {
+    bool capture_allowed = false;
     bool attempt_disable_border = false;
     bool effective_borderless = false;
     CaptureBorderPolicyReason reason =

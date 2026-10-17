@@ -5,10 +5,38 @@
 #include "replay_interval.h"
 
 #include <cassert>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
 
 namespace fthr {
+
+namespace {
+
+// Convert exactly one configured video PTS tick to the capture QPC domain.
+// This is used only for the exclusive end boundary; requested target_end_qpc
+// remains the independent stale-end/health guard.
+int64_t VideoPtsTickQpc(int64_t qpc_frequency,
+                        const EncodedVideoConfig& config) noexcept {
+    if (qpc_frequency <= 0 || config.time_base.numerator <= 0
+        || config.time_base.denominator <= 0) {
+        return 0;
+    }
+    const long double ticks =
+        static_cast<long double>(qpc_frequency)
+        * static_cast<long double>(config.time_base.numerator)
+        / static_cast<long double>(config.time_base.denominator);
+    if (!std::isfinite(ticks)
+        || ticks > static_cast<long double>(std::numeric_limits<int64_t>::max())) {
+        return 0;
+    }
+    const auto rounded = static_cast<int64_t>(std::llround(ticks));
+    return rounded > 0 ? rounded : 1;
+}
+
+}  // namespace
 
 EncodedRingBuffer::EncodedRingBuffer(
     size_t capacity, uint32_t fps, int64_t qpc_freq)
@@ -117,6 +145,8 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTime(
 
     for (int attempt = 0; attempt < 3; ++attempt) {
         EncodedRingSnapshot snapshot;
+        snapshot.selection_attempts = static_cast<uint32_t>(attempt + 1);
+        snapshot.ring_capacity = capacity_;
         const uint64_t current_generation =
             generation_.load(std::memory_order_acquire);
         snapshot.capture_generation = current_generation;
@@ -128,7 +158,25 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTime(
 
         const uint64_t current_head = head_.load(std::memory_order_acquire);
         const size_t current_count = count_.load(std::memory_order_acquire);
-        if (current_count == 0) return snapshot;
+        snapshot.ring_head = current_head;
+        snapshot.ring_count = current_count;
+        snapshot.snapshot_start_ring_head = current_head;
+        snapshot.snapshot_start_ring_count = current_count;
+        snapshot.snapshot_start_ring_generation = current_generation;
+        snapshot.scanned_packet_count = current_count;
+        const auto capture_after_state = [&snapshot, this]() {
+            snapshot.snapshot_end_ring_head = head_.load(
+                std::memory_order_acquire);
+            snapshot.snapshot_end_ring_count = count_.load(
+                std::memory_order_acquire);
+            snapshot.snapshot_end_ring_generation = generation_.load(
+                std::memory_order_acquire);
+        };
+        if (current_count == 0) {
+            snapshot.selection_outcome = replay_save::SnapshotOutcome::EmptyRing;
+            capture_after_state();
+            return snapshot;
+        }
         if (target_end_qpc <= 0) {
             target_end_qpc = latest_wall_qpc_.load(std::memory_order_acquire);
         }
@@ -152,6 +200,22 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTime(
             refs.push_back({pos, {packet.wall_qpc, packet.is_keyframe}});
         }
 
+        snapshot.eligible_packet_count = refs.size();
+        for (const auto& ref : refs) {
+            if (ref.sample.keyframe) ++snapshot.keyframe_count;
+            if (snapshot.oldest_wall_qpc == 0
+                || ref.sample.timestamp < snapshot.oldest_wall_qpc) {
+                snapshot.oldest_wall_qpc = ref.sample.timestamp;
+            }
+            snapshot.newest_wall_qpc = std::max(
+                snapshot.newest_wall_qpc, ref.sample.timestamp);
+        }
+        if (refs.empty()) {
+            snapshot.selection_outcome = replay_save::SnapshotOutcome::NoEligiblePackets;
+            capture_after_state();
+            return snapshot;
+        }
+
         std::vector<Sample> samples;
         samples.reserve(refs.size());
         for (const auto& ref : refs) samples.push_back(ref.sample);
@@ -159,7 +223,18 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTime(
             samples,
             target_end_qpc,
             static_cast<int64_t>(duration_seconds) * qpc_freq_);
-        if (!selection.valid) return snapshot;
+        snapshot.requested_start_qpc = selection.requested_start;
+        snapshot.target_end_qpc = selection.target_end;
+        if (!selection.valid) {
+            snapshot.selection_outcome = selection.outcome
+                == replay_interval::Selection::Outcome::MissingStartKeyframe
+                ? replay_save::SnapshotOutcome::MissingStartKeyframe
+                : replay_save::SnapshotOutcome::NoEligiblePackets;
+            capture_after_state();
+            return snapshot;
+        }
+        snapshot.valid_starting_keyframe = selection.decode_start < samples.size()
+            && samples[selection.decode_start].keyframe;
 
         snapshot.packets.reserve(
             selection.end - selection.decode_start + 1);
@@ -176,35 +251,91 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTime(
             }
             snapshot.packets.push_back(source);
         }
-        if (stale) continue;
+        if (stale) {
+            snapshot.internal_consistency = false;
+            continue;
+        }
         if (generation_.load(std::memory_order_acquire) != current_generation) {
             // Clear() may have invalidated the selected history while it was
             // being copied. Never return a snapshot that crosses that boundary.
+            snapshot.internal_consistency = false;
             continue;
         }
 
         snapshot.full_history = selection.full_history;
+        snapshot.selection_outcome = replay_save::SnapshotOutcome::Valid;
+        capture_after_state();
+        snapshot.interval_spanned_qpc = snapshot.packets.empty()
+            ? 0
+            : snapshot.packets.back().wall_qpc
+                - snapshot.packets.front().wall_qpc;
         int64_t requested_duration_ticks = DurationInVideoTicks(
             snapshot.video_config, duration_seconds);
         if (requested_duration_ticks <= 0) {
             requested_duration_ticks = static_cast<int64_t>(fps_)
                 * static_cast<int64_t>(duration_seconds);
         }
-        snapshot.presentation_start_pts = replay_interval::PresentationStartPts(
-            snapshot.packets.back().pts,
-            requested_duration_ticks,
-            snapshot.full_history,
-            snapshot.packets.front().pts);
+        snapshot.presentation_start_pts =
+            replay_interval::PresentationStartPts(
+                snapshot.packets.back().pts,
+                requested_duration_ticks,
+                snapshot.full_history,
+                snapshot.packets.front().pts);
         snapshot.qpc_start_s = static_cast<double>(
             snapshot.packets.front().wall_qpc) / qpc_freq_;
         snapshot.qpc_end_s = static_cast<double>(
             snapshot.packets.back().wall_qpc) / qpc_freq_;
         snapshot.media_end_qpc_s = snapshot.qpc_end_s;
-        snapshot.presentation_end_qpc_s =
-            static_cast<double>(target_end_qpc) / qpc_freq_;
-        snapshot.presentation_start_qpc_s = snapshot.full_history
-            ? snapshot.presentation_end_qpc_s - duration_seconds
-            : snapshot.qpc_start_s;
+
+        // Map the audio interval to the same actual video PTS range that the
+        // muxer rebases with presentation_start_pts.  target_end_qpc remains
+        // the requested save boundary and is still used by replay-health's
+        // stale-end predicate; it must never be treated as a captured frame.
+        snapshot.presentation_start_qpc_s = snapshot.qpc_start_s;
+        for (const auto& packet : snapshot.packets) {
+            if (packet.pts >= snapshot.presentation_start_pts) {
+                const long double pts_delta =
+                    static_cast<long double>(packet.pts)
+                    - static_cast<long double>(
+                        snapshot.presentation_start_pts);
+                const long double qpc_delta =
+                    static_cast<long double>(qpc_freq_)
+                    * static_cast<long double>(
+                        snapshot.video_config.time_base.numerator)
+                    * pts_delta
+                    / static_cast<long double>(
+                        snapshot.video_config.time_base.denominator);
+                if (std::isfinite(qpc_delta)
+                    && qpc_delta >= static_cast<long double>(
+                        std::numeric_limits<int64_t>::min())
+                    && qpc_delta <= static_cast<long double>(
+                        std::numeric_limits<int64_t>::max())) {
+                    const int64_t rounded_delta = static_cast<int64_t>(
+                        std::llround(qpc_delta));
+                    const long double mapped_start =
+                        static_cast<long double>(packet.wall_qpc)
+                        - static_cast<long double>(rounded_delta);
+                    if (mapped_start >= static_cast<long double>(
+                            std::numeric_limits<int64_t>::min())
+                        && mapped_start <= static_cast<long double>(
+                            std::numeric_limits<int64_t>::max())) {
+                        snapshot.presentation_start_qpc_s =
+                            static_cast<double>(static_cast<int64_t>(
+                                std::llround(mapped_start))) / qpc_freq_;
+                    }
+                }
+                break;
+            }
+        }
+        const int64_t one_tick_qpc = VideoPtsTickQpc(
+            qpc_freq_, snapshot.video_config);
+        const int64_t last_wall_qpc = snapshot.packets.back().wall_qpc;
+        const bool end_tick_fits = one_tick_qpc > 0
+            && last_wall_qpc <= std::numeric_limits<int64_t>::max()
+                - one_tick_qpc;
+        snapshot.presentation_end_qpc_s = end_tick_fits
+            ? static_cast<double>(last_wall_qpc + one_tick_qpc) / qpc_freq_
+            : snapshot.qpc_end_s;
 
         std::cout << "[EncodedRingBuffer] TakeSnapshot: "
                   << snapshot.packets.size() << " packets, QPC "
@@ -217,7 +348,23 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTime(
 
     std::cerr << "[EncodedRingBuffer] ring advanced during snapshot retries"
               << std::endl;
-    return {};
+    EncodedRingSnapshot snapshot;
+    snapshot.selection_outcome =
+        replay_save::SnapshotOutcome::RetryExhaustedGenerationOrSlotRace;
+    snapshot.selection_attempts = 3;
+    snapshot.internal_consistency = false;
+    snapshot.ring_capacity = capacity_;
+    snapshot.ring_count = count_.load(std::memory_order_acquire);
+    snapshot.ring_head = head_.load(std::memory_order_acquire);
+    snapshot.capture_generation = generation_.load(std::memory_order_acquire);
+    snapshot.snapshot_start_ring_count = snapshot.ring_count;
+    snapshot.snapshot_start_ring_head = snapshot.ring_head;
+    snapshot.snapshot_start_ring_generation = snapshot.capture_generation;
+    snapshot.snapshot_end_ring_count = snapshot.ring_count;
+    snapshot.snapshot_end_ring_head = snapshot.ring_head;
+    snapshot.snapshot_end_ring_generation = snapshot.capture_generation;
+    snapshot.scanned_packet_count = snapshot.ring_count;
+    return snapshot;
 }
 
 bool EncodedRingBuffer::WaitUntilPublished(

@@ -1,4 +1,5 @@
 #include "audio_multi_capture.h"
+#include "audio_timing.h"
 #include <iostream>
 #include <cstring>
 #include <time.h>
@@ -50,9 +51,19 @@ void AudioMultiCapture::stream_read_cb(pa_stream* s, size_t /*nbytes*/,
     const float* samples = (const float*)data;
     size_t       nfloats = nbytes / sizeof(float);
 
+    pa_usec_t latency_us = 0;
+    pa_usec_t stream_latency = 0;
+    int negative = 0;
+    if (pa_stream_get_latency(s, &stream_latency, &negative) >= 0 && !negative)
+        latency_us = stream_latency;
+    const int64_t delivery_end_ns = mono_ns_multi();
+
     TimedChunk chunk;
     chunk.samples.assign(samples, samples + nfloats);
-    chunk.start_ns = mono_ns_multi();
+    chunk.start_ns = AudioChunkStartNs(
+        delivery_end_ns, static_cast<int64_t>(latency_us),
+        nfloats / AudioMultiCapture::kChannels,
+        AudioMultiCapture::kSampleRate);
     pa_stream_drop(s);
 
     {

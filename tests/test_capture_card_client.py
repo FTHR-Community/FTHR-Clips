@@ -170,3 +170,27 @@ def test_broken_pipe_relaunches_once_and_preserves_the_popup_event(monkeypatch):
 
     assert broken.terminated
     assert replacement.stdin.value == 'screenshot|750\n'
+
+
+def test_windows_modes_filter_visuals_and_keep_sound_events(monkeypatch):
+    process = _FakeProcess()
+    monkeypatch.setattr(capture_card_client.sys, 'platform', 'win32')
+    monkeypatch.setattr(capture_card_client.subprocess, 'Popen', lambda *a, **k: process)
+    class Settings:
+        mode = 'capture'
+        def get(self, key, default=None):
+            return self.mode if key == 'capture_card_mode' else default
+    settings = Settings()
+    client = capture_card_client.CaptureCardClient(settings)
+    client.show_clip(30, 60, '1080p')
+    client.show_capturing('Game')
+    settings.mode = 'detection'
+    client.show_clip(30, 60, '1080p')
+    client.show_capturing('Game')
+    settings.mode = 'off'
+    client.show_screenshot()
+    assert process.stdin.value.splitlines() == [
+        'visuals|1', 'clip|30|60|1080p', 'visuals|0', 'capturing|Game',
+        'visuals|0', 'clip|30|60|1080p', 'visuals|1', 'capturing|Game',
+        'visuals|0', 'screenshot',
+    ]

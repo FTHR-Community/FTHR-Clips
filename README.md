@@ -3,6 +3,7 @@
 # FTHR Clips
 
 **Instant Replay, Recordings and Screenshots with easy sharing and editing tools built in, right on your Windows or Linux PC—local first.**
+**FOR LINUX VERSION PULL REQUESTS PLEASE USE THE LINUX BRANCH**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20experimental-lightgrey)](KNOWN_ISSUES.md)
@@ -48,8 +49,8 @@ FTHRClips run silently in the background capturing your game and when you press 
 
 ## Download
 
-you can download a ready installer or app image right on our downloads page 
-downloads.fthrclips.com
+you can download a ready installer or app image right on our downloads page
+[downloads.fthrclips.com](https://downloads.fthrclips.com)
 or compile the code yourself with this repo.
 
 
@@ -72,7 +73,9 @@ Settings → Hotkeys. Root access and the `input` group are not required.
 
 **Requirements:**
 - A Wayland compositor exposing `wlr-screencopy` or
-  `ext-image-copy-capture`, or a native X11 session
+  `ext-image-copy-capture`, or an `org.freedesktop.portal.ScreenCast` backend
+  with PipeWire and D-Bus (for KDE/KWin, `xdg-desktop-portal-kde`), or a native
+  X11 session
 - `nc` (netcat) for hotkeys — install via `sudo pacman -S openbsd-netcat` (Arch) or `sudo apt install netcat-openbsd` (Debian/Ubuntu)
 - `grim` for screenshot capture — install via `sudo pacman -S grim` (Arch) or `sudo apt install grim` (Debian/Ubuntu)
 - PulseAudio or PipeWire's PulseAudio compatibility layer; FTHR records the
@@ -89,6 +92,14 @@ FFmpeg/XCB only in the already-isolated native engine process; the UI applies a
 fixed terminate/kill/reap deadline if an XCB reply ignores the normal interrupt
 callback. XWayland is deliberately not used as a fallback for unsupported
 Wayland compositors because it can expose a black root window.
+
+On Wayland the engine tries `wlr-screencopy`, then
+`ext-image-copy-capture`, then the ScreenCast portal. The portal-controlled
+screen picker may appear on the first run; its owner-only restore token is kept
+at `~/.fthr/portal_screencast_token` so later launches can reuse the selection.
+Declining the picker produces one actionable capture failure instead of a
+repeated picker loop. This portal path captures video only: screenshots still
+use `grim`, and the picker—not the in-app monitor setting—selects the screen.
 
 
 ---
@@ -159,7 +170,7 @@ audio. Platform hotkey activation is
 forwarded by the UI through the same shared-memory command contract; Linux also
 uses an owner-only Unix socket for compositor key bindings.
 
-the uploader is separate from the main app and doesn't work unless deliberately installed. 
+the uploader is separate from the main app and doesn't work unless deliberately installed.
 Even after it installing it only connects when you allow it to.
 please note that all clips uploaded to third party services fall under their terms and privacy policy:
 `THIRD_PARTY_NOTICES.md`.
@@ -180,7 +191,7 @@ The use of generative AI when contributing to this repository is generally permi
 
 any AI-assisted contribution that affect any security-critical systems, privacy, data handling, encryption, authentication, update mechanisms, must be reviewed by a competent human contributor, gary does not count.
 
-All creative work that is part of your contribution, including icons, illustrations, audio, music, and sound effects, must be fully created by human artists. 
+All creative work that is part of your contribution, including icons, illustrations, audio, music, and sound effects, must be fully created by human artists.
 AI is a tool to assist, not a replacement for human creativity.
 
 ---

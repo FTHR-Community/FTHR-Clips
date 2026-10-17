@@ -124,6 +124,18 @@ public:
             error = "could not inspect clip streams: " + ErrorText(result);
             return false;
         }
+        // FFmpeg timestamps are expressed on the container's absolute
+        // timeline, while the editor and the mixer cursor use a relative
+        // zero-origin timeline.  Keep this shared origin exactly once.  It
+        // must come from the format, never from the earliest selected audio
+        // stream: a later audio stem is intentionally late on the same
+        // timeline and must remain so.
+        container_start_time_us_ = format_->start_time == AV_NOPTS_VALUE
+            ? 0
+            : format_->start_time;
+        container_origin_sample_ = av_rescale_q(
+            container_start_time_us_, AVRational{1, AV_TIME_BASE},
+            AVRational{1, kSampleRate});
         for (int input_index = 0; input_index < stream_count; ++input_index) {
             const int stream_index = stream_indexes[input_index];
             if (stream_index < 0 || stream_index >= static_cast<int>(format_->nb_streams)) {
@@ -247,8 +259,11 @@ public:
 
     bool Seek(const int64_t position_ms, std::string& error) {
         const int64_t clamped_ms = std::max<int64_t>(0, position_ms);
-        const int64_t target = av_rescale_q(
+        const int64_t relative_target = av_rescale_q(
             clamped_ms, AVRational{1, 1000}, seek_time_base_);
+        const int64_t container_origin = av_rescale_q(
+            container_start_time_us_, AVRational{1, AV_TIME_BASE}, seek_time_base_);
+        const int64_t target = container_origin + relative_target;
         // Seek on an audio stream, not the global/video timeline. Global seeks
         // snap to a potentially distant video keyframe; Pull() then emitted
         // silence while every AAC decoder caught up. AAC packets are valid
@@ -618,8 +633,8 @@ private:
             if (source_timestamp == AV_NOPTS_VALUE) source_timestamp = frame_->pts;
             const int64_t first = source_timestamp == AV_NOPTS_VALUE
                 ? decoder.fallback_next_sample
-                : std::max<int64_t>(0, av_rescale_q(source_timestamp, decoder.time_base,
-                                                     AVRational{1, kSampleRate}));
+                : av_rescale_q(source_timestamp, decoder.time_base,
+                               AVRational{1, kSampleRate}) - container_origin_sample_;
             av_frame_unref(frame_);
             AppendSegment(decoder, first, std::move(converted));
         }
@@ -660,6 +675,8 @@ private:
     int seek_stream_index_ = -1;
     AVRational seek_time_base_{1, kSampleRate};
     int64_t seek_start_time_ = AV_NOPTS_VALUE;
+    int64_t container_start_time_us_ = 0;
+    int64_t container_origin_sample_ = 0;
     int64_t cursor_sample_ = 0;
     int seek_fade_remaining_ = 0;
     bool input_eof_ = false;

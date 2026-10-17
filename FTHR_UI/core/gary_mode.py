@@ -29,6 +29,7 @@ def intensity_for_level(level: float, min_level, max_level) -> float:
     try:
         percent = max(0.0, min(float(level), 1.0)) * 100.0
     except (TypeError, ValueError):
+        # Invalid meter input leaves the decorative response idle, not active.
         return 0.0
     if percent <= low + 1e-9:
         return 0.0

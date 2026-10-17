@@ -137,6 +137,7 @@ a = Analysis(
         (str(ASSETS_DIR / 'fthr_logo.png'),  'assets'),
         (str(ASSETS_DIR / 'preview_desktop.png'), 'assets'),
         (str(ASSETS_DIR / 'gary.png'), 'assets'),
+        (str(ASSETS_DIR / 'gatze.png'), 'assets'),
         # Licence paperwork must travel INSIDE the bundle (AUDIT-005), so a
         # portable copy is as complete as an installed one.
         (str(ROOT / 'LICENSE'), '.'),
@@ -151,10 +152,14 @@ a = Analysis(
         *_asset_tree(ASSETS_DIR / 'fonts',   'assets/fonts'),
         *_asset_tree(ASSETS_DIR / 'icons',   'assets/icons'),
         *_asset_tree(ASSETS_DIR / 'sounds',  'assets/sounds'),
+        (str(UI_DIR / 'ui' / 'qml'), 'ui/qml'),
     ],
     hiddenimports=[
         'PySide6.QtMultimedia',
         'PySide6.QtMultimediaWidgets',
+        'PySide6.QtQml',
+        'PySide6.QtQuick',
+        'PySide6.QtQuickWidgets',
         'sounddevice',
         'numpy',
         'cv2',
@@ -193,8 +198,8 @@ a = Analysis(
         # Exclude imageio_ffmpeg; use the project-pinned FFmpeg runtime beside
         # the engine. See core/ffmpeg_tools.py.
         'imageio_ffmpeg',
-        # Qt modules we don't use (Widgets-only app)
-        'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtWebEngine',
+        # Quick/QML power the shared video preview; keep their runtime.
+        'PySide6.QtWebEngine',
         'PySide6.QtWebEngineCore', 'PySide6.QtBluetooth', 'PySide6.QtPositioning',
         'PySide6.QtSensors', 'PySide6.QtLocation', 'PySide6.Qt3D',
         'PySide6.QtPdf', 'PySide6.QtPdfWidgets', 'PySide6.QtNfc',
@@ -216,16 +221,28 @@ a = Analysis(
 )
 
 # QtGui's generic hook also sees the optional Virtual Keyboard plugin. It is a
-# GPL-only Qt module and drags in unused QML/Quick libraries. Excludes stop
+# GPL-only Qt module. Excludes stop
 # Python imports but not hook-added binaries, so filter the actual artifact
 # TOCs as a second, deterministic boundary.
+import json as _json
+_REVIEWED_QT = _json.loads((ROOT / 'tools' / 'qt_runtime_manifest.json').read_text())
+_APPROVED_QT_LIBS = {f'libqt6{module.lower()}'
+                     for module in _REVIEWED_QT['approved_runtime_qt_modules']['linux']}
+
+
 def _keep_reviewed_qt_runtime(entry):
     dest = str(entry[0]).replace('\\', '/').casefold()
     name = dest.rsplit('/', 1)[-1]
-    forbidden_prefixes = ('libqt6virtualkeyboard',)
+    if dest.startswith('pyside6/') and '/qml/' in dest:
+        qml_parent = dest.split('/qml/', 1)[1].rsplit('/', 1)[0]
+        if qml_parent not in ('qtqml', 'qtqml/models', 'qtqml/workerscript',
+                              'qtquick', 'qtmultimedia'):
+            return False
+    if (name.startswith('libqt6') and '.so' in name
+            and name.split('.so', 1)[0] not in _APPROVED_QT_LIBS):
+        return False
     return (name not in _SKIPPED_QT_PLUGINS
-            and 'virtualkeyboard' not in dest
-            and not name.startswith(forbidden_prefixes))
+            and 'virtualkeyboard' not in dest)
 
 
 a.binaries = [entry for entry in a.binaries

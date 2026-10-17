@@ -1,35 +1,50 @@
 FTHR UPLOAD EXTENSION — PRIVACY POLICY
-Version: 2026-08-24-v1
+Version: 2026-10-15-v3
 
 Installation and execution
 
 FTHR Clips Core contains no provider upload client. This extension is stored as
 a dormant, integrity-checked package and is extracted only after consent. It
-runs only for an upload, account, or connection-test request; it has no idle
+runs only for an upload or connection-test request; it has no idle
 background service.
 
 Data kept locally
 
 - uploader enable state, selected provider, schedule, and Catbox userhash;
-- upload history, returned links, file IDs, and expiry timestamps;
-- for Lustful, the account ID and the derived hardware UUID.
+- upload history, returned links, file IDs, and expiry timestamps.
 
 Data sent
 
 - Catbox: the selected clip, filename, optional userhash, and connection data;
-- Lustful: the selected clip, filename, account ID, derived hardware UUID, file
-  metadata, and connection data required by the service.
-
-The general uploader cannot read raw hardware identifiers. Lustful requires a
-second, separately consented Hardware Identity capability. That capability
-derives a UUID locally and returns only the derived value.
 
 Provider policies and retention
 
 Catbox: https://catbox.moe/legal.php
-Lustful terms: https://fthr.lustful.wtf/tos
-Lustful privacy: https://fthr.lustful.wtf/privacy
 
 Disabling uploads stops network actions. Uninstalling FTHR Clips removes the
 activated package files; local uploader settings can also be removed with the
 installer's settings-cleanup option.
+
+SFTP and user-selected servers
+
+SFTP connection settings (host, port, username, remote folder and host-key
+fingerprint) are stored locally. SFTP passwords are stored separately in
+Windows Credential Manager and may be removed with the Forget saved password
+control. They are not removed by the installer's settings cleanup. Connection
+tests may use a transient password without saving it. The extension also runs
+for local credential-management requests.
+
+The selected SFTP server receives the username and password over an encrypted,
+host-key-verified SSH connection, the selected clip under a unique generated
+filename, its size and connection data. Custom HTTP servers receive the clip
+and any configured authentication header. The selected operator's policies and
+retention apply. Remote paths and SFTP locations are recorded in local history.
+
+Optional public URL mapping
+
+When you explicitly enable public HTTPS sharing links, the extension uploads
+new files with permissions 0644 so a configured web server can read them.
+The public folder URL is stored locally; generated HTTPS links and private
+SFTP locations are recorded in history. Anyone with access to a publicly
+served file can view or share it. Your operator controls web access and
+retention. The extension does not configure hosting or call a publishing API.
