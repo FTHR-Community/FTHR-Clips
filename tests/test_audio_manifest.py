@@ -94,7 +94,7 @@ def test_rebind_refuses_invalid_sidecar(tmp_path):
     assert sidecar.read_text(encoding='utf-8') == '{"not":"a manifest"}'
 
 
-def test_manifest_rejects_duplicate_streams_and_more_than_ten_sources(tmp_path):
+def test_manifest_rejects_duplicate_streams_and_more_than_fourteen_sources(tmp_path):
     media = tmp_path / 'clip.mp4'
     media.write_bytes(b'finished clip bytes')
     manifest = build_manifest(
@@ -105,11 +105,11 @@ def test_manifest_rejects_duplicate_streams_and_more_than_ten_sources(tmp_path):
         validate_manifest(manifest, media_path=media)
 
     manifest['sources'] = [_entry(stream_index=index + 2, name=f'App {index}')
-                           .__dict__ for index in range(10)]
+                           .__dict__ for index in range(14)]
     validate_manifest(manifest)
 
-    manifest['sources'].append(_entry(stream_index=12, name='App 10').__dict__)
-    with pytest.raises(AudioManifestError, match='between one and ten'):
+    manifest['sources'].append(_entry(stream_index=16, name='App 14').__dict__)
+    with pytest.raises(AudioManifestError, match='between one and fourteen'):
         validate_manifest(manifest, media_path=media)
 
 
