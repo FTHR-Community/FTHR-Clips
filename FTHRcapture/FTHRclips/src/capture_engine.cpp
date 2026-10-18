@@ -6584,6 +6584,10 @@ namespace fthr {
                 const auto live_size = wgc_state_->item.Size();
                 if (live_size.Width != static_cast<int32_t>(width_)
                     || live_size.Height != static_cast<int32_t>(height_)) {
+                    std::cerr << "[CaptureThread/WGC] source size changed from "
+                              << width_ << "x" << height_ << " to "
+                              << live_size.Width << "x" << live_size.Height
+                              << std::endl;
                     SetCaptureFailure("WGC source dimensions changed; restart required");
                     capture_health_flags_.store(WgcSizeMismatchHealthFlags(
                         wgc_state_->monitor_item));

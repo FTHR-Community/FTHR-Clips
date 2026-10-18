@@ -8714,7 +8714,13 @@ class MainWindow(QMainWindow):
                         'content_suspicious_streak', 0),
                     luma_mean=status.get('content_luma_mean', 0.0),
                     luma_variance=status.get('content_luma_variance', 0.0))
-                if snapshot.state is CaptureHealthState.FAILED:
+                # A size change restarts capture at the new size on its own;
+                # the error card would only flash and then recover.
+                size_change_restart = bool(
+                    int(status.get('capture_health_flags', 0))
+                    & int(CaptureHealthFlag.RECONFIGURE_REQUIRED))
+                if (snapshot.state is CaptureHealthState.FAILED
+                        and not size_change_restart):
                     # Linux capture backends publish their terminal reason in
                     # engine_string so portal failures are actionable.
                     self.push_error(

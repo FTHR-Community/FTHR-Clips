@@ -106,8 +106,9 @@ void WgcSizeMismatchPreservesSourceSpecificRecoveryPolicy() {
         "monitor WGC size mismatch requests backend restart and reconfiguration");
     CheckBackendPolicy(
         fthr::WgcSizeMismatchHealthFlags(false)
-            == fthr::CAPTURE_HEALTH_BACKEND_FAILED,
-        "window WGC size mismatch remains a backend failure without monitor reconfigure");
+            == (fthr::CAPTURE_HEALTH_BACKEND_FAILED
+                | fthr::CAPTURE_HEALTH_RECONFIGURE_REQUIRED),
+        "window WGC size mismatch restarts the same window at its new size");
 }
 
 }  // namespace
