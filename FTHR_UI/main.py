@@ -134,6 +134,15 @@ from core.capture_settings import (
     AUDIO_CAPTURE_MODE_COMBINED,
     AUDIO_CAPTURE_MODE_SEPARATED,
     normalize_audio_capture_mode,
+    audio_plan_from_settings,
+    effective_audio_source_mode,
+    AUDIO_SOURCE_DEVICE,
+    AUDIO_SOURCE_PROGRAMS,
+    AUDIO_SOURCE_DEVICES,
+    encode_audio_device_tracks,
+    normalize_audio_device_tracks,
+    MAX_AUDIO_DEVICE_TRACKS,
+    MAX_AUDIO_DEVICE_TRACK_NAME,
     validate_fps,
     validate_normal_clip_length,
     custom_clip_lengths,
@@ -5321,10 +5330,10 @@ class MainWindow(QMainWindow):
             # Kept in the engine launch ABI, permanently disabled. The new
             # audio capture mode is carried in its own argument below.
             multiband_enabled=False,
-            separate_audio_enabled=(normalize_audio_capture_mode(
-                self.settings_manager.get('audio_capture_mode',
-                                          AUDIO_CAPTURE_MODE_COMBINED))
-                                    == AUDIO_CAPTURE_MODE_SEPARATED),
+            separate_audio_enabled=audio_plan_from_settings(self.settings_manager)[0],
+            application_audio_tracks_enabled=audio_plan_from_settings(self.settings_manager)[1],
+            audio_device_tracks=(encode_audio_device_tracks(
+                audio_plan_from_settings(self.settings_manager)[2]) if sys.platform == 'win32' else ''),
             microphone_endpoint_id=str(
                 self.settings_manager.get('mic_device_id') or ''),
             playback_endpoint_id=str(self.settings_manager.get('playback_device_id') or '') if sys.platform == 'win32' else '',
@@ -5698,7 +5707,10 @@ class MainWindow(QMainWindow):
                      f'{launch_config.crop_w:.9g}',
                      f'{launch_config.crop_h:.9g}',
                      audio_mode_arg, launch_config.playback_endpoint_id,
-                     '1' if launch_config.microphone_mono else '0'],
+                     '1' if launch_config.microphone_mono else '0',
+                     launch_config.audio_device_tracks,
+                     '1' if launch_config.application_audio_tracks_enabled
+                     else '0'],
                     **popen_options
                 )
                 self._engine_startup_output.attach(self.engine_process.stdout)
@@ -10027,6 +10039,9 @@ class _SettingsPage(QWidget):
         'reduce_ui_animations_check': 5,
         'remove_image_overlay_btn': 3,
         'separate_audio_check': 2,
+        'audio_source_combo': 2,
+        'extra_audio_group': 2,
+        'extra_audio_devices_box': 2,
         'shortcut_settings': 6,
         'sound_sliders': 2,
         'sound_value_labels': 2,
@@ -11423,11 +11438,43 @@ class _SettingsPage(QWidget):
         outer.addWidget(self.audio_capture_check)
         outer.addSpacing(12)
 
+        source_row = QHBoxLayout()
+        source_row.setContentsMargins(0, 0, 0, 0)
+        source_row.setSpacing(Sizes.ROW_GAP)
+        source_label = QLabel('Record')
+        source_label.setObjectName('audioSourceModeLabel')
+        source_row.addWidget(source_label)
+        self.audio_source_combo = QComboBox()
+        self.audio_source_combo.setObjectName('audioSourceModeCombo')
+        self.audio_source_combo.setMinimumWidth(0)
+        self.audio_source_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        set_theme_style(self.audio_source_combo, combo_qss)
+        self.audio_source_combo.addItem(
+            'One device (everything on it in one track)', AUDIO_SOURCE_DEVICE)
+        self.audio_source_combo.addItem(
+            'Each program as its own track', AUDIO_SOURCE_PROGRAMS)
+        self.audio_source_combo.addItem(
+            'Several devices as separate tracks', AUDIO_SOURCE_DEVICES)
+        self.audio_source_combo.setCurrentIndex(max(0, self.audio_source_combo.findData(
+            self._audio_source_mode())))
+        self.audio_source_combo.currentIndexChanged.connect(
+            self._on_audio_source_mode_changed)
+        source_row.addWidget(self.audio_source_combo, 1)
+        outer.addLayout(source_row)
+        outer.addSpacing(Sizes.SPACE_3)
+        self.audio_source_hint = QLabel('')
+        self.audio_source_hint.setWordWrap(True)
+        set_theme_style(self.audio_source_hint, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
+        outer.addWidget(self.audio_source_hint)
+        outer.addSpacing(12)
+
         playback_row = QHBoxLayout()
         playback_row.setContentsMargins(0, 0, 0, 0)
         playback_row.setSpacing(Sizes.ROW_GAP)
         playback_label = QLabel('Playback device to capture')
         playback_label.setObjectName('playbackDeviceLabel')
+        self.playback_label = playback_label
         playback_row.addWidget(playback_label)
         self.playback_combo = QComboBox()
         self.playback_combo.setMinimumWidth(0)
@@ -11438,6 +11485,7 @@ class _SettingsPage(QWidget):
         playback_row.addWidget(self.playback_combo, 1)
         refresh_playback = QPushButton('Refresh')
         refresh_playback.setObjectName('playbackDeviceRefresh')
+        self.playback_refresh = refresh_playback
         set_theme_style(refresh_playback, button_outline_qss)
         refresh_playback.clicked.connect(self._populate_playback_devices)
         playback_row.addWidget(refresh_playback)
@@ -11445,10 +11493,58 @@ class _SettingsPage(QWidget):
         outer.addSpacing(Sizes.SPACE_3)
         hint = QLabel('If this device disconnects, capture switches to the Windows default.')
         hint.setWordWrap(True)
+        self.playback_hint = hint
         outer.addWidget(hint)
         outer.addSpacing(12)
         self._playback_inventory_ready.connect(self._apply_playback_devices)
         QTimer.singleShot(0, self._populate_playback_devices)
+
+        self._playback_endpoints = []
+        self.extra_audio_group = QWidget()
+        extra_layout = QVBoxLayout(self.extra_audio_group)
+        extra_layout.setContentsMargins(0, 0, 0, 0)
+        extra_layout.setSpacing(12)
+        extra_hint = QLabel(
+            'Pick each device, name its track and add it. Every device shows up '
+            'as a named track in the clip editor.')
+        extra_hint.setWordWrap(True)
+        set_theme_style(extra_hint, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
+        extra_layout.addWidget(extra_hint)
+        self.extra_audio_devices_box = QVBoxLayout()
+        self.extra_audio_devices_box.setContentsMargins(0, 0, 0, 0)
+        self.extra_audio_devices_box.setSpacing(10)
+        extra_layout.addLayout(self.extra_audio_devices_box)
+        extra_row = QHBoxLayout()
+        extra_row.setContentsMargins(0, 0, 0, 0)
+        extra_row.setSpacing(Sizes.ROW_GAP)
+        self.extra_device_combo = QComboBox()
+        self.extra_device_combo.setObjectName('extraAudioDeviceCombo')
+        self.extra_device_combo.setMinimumWidth(0)
+        self.extra_device_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        set_theme_style(self.extra_device_combo, combo_qss)
+        extra_row.addWidget(self.extra_device_combo, 2)
+        self.extra_device_name = QLineEdit()
+        self.extra_device_name.setObjectName('extraAudioDeviceName')
+        self.extra_device_name.setPlaceholderText('Track name, e.g. Chat')
+        self.extra_device_name.setMaxLength(MAX_AUDIO_DEVICE_TRACK_NAME)
+        set_theme_style(self.extra_device_name, lambda: (
+            f'QLineEdit {{ background:{Colors.SURFACE_1}; color:{Colors.TEXT}; '
+            f'border:{Sizes.BORDER_W}px solid {Colors.BORDER}; '
+            f'border-radius:{Sizes.RADIUS_SM}px; padding:7px 9px; }}'
+            f'QLineEdit:hover {{ border-color:{Colors.BORDER_HI}; }}'
+            f'QLineEdit:focus {{ border-color:{Colors.ACCENT}; }}'))
+        extra_row.addWidget(self.extra_device_name, 1)
+        self.extra_device_add = QPushButton('Add track')
+        self.extra_device_add.setObjectName('extraAudioDeviceAdd')
+        set_theme_style(self.extra_device_add, button_outline_qss)
+        self.extra_device_add.clicked.connect(self._on_add_extra_audio_device)
+        extra_row.addWidget(self.extra_device_add)
+        extra_layout.addLayout(extra_row)
+        outer.addWidget(self.extra_audio_group)
+        outer.addSpacing(16)
+        self._refresh_extra_audio_devices()
+        self._sync_audio_source_mode()
 
         self.separate_audio_check = QCheckBox(
             'Keep system and microphone audio as separate tracks')
@@ -11503,6 +11599,118 @@ class _SettingsPage(QWidget):
         self.sm.set('audio_capture_mode', mode)
         self.sm.save_settings()
         self.audio_capture_mode_changed.emit(mode)
+
+    def _audio_source_mode(self) -> str:
+        return effective_audio_source_mode(
+            self.sm.get('audio_source_mode', None),
+            self.sm.get('audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED),
+            self.sm.get('audio_device_tracks', []),
+            self.sm.get('per_app_audio_tracks', None))
+
+    def _sync_audio_source_mode(self):
+        """Show only the controls the chosen recording mode uses."""
+        combo = self.__dict__.get('audio_source_combo')
+        if combo is None:
+            return
+        mode = self._audio_source_mode()
+        combo.blockSignals(True)
+        combo.setCurrentIndex(max(0, combo.findData(mode)))
+        combo.blockSignals(False)
+        self.extra_audio_group.setVisible(mode == AUDIO_SOURCE_DEVICES)
+        for widget in (self.playback_label, self.playback_combo,
+                       self.playback_refresh, self.playback_hint):
+            widget.setVisible(mode == AUDIO_SOURCE_DEVICE)
+        self.audio_source_hint.setText({
+            AUDIO_SOURCE_DEVICE: 'All sound played on the chosen device ends up '
+                                 'in one track.',
+            AUDIO_SOURCE_PROGRAMS: 'Every program that plays sound gets its own '
+                                   'track you can adjust in the clip editor '
+                                   '(Windows 11). A System Audio track of the device '
+                                   'chosen under One device is always included.',
+            AUDIO_SOURCE_DEVICES: 'Record several playback devices, for example '
+                                  "a mixer's Chat, Game and Music outputs, each "
+                                  'as its own track. No combined System Audio track is added.',
+        }[mode])
+
+    def _on_audio_source_mode_changed(self, _index):
+        mode = self.audio_source_combo.currentData()
+        self.sm.set('audio_source_mode', mode)
+        self.sm.set('per_app_audio_tracks', mode == AUDIO_SOURCE_PROGRAMS)
+        self.sm.save_settings()
+        self._sync_audio_source_mode()
+        self.audio_capture_mode_changed.emit(str(self.sm.get(
+            'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED)))
+
+    def _refresh_extra_audio_devices(self):
+        """Rebuild the added-device rows and the picker from settings."""
+        tracks = normalize_audio_device_tracks(
+            self.sm.get('audio_device_tracks', []))
+        while self.extra_audio_devices_box.count():
+            item = self.extra_audio_devices_box.takeAt(0)
+            row = item.layout()
+            if row is not None:
+                while row.count():
+                    child = row.takeAt(0).widget()
+                    if child is not None:
+                        child.deleteLater()
+        known = {endpoint.endpoint_id: endpoint.display_name
+                 for endpoint in self._playback_endpoints}
+        saved_names = self.sm.get('audio_device_names', {}) or {}
+        for track in tracks:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(Sizes.ROW_GAP)
+            device = known.get(track['id']) or saved_names.get(
+                track['id'], 'Unavailable device')
+            label = QLabel(f"{track['name']}  -  {device}")
+            label.setWordWrap(True)
+            set_theme_style(label, lambda: (label_body(Colors.TEXT, Fonts.SIZE_BODY)))
+            row.addWidget(label, 1)
+            remove = QPushButton('Remove')
+            remove.setObjectName('extraAudioDeviceRemove')
+            set_theme_style(remove, button_outline_qss)
+            remove.clicked.connect(
+                lambda _checked=False, endpoint_id=track['id']:
+                    self._on_remove_extra_audio_device(endpoint_id))
+            row.addWidget(remove)
+            self.extra_audio_devices_box.addLayout(row)
+        used = {track['id'] for track in tracks}
+        self.extra_device_combo.clear()
+        for endpoint in self._playback_endpoints:
+            if endpoint.endpoint_id not in used:
+                self.extra_device_combo.addItem(
+                    endpoint.display_name, endpoint.endpoint_id)
+        full = len(tracks) >= MAX_AUDIO_DEVICE_TRACKS
+        self.extra_device_combo.setEnabled(not full)
+        self.extra_device_name.setEnabled(not full)
+        self.extra_device_add.setEnabled(
+            not full and self.extra_device_combo.count() > 0)
+
+    def _on_add_extra_audio_device(self):
+        endpoint_id = self.extra_device_combo.currentData()
+        if not endpoint_id:
+            return
+        tracks = normalize_audio_device_tracks(
+            self.sm.get('audio_device_tracks', []))
+        device_name = self.extra_device_combo.currentText()
+        tracks.append({'id': str(endpoint_id),
+                       'name': self.extra_device_name.text() or device_name})
+        names = dict(self.sm.get('audio_device_names', {}) or {})
+        names[str(endpoint_id)] = device_name
+        self.sm.set('audio_device_names', names)
+        self.sm.set('audio_device_tracks', normalize_audio_device_tracks(tracks))
+        self.sm.save_settings()
+        self.extra_device_name.clear()
+        self._refresh_extra_audio_devices()
+        self.audio_capture_changed.emit(True)
+
+    def _on_remove_extra_audio_device(self, endpoint_id: str):
+        tracks = [track for track in normalize_audio_device_tracks(
+            self.sm.get('audio_device_tracks', [])) if track['id'] != endpoint_id]
+        self.sm.set('audio_device_tracks', tracks)
+        self.sm.save_settings()
+        self._refresh_extra_audio_devices()
+        self.audio_capture_changed.emit(True)
 
     def _sync_audio_controls(self):
         """Keep Audio and Performance views backed by one audio setting."""
@@ -12289,6 +12497,9 @@ class _SettingsPage(QWidget):
 
     def _apply_playback_devices(self, endpoints):
         self._playback_scan_running = False
+        self._playback_endpoints = list(endpoints)
+        if 'extra_device_combo' in self.__dict__:
+            self._refresh_extra_audio_devices()
         saved = self.sm.get('playback_device_id', '')
         self.playback_combo.blockSignals(True)
         try:
@@ -12520,6 +12731,8 @@ class _SettingsPage(QWidget):
                 normalize_audio_capture_mode(self.sm.get(
                     'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED))
                 == AUDIO_CAPTURE_MODE_SEPARATED)
+            self._sync_audio_source_mode()
+            self._refresh_extra_audio_devices()
             saved_mon = self.sm.get('notification_monitor', 'auto')
             idx = self.notif_monitor_combo.findData(saved_mon)
             if idx >= 0:
