@@ -46,6 +46,22 @@ _SKIPPED_QT_PLUGINS = {
 }
 
 
+_QT6_LIB = Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.LibrariesPath)).resolve()
+_QT6_LIB_DEST = (Path('PySide6') / _QT6_LIB.relative_to(_PYSIDE_ROOT)).as_posix()
+
+
+def _qt_ffmpeg_stubs():
+    """Qt's own FFmpeg (libavcodec.so.61 & co.) NEEDs these SSL/crypto/VA-API
+    stubs next to it (RUNPATH $ORIGIN). PyInstaller does not collect them,
+    and without them libffmpegmediaplugin.so fails to load: QMediaPlayer
+    then reports "No QtMultimedia backends found" and playback stalls."""
+    stubs = sorted(_QT6_LIB.glob('libQt6FFmpegStub-*.so*'))
+    if not stubs:
+        raise SystemExit(
+            f'FTHR_linux.spec: no libQt6FFmpegStub-* libraries in {_QT6_LIB}')
+    return [(str(p), _QT6_LIB_DEST) for p in stubs]
+
+
 def _so(subdir):
     d = _QT6_PLUG / subdir
     dest = (_QT6_PLUGIN_DEST / subdir).as_posix()
@@ -144,6 +160,7 @@ a = Analysis(
         # The verified LGPL FFmpeg the engine was built against.
         *[(str(p), '.') for p in _FFMPEG_LIBS],
         *[(str(p), '.') for p in _FFMPEG_TOOLS],
+        *_qt_ffmpeg_stubs(),
         *_so('platforms'),
         *_so('wayland-decoration-client'),
         *_so('wayland-shell-integration'),
@@ -288,7 +305,10 @@ def _keep_reviewed_qt_runtime(entry):
         qml_parent = dest[len(_QT_QML_DEST):].rpartition('/')[0]
         if qml_parent not in _KEPT_QML_DIRS:
             return False
-    if name.startswith('libqt6') and '.so' in name:
+    # Qt Multimedia's FFmpeg loader stubs belong to the approved Multimedia
+    # module; see _qt_ffmpeg_stubs().
+    if (name.startswith('libqt6') and '.so' in name
+            and not name.startswith('libqt6ffmpegstub-')):
         if name.split('.so', 1)[0] + '.so' not in _APPROVED_QT_SONAMES:
             return False
     return (name not in _SKIPPED_QT_PLUGINS
