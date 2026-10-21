@@ -412,6 +412,14 @@ def _load_logo_asset(path: Path) -> QPixmap:
     return QPixmap(str(path))
 
 
+def _close_to_tray_supported() -> bool:
+    """Windows always has a tray; Linux needs a StatusNotifierItem host
+    (KDE, waybar, GNOME with the AppIndicator extension, ...)."""
+    if sys.platform == 'win32':
+        return True
+    return QSystemTrayIcon.isSystemTrayAvailable()
+
+
 _icon_registry: list[tuple[object, str, int]] = []
 
 
@@ -3646,11 +3654,10 @@ class MainWindow(QMainWindow):
         self._background_services_started = True
 
     def _create_system_tray(self) -> bool:
-        """Create one native Windows tray icon for the process lifetime."""
+        """Create one native tray icon for the process lifetime."""
         if self._tray_icon is not None:
             return True
-        if (sys.platform != 'win32'
-                or not QSystemTrayIcon.isSystemTrayAvailable()):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
             print('[Lifecycle] System tray unavailable; normal close remains enabled')
             return False
 
@@ -3694,6 +3701,13 @@ class MainWindow(QMainWindow):
         """Restore the existing UI without restarting the capture generation."""
         self.capture_card.hide_background_capture()
         self.ensure_main_ui()
+        # Wayland maps a window only after its first painted frame. A paused
+        # (updates-disabled) UI never paints, and the app cannot become
+        # active before it is mapped, so unpause before showing and defer any
+        # re-pause until the restored surface has painted once.
+        if not self.isVisible():
+            self._first_frame_painted = False
+        self._apply_background_ui_paused(False)
         self.setWindowState(
             self.windowState() & ~Qt.WindowState.WindowMinimized)
         if (self.isMaximized()
@@ -3705,13 +3719,13 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         self._background_start = False
-        QTimer.singleShot(0, self._refresh_background_ui_pause_state)
         print('[Lifecycle] WindowRestored')
 
     def _on_close_to_tray_changed(self, enabled: bool) -> None:
-        """Keep the Windows title-bar affordance aligned with close behavior."""
+        """Keep the title-bar shutdown affordance aligned with close behavior."""
         if hasattr(self, 'power_btn'):
-            self.power_btn.setVisible(sys.platform == 'win32' and bool(enabled))
+            self.power_btn.setVisible(
+                _close_to_tray_supported() and bool(enabled))
 
     def _on_error_notifications_changed(self, enabled: bool) -> None:
         """Apply the bottom-bar preference immediately, including open errors."""
@@ -3948,7 +3962,7 @@ class MainWindow(QMainWindow):
             'Shut down FTHR Clips and stop background capture')
         self.power_btn.clicked.connect(self.request_full_exit)
         self.power_btn.setVisible(
-            sys.platform == 'win32'
+            _close_to_tray_supported()
             and bool(self.settings_manager.get('close_to_tray', True)))
         tb.addWidget(self.power_btn)
 
@@ -9634,7 +9648,7 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         close_to_tray = (
-            sys.platform == 'win32'
+            _close_to_tray_supported()
             and bool(self.settings_manager.get('close_to_tray', True))
         )
         if (close_to_tray
@@ -9644,7 +9658,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             self._hide_main_window_to_tray()
             return
-        # With close-to-tray disabled, or when Windows cannot expose a tray,
+        # With close-to-tray disabled, or when no tray host is available,
         # X deliberately uses the same bounded full-exit path as the power icon.
         self._persist_window_geometry()
         event.ignore()
@@ -10182,7 +10196,7 @@ class _SettingsPage(QWidget):
         self.kofi_widget_changed.emit(bool(enabled))
 
     def _on_close_to_tray_toggled(self, enabled: bool) -> None:
-        if self.sm is None or sys.platform != 'win32':
+        if self.sm is None or not _close_to_tray_supported():
             return
         self.sm.set('close_to_tray', bool(enabled))
         self.sm.save_settings()
@@ -10423,7 +10437,7 @@ class _SettingsPage(QWidget):
         set_theme_style(self.close_to_tray_check, checkbox_qss)
         self.close_to_tray_check.setChecked(
             bool(self.sm.get('close_to_tray', True)))
-        self.close_to_tray_check.setVisible(sys.platform == 'win32')
+        self.close_to_tray_check.setVisible(_close_to_tray_supported())
         self.close_to_tray_check.setToolTip(
             'X hides FTHR in the system tray. The power button fully shuts '
             'down capture; Minimize stays on the taskbar.')
