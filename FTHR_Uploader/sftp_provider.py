@@ -80,12 +80,35 @@ def configuration(settings):
     return host, port, username, folder, fingerprint
 
 
+def _store_name():
+    return ('Windows Credential Manager' if sys.platform == 'win32'
+            else 'the Secret Service keyring')
+
+
+_NO_SECRET_SERVICE = (
+    'Saved SFTP passwords need a Secret Service keyring (GNOME Keyring, KWallet or '
+    'KeePassXC Secret Service) and none is running or D-Bus activatable. Start your '
+    "desktop's keyring and try again.")
+
+
 def _vault():
     # Select a trusted backend explicitly; never allow a plaintext keyring fallback.
-    if sys.platform != 'win32':
-        raise SftpError('Saved SFTP passwords currently require Windows Credential Manager.')
-    from keyring.backends.Windows import WinVaultKeyring
-    return WinVaultKeyring()
+    if sys.platform == 'win32':
+        from keyring.backends.Windows import WinVaultKeyring
+        return WinVaultKeyring()
+    if not sys.platform.startswith('linux'):
+        raise SftpError('Saved SFTP passwords are not supported on this platform.')
+    try:
+        from keyring.backends.SecretService import Keyring as SecretServiceKeyring
+    except Exception as exc:
+        raise SftpError(_NO_SECRET_SERVICE) from exc
+    try:
+        # keyring's availability probe: raises when SecretStorage is missing or
+        # no Secret Service daemon is running or D-Bus activatable.
+        SecretServiceKeyring.priority  # noqa: B018
+    except Exception as exc:
+        raise SftpError(_NO_SECRET_SERVICE) from exc
+    return SecretServiceKeyring()
 
 
 def _credential_identity(settings):
@@ -100,8 +123,10 @@ def save_password(settings, password):
     service, username = _credential_identity(settings)
     try:
         _vault().set_password(service, username, password)
+    except SftpError:
+        raise
     except Exception as exc:
-        raise SftpError('Could not save the password in Windows Credential Manager.') from exc
+        raise SftpError(f'Could not save the password in {_store_name()}.') from exc
 
 
 def forget_password(settings):
@@ -110,6 +135,8 @@ def forget_password(settings):
         vault = _vault()
         if vault.get_password(service, username) is not None:
             vault.delete_password(service, username)
+    except SftpError:
+        raise
     except Exception as exc:
         raise SftpError('Could not remove the saved SFTP password.') from exc
 
@@ -121,8 +148,10 @@ def _password(settings):
     service, username = _credential_identity(settings)
     try:
         value = _vault().get_password(service, username)
+    except SftpError:
+        raise
     except Exception as exc:
-        raise SftpError('Could not read Windows Credential Manager.') from exc
+        raise SftpError(f'Could not read {_store_name()}.') from exc
     if not value:
         raise SftpError('Enter and save an SFTP password first.')
     return value

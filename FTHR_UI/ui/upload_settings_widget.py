@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 
 from PySide6.QtCore import QUrl, Qt, QTimer, Signal
@@ -56,6 +57,10 @@ CATBOX_LEGAL_URL = 'https://catbox.moe/legal.php'
 CATBOX_SUPPORT_URL = 'https://catbox.moe/support.php'
 VAULTSCOPE_SIGNUP_URL = 'https://vaultscope.de/ps/fthr'
 _CUSTOM_PROVIDER = 'custom'
+# Where the uploader's SFTP password vault lives (FTHR_Uploader/sftp_provider.py).
+_PASSWORD_STORE = (
+    'Windows Credential Manager' if sys.platform == 'win32'
+    else 'your desktop keyring (Secret Service)')
 
 
 def _section_header(title: str) -> QWidget:
@@ -400,7 +405,7 @@ class UploadSettingsWidget(QWidget):
             'previously verified by FTHR. For a new host, enter the SHA256 fingerprint from '
             'the server operator and test once; FTHR remembers the verified key. '
             'Unknown or changed keys are rejected before sending credentials. '
-            'Passwords are saved in Windows Credential Manager. Files get unique names. '
+            f'Passwords are saved in {_PASSWORD_STORE}. Files get unique names. '
             'For sharing links, enter the HTTPS address that serves this exact remote folder. '
             'Enabling public links makes new files readable by the web server. '
             'Your server must already provide public web access; the URL setting does not set up hosting '

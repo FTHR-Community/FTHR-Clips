@@ -4,6 +4,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import time
 
+import pytest
+
 from unittest.mock import patch, MagicMock
 
 
@@ -225,3 +227,17 @@ def test_failed_finalization_never_uploads(qapp, tmp_path):
         assert uploaded == []
     finally:
         um.stop()
+
+
+@pytest.mark.skipif(sys.platform == 'win32',
+                    reason='POSIX permission bits do not apply on NTFS')
+def test_atomic_json_writes_owner_only(tmp_path):
+    import stat
+    from core import upload_manager
+
+    target = tmp_path / 'settings.json'
+    target.write_text('{}')
+    os.chmod(target, 0o644)  # an older build's file
+    upload_manager._atomic_json(target, {'catbox_userhash': 'secret'})
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert not (tmp_path / 'settings.json.tmp').exists()
