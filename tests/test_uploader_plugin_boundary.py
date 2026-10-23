@@ -127,6 +127,8 @@ def test_linux_manifest_without_linux_binding_fails_closed(tmp_path, monkeypatch
     assert not uploader_root.exists() or not any(uploader_root.iterdir())
 
 
+@pytest.mark.skipif(sys.platform == 'win32',
+                    reason='Windows file modes carry no executable bit')
 def test_linux_activation_restores_uploader_executable_bit(tmp_path, monkeypatch):
     monkeypatch.setattr(core_uploader.sys, 'platform', 'linux')
     uploader_bundle = _bundle(
