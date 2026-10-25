@@ -17,10 +17,12 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
+#include <libavutil/buffer.h>
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
+#include <libavutil/mem.h>
 }
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -58,7 +60,7 @@ const AmfCodecSelection kAv1Amf{
     EncodedPacketFormat::LowOverheadObu,
     AV_PROFILE_AV1_MAIN};
 
-// Must match the pinned FFmpeg D3D11 hardware-frame pool configured below.
+// Capacity of the AMF input texture pool configured below.
 // Keeping this bound in the wrapper makes the exported progress snapshot
 // bounded even if a test seam accepts frames without producing packets.
 constexpr uint32_t kAmfFramePoolCapacity = 8;
@@ -83,6 +85,64 @@ bool SameComObject(IUnknown* left, IUnknown* right) noexcept {
     if (left_identity) left_identity->Release();
     if (right_identity) right_identity->Release();
     return same;
+}
+
+// AMF input textures are standalone (ArraySize=1), never slices of FFmpeg's
+// internal D3D11 texture array. h264_amf tells AMF the slice through
+// AMFTextureArrayIndexGUID private data on the shared array object and
+// rewrites it on every submit while earlier frames may still be queued. With
+// array slices an RX 7800 XT encoded pixels from the wrong or a partially
+// written slice (rectangular tearing in every clip); standalone textures
+// always carry index 0 and encode exactly.
+struct AmfInputTexturePool {
+    ID3D11Device* device = nullptr;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t allocated = 0;
+};
+
+void ReleaseAmfInputTexture(void*, uint8_t* data) {
+    auto* descriptor = reinterpret_cast<AVD3D11FrameDescriptor*>(data);
+    if (descriptor->texture) descriptor->texture->Release();
+    av_free(data);
+}
+
+AVBufferRef* AllocateAmfInputTexture(void* opaque, size_t) {
+    auto* pool = static_cast<AmfInputTexturePool*>(opaque);
+    if (!pool || !pool->device || pool->allocated >= kAmfFramePoolCapacity) {
+        return nullptr;
+    }
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = pool->width;
+    description.Height = pool->height;
+    description.MipLevels = 1;
+    description.ArraySize = 1;
+    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_DEFAULT;
+    ID3D11Texture2D* texture = nullptr;
+    if (FAILED(pool->device->CreateTexture2D(&description, nullptr, &texture))
+        || !texture) {
+        return nullptr;
+    }
+    auto* descriptor = static_cast<AVD3D11FrameDescriptor*>(
+        av_mallocz(sizeof(AVD3D11FrameDescriptor)));
+    if (!descriptor) {
+        texture->Release();
+        return nullptr;
+    }
+    descriptor->texture = texture;
+    descriptor->index = 0;
+    AVBufferRef* buffer = av_buffer_create(
+        reinterpret_cast<uint8_t*>(descriptor), sizeof(*descriptor),
+        ReleaseAmfInputTexture, nullptr, 0);
+    if (!buffer) {
+        texture->Release();
+        av_free(descriptor);
+        return nullptr;
+    }
+    ++pool->allocated;
+    return buffer;
 }
 
 void ParseAnnexBNals(
@@ -297,11 +357,21 @@ public:
         frames_context->sw_format = AV_PIX_FMT_BGRA;
         frames_context->width = static_cast<int>(output_width_);
         frames_context->height = static_cast<int>(output_height_);
-        // This pinned D3D11 hwcontext requires a non-zero fixed pool. Eight
-        // slices cover AMF async_depth=4 plus the prepared input and transient
-        // references. Each submitted AVFrame retains its array slice until AMF
-        // releases it; capture never maps this GPU-only texture array.
-        frames_context->initial_pool_size = kAmfFramePoolCapacity;
+        // Caller-owned pool of standalone textures (see AmfInputTexturePool).
+        // Eight textures cover AMF async_depth=4 plus the prepared input and
+        // transient references. Each submitted AVFrame retains its texture
+        // until AMF releases it; capture never maps these GPU-only textures.
+        // initial_pool_size stays 0 so FFmpeg allocates no unused array.
+        input_texture_pool_ = {shared_device, output_width_, output_height_, 0};
+        frames_context->pool = av_buffer_pool_init2(
+            sizeof(AVD3D11FrameDescriptor), &input_texture_pool_,
+            AllocateAmfInputTexture, nullptr);
+        if (!frames_context->pool) {
+            error = "could not allocate AMD D3D11 input texture pool";
+            Reset();
+            return false;
+        }
+        frames_context->initial_pool_size = 0;
         result = av_hwframe_ctx_init(hw_frames_ctx_);
         if (result < 0) {
             error = "could not initialize FFmpeg D3D11 hardware frame context: "
@@ -826,6 +896,7 @@ private:
     const AmfCodecSelection* selection_ = nullptr;
     AVBufferRef* hw_device_ctx_ = nullptr;
     AVBufferRef* hw_frames_ctx_ = nullptr;
+    AmfInputTexturePool input_texture_pool_{};
     AVCodecContext* codec_context_ = nullptr;
     AVFrame* frame_ = nullptr;
     AVPacket* packet_ = nullptr;
