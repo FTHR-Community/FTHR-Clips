@@ -8,7 +8,9 @@ On Windows, resolution reports these Linux tools as unavailable.
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Optional
@@ -23,6 +25,7 @@ _TOOLS: dict[str, tuple[bool, str]] = {
     'xrandr':   (True,  'selected-monitor geometry for native X11 capture'),
     'grim':     (True,  'Wayland screenshots'),
     'nc':       (True,  'the hotkey socket client used by compositor binds'),
+    'socat':    (False, 'the hotkey socket client when nc has no -U option'),
     'xdg-open': (False, 'opening the clips folder in a file manager'),
     'wmctrl':   (False, 'alternative window listing when xdotool is absent'),
 }
@@ -96,9 +99,69 @@ class ToolMissing(RuntimeError):
         self.purpose = purpose
 
 
+# OpenBSD netcat ("-U  Use UNIX domain socket") and nmap's ncat
+# ("-U, --unixsock") list the option in their help; GNU netcat and
+# BusyBox nc have no Unix-socket mode and do not.
+_NC_UNIX_OPTION = re.compile(r'(?:^|[\s,\[])-U\b', re.MULTILINE)
+_nc_unix_cache: dict[str, Optional[bool]] = {}
+
+
+def nc_supports_unix(nc: Optional[str] = None) -> Optional[bool]:
+    """Whether *nc* (default: the resolved nc) accepts ``-U``.
+
+    True or False from its help text, None when it cannot be probed. A nc
+    without ``-U`` makes compositor binds fire and deliver nothing.
+    """
+    nc = nc or path('nc')
+    if not nc:
+        return None
+    if nc in _nc_unix_cache:
+        return _nc_unix_cache[nc]
+    try:
+        # Help goes to stdout or stderr and may exit non-zero; read both.
+        probe = subprocess.run([nc, '-h'], capture_output=True, text=True,
+                               timeout=2, stdin=subprocess.DEVNULL)
+        text = (probe.stdout or '') + (probe.stderr or '')
+        result: Optional[bool] = bool(_NC_UNIX_OPTION.search(text)) if text else None
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    _nc_unix_cache[nc] = result
+    return result
+
+
+def unix_socket_client() -> Optional[tuple[str, str]]:
+    """The program compositor binds use to reach a Unix socket.
+
+    ``('nc', path)`` for a nc with ``-U`` (or one that cannot be probed),
+    else ``('socat', path)`` when socat is installed, else None.
+    """
+    nc = path('nc')
+    if nc and nc_supports_unix(nc) is not False:
+        return 'nc', nc
+    socat = path('socat')
+    if socat:
+        return 'socat', socat
+    return None
+
+
+def unix_socket_client_problem() -> Optional[str]:
+    """A sentence the UI can show when no usable socket client exists."""
+    if unix_socket_client() is not None:
+        return None
+    nc = path('nc')
+    if nc:
+        return (f"The installed nc ({nc}) cannot connect to Unix sockets "
+                "(it has no -U option; GNU netcat and BusyBox nc lack it), "
+                "so hotkey binds fire but never reach FTHR Clips. "
+                "Install openbsd-netcat or socat.")
+    return (missing_message('nc') + ' Install openbsd-netcat or socat so '
+            'compositor binds can reach FTHR Clips.')
+
+
 def reset_cache() -> None:
     """Drop the cache. Tests use this after manipulating PATH."""
     _cache.clear()
+    _nc_unix_cache.clear()
 
 
 def report() -> str:

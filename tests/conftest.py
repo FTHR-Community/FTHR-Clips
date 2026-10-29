@@ -107,6 +107,7 @@ def _isolate_linux_desktop_hotkeys(monkeypatch, tmp_path, tmp_path_factory):
         monkeypatch.setattr(module, '_FTHR_HYPR_CONF', hypr / 'fthr-hotkeys.conf')
         monkeypatch.setattr(module, '_HYPR_CONF', hypr / 'hyprland.conf')
         monkeypatch.setattr(module, '_HYPR_LUA_CONF', hypr / 'hyprland.lua')
+        monkeypatch.setattr(module, '_FTHR_HYPR_LUA', hypr / 'fthr-hotkeys.lua')
         monkeypatch.setattr(
             module, '_HYPR_CUSTOM_LUA', hypr / 'custom' / 'keybinds.lua')
         # Bind the hotkey server on a private socket, seen only through the

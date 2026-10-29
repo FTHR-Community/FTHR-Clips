@@ -180,3 +180,70 @@ def test_displayed_hotkey_instructions_use_private_socket(
     assert str(linux_runtime.hotkey_socket_path(create_dir=False)) in instructions
     for action in ('save_clip', 'save_screenshot'):
         assert action in instructions
+
+
+# Unix-socket client: a nc without -U makes binds fire and deliver nothing
+
+_OPENBSD_NC_HELP = ('#!/bin/sh\necho "usage: nc [-46CDdFhklNnrStUuvz]" >&2\n'
+                    'printf "\\t-U\\t\\tUse UNIX domain socket\\n" >&2\nexit 1\n')
+_NCAT_HELP = '#!/bin/sh\necho "  -U, --unixsock             Use Unix domain sockets only"\n'
+_GNU_NC_HELP = ('#!/bin/sh\necho "GNU netcat 0.7.1, a rewrite of the famous networking tool."\n'
+                'echo "  -u, --udp                  UDP mode"\n')
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Linux helper tools')
+@pytest.mark.parametrize('body, expected', [
+    (_OPENBSD_NC_HELP, True),
+    (_NCAT_HELP, True),
+    (_GNU_NC_HELP, False),
+    ('#!/bin/sh\nexit 1\n', None),
+])
+def test_nc_unix_support_is_read_from_help(tmp_path, monkeypatch, body, expected):
+    _make_fake_tool(tmp_path, 'nc', body)
+    monkeypatch.setenv('PATH', str(tmp_path))
+    linux_tools.reset_cache()
+    assert linux_tools.nc_supports_unix() is expected
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Linux helper tools')
+def test_socat_preferred_over_nc_without_unix_support(tmp_path, monkeypatch):
+    _make_fake_tool(tmp_path, 'nc', _GNU_NC_HELP)
+    monkeypatch.setenv('PATH', str(tmp_path))
+    linux_tools.reset_cache()
+    assert linux_tools.unix_socket_client() is None
+    problem = linux_tools.unix_socket_client_problem()
+    assert 'openbsd-netcat or socat' in problem and '-U' in problem
+
+    socat = _make_fake_tool(tmp_path, 'socat')
+    linux_tools.reset_cache()
+    assert linux_tools.unix_socket_client() == ('socat', str(socat))
+    assert linux_tools.unix_socket_client_problem() is None
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Linux helper tools')
+def test_capable_nc_is_kept_and_missing_nc_is_explained(tmp_path, monkeypatch):
+    nc = _make_fake_tool(tmp_path, 'nc', _OPENBSD_NC_HELP)
+    _make_fake_tool(tmp_path, 'socat')
+    monkeypatch.setenv('PATH', str(tmp_path))
+    linux_tools.reset_cache()
+    assert linux_tools.unix_socket_client() == ('nc', str(nc))
+
+    empty = tmp_path / 'empty'
+    empty.mkdir()
+    monkeypatch.setenv('PATH', str(empty))
+    linux_tools.reset_cache()
+    problem = linux_tools.unix_socket_client_problem()
+    assert "'nc' is not installed" in problem and 'socat' in problem
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Linux hotkey socket')
+def test_generated_socket_command_falls_back_to_socat(tmp_path, monkeypatch):
+    from core.hotkey_manager import HotkeyManager
+
+    _make_fake_tool(tmp_path, 'nc', _GNU_NC_HELP)
+    socat = _make_fake_tool(tmp_path, 'socat')
+    monkeypatch.setenv('PATH', str(tmp_path))
+    linux_tools.reset_cache()
+    cmd = HotkeyManager.socket_command(SimpleNamespace(_socket_path='/run/x.sock'),
+                                       'save_clip')
+    assert cmd == f'echo -n "save_clip" | {socat} - UNIX-CONNECT:/run/x.sock'
