@@ -8,7 +8,9 @@ Linux never reads input devices itself. The XDG GlobalShortcuts portal
 and tells us over D-Bus when an action fires. Where no portal backend exists,
 and always on Hyprland, compositor binds send commands to the private socket
 resolved by core.linux_runtime.hotkey_socket_path(); Hyprland configuration for
-that is written to ~/.config/hypr/fthr-hotkeys.conf when a shortcut changes.
+that is written to ~/.config/hypr/fthr-hotkeys.conf (fthr-hotkeys.lua for a
+hyprland.lua config) when a shortcut changes, and `hyprctl binds` is checked
+afterwards so a file Hyprland never loads is reported instead of silent.
 """
 import ctypes
 import os
@@ -34,6 +36,70 @@ _HYPR_CUSTOM_LUA   = Path.home() / '.config' / 'hypr' / 'custom' / 'keybinds.lua
 _FTHR_LUA_BEGIN    = '-- FTHR Clips hotkeys begin (managed)'
 _FTHR_LUA_END      = '-- FTHR Clips hotkeys end (managed)'
 _FTHR_LUA_MARKER   = _FTHR_LUA_BEGIN
+# FTHR-owned Lua file for hyprland.lua configs that do not load
+# custom/keybinds.lua. It must sit next to hyprland.lua: see
+# _hyprland_lua_load_line().
+_FTHR_HYPR_LUA     = Path.home() / '.config' / 'hypr' / 'fthr-hotkeys.lua'
+_FTHR_LUA_REQUIRE_COMMENT = '-- FTHR Clips hotkeys (auto-added)'
+# Lua bind description prefix; `hyprctl binds` shows it, not the command.
+_FTHR_BIND_DESCRIPTION = 'FTHR Clips: '
+# A live (non-comment) mention of custom/keybinds or custom.keybinds.
+_LUA_CUSTOM_KEYBINDS = re.compile(r'custom[./]keybinds\b')
+
+
+def _lua_loads_custom_keybinds(content: str) -> bool:
+    """Whether hyprland.lua mentions custom/keybinds outside a comment."""
+    return any(_LUA_CUSTOM_KEYBINDS.search(line.split('--', 1)[0])
+               for line in content.splitlines())
+
+
+def _hyprland_lua_load_line(target: Path) -> str:
+    """The hyprland.lua line that loads *target* (a file next to hyprland.lua).
+
+    Every Lua-config Hyprland (0.55 onward) puts the main config's directory
+    on package.path, so the bare module name resolves there; absolute
+    require() paths only arrived in 0.56. Hyprland runs each require()d file
+    in its own scope, and pcall keeps hyprland.lua working if the file is
+    ever removed: from 0.56 require() of a missing module aborts the caller.
+    """
+    return f'pcall(require, "{target.stem}")'
+
+
+def _remove_lua_block(path: Path) -> bool:
+    """Remove a complete FTHR-managed block from *path*; True if removed."""
+    try:
+        original = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    begin = original.find(_FTHR_LUA_BEGIN)
+    if begin < 0:
+        return False
+    end = original.find(_FTHR_LUA_END, begin)
+    if end < 0:
+        return False  # Incomplete block: never guess where the user's code starts.
+    end += len(_FTHR_LUA_END)
+    text = original[:begin].rstrip()
+    rest = original[end:].lstrip('\n')
+    text = (text + '\n' + rest) if rest else text + '\n'
+    try:
+        path.write_text(text if text.strip() else '')
+        print(f'[Hotkey] Removed unused FTHR binds from {path}')
+        return True
+    except OSError as e:
+        print(f'[Hotkey] Could not remove FTHR binds from {path}: {e}')
+        return False
+
+
+def _json_strings(value):
+    """Every string inside a parsed JSON value."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _json_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _json_strings(item)
 
 # Older builds stored each binding as ``{'keyboard': 'F9', 'controller': ...}``
 # and used the longer game-detection action names.  Keep the user's keyboard
@@ -1542,7 +1608,11 @@ class HotkeyManager(QObject):
         except Exception:
             pass  # Unknown desktop: fall through to the generic setup advice.
         if comp == 'hyprland':
-            return   # binds are auto-written; hotkeys work via the socket
+            # The binds are written by _apply_compositor_config(), which also
+            # checks `hyprctl binds` and reports a config Hyprland never
+            # loaded. What remains to check here is the client the binds run.
+            self._warn_if_socket_client_unusable()
+            return
         # Be specific about which desktop this is and what to actually do.
         # A vague warning here is why "hotkeys don't work" was the most common
         # Linux report with no actionable follow-up.
@@ -1552,13 +1622,7 @@ class HotkeyManager(QObject):
             'x11':   "your window manager's keybinding config",
         }.get(comp or '', "your desktop's custom-shortcut settings")
 
-        if not linux_tools.available('nc'):
-            self.error_occurred.emit(
-                'GLOBAL HOTKEYS UNAVAILABLE',
-                linux_tools.missing_message('nc') +
-                ' Without it, compositor binds cannot reach FTHR Clips.',
-                'error',
-            )
+        if self._warn_if_socket_client_unusable():
             return
 
         self.error_occurred.emit(
@@ -1569,6 +1633,18 @@ class HotkeyManager(QObject):
             f'{self.socket_command("save_clip")}',
             'warning',
         )
+
+    def _warn_if_socket_client_unusable(self) -> bool:
+        """Report when no installed program can reach the hotkey socket.
+
+        Covers both a missing nc and a nc without -U (GNU netcat, BusyBox),
+        which makes binds fire and deliver nothing. True when it warned.
+        """
+        problem = linux_tools.unix_socket_client_problem()
+        if problem is None:
+            return False
+        self.error_occurred.emit('GLOBAL HOTKEYS UNAVAILABLE', problem, 'error')
+        return True
 
     # Compositor auto-config (Hyprland)
 
@@ -1588,9 +1664,24 @@ class HotkeyManager(QObject):
     def socket_command(self, action: str) -> str:
         """Build the shell command shared by compositor binds and setup instructions.
 
-        Resolve both the private socket path and the absolute nc executable path.
+        Resolve both the private socket path and the absolute client path:
+        nc when it supports -U, socat when only socat can reach a Unix socket.
         """
+        sock = HotkeyManager._hotkey_socket_display_path(self)
+        client = linux_tools.unix_socket_client()
+        if client is not None and client[0] == 'socat':
+            return f'echo -n "{action}" | {client[1]} - UNIX-CONNECT:{sock}'
+        # nc with -U, or no usable client at all: keep the nc form so the
+        # command shown to the user is still the one to fix (see
+        # linux_tools.unix_socket_client_problem()).
         nc = linux_tools.path('nc') or 'nc'
+        return f'echo -n "{action}" | {nc} -U {sock}'
+
+    def _hotkey_socket_display_path(self) -> str:
+        """Socket path compositor binds connect to (a string, never raises).
+
+        Callable unbound on a stand-in object, like socket_command.
+        """
         sock = getattr(self, '_socket_path', None)
         if not sock:
             try:
@@ -1598,7 +1689,7 @@ class HotkeyManager(QObject):
             except Exception as exc:
                 print(f'[Hotkey] Cannot determine socket path: {exc}')
                 sock = '<socket unavailable>'
-        return f'echo -n "{action}" | {nc} -U {sock}'
+        return str(sock)
 
     def setup_instructions(self, compositor: str) -> str:
         """Return compositor instructions built from the real private socket."""
@@ -1691,14 +1782,15 @@ class HotkeyManager(QObject):
                     raise ValueError('incomplete FTHR Lua hotkey block; refusing to edit user config')
                 end += len(_FTHR_LUA_END)
                 existing = existing[:begin].rstrip() + existing[end:]
-            lines = [existing.rstrip(), '', _FTHR_LUA_BEGIN]
+            lines = [existing.rstrip(), ''] if existing.strip() else []
+            lines.append(_FTHR_LUA_BEGIN)
             for action in self._hyprland_bind_actions():
                 key = self.hotkeys.get(action, '')
                 combo = ' + '.join(part.upper() for part in key.split('+'))
                 command = self.socket_command(action).replace('\\', '\\\\').replace('"', '\\"')
                 lines.append(
                     f'hl.bind("{combo}", hl.dsp.exec_cmd("{command}"), '
-                    f'{{ description = "FTHR Clips: {action}" }})')
+                    f'{{ description = "{_FTHR_BIND_DESCRIPTION}{action}" }})')
             lines.append(_FTHR_LUA_END)
             text = '\n'.join(lines).rstrip() + '\n'
             if text == original:
@@ -1710,29 +1802,32 @@ class HotkeyManager(QObject):
             print(f'[Hotkey] Failed to write Lua bindings: {e}')
             return False
 
-    def _ensure_hyprland_source(self) -> None:
+    def _ensure_hyprland_source(self) -> bool:
         """Add a source line to hyprland.conf if it doesn't already exist.
 
         Skipped if the user already has fthr_hotkey.sock bind lines directly
         in hyprland.conf — we don't want to add a second set of binds.
+        Returns True when the line was added.
         """
         if not _HYPR_CONF.exists():
-            return
+            return False
         try:
             content = _HYPR_CONF.read_text()
         except Exception:
-            return  # No readable hyprland.conf: never create or edit one blindly.
+            return False  # No readable hyprland.conf: never create or edit one blindly.
         # Already sourced, or user has manual FTHR binds — either way, skip.
         if ('fthr-hotkeys.conf' in content or 'fthr_hotkey.sock' in content
                 or 'hotkey.sock' in content):
-            return
+            return False
         source_line = f'\n# FTHR Clips hotkeys (auto-added)\nsource = {_FTHR_HYPR_CONF}\n'
         try:
             with open(_HYPR_CONF, 'a') as f:
                 f.write(source_line)
             print(f'[Hotkey] Added source line to {_HYPR_CONF}')
+            return True
         except Exception as e:
             print(f'[Hotkey] Could not add source line: {e}')
+            return False
 
     def _apply_compositor_config(self) -> None:
         """Write compositor config and apply live. Hyprland only for now."""
@@ -1745,14 +1840,24 @@ class HotkeyManager(QObject):
             return  # Unknown desktop: compositor binds are Hyprland-only.
         if comp != 'hyprland':
             return
-        if _HYPR_CUSTOM_LUA.exists() or _HYPR_LUA_CONF.exists():
-            changed = self._write_hyprland_lua_config()
+        # Hyprland 0.55+ reads hyprland.lua when it exists; older releases
+        # (and users who have not migrated) read hyprland.conf.
+        if _HYPR_LUA_CONF.exists():
+            changed, target, load_line = self._apply_hyprland_lua_config()
+            main_config = _HYPR_LUA_CONF
         else:
             changed = self._write_hyprland_config()
-            self._ensure_hyprland_source()
-        # A full `hyprctl reload`, run only when the generated file changed.
-        if changed and os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'):
-            def _reload():
+            changed = self._ensure_hyprland_source() or changed
+            target, load_line = _FTHR_HYPR_CONF, f'source = {_FTHR_HYPR_CONF}'
+            main_config = _HYPR_CONF
+        if not os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'):
+            return  # Not inside a live Hyprland session: nothing to reload or ask.
+
+        def _reload_and_verify():
+            # A full `hyprctl reload`, run only when a config file changed.
+            # The bind check runs every time, so a config that Hyprland never
+            # loads is reported on startup too, not only after an edit.
+            if changed:
                 try:
                     hyprctl = linux_tools.path('hyprctl')
                     if not hyprctl:
@@ -1770,8 +1875,133 @@ class HotkeyManager(QObject):
                         'Hyprland config reload failed. Re-apply manually in Hotkey settings.',
                         'warning',
                     )
-            threading.Thread(target=_reload, daemon=True,
-                             name='fthr-hyprctl-apply').start()
+                    return
+            self._verify_hyprland_binds(target, load_line, main_config)
+        threading.Thread(target=_reload_and_verify, daemon=True,
+                         name='fthr-hyprctl-apply').start()
+
+    def _apply_hyprland_lua_config(self) -> tuple[bool, Path, str | None]:
+        """Write Lua binds into a file hyprland.lua really loads.
+
+        The illogical-impulse (end-4) dotfiles load custom/keybinds.lua from
+        hyprland.lua; other setups (CachyOS, Noctalia, a plain migrated
+        config) do not, and binds written there are silently dead. Unless
+        hyprland.lua already loads custom/keybinds, write an FTHR-owned file
+        and add one require line for it to hyprland.lua.
+
+        Returns (changed, file written, line hyprland.lua needs to load it);
+        the line is None when the user's own socket binds are in charge.
+        """
+        try:
+            content: str | None = _HYPR_LUA_CONF.read_text()
+        except (OSError, UnicodeDecodeError):
+            content = None  # Unreadable: never edit it; the bind check reports.
+        custom = _HYPR_CUSTOM_LUA
+        if (content is not None and custom.exists()
+                and _lua_loads_custom_keybinds(content)):
+            return (self._write_hyprland_lua_config(custom), custom,
+                    'require("custom.keybinds")')
+
+        target = _FTHR_HYPR_LUA
+        load_line = _hyprland_lua_load_line(target)
+        changed = self._write_hyprland_lua_config(target)
+        if content is not None:
+            changed = self._ensure_hyprland_lua_require(content, target, load_line) or changed
+            # Earlier builds wrote the block into custom/keybinds.lua even when
+            # nothing loaded it. Drop it so a later require cannot double-bind.
+            if custom.exists():
+                changed = _remove_lua_block(custom) or changed
+            if 'hotkey.sock' in content and target.stem not in content:
+                # The user binds the socket by hand. Lua binds hide their
+                # command from `hyprctl binds`, so they cannot be checked.
+                return changed, target, None
+        return changed, target, load_line
+
+    def _ensure_hyprland_lua_require(self, content: str, target: Path,
+                                     load_line: str) -> bool:
+        """Append the FTHR require line to hyprland.lua once; True if added.
+
+        Mirrors _ensure_hyprland_source(): skipped when hyprland.lua already
+        loads the file or carries the user's own socket binds, never creates
+        the main config, and only appends.
+        """
+        if not target.exists():
+            return False  # Write failed; never point the config at nothing.
+        if target.stem in content or 'hotkey.sock' in content:
+            return False
+        try:
+            with open(_HYPR_LUA_CONF, 'a') as f:
+                f.write(f'\n{_FTHR_LUA_REQUIRE_COMMENT}\n{load_line}\n')
+            print(f'[Hotkey] Added require line to {_HYPR_LUA_CONF}')
+            return True
+        except OSError as e:
+            print(f'[Hotkey] Could not add require line: {e}')
+            return False
+
+    # `hyprctl reload` returns before every bind is in place on a busy
+    # session; give it a few short tries before calling the binds missing.
+    _HYPR_VERIFY_ATTEMPTS = 3
+    _HYPR_VERIFY_DELAY_S = 0.5
+
+    def _hyprland_binds_loaded(self) -> bool | None:
+        """Whether Hyprland's live bind list holds an FTHR bind.
+
+        hyprland.conf binds show their exec command (and so the socket path)
+        as `arg`. Lua binds do not: hl.dsp.exec_cmd() is a closure, listed as
+        dispatcher "__lua" with a registry index as arg, so those are found
+        by the description FTHR gives them. None when hyprctl is missing,
+        fails, or answers something unexpected.
+        """
+        hyprctl = linux_tools.path('hyprctl')
+        if not hyprctl:
+            return None
+        try:
+            result = subprocess.run([hyprctl, 'binds', '-j'],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                return None
+            binds = json.loads(result.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        if not isinstance(binds, list):
+            return None
+        sock = HotkeyManager._hotkey_socket_display_path(self)
+        for bind in binds:
+            if not isinstance(bind, dict):
+                continue
+            if str(bind.get('description', '')).startswith(_FTHR_BIND_DESCRIPTION):
+                return True
+            if any(sock in text for text in _json_strings(bind)):
+                return True
+        return False
+
+    def _verify_hyprland_binds(self, target: Path, load_line: str | None,
+                               main_config: Path) -> None:
+        """Warn when Hyprland has not loaded the binds FTHR wrote."""
+        if load_line is None or not self._hyprland_bind_actions():
+            return  # Hand-made binds, or no key assigned: nothing to find.
+        for attempt in range(self._HYPR_VERIFY_ATTEMPTS):
+            if attempt:
+                time.sleep(self._HYPR_VERIFY_DELAY_S)
+            found = self._hyprland_binds_loaded()
+            if found is None:
+                print('[Hotkey] Could not read `hyprctl binds`; bind check skipped.')
+                return
+            if found:
+                self._hyprland_bind_warning = None
+                return
+        message = (
+            f'FTHR Clips wrote its Hyprland hotkey binds to {target}, but '
+            'Hyprland has not loaded them, so the hotkeys do nothing. '
+            f'Add this line to {main_config} and save (or run '
+            f'`hyprctl reload`):    {load_line}'
+        )
+        print(f'[Hotkey] {message}')
+        # register_all() runs after every shortcut capture; say it once.
+        if getattr(self, '_hyprland_bind_warning', None) == message:
+            return
+        self._hyprland_bind_warning = message
+        self.error_occurred.emit('HYPRLAND HOTKEYS NOT LOADED', message, 'warning')
 
     def _start_socket_server(self):
         """Listen on the private hotkey socket for compositor bind commands."""
