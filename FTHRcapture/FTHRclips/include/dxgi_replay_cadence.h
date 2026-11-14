@@ -1,7 +1,7 @@
 #pragma once
 
 // Platform-neutral scheduling and replay policy for DXGI's sampled capture
-// path. Callers supply QPC values and the result of one zero-timeout acquire;
+// path. Callers supply QPC values and the result of one acquire per due slot;
 // this header deliberately has no Windows, COM, or D3D dependency.
 
 #include <algorithm>
@@ -21,6 +21,7 @@ struct AcquireSchedule {
     bool due = false;
     int64_t wait_qpc = 0;
     uint64_t tick = 0;
+    uint64_t skipped_slots = 0;
 };
 
 struct AcquireResult {
@@ -93,14 +94,15 @@ public:
         }
 
         const int64_t lateness = now_qpc - next_deadline_qpc_;
-        const int64_t skipped_slots = lateness / period_qpc_ + 1;
-        if (skipped_slots > (std::numeric_limits<int64_t>::max()
+        const int64_t skipped_slots = lateness / period_qpc_;
+        const int64_t advance_slots = skipped_slots + 1;
+        if (advance_slots > (std::numeric_limits<int64_t>::max()
                 - next_deadline_qpc_) / period_qpc_) {
             Invalidate();
             ResetSchedule();
             return {};
         }
-        next_deadline_qpc_ += skipped_slots * period_qpc_;
+        next_deadline_qpc_ += advance_slots * period_qpc_;
         if (next_tick_ == std::numeric_limits<uint64_t>::max()) {
             Invalidate();
             ResetSchedule();
@@ -108,7 +110,35 @@ public:
         }
         pending_tick_ = ++next_tick_;
         awaiting_completion_ = true;
-        return {true, 0, pending_tick_};
+        return {true, 0, pending_tick_, static_cast<uint64_t>(skipped_slots)};
+    }
+
+    // Bound the noncancelable API wait, leaving at least a quarter frame for
+    // copying and encoder submission. The caller can reserve more based on
+    // recent post-acquire work. Measure now at the actual call site so that
+    // wake jitter and work before the call come out of the wait budget.
+    uint32_t AcquireTimeoutMs(uint64_t tick, int64_t now_qpc,
+                              int64_t processing_budget_qpc = 0) const noexcept {
+        if (!awaiting_completion_ || tick == 0 || tick != pending_tick_
+            || now_qpc < last_schedule_qpc_ || now_qpc >= next_deadline_qpc_) {
+            return 0;
+        }
+
+        const int64_t remaining_qpc = next_deadline_qpc_ - now_qpc;
+        const int64_t quarter_period_qpc = period_qpc_ / 4 + (period_qpc_ % 4 != 0);
+        const int64_t reserve_qpc = std::max(quarter_period_qpc, processing_budget_qpc);
+        if (remaining_qpc <= reserve_qpc) return 0;
+        const int64_t available_qpc = remaining_qpc - reserve_qpc;
+
+        constexpr uint32_t kMaximumAcquireWaitMs = 12;
+        for (uint32_t ms = kMaximumAcquireWaitMs; ms > 0; --ms) {
+            // Compare against whole milliseconds, rounded up to QPC ticks,
+            // without multiplying the full frequency or QPC budget.
+            const int64_t required_qpc = (qpc_frequency_ / 1000) * ms
+                + ((qpc_frequency_ % 1000) * ms + 999) / 1000;
+            if (available_qpc >= required_qpc) return ms;
+        }
+        return 0;
     }
 
     Presentation Complete(uint64_t tick, const AcquireResult& result) noexcept {

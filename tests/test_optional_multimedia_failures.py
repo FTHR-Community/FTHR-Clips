@@ -8,7 +8,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -151,6 +151,7 @@ def test_clip_viewer_import_failure_preserves_ownership_and_records_detail(
         _show_playback_unavailable=lambda: MainWindow._show_playback_unavailable(window),
     )
 
+    window._editor_trash_pending = MethodType(MainWindow._editor_trash_pending, window)
     original_import = importlib.import_module
 
     def failing_import(name, package=None):

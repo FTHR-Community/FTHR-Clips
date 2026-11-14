@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <iostream>
 
+int RunDxgiCursorTests();
+
 namespace {
 
 int backend_policy_checks = 0;
@@ -21,10 +23,10 @@ void DesktopAutomaticModePreservesSameMonitorFallback() {
     const auto plan = fthr::PlanWindowsCaptureStartup(
         false, false, false, fthr::WindowsCaptureBackendPreference::Auto);
     CheckBackendPolicy(plan.supported
-            && plan.primary == fthr::WindowsCaptureBackend::WgcMonitor
-            && plan.fallback == fthr::WindowsCaptureBackend::DxgiDesktop
+            && plan.primary == fthr::WindowsCaptureBackend::DxgiDesktop
+            && plan.fallback == fthr::WindowsCaptureBackend::WgcMonitor
             && !plan.focus_gated,
-        "desktop Auto tries WGC then same-monitor DXGI");
+        "desktop Auto tries DXGI then exact-monitor WGC");
 }
 
 void ExplicitDesktopBackendNeverFallsBack() {
@@ -106,20 +108,60 @@ void WgcSizeMismatchPreservesSourceSpecificRecoveryPolicy() {
         "monitor WGC size mismatch requests backend restart and reconfiguration");
     CheckBackendPolicy(
         fthr::WgcSizeMismatchHealthFlags(false)
-            == fthr::CAPTURE_HEALTH_BACKEND_FAILED,
-        "window WGC size mismatch remains a backend failure without monitor reconfigure");
+            == (fthr::CAPTURE_HEALTH_BACKEND_FAILED
+                | fthr::CAPTURE_HEALTH_RECONFIGURE_REQUIRED),
+        "window WGC size mismatch requests a fresh generation while preserving HWND identity");
+}
+
+void RotationPolicyAcceptsOnlyIdentityOrUnspecified() {
+    CheckBackendPolicy(fthr::IsSupportedDxgiOutputRotation(0u),
+        "unspecified output rotation remains supported");
+    CheckBackendPolicy(fthr::IsSupportedDxgiOutputRotation(1u),
+        "identity output rotation remains supported");
+    CheckBackendPolicy(!fthr::IsSupportedDxgiOutputRotation(2u)
+            && !fthr::IsSupportedDxgiOutputRotation(3u)
+            && !fthr::IsSupportedDxgiOutputRotation(4u),
+        "rotated output modes are rejected before capture startup");
 }
 
 }  // namespace
 
 int RunWindowsCaptureBackendPolicyTests() {
+    auto parsed = fthr::WindowsCaptureBackendPreference::Auto;
+    CheckBackendPolicy(fthr::ParseWindowsCaptureBackendPreference("dxgi", parsed)
+            && parsed == fthr::WindowsCaptureBackendPreference::Dxgi,
+        "production DXGI argument selects strict desktop duplication");
+    CheckBackendPolicy(fthr::ParseWindowsCaptureBackendPreference("wgc", parsed)
+            && parsed == fthr::WindowsCaptureBackendPreference::Wgc,
+        "production WGC argument is explicit");
+    CheckBackendPolicy(fthr::ParseWindowsCaptureBackendPreference("auto", parsed)
+            && parsed == fthr::WindowsCaptureBackendPreference::Auto,
+        "production default keeps automatic capture policy");
+    CheckBackendPolicy(!fthr::ParseWindowsCaptureBackendPreference("invalid", parsed)
+            && !fthr::ParseWindowsCaptureBackendPreference(nullptr, parsed)
+            && parsed == fthr::WindowsCaptureBackendPreference::Auto,
+        "invalid backend never silently changes capture preference");
     DesktopAutomaticModePreservesSameMonitorFallback();
     ExplicitDesktopBackendNeverFallsBack();
     WindowModeRequiresAnExactWindowCaptureTarget();
     ProtectedWindowsPauseWithoutChangingTheCaptureSource();
     MissingCaptureTargetsHaveStableStartupErrorIdentity();
     WgcSizeMismatchPreservesSourceSpecificRecoveryPolicy();
+    RotationPolicyAcceptsOnlyIdentityOrUnspecified();
+    const auto excluded = fthr::PlanWindowsCaptureStartup(false, false, false,
+        fthr::WindowsCaptureBackendPreference::Auto, false);
+    CheckBackendPolicy(excluded.supported
+            && excluded.primary == fthr::WindowsCaptureBackend::WgcMonitor
+            && excluded.fallback == fthr::WindowsCaptureBackend::None,
+        "cursor exclusion uses WGC with no cursor-leaking DXGI fallback");
+    const auto forced_excluded = fthr::PlanWindowsCaptureStartup(false, false, false,
+        fthr::WindowsCaptureBackendPreference::Dxgi, false);
+    CheckBackendPolicy(!forced_excluded.supported
+            && forced_excluded.failure == fthr::WindowsCapturePolicyFailure::CursorExclusionRequiresWgc,
+        "forced DXGI cannot promise cursor exclusion");
+    const int cursor_checks = RunDxgiCursorTests();
     std::cout << "Windows capture backend policy tests: "
-              << backend_policy_checks << " checks passed" << std::endl;
-    return backend_policy_checks;
+              << backend_policy_checks << " checks passed; DXGI cursor suite "
+              << cursor_checks << " checks passed" << std::endl;
+    return backend_policy_checks + cursor_checks;
 }

@@ -12,10 +12,13 @@ import os
 from pathlib import Path
 import queue
 import inspect
+import sys
 import subprocess
 import threading
 import time
 from typing import Callable, Sequence
+
+from core.mp4_timing import normalize_mp4_presentation_in_place
 
 
 class ExportState(str, Enum):
@@ -427,6 +430,18 @@ class ExportJob:
             self._transition(ExportState.FINALIZING)
             if not self.staged_path.is_file() or self.staged_path.stat().st_size <= 0:
                 raise RuntimeError('Export produced no usable output')
+            # The staged path is still unpublished here, so the lossless
+            # Windows MP4 timing rewrite can atomically replace it before any
+            # caller validator or final commit observes the file. Unsupported
+            # formats and already-normalized MP4s deliberately remain intact.
+            if (sys.platform == 'win32'
+                    and self.staged_path.suffix.casefold() == '.mp4'):
+                normalize_mp4_presentation_in_place(
+                    self.staged_path, cancelled=self._cancel_event)
+            if self._cancel_event.is_set():
+                self._transition(ExportState.CANCELLED)
+                return self._result(ExportState.CANCELLED, 'Export cancelled', started,
+                                    returncode)
             self._validate_staged_output()
             if self._cancel_event.is_set():
                 self._transition(ExportState.CANCELLED)

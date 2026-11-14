@@ -1,5 +1,50 @@
 ## Current issues
 
+### Next update — trash and restore, 20 October 2026
+
+The working source moves owned clips to recoverable Trash from the library, editor and selected bulk actions. Metadata and saved drafts retain their clip identity. Restore chooses a free name on collision; permanent deletion requires a separate confirmation. Interrupted permanent deletions remain visible for retry until cleanup is complete. Protection and upload/export ownership are checked before mutations; external originals and unsupported media associations are retained.
+
+Trash and restore currently require the same volume. Cross-volume operations, live power-loss recovery and current-build/interactive upgrade acceptance remain open. Startup explicitly requests the backed-up schema-3 migration. No production profile was migrated during source validation. Earlier binaries do not contain these changes.
+
+### Next update — library multi-selection, 20 October 2026
+
+The working source supports Ctrl/Shift selection, all filtered results and bulk favorite/protection changes. Original-file export copies complete selected sources and valid audio-label manifests through the existing export queue; saved editor changes are not applied. Registered additional media that cannot be preserved by this export are reported as unsupported. Busy, unfinished or replaced sources are reported individually. Bulk deletion now uses recoverable Trash with per-file protection and identity checks. Earlier binaries do not contain these source changes; current-build and hardware qualification remain open.
+
+### Next update — favorites and protected clips, 19 October 2026
+
+The working source includes favorite controls, a favorites filter and independent deletion protection. New favorites start protected; explicitly removing protection keeps the favorite. Current library, editor, upload and orphan audio-manifest deletion paths recheck protection. The later trash/restore implementation described above replaces the ordinary permanent-delete workflow for owned clips. Earlier application binaries do not contain these source changes. Hardware qualification and current-build/upgrade acceptance remain open.
+
+Removing a favorite now releases protection added automatically by the current source. Separately selected protection remains active. Older saved protection has no origin marker and is retained conservatively; use “Unprotect clip” explicitly for those clips.
+
+Offscreen integration runs have aborted natively during Qt event processing, including the combined F06 source-suite run. The source suite is qualified in four fixed isolated test processes with the existing hardware/platform skips retained. The native cause remains unconfirmed; single-process Qt stability and current-build acceptance remain open. No native-crash fix is claimed.
+
+### Next update — library foundations, 19 October 2026
+
+The working source adds backed-up metadata migration, stable clip identities and journaled same-folder renames. Recovery coverage simulates process interruptions; power-loss durability, live recovery and interactive upgrade acceptance remain open. Trash/restore, cross-volume moves and the expanded editor are not implemented by this foundation. The previous portable build and earlier installer do not contain these source changes.
+
+### Next update — editor upload, 19 October 2026
+
+The local editor now exports and validates the current edit before handing its output to the existing optional uploader. Export failures do not fall back to uploading the original. The previous packaged PR candidate does not contain this later change. Physical audio/AMD qualification and release-package acceptance remain open.
+
+### vxnsin PR integration — 19 October 2026
+
+PRs #88–#90 are integrated into this local source; PR #87 was already adapted. Multiple named playback-device tracks apply to Windows replay clips; manual continuous recordings retain the existing system mix. Full multi-endpoint hardware-mixer and supported-Windows per-program qualification remain separate from parser/UI/build validation. Window resizing restarts the existing selected source with a fresh replay generation and bounded retries; terminal failures remain visible.
+
+### Audio/video synchronization update — 19 October 2026
+
+The reproduced Windows MP4 Edit List video offset and AAC priming offset are corrected in the tested decoder paths. New Windows MP4 outputs and eligible old-clip playback copies use the timing-neutral workaround. A new generated system-loopback capture and production-finalized copy retain all six matched markers within one 60-Hz frame and preserve the full video tail. Historical entries below describe their original test state; the reproduced container cases are superseded by these corrections and controlled decoder checks.
+
+Physical microphone/speaker/display latency, long gameplay, device changes and other Windows/hardware configurations remain unqualified. This is not a universal repair for offsets already present in recorded source content.
+
+### AMD source review — 18 October 2026
+
+The full Windows Release/x64 build has now been run on the development PC.
+Native contract tests and the production GPU-input probe pass on its RTX 4060 Ti.
+These results do not qualify Radeon hardware, gameplay, physical microphone
+sync or the complete GUI/release matrix. The existing Windows playback-offset
+issue remained open at this historical review stage. Physical Radeon follow-up
+is still required; the later container corrections above do not qualify Radeon hardware.
+
 ### Release qualification status — 17 October 2026
 
 - AMD/NVIDIA core feature parity is a P0 requirement. AMD physical validation
@@ -37,7 +82,7 @@ this is just a unordered list of things that we need to address as we move on, p
 - slight audio delay is sometimes possible at higher frame rate recordings
 - app drops frames of anticheat protected games after tabbing out
 - capture card doesn't always display correct amount of seconds of the actual clip but rather follows the selected length even if it wasn't reached
-- manual recording a length sometimes inaccurately displayed
+- The manual recording timer shows approximate elapsed time; the saved notification reports measured video duration when available. Physical start/stop timing and long recordings remain part of hardware qualification.
 - Linux ScreenCast portal capture can temporarily appear as "CAPTURE STALLED"
   while the desktop's first-run screen picker is open. The picker controls the
   selected screen; the separate screenshot path still depends on `grim` and is

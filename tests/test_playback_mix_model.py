@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 import json
 import subprocess
@@ -147,10 +148,10 @@ def test_legacy_kovaak_manifest_identity_gets_friendly_name():
     assert source_display_name(source) == "KovaaK's"
 
 
-def test_one_two_four_and_eight_tracks_follow_equal_power_headroom():
+def test_one_two_four_and_eight_tracks_preserve_recorded_levels():
     for tracks in (1, 2, 4, 8):
         output = mix_interleaved_float([[0.5, 0.5]] * tracks, [1.0] * tracks)
-        assert output == [min(LIMITER_CEILING, 0.5 * tracks / tracks ** 0.5)] * 2
+        assert output == [min(LIMITER_CEILING, 0.5 * tracks)] * 2
 
 
 def test_gain_mute_master_and_limiter_are_non_destructive_mix_state():
@@ -161,7 +162,7 @@ def test_gain_mute_master_and_limiter_are_non_destructive_mix_state():
     assert label == '[aout]'
     assert 'volume=0.000000' in filters[1]
     assert 'volume=0.500000' in filters[-1]
-    assert 'alimiter=limit=0.98' in filters[-1]
+    assert 'alimiter=limit=0.98:level=disabled:latency=1' in filters[-1]
     assert mix_interleaved_float([[2.0], [2.0]], [1.0, 1.0]) == [LIMITER_CEILING]
 
 
@@ -176,18 +177,18 @@ def test_application_gain_is_a_delta_against_hidden_default_mix():
 
     filters, _ = ffmpeg_mix_filter(sources, {}, 100)
     assert filters[0] == (
-        '[0:a:1]aresample=first_pts=0:async=0,volume=0.000000[src0]')
+        '[0:a:1]aresample=first_pts=0:async=0,aformat=sample_rates=48000:channel_layouts=stereo,anull,volume=0.000000[src0]')
     assert filters[1] == (
-        '[0:a:2]aresample=first_pts=0:async=0,volume=0.000000[src1]')
+        '[0:a:2]aresample=first_pts=0:async=0,aformat=sample_rates=48000:channel_layouts=stereo,anull,volume=0.000000[src1]')
     assert filters[2] == (
-        '[0:a:0]aresample=first_pts=0:async=0,volume=1.000000[src2]')
+        '[0:a:0]aresample=first_pts=0:async=0,aformat=sample_rates=48000:channel_layouts=stereo,anull,volume=1.000000[src2]')
 
     states = {chrome.source_id: SourceMixState(muted=True)}
     filters, _ = ffmpeg_mix_filter(sources, states, 100)
     assert filters[0] == (
-        '[0:a:1]aresample=first_pts=0:async=0,volume=-1.000000[src0]')
+        '[0:a:1]aresample=first_pts=0:async=0,aformat=sample_rates=48000:channel_layouts=stereo,anull,volume=-1.000000[src0]')
     assert filters[1] == (
-        '[0:a:2]aresample=first_pts=0:async=0,volume=0.000000[src1]')
+        '[0:a:2]aresample=first_pts=0:async=0,aformat=sample_rates=48000:channel_layouts=stereo,anull,volume=0.000000[src1]')
     assert base.editable is False
     assert discord.editable is True
 
@@ -299,6 +300,7 @@ def test_video_sync_accounts_for_qaudio_device_buffer(qtbot):
     controller._worker = Worker()
     controller._output_format = OutputFormat()
     controller._sink = Sink()
+    controller._playback_rate = 1.0
     controller._sync_guard_until = 0.0
     sought = []
     controller.seek = sought.append
@@ -309,6 +311,11 @@ def test_video_sync_accounts_for_qaudio_device_buffer(qtbot):
     controller.sync_to_video_position(700)
     assert sought == []
     assert controller._sink.suspended == 1
+
+    controller._playback_rate = 2.0
+    assert controller._estimated_output_position_ms() == 750
+    controller._playback_rate = 0.5
+    assert controller._estimated_output_position_ms() == 1_125
 
 
 def test_video_sync_waits_for_seek_pipeline_to_recover(qtbot):
@@ -395,6 +402,7 @@ def test_video_sync_only_seeks_forward_when_audio_is_late(qtbot):
     controller._sync_guard_until = 0.0
     controller._sync_holding = False
     controller._sink = None
+    controller._worker = SimpleNamespace(at_eof=False)
     controller._estimated_output_position_ms = lambda: 700
     sought = []
     controller.seek = sought.append
@@ -402,6 +410,26 @@ def test_video_sync_only_seeks_forward_when_audio_is_late(qtbot):
     controller.sync_to_video_position(1_000)
 
     assert sought == [1_000]
+
+    controller._worker.at_eof = True
+    controller.sync_to_video_position(2_000)
+
+    assert sought == [1_000]
+
+
+def test_pausing_stops_output_maintenance_timer(qtbot):
+    from PySide6.QtCore import QObject, QTimer
+
+    controller = FFmpegPlaybackController.__new__(FFmpegPlaybackController)
+    QObject.__init__(controller)
+    controller._sink_timer = QTimer(controller)
+    controller._sink_timer.start(20)
+    controller._worker = SimpleNamespace(pause=lambda: None)
+    controller._discard_output_buffer = lambda: None
+
+    controller.pause()
+
+    assert not controller._sink_timer.isActive()
 
 
 def test_seek_invalidates_decoder_before_releasing_qaudio_buffer(qtbot):
@@ -453,8 +481,11 @@ def test_in_flight_pre_seek_decode_cannot_reenter_cleared_queue(monkeypatch):
     class Mixer:
         pulls = 0
 
-        def __init__(self, *_args):
+        def __init__(self, *_args, **_kwargs):
             pass
+
+        def output_peak(self):
+            return 0.0
 
         def seek(self, _position_ms):
             pass
@@ -494,6 +525,55 @@ def test_in_flight_pre_seek_decode_cannot_reenter_cleared_queue(monkeypatch):
             if queue.frames:
                 break
             threading.Event().wait(0.005)
+        assert queue.read(8) == b'n' * 8
+    finally:
+        worker.stop()
+        worker.join(timeout=2)
+
+
+def test_seek_restarts_audio_after_short_track_ends(monkeypatch):
+    import core.ffmpeg_playback as playback
+
+    ended = threading.Event()
+
+    class Mixer:
+        def __init__(self, *_args, **_kwargs):
+            self.next_sample = None
+
+        def seek(self, position_ms):
+            self.next_sample = b'o' if position_ms == 0 else b'n'
+
+        def pull(self, frames, _gains, _master):
+            if self.next_sample is None:
+                return None
+            samples = self.next_sample * (frames * 8)
+            self.next_sample = None
+            return samples
+
+        def failed_source_indexes(self):
+            return ()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(playback, 'InProcessFFmpegMixer', Mixer)
+    queue = BoundedPCMQueue(bytes_per_frame=8)
+    worker = _DecodeWorker(
+        'clip.mp4', (PlaybackSource('track', 'Track', 'track', 1, 0),),
+        queue, lambda pcm: pcm, lambda: ([1.0], 1.0),
+        lambda _error: None, lambda _error: None, lambda _source: None, ended.set)
+    worker.start()
+    try:
+        worker.play(0)
+        assert ended.wait(2)
+        assert worker.at_eof
+        assert queue.read(8) == b'o' * 8
+
+        ended.clear()
+        worker.seek(1_000)
+
+        assert ended.wait(2)
+        assert worker.at_eof
         assert queue.read(8) == b'n' * 8
     finally:
         worker.stop()
@@ -568,7 +648,7 @@ def test_stopped_sink_is_recreated_after_fresh_pcm_arrives(qtbot, monkeypatch):
     assert controller._sink.starts == 1
 
 
-def test_master_zero_to_audible_discards_buffered_silence_and_reseeks(qtbot):
+def test_master_zero_to_audible_preserves_decoder_and_output_buffers(qtbot):
     from PySide6.QtCore import QObject
 
     events = []
@@ -603,10 +683,10 @@ def test_master_zero_to_audible_discards_buffered_silence_and_reseeks(qtbot):
     controller.refresh_mix(1_250)
 
     assert controller._master_gain == 0.75
-    assert events == ['python-clear', ('decoder-seek', 1_250), 'sink-reset']
+    assert events == []
 
 
-def test_last_source_unmute_uses_same_immediate_audio_restart(qtbot):
+def test_last_source_unmute_preserves_continuous_playback(qtbot):
     from PySide6.QtCore import QObject
 
     events = []
@@ -641,7 +721,7 @@ def test_last_source_unmute_uses_same_immediate_audio_restart(qtbot):
     controller.refresh_mix(900)
 
     assert controller.source_state('track').muted is False
-    assert events == ['python-clear', ('decoder-seek', 900), 'sink-reset']
+    assert events == []
 
 
 def test_probe_uses_actual_container_indexes_and_titles(monkeypatch):

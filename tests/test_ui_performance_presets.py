@@ -12,7 +12,6 @@ from core.ui_performance import DEFAULTS, PRESETS, matching_preset
 from main import _SettingsPage
 from ui.clip_grid import ClipGrid, ClipThumbnail
 from ui.clip_viewer import ClipViewer
-from ui.motion import set_reduce_motion
 
 
 def test_export_concurrency_is_opt_in_and_persisted(qtbot, monkeypatch, tmp_path):
@@ -45,30 +44,30 @@ def test_presets_persist_and_manual_changes_sync_clip_tab(qtbot, monkeypatch, tm
     qtbot.addWidget(page)
     page._ensure_category(5)
     page._ensure_category(1)
-    try:
-        for name, values in PRESETS.items():
-            page._apply_ui_performance_preset(name)
-            assert matching_preset(sm) == name
-            assert page.ui_performance_preset_combo.currentText() == name
-            reloaded = SettingsManager()
-            assert all(reloaded.get(key) == value for key, value in values.items())
-            assert reloaded.get('watermark_enabled') is True
-            assert reloaded.get('encoder_preset') == 6
-            assert page.timeline_preview_strip_enabled_check.isChecked() == values['timeline_preview_strip_enabled']
-        page.timeline_preview_strip_enabled_check.setChecked(True)
-        assert page.ui_performance_preset_combo.currentText() == 'Custom'
-        assert page._ui_performance_checks['timeline_preview_strip_enabled'].isChecked()
-        page._ui_performance_checks['clip_editor_enabled'].setChecked(True)
-        assert sm.get('clip_editor_enabled') is True
-        assert isinstance(page.stack.widget(5), QScrollArea)
-        page.stack.setCurrentIndex(5)
-        page.resize(1050, 700)
-        page.show()
-        qtbot.wait(50)
-        scroll = page.stack.widget(5)
-        assert scroll.verticalScrollBar().maximum() > 0
-    finally:
-        set_reduce_motion(False)
+    for name, values in PRESETS.items():
+        page._apply_ui_performance_preset(name)
+        assert matching_preset(sm) == name
+        assert page.ui_performance_preset_combo.currentText() == name
+        reloaded = SettingsManager()
+        assert all(reloaded.get(key) == value for key, value in values.items())
+        assert reloaded.get('watermark_enabled') is True
+        assert reloaded.get('encoder_preset') == 6
+        assert page.timeline_preview_strip_enabled_check.isChecked() == values['timeline_preview_strip_enabled']
+    page.timeline_preview_strip_enabled_check.setChecked(True)
+    assert page.ui_performance_preset_combo.currentText() == 'Custom'
+    assert page._ui_performance_checks['timeline_preview_strip_enabled'].isChecked()
+    page._ui_performance_checks['clip_editor_enabled'].setChecked(True)
+    assert sm.get('clip_editor_enabled') is True
+    assert isinstance(page.stack.widget(5), QScrollArea)
+    page.stack.setCurrentIndex(5)
+    page.resize(1050, 700)
+    page.show()
+    from ui.customize_page import _AccordionSection
+    for section in page.stack.widget(5).findChildren(_AccordionSection):
+        section.expand()
+    qtbot.wait(50)
+    scroll = page.stack.widget(5)
+    assert scroll.verticalScrollBar().maximum() > 0
 
 
 def test_thumbnail_switch_cancels_and_releases_and_requeues(qtbot):
@@ -132,6 +131,40 @@ def test_basic_viewer_has_no_editor_and_releases_source(qtbot, tmp_path):
     assert viewer.player.source().isEmpty()
 
 
+def test_basic_viewer_cancels_compatibility_and_ignores_a_queued_result(
+        qtbot, tmp_path, monkeypatch):
+    from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal
+    from ui import basic_clip_viewer
+
+    class Signals(QObject):
+        ready = Signal(object)
+
+    signals = Signals()
+    workers = []
+
+    def make_worker(source, cancelled):
+        return SimpleNamespace(signals=signals, source=source, cancelled=cancelled)
+
+    monkeypatch.setattr(basic_clip_viewer, 'CompatibilitySourceWorker', make_worker)
+    monkeypatch.setattr(
+        basic_clip_viewer, 'QThreadPool',
+        SimpleNamespace(globalInstance=lambda: SimpleNamespace(start=workers.append)))
+    viewer = basic_clip_viewer.BasicClipViewer(str(tmp_path / 'clip.mp4'))
+    viewer.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+    qtbot.addWidget(viewer)
+    assert len(workers) == 1
+    assert viewer.player.source().isEmpty()
+    assert not viewer.play.isEnabled()
+
+    signals.ready.emit(str(tmp_path / 'compatibility.mp4'))
+    viewer.done(0)
+    QCoreApplication.processEvents()
+
+    assert workers[0].cancelled.is_set()
+    assert viewer.player.source().isEmpty()
+    assert not viewer.play.isEnabled()
+
+
 def test_presets_only_contain_ui_preferences():
     assert matching_preset({}) == 'Full experience'
     for preset in PRESETS.values():
@@ -145,6 +178,7 @@ def test_library_viewer_mode_bypasses_editor_session_creation(qtbot, tmp_path):
 
     class Host(QWidget):
         _forget_basic_viewer = MainWindow._forget_basic_viewer
+        _editor_trash_pending = MainWindow._editor_trash_pending
 
     host = Host()
     qtbot.addWidget(host)

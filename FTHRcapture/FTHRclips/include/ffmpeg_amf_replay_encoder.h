@@ -5,6 +5,7 @@
 #define FTHR_FFMPEG_AMF_REPLAY_ENCODER_H
 
 #include "replay_encoder.h"
+#include <d3d11.h>
 
 #include <atomic>
 #include <cstdint>
@@ -12,6 +13,10 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+struct AVHWFramesContext;
+struct AVBufferRef;
+struct AVFrame;
 
 namespace fthr {
 
@@ -33,6 +38,54 @@ EncodedVideoConfig BuildAmfVideoConfig(
     const std::vector<uint8_t>& codec_extradata);
 
 namespace detail {
+
+// Internal, directly testable caller-pool contract. No AMF encoder is needed
+// to exercise these real D3D11/FFmpeg resource lifetimes. Accepts production
+// BGRA and the explicit even-sized NV12 diagnostic candidate, each bounded to
+// eight separate textures with slice zero.
+struct AmfInputPoolDiagnostics {
+    std::atomic<uint32_t> live_textures{0};
+    std::atomic<bool> capacity_exhausted{false};
+    std::atomic<bool> hresult_available{false};
+    std::atomic<int32_t> hresult{0};
+    std::atomic<bool> state_destroyed{false};
+};
+using AmfCreatePoolTexture = HRESULT (*)(ID3D11Device*,
+    const D3D11_TEXTURE2D_DESC*, ID3D11Texture2D**);
+int InstallAmfSingleTexturePool(AVHWFramesContext* frames, ID3D11Device* device,
+    std::shared_ptr<AmfInputPoolDiagnostics> diagnostics = {},
+    AmfCreatePoolTexture create_texture = nullptr) noexcept;
+// Unrefs the destination before acquiring; failure leaves no pending frame.
+int AcquireAmfInputFrame(AVBufferRef* frames, AVFrame* frame) noexcept;
+const AmfInputPoolDiagnostics* GetAmfInputPoolDiagnostics(
+    const AVHWFramesContext* frames) noexcept;
+
+// Internal diagnostics only; does not change the exported replay/shared ABI.
+struct AmfTextureEvidence {
+    bool available = false;
+    uint32_t width = 0, height = 0, format = 0, array_size = 0, mip_levels = 0;
+    uint32_t bind_flags = 0, misc_flags = 0, usage = 0, cpu_access_flags = 0;
+    uint32_t sample_count = 0, sample_quality = 0, subresource = 0;
+};
+
+struct AmfFailureEvidence {
+    std::string operation, codec;
+    bool ffmpeg_error_available = false;
+    int ffmpeg_error = 0;
+    bool hresult_available = false;
+    int32_t hresult = 0;
+    bool device_removed_available = false;
+    int32_t device_removed_reason = 0;
+    uint64_t generation = 0, successful_submits = 0, packets = 0;
+    int64_t pts = -1, last_submit_pts = -1, last_output_pts = -1;
+    bool source_device_matches = false, input_device_matches = false;
+    bool hw_frames_ctx_matches = false;
+    bool source_identity_available = false, input_identity_available = false;
+    bool hw_frames_identity_available = false;
+    AmfTextureEvidence source, input;
+};
+
+std::string BuildAmfFailureEvidence(const AmfFailureEvidence& evidence);
 
 enum class AmfSubmitStatus : uint32_t {
     Accepted,
@@ -75,6 +128,7 @@ public:
         std::string& error) = 0;
     virtual ID3D11Texture2D* GetCurrentInputTexture() const noexcept = 0;
     virtual uint32_t GetCurrentInputSubresource() const noexcept = 0;
+    virtual bool UsesDirectBgraCopy() const noexcept { return false; }
     virtual AmfSubmitStatus SubmitFrame(
         int64_t pts, bool force_keyframe, std::string& error) = 0;
     virtual AmfReceiveStatus ReceivePacket(
@@ -84,6 +138,8 @@ public:
 };
 
 std::unique_ptr<IAmfCodecSession> CreateProductionAmfCodecSession();
+// Explicit diagnostic candidate only. Production continues to select BGRA.
+std::unique_ptr<IAmfCodecSession> CreateNv12AmfComparisonSession();
 
 } // namespace detail
 
@@ -102,6 +158,7 @@ public:
         PacketCallback callback,
         bool cpu_input_mode) override;
     bool RequiresBackendGpuPreparation() const noexcept override;
+    bool UsesDirectBgraCopy() const noexcept;
     bool PrepareGpuFrame(
         ID3D11Texture2D* source,
         uint32_t source_subresource = 0) override;

@@ -243,17 +243,17 @@ def test_category_results_restore_a_visible_grid_without_opacity_effect(
         }.get(key, default))
     grid = clip_grid.ClipGrid(settings)
     grid._filter = 'screenshots'
-    grid._on_files_collected_for_transition(
-        {str(image_path)}, [(image_path.stat().st_mtime, str(image_path))],
-        set(), [])
+    grid._replace_records(grid._records_from_paths({str(image_path)}))
+    grid._apply_current_index()
 
     assert not grid._sections_host.isHidden()
     assert grid._sections_host.graphicsEffect() is None
     assert len(grid.thumbnails) == 1
 
 
-def test_category_refresh_keeps_worker_alive_until_completion(
+def test_category_filter_stays_scanfree(
         qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Changing a category filters the existing index without scanning."""
     settings = SimpleNamespace(
         get=lambda key, default=None: {
             'clips_directory': str(tmp_path),
@@ -267,13 +267,10 @@ def test_category_refresh_keeps_worker_alive_until_completion(
     grid._on_filter_changed(2)
 
     assert grid._filter == 'screenshots'
-    assert len(started) == 1
-    worker = started[0]
-    assert worker in grid._transition_workers.values()
+    assert started == []
 
-    worker.signals.finished.emit(set(), [], set(), [])
-    assert worker not in grid._transition_workers.values()
-    assert grid._all_count_label.text() == 'SCREENSHOTS'
+    # The fixed-width visual label may elide; its accessible name preserves the heading.
+    assert grid._all_count_label.accessibleName() == 'SCREENSHOTS'
 
 
 def test_short_section_cards_are_left_aligned(qapp, tmp_path: Path) -> None:

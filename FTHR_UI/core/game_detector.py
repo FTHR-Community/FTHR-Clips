@@ -185,6 +185,11 @@ class _MONITORINFO(ctypes.Structure):
     ]
 
 
+class _FILETIME(ctypes.Structure):
+    _fields_ = [('dwLowDateTime', wintypes.DWORD),
+                ('dwHighDateTime', wintypes.DWORD)]
+
+
 _USER32 = None
 _KERNEL32 = None
 if sys.platform == 'win32':
@@ -197,6 +202,11 @@ if sys.platform == 'win32':
         _USER32.IsWindow.restype = wintypes.BOOL
         _USER32.IsWindowVisible.argtypes = (wintypes.HWND,)
         _USER32.IsWindowVisible.restype = wintypes.BOOL
+        _USER32.IsIconic.argtypes = (wintypes.HWND,)
+        _USER32.IsIconic.restype = wintypes.BOOL
+        _USER32.GetClientRect.argtypes = (
+            wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+        _USER32.GetClientRect.restype = wintypes.BOOL
         _USER32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
         _USER32.GetWindowTextLengthW.restype = ctypes.c_int
         _USER32.GetWindowTextW.argtypes = (
@@ -226,6 +236,11 @@ if sys.platform == 'win32':
             wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
             ctypes.POINTER(wintypes.DWORD))
         _KERNEL32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        _KERNEL32.GetProcessTimes.argtypes = (
+            wintypes.HANDLE, ctypes.POINTER(_FILETIME),
+            ctypes.POINTER(_FILETIME), ctypes.POINTER(_FILETIME),
+            ctypes.POINTER(_FILETIME))
+        _KERNEL32.GetProcessTimes.restype = wintypes.BOOL
         _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
         _KERNEL32.CloseHandle.restype = wintypes.BOOL
     # The Win32 DLLs are optional outside Windows; leave them disabled when
@@ -245,6 +260,7 @@ class GameWindow:
     exe_path: str = ''
     exe_name: str = ''
     class_name: str = ''
+    process_created: int | None = None
     left: int = 0
     top: int = 0
     right: int = 0
@@ -294,6 +310,8 @@ class GameWindow:
             'display_name': self.display_name,
             'exe_path': self.exe_path,
             'exe_name': self.exe_name,
+            'class_name': self.class_name,
+            'process_created': self.process_created,
             'is_game': True,
             'icon': None,
         }
@@ -317,8 +335,6 @@ _EXCLUDED_EXECUTABLES = {
     # Steam helpers can look like borderless/fullscreen windows.
     'steamwebhelper.exe', 'steamservice.exe', 'steamerrorreporter.exe',
     'steam_monitor.exe', 'gameoverlayui.exe',
-    # Never allow the capture application to target itself.
-    'fthrclips.exe',
 }
 
 _EXCLUDED_WINDOW_CLASSES = {
@@ -336,6 +352,60 @@ _EXCLUDED_WINDOW_TITLE_MARKERS = (
     'windows input experience',
     'microsoft text input application',
 )
+
+
+def is_fthr_application_executable(path: str, pid: int | None = None) -> bool:
+    """Match FTHR's own process or exact product executables in known roots."""
+    try:
+        if pid is not None and int(pid) == os.getpid():
+            return True
+    except (TypeError, ValueError):
+        # A malformed PID falls through to path identity instead of matching.
+        pass
+    candidate = Path(str(path or '')).resolve(strict=False)
+    if not candidate.name:
+        return False
+    known_names = {
+        'fthrclips.exe', 'fthr uploader.exe', 'fthrclips-launcher.exe',
+        'fthrclips_launcher.exe',
+    }
+    if candidate.name.casefold() not in known_names:
+        return False
+
+    # Restrict helper names to this checkout/install family. A third-party
+    # binary with a FTHR-like prefix elsewhere is not our application.
+    roots = {
+        Path(__file__).resolve().parents[2],
+        Path(sys.executable).resolve(strict=False).parent,
+    }
+    try:
+        argv_path = Path(sys.argv[0]).resolve(strict=False)
+        if argv_path.is_file():
+            roots.add(argv_path.parent)
+    except (OSError, RuntimeError):
+        # An unavailable entry-point path only removes that optional root.
+        pass
+    expanded_roots = set(roots)
+    # The optional uploader runs from a user-data plugin directory, outside
+    # the main app's install root. Keep this exact product-owned subtree in
+    # scope without blacklisting same-named executables elsewhere in AppData.
+    local_app_data = Path(os.environ.get(
+        'LOCALAPPDATA', str(Path.home() / 'AppData' / 'Local')))
+    expanded_roots.add(
+        local_app_data / 'FTHR Clips' / 'plugins' / 'uploader')
+    for root in roots:
+        expanded_roots.update({
+            root / 'dist' / 'FTHRClips',
+            root / 'dist' / 'FTHR-Uploader',
+            root / 'plugins' / 'com.fthrclips.uploader',
+        })
+    normalized_parent = os.path.normcase(str(candidate.parent)).casefold()
+    return any(
+        normalized_parent == os.path.normcase(str(root)).casefold()
+        or normalized_parent.startswith(
+            os.path.normcase(str(root)).casefold() + os.sep.casefold())
+        for root in expanded_roots
+    )
 
 _GAME_WINDOW_CLASS_MARKERS = (
     'unitywndclass', 'unrealwindow', 'sdl_app', 'glfw', 'godot',
@@ -480,6 +550,9 @@ def is_probable_game(window: Optional[GameWindow],
     """Apply conservative, deterministic game heuristics to a window."""
     if window is None or not window.hwnd or not window.pid:
         return False
+    if is_fthr_application_executable(
+            window.exe_path or window.exe_name, window.pid):
+        return False
     if is_user_configured_game(window, custom_game_rules):
         return True
     if window.width < 640 or window.height < 360:
@@ -527,6 +600,28 @@ def is_capture_window_valid(hwnd: int) -> bool:
         return False
 
 
+def is_capture_window_renderable(hwnd: int) -> bool:
+    """Check startup readiness without changing or discarding window identity.
+
+    Minimized fullscreen games remain valid capture identities, but Windows
+    cannot start a WGC window session until their client area is restored.
+    """
+    if _USER32 is None or not hwnd:
+        return False
+    try:
+        handle = wintypes.HWND(int(hwnd))
+        if (not _USER32.IsWindow(handle)
+                or not _USER32.IsWindowVisible(handle)
+                or _USER32.IsIconic(handle)):
+            return False
+        rect = wintypes.RECT()
+        return bool(_USER32.GetClientRect(handle, ctypes.byref(rect))
+                    and rect.right > rect.left and rect.bottom > rect.top)
+    except Exception:
+        # The target may disappear or minimize between Win32 calls.
+        return False
+
+
 def _window_text(hwnd: int) -> str:
     length = int(_USER32.GetWindowTextLengthW(hwnd))
     if length <= 0:
@@ -543,11 +638,13 @@ def _window_class(hwnd: int) -> str:
     return ''
 
 
-def _process_path(pid: int) -> str:
+def _process_path(pid: int, *, process_handle=None) -> str:
     if _KERNEL32 is None or not pid:
         return ''
-    handle = _KERNEL32.OpenProcess(
-        PROCESS_QUERY_LIMITED_INFORMATION, False, wintypes.DWORD(pid))
+    handle = process_handle
+    if handle is None:
+        handle = _KERNEL32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, wintypes.DWORD(pid))
     if not handle:
         return ''
     try:
@@ -562,12 +659,53 @@ def _process_path(pid: int) -> str:
     except Exception:
         pass
     finally:
-        _KERNEL32.CloseHandle(handle)
+        if process_handle is None:
+            _KERNEL32.CloseHandle(handle)
     return ''
 
 
+def _process_creation_time(pid: int, *, process_handle=None) -> int | None:
+    """Return the Windows process creation FILETIME for HWND reuse checks."""
+    if _KERNEL32 is None or not pid:
+        return None
+    handle = process_handle
+    if handle is None:
+        handle = _KERNEL32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, wintypes.DWORD(int(pid)))
+    if not handle:
+        return None
+    try:
+        created, exited, kernel, user = (_FILETIME() for _ in range(4))
+        if not _KERNEL32.GetProcessTimes(
+                handle, ctypes.byref(created), ctypes.byref(exited),
+                ctypes.byref(kernel), ctypes.byref(user)):
+            return None
+        return (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
+    except (OSError, TypeError, ValueError):
+        # Access may be denied during process exit; missing identity fails closed.
+        return None
+    finally:
+        if process_handle is None:
+            _KERNEL32.CloseHandle(handle)
+
+
+def _process_metadata(pid: int) -> tuple[str, int | None]:
+    """Read both identity fields from one process instance and one handle."""
+    if _KERNEL32 is None or not pid:
+        return '', None
+    handle = _KERNEL32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, False, wintypes.DWORD(pid))
+    if not handle:
+        return '', None
+    try:
+        return (_process_path(pid, process_handle=handle),
+                _process_creation_time(pid, process_handle=handle))
+    finally:
+        _KERNEL32.CloseHandle(handle)
+
+
 _GAME_DATABASE_LOCK = threading.Lock()
-_GAME_DATABASE_LOADED_AT = 0.0
+_GAME_DATABASE_LOADED_AT: float | None = None
 _GAME_DATABASE_PATHS: set[str] = set()
 _GAME_DATABASE_PARENTS: set[str] = set()
 _GAME_DATABASE_TTL_SECONDS = 300.0
@@ -584,12 +722,14 @@ def _refresh_windows_game_database_if_needed():
     if sys.platform != 'win32':
         return
     now = time.monotonic()
-    if now - _GAME_DATABASE_LOADED_AT < _GAME_DATABASE_TTL_SECONDS:
+    if (_GAME_DATABASE_LOADED_AT is not None
+            and now - _GAME_DATABASE_LOADED_AT < _GAME_DATABASE_TTL_SECONDS):
         return
 
     with _GAME_DATABASE_LOCK:
         now = time.monotonic()
-        if now - _GAME_DATABASE_LOADED_AT < _GAME_DATABASE_TTL_SECONDS:
+        if (_GAME_DATABASE_LOADED_AT is not None
+                and now - _GAME_DATABASE_LOADED_AT < _GAME_DATABASE_TTL_SECONDS):
             return
         paths: set[str] = set()
         parents: set[str] = set()
@@ -668,7 +808,10 @@ def get_foreground_window(own_pid: Optional[int] = None) -> Optional[GameWindow]
     """Read the current foreground window using fast Win32 calls only."""
     if _USER32 is None:
         return None
-    return get_window_info(int(_USER32.GetForegroundWindow() or 0), own_pid)
+    hwnd = int(_USER32.GetForegroundWindow() or 0)
+    if not is_capture_window_renderable(hwnd):
+        return None
+    return get_window_info(hwnd, own_pid)
 
 
 def get_window_info(hwnd: int, own_pid: Optional[int] = None) -> Optional[GameWindow]:
@@ -708,7 +851,7 @@ def get_window_info(hwnd: int, own_pid: Optional[int] = None) -> Optional[GameWi
             and window_h >= monitor_h * 0.90
         )
         has_caption = bool(style & WS_CAPTION)
-        path = _process_path(pid)
+        path, process_created = _process_metadata(pid)
         return GameWindow(
             hwnd=hwnd,
             pid=pid,
@@ -716,6 +859,7 @@ def get_window_info(hwnd: int, own_pid: Optional[int] = None) -> Optional[GameWi
             exe_path=path,
             exe_name=Path(path).name if path else '',
             class_name=_window_class(hwnd),
+            process_created=process_created,
             left=int(rect.left), top=int(rect.top),
             right=int(rect.right), bottom=int(rect.bottom),
             monitor_width=monitor_w, monitor_height=monitor_h,
@@ -736,6 +880,7 @@ class ForegroundGameDetector(QObject):
 
     game_detected = Signal(object)  # GameWindow
     game_lost = Signal()
+    _observation_ready = Signal(object)
 
     def __init__(
         self,
@@ -756,6 +901,7 @@ class ForegroundGameDetector(QObject):
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._observation_ready.connect(self._publish_observation)
         self._custom_game_rules = normalise_custom_game_rules(custom_game_rules)
         self._blacklist_rules = normalise_custom_game_rules(blacklist_rules)
         self._observed_identity: Optional[tuple[int, int]] = None
@@ -770,15 +916,19 @@ class ForegroundGameDetector(QObject):
     @property
     def is_running(self) -> bool:
         thread = self._thread
-        return bool(thread and thread.is_alive())
+        return bool(thread and thread.is_alive() and not self._stop_event.is_set())
 
     def start(self) -> bool:
         if not self.available:
             return False
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                if self._stop_event.is_set():
+                    # Reuse a slow retiring worker without reviving its token.
+                    self._stop_event = threading.Event()
+                    self._reset_observation_locked()
                 return True
-            self._stop_event.clear()
+            self._stop_event = threading.Event()
             self._reset_observation_locked()
             self._thread = threading.Thread(
                 target=self._run, name='FTHRGameDetection', daemon=True)
@@ -786,13 +936,15 @@ class ForegroundGameDetector(QObject):
         return True
 
     def stop(self):
-        self._stop_event.set()
-        thread = self._thread
+        with self._lock:
+            self._stop_event.set()
+            thread = self._thread
+            self._reset_observation_locked()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=0.35)
         with self._lock:
-            self._thread = None
-            self._reset_observation_locked()
+            if self._thread is thread and (thread is None or not thread.is_alive()):
+                self._thread = None
 
     def set_enabled(self, enabled: bool) -> bool:
         if enabled:
@@ -804,6 +956,19 @@ class ForegroundGameDetector(QObject):
         """Ignore a prompted candidate until it leaves the foreground."""
         with self._lock:
             self._suppressed_identity = window.identity if window else None
+
+    def reconsider_current_game(self):
+        """Require fresh observations after an explicit detection choice.
+
+        A game observed while manual capture owned the source may already have
+        been emitted. Invalidate queued results as well as that cached decision.
+        This does not start a stopped detector or authorize a source switch.
+        """
+        with self._lock:
+            if self._stop_event.is_set():
+                return
+            self._stop_event = threading.Event()
+            self._reset_observation_locked()
 
     def set_custom_game_rules(self, rules: object):
         with self._lock:
@@ -824,7 +989,13 @@ class ForegroundGameDetector(QObject):
         self._no_game_count = 0
 
     def _run(self):
-        while not self._stop_event.is_set():
+        while True:
+            with self._lock:
+                stop_event = self._stop_event
+                if stop_event.is_set():
+                    if self._thread is threading.current_thread():
+                        self._thread = None
+                    return
             try:
                 window = self._window_provider(self._own_pid)
                 with self._lock:
@@ -832,19 +1003,22 @@ class ForegroundGameDetector(QObject):
                     blocked = self._blacklist_rules
                 if (window is not None and matching_custom_game_rule(window, blocked)) or not is_probable_game(window, rules):
                     window = None
-                self._observe(window)
+                self._observe(window, stop_event=stop_event)
             # Detection is a best-effort background service; one bad poll
             # should be treated as game loss and not stop future polls.
             except Exception:
-                self._observe(None)
-            self._stop_event.wait(self.interval_seconds)
+                self._observe(None, stop_event=stop_event)
+            stop_event.wait(self.interval_seconds)
 
-    def _observe(self, window: Optional[GameWindow]):
+    def _observe(self, window: Optional[GameWindow], *, stop_event=None):
         emit_window = None
         emit_lost = False
         identity = window.identity if window else None
         capture_signature = window.capture_signature if window else None
         with self._lock:
+            if (stop_event is not None
+                    and (stop_event is not self._stop_event or stop_event.is_set())):
+                return
             if identity is None:
                 self._observed_identity = None
                 self._observed_capture_signature = None
@@ -889,9 +1063,19 @@ class ForegroundGameDetector(QObject):
                     self._active_identity = identity
                     emit_window = window
 
-        if emit_window is not None and not self._stop_event.is_set():
-            self.game_detected.emit(emit_window)
-        if emit_lost and not self._stop_event.is_set():
+        if emit_window is not None or emit_lost:
+            self._observation_ready.emit((
+                stop_event if stop_event is not None else self._stop_event,
+                emit_window, emit_lost))
+
+    def _publish_observation(self, observation):
+        stop_event, window, lost = observation
+        with self._lock:
+            if stop_event is not self._stop_event or stop_event.is_set():
+                return
+        if window is not None:
+            self.game_detected.emit(window)
+        if lost:
             self.game_lost.emit()
 
 
@@ -902,6 +1086,7 @@ __all__ = [
     'get_foreground_window',
     'get_window_info',
     'is_capture_window_valid',
+    'is_capture_window_renderable',
     'is_probable_game',
     'matching_custom_game_rule',
     'crop_profile_for_window',

@@ -743,7 +743,7 @@ void FirstEqualRateCompensationKeepsContinuousSignalBounded() {
         "equal-rate compensation produces post-compensation output");
 }
 
-void HighLevelInputIsClampedWithoutNumericalWrap() {
+void HighLevelFloatInputPreservesRecoverableHeadroom() {
     const auto format = Extensible(WAVE_FORMAT_IEEE_FLOAT, 32, 8, 2,
         48000, SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT);
     fthr::AudioFormatConverter converter;
@@ -753,11 +753,8 @@ void HighLevelInputIsClampedWithoutNumericalWrap() {
     std::vector<float> output;
     CheckConverter(converter.Convert(reinterpret_cast<const uint8_t*>(input),
         2, &output), "high-level input converts");
-    CheckConverter(output.size() == 4 && std::isfinite(output[0])
-        && std::isfinite(output[1]) && std::isfinite(output[2])
-        && std::isfinite(output[3]) && output[0] <= 1.0f
-        && output[1] >= -1.0f && output[2] <= 1.0f && output[3] >= -1.0f,
-        "high-level signal is bounded without integer-style wraparound");
+    CheckConverter(output.size() == 4 && std::memcmp(output.data(), input, sizeof(input)) == 0,
+        "float capture retains finite source peaks above full scale exactly");
     CheckConverter(converter.GetInputSignalMetrics().clipping_samples == 4,
         "high-level input clipping remains observable at the decoded stage");
 }
@@ -1727,7 +1724,7 @@ int RunAudioFormatConverterTests() {
     TimelineSourcesRestartIndependentlyAndRejectRegression();
     ConverterPreservesQuietSineAndStereoMultitone();
     FirstEqualRateCompensationKeepsContinuousSignalBounded();
-    HighLevelInputIsClampedWithoutNumericalWrap();
+    HighLevelFloatInputPreservesRecoverableHeadroom();
     AacRoundTripPreservesFiniteSignalMetrics();
     AvTimelineEvidencePreservesRelativeTiming();
     CorrectionDistributionsRemainBoundedAndSigned();

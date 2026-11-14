@@ -191,6 +191,7 @@ class _Signal:
 class _HotkeySignals:
     def __init__(self):
         self.save_clip_triggered = _Signal()
+        self.mark_highlight_triggered = _Signal()
         self.custom_clip_triggered = _Signal()
         self.save_screenshot_triggered = _Signal()
         self.start_recording_triggered = _Signal()
@@ -214,6 +215,7 @@ def _hotkey_warning_host(error_bar):
         _toggle_hotkeys=lambda: None,
         _save_clip=lambda _seconds: None,
         _on_hotkey_save_clip=lambda: None,
+        _on_hotkey_mark_highlight=lambda: None,
         _on_hotkey_save_screenshot=lambda: None,
         _on_hotkey_start_recording=lambda: None,
         _on_hotkey_stop_recording=lambda: None,

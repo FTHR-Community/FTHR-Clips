@@ -70,16 +70,24 @@ bool IsNvencInputFormatSupported(
 bool ConfigureNvencCodec(
     VideoCodec codec,
     uint32_t fps,
-    NV_ENC_CONFIG& config) noexcept {
+    NV_ENC_CONFIG& config, bool hdr10) noexcept {
     const auto* selection = GetNvencCodecSelection(codec);
-    if (!selection || fps == 0) return false;
+    if (!selection || fps == 0 || (hdr10 && codec == VideoCodec::H264)) return false;
 
     const uint32_t keyframe_interval = fps;
     // H.264/HEVC VUI timing is part of the encoded stream metadata. Publish
     // the configured fixed rate explicitly so media-property readers do not
     // have to infer it from irregular capture timestamps.
     const uint32_t vui_time_scale = fps * 2;
-    config.profileGUID = selection->profile_guid;
+    config.profileGUID = hdr10 && codec == VideoCodec::HEVC
+        ? NV_ENC_HEVC_PROFILE_MAIN10_GUID : selection->profile_guid;
+    const auto depth = hdr10 ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
+    const auto primaries = hdr10 ? NV_ENC_VUI_COLOR_PRIMARIES_BT2020
+                                 : NV_ENC_VUI_COLOR_PRIMARIES_BT709;
+    const auto transfer = hdr10 ? NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084
+                                : NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
+    const auto matrix = hdr10 ? NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL
+                              : NV_ENC_VUI_MATRIX_COEFFS_BT709;
     config.frameIntervalP = 1;
     config.gopLength = keyframe_interval;
 
@@ -125,16 +133,16 @@ bool ConfigureNvencCodec(
             NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
         hevc.hevcVUIParameters.videoFullRangeFlag = 0;
         hevc.hevcVUIParameters.colourDescriptionPresentFlag = 1;
-        hevc.hevcVUIParameters.colourPrimaries =
-            NV_ENC_VUI_COLOR_PRIMARIES_BT709;
-        hevc.hevcVUIParameters.transferCharacteristics =
-            NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
-        hevc.hevcVUIParameters.colourMatrix =
-            NV_ENC_VUI_MATRIX_COEFFS_BT709;
+        hevc.hevcVUIParameters.colourPrimaries = primaries;
+        hevc.hevcVUIParameters.transferCharacteristics = transfer;
+        hevc.hevcVUIParameters.colourMatrix = matrix;
+        hevc.hevcVUIParameters.chromaSampleLocationFlag = hdr10 ? 1 : 0;
+        hevc.hevcVUIParameters.chromaSampleLocationTop = 0;
+        hevc.hevcVUIParameters.chromaSampleLocationBot = 0;
         hevc.disableSPSPPS = 1;
         hevc.repeatSPSPPS = 0;
-        hevc.inputBitDepth = NV_ENC_BIT_DEPTH_8;
-        hevc.outputBitDepth = NV_ENC_BIT_DEPTH_8;
+        hevc.inputBitDepth = depth;
+        hevc.outputBitDepth = depth;
         return true;
     }
     case VideoCodec::AV1: {
@@ -150,12 +158,11 @@ bool ConfigureNvencCodec(
         // low-overhead OBUs into valid MP4 samples.
         av1.disableSeqHdr = 0;
         av1.repeatSeqHdr = 1;
-        av1.inputBitDepth = NV_ENC_BIT_DEPTH_8;
-        av1.outputBitDepth = NV_ENC_BIT_DEPTH_8;
-        av1.colorPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
-        av1.transferCharacteristics =
-            NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
-        av1.matrixCoefficients = NV_ENC_VUI_MATRIX_COEFFS_BT709;
+        av1.inputBitDepth = depth;
+        av1.outputBitDepth = depth;
+        av1.colorPrimaries = primaries;
+        av1.transferCharacteristics = transfer;
+        av1.matrixCoefficients = matrix;
         av1.colorRange = 0;
         av1.chromaSamplePosition = 1;
         return true;
@@ -170,7 +177,7 @@ EncodedVideoConfig BuildNvencVideoConfig(
     uint32_t height,
     uint32_t fps,
     uint32_t bitrate_kbps,
-    const std::vector<uint8_t>& codec_extradata) {
+    const std::vector<uint8_t>& codec_extradata, bool hdr10) {
     EncodedVideoConfig config;
     const auto* selection = GetNvencCodecSelection(codec);
     config.codec = codec;
@@ -183,6 +190,7 @@ EncodedVideoConfig BuildNvencVideoConfig(
     config.max_b_frames = 0;
     if (selection) config.packet_format = selection->packet_format;
     config.codec_extradata = codec_extradata;
+    config.hdr10 = hdr10;
     return config;
 }
 

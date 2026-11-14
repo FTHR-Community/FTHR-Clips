@@ -1,20 +1,48 @@
 from __future__ import annotations
 
+import pytest
+
 from core.library_ownership import (
     MediaOwnership,
     add_import_root,
+    classify_media_path,
     generic_delete_owned_media,
     remove_import_root,
 )
 
 
+@pytest.mark.parametrize('import_location, expected', [
+    ('ancestor', MediaOwnership.FTHR_OWNED),
+    ('same', MediaOwnership.LINKED_IMPORTED),
+    ('nested', MediaOwnership.LINKED_IMPORTED),
+])
+def test_overlapping_imports_use_the_more_specific_root(tmp_path, import_location, expected):
+    root = tmp_path / 'Videos' / 'FTHR Clips'
+    clip = root / 'Desktop' / 'capture.mp4'
+    imported = {'ancestor': root.parent, 'same': root, 'nested': clip.parent}[import_location]
+    assert classify_media_path(clip, root, [imported]) is expected
+    external = root.parent / 'Other App' / 'original.mp4'
+    assert classify_media_path(external, root, [root.parent]) is MediaOwnership.LINKED_IMPORTED
+
+
+def test_nested_import_stays_protected_with_an_ancestor_import(tmp_path):
+    root = tmp_path / 'Videos' / 'FTHR Clips'
+    imported = root / 'Imported'
+    for roots in ([root.parent, imported], [imported, root.parent]):
+        assert classify_media_path(imported / 'original.mp4', root, roots) is MediaOwnership.LINKED_IMPORTED
+
+
 def test_owned_clip_can_be_deleted(tmp_path):
+    from core.clip_metadata_manager import ClipMetadataManager
+
     root = tmp_path / 'FTHR_Clips'
     clip = root / 'Desktop' / 'owned.mp4'
     clip.parent.mkdir(parents=True)
     clip.write_bytes(b'owned')
 
-    result = generic_delete_owned_media(clip, root, [])
+    manager = ClipMetadataManager(database_path=tmp_path / 'metadata.sqlite3')
+    manager.migrate()
+    result = generic_delete_owned_media(clip, root, [], metadata_manager=manager)
 
     assert result.deleted
     assert result.ownership is MediaOwnership.FTHR_OWNED

@@ -12,6 +12,7 @@
 #include <atomic>
 #include <string>
 #include <vector>
+#include <functional>
 
 #include "audio_format_converter.h"
 #include "audio_timeline.h"
@@ -21,6 +22,7 @@ namespace fthr {
 
     class AudioRingBuffer;
     class AudioEncoder;
+    struct AudioCaptureRecoveryTestAccess;
 
 
     struct AudioCaptureConfig {
@@ -39,6 +41,7 @@ namespace fthr {
 
     class AudioCapture {
     public:
+        enum class FailureReason { None, EndpointRecoveryExhausted, TimelineGap, TimestampUnavailable };
         AudioCapture();
         ~AudioCapture();
 
@@ -76,7 +79,23 @@ namespace fthr {
         // True if the WASAPI device was lost at runtime (device change, driver reset,
         // exclusive-mode app, etc.). Audio ring is stale once this is set.
         // Cleared by Shutdown() so a fresh Initialize()+Start() starts clean.
-        bool     IsDeviceLost()  const { return device_lost_.load(std::memory_order_relaxed); }
+        bool     IsDeviceLost()  const { return device_lost_.load(std::memory_order_acquire); }
+        FailureReason GetFailureReason() const {
+            return failure_reason_.load(std::memory_order_acquire);
+        }
+        const char* GetFailureReasonName() const;
+        bool IsRecoveryPending() const {
+            return recovery_pending_.load(std::memory_order_acquire);
+        }
+        uint64_t GetTimestampErrorPacketCount() const {
+            return timestamp_error_packet_count_.load(std::memory_order_relaxed);
+        }
+        uint64_t GetProcessingTimeFallbackCount() const {
+            return processing_time_fallback_count_.load(std::memory_order_relaxed);
+        }
+        uint64_t GetUnavailableTimestampCount() const {
+            return unavailable_timestamp_count_.load(std::memory_order_relaxed);
+        }
 
         // QPC (100ns) of the first submitted audio frame for this generation.
         // A value of zero means no timestamped packet has arrived yet.
@@ -169,6 +188,24 @@ namespace fthr {
 
 
     private:
+        friend struct AudioCaptureRecoveryTestAccess;
+        enum class SessionResult { EndpointFailure, TimelineGap, TimestampUnavailable, Stopped };
+        struct CaptureLoopOps {
+            std::function<bool()> Ready;
+            std::function<SessionResult(uint64_t&)> RunSession;
+            std::function<void()> Teardown;
+            std::function<bool()> Setup;
+            std::function<bool()> Start;
+            std::function<void(int)> Backoff;
+        };
+        void RunCaptureLoop(const CaptureLoopOps& ops);
+        SessionResult RunNativeSession(uint64_t& next_timeline_100ns);
+        uint64_t SelectPacketTimestamp(uint64_t qpc_position, uint32_t flags,
+                                       uint64_t fallback_100ns);
+        void MarkTerminalFailure(FailureReason reason);
+        void ResetGenerationRecoveryState();
+        void ObserveRealPacketProgress(uint64_t submitted_frames);
+        bool SubmitCapturedPacket(const uint8_t* data, uint32_t frames, uint64_t qpc_100ns);
         // Thread entry point
         void CaptureThread();
 
@@ -221,6 +258,12 @@ namespace fthr {
         std::thread       capture_thread_;
         std::atomic<bool> running_{ false };
         std::atomic<bool> device_lost_{ false };
+        std::atomic<FailureReason> failure_reason_{ FailureReason::None };
+        std::atomic<bool> recovery_pending_{ false };
+        std::atomic<uint64_t> timestamp_error_packet_count_{ 0 };
+        std::atomic<uint64_t> processing_time_fallback_count_{ 0 };
+        std::atomic<uint64_t> unavailable_timestamp_count_{ 0 };
+        uint64_t session_real_progress_frames_ = 0;  // Capture-thread only, saturates at 1s.
         std::atomic<uint64_t> timeline_origin_qpc_100ns_{ 0 };
         std::atomic<uint64_t> packet_count_{ 0 };
         std::atomic<uint64_t> discontinuity_count_{ 0 };

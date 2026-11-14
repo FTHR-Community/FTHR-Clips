@@ -34,19 +34,6 @@ def _hardware_preview(qtbot):
     return preview
 
 
-def test_compact_transition_capture_includes_gpu_video(qtbot):
-    from ui.shell_transitions import compact_snapshot
-    preview = _hardware_preview(qtbot)
-    image = QImage(128, 72, QImage.Format.Format_RGB32)
-    image.fill(QColor(30, 110, 210))
-    preview.videoSink().setVideoFrame(QVideoFrame(image))
-    qtbot.wait(100)
-    snapshot = compact_snapshot(preview).toImage()
-    color = snapshot.pixelColor(snapshot.width() // 2, snapshot.height() // 2)
-    assert max(abs(a - b) for a, b in zip(
-        color.getRgb()[:3], (30, 110, 210), strict=True)) <= 3
-
-
 def test_hardware_shader_matches_cpu_color_math_and_updates_paused_frame(qtbot):
     preview = _hardware_preview(qtbot)
     image = QImage(128, 72, QImage.Format.Format_RGB32)

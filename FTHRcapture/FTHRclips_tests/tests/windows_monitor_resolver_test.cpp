@@ -27,16 +27,25 @@ int RunAmfReplayEncoderTests();
 int RunSoftwareReplayEncoderTests();
 int RunQsvReplayEncoderTests();
 int RunWindowsReplayPolicyTests();
+int RunReplayMemoryBudgetTests();
 int RunAudioSourceModelTests();
 int RunWindowsAudioSessionRegistryTests();
 int RunWindowsProcessLoopbackAudioProviderTests();
+int RunBgraFrameScalerTests();
+bool RunLiveProcessLoopbackToneTestIfRequested();
 int RunWindowsMicrophoneAudioProviderTests();
 int RunAudioFormatConverterTests();
+int RunAudioCaptureRecoveryTests();
 int RunWindowsCaptureBorderPolicyTests();
 int RunWindowsCaptureBackendPolicyTests();
 int RunContinuousRecordingWriterTests();
 int RunNvencInputLifecycleTests();
 int RunCaptureScaleGeometryTests();
+int RunWgcWindowLifecycleTests();
+int RunCaptureSourceSafetyTests();
+int RunNativeEncoderProbeTests();
+int RunReplayDiskStoreTests();
+int RunCaptureTimelineTests();
 
 void WgcFrameLeaseReturnsEveryPoolSlot() {
     struct Frame {
@@ -163,13 +172,96 @@ void LiveDesktopSurvivesMissingPnpMetadata() {
     const DxgiOutputIdentity output{{8, 0}, live.hmonitor, live.source_gdi_name, 1};
     result = fthr::monitor::BuildLiveMonitorTopology({live}, {}, {output});
     Check(result.ok() && result.monitors[0].adapter_luid == AdapterLuid{8, 0}, "DXGI adapter metadata fallback");
-    Check(!fthr::monitor::BuildLiveMonitorTopology({live}, {source_path}, {output}).ok(), "conflicting adapters rejected");
+    const auto mismatch = fthr::monitor::BuildLiveMonitorTopology({live}, {source_path}, {output});
+    Check(mismatch.ok() && mismatch.monitors[0].adapter_luid == output.adapter_luid,
+          "exact live DXGI output supplies capture adapter despite CCD mismatch");
     auto other = source_path; other.source_id++;
     Check(!fthr::monitor::BuildLiveMonitorTopology({live}, {source_path, other}, {}).ok(), "ambiguous source rejected");
     Check(fthr::monitor::BuildLiveMonitorTopology({}, {source_path}, {output}).monitors.empty(), "disconnected targets do not create desktop choices");
     auto selected = result.monitors[0];
     auto stale = output; stale.hmonitor++;
     Check(!fthr::monitor::ResolveDxgiOutput(selected, {stale}).ok(), "DXGI requires matching handle and GDI name");
+}
+
+void VirtualAndPhysicalAdapterMappingsRemainIndependent() {
+    auto physical = Monitor(L"PATH-PHYSICAL", {}, 0, 0, 100, L"DISPLAY1", true);
+    auto virtual_monitor = Monitor(L"PATH-VIRTUAL", {}, 0, 0, 200, L"DISPLAY2");
+    physical.width = virtual_monitor.width = 1920;
+    physical.height = virtual_monitor.height = 1080;
+    physical.adapter_luid_available = virtual_monitor.adapter_luid_available = false;
+    auto physical_path = Monitor(L"PATH-PHYSICAL", {1, 0}, 1, 11, 0, L"DISPLAY1");
+    auto virtual_path = Monitor(L"PATH-VIRTUAL", {2, -1}, 2, 22, 0, L"DISPLAY2");
+    physical_path.target_adapter_luid_available = virtual_path.target_adapter_luid_available = true;
+    physical_path.target_adapter_luid = {1, 0};
+    virtual_path.target_adapter_luid = {3, -2}; // Target can also differ from the CCD source.
+    const std::vector<DxgiOutputIdentity> outputs{
+        {{1, 0}, 100, L"DISPLAY1", 0}, {{9, 1}, 200, L"display2", 1}};
+    const auto topology = fthr::monitor::BuildLiveMonitorTopology(
+        {physical, virtual_monitor}, {physical_path, virtual_path}, outputs);
+    Check(topology.ok() && topology.monitors.size() == 2, "virtual mismatch retains physical and virtual choices");
+    FakeTopologySource source(topology.monitors);
+    MonitorResolver resolver(source);
+    const auto selected = resolver.Resolve(L"PATH-VIRTUAL");
+    const auto physical_selected = resolver.Resolve(L"PATH-PHYSICAL");
+    Check(selected.ok() && selected.monitor.hmonitor == 200
+              && selected.monitor.adapter_luid == AdapterLuid{9, 1}
+              && selected.monitor.monitor_device_path == L"path-virtual",
+          "virtual selection retains exact monitor and path with render adapter");
+    Check(physical_selected.ok() && physical_selected.monitor.hmonitor == 100
+              && physical_selected.monitor.adapter_luid == AdapterLuid{1, 0},
+          "physical selection remains independently usable");
+    Check(selected.monitor.target_adapter_luid_available
+              && selected.monitor.target_adapter_luid == AdapterLuid{3, -2}
+              && selected.monitor.target_id == 22,
+          "CCD target metadata survives render adapter override");
+    Check(fthr::monitor::ResolveDxgiOutput(selected.monitor, outputs).ok(), "virtual resolves exact render output");
+    Check(fthr::monitor::ResolveDxgiOutput(physical_selected.monitor, outputs).ok(), "physical resolves exact render output");
+    Check(!resolver.Resolve(L"PATH-DISCONNECTED").ok(), "virtual mismatch never falls back to primary");
+
+    auto wrong_handle = outputs[1]; wrong_handle.hmonitor++;
+    auto wrong_name = outputs[1]; wrong_name.source_gdi_name = L"DISPLAY3";
+    for (const auto& wrong : {wrong_handle, wrong_name}) {
+        const auto unmatched = fthr::monitor::BuildLiveMonitorTopology({virtual_monitor}, {virtual_path}, {wrong});
+        Check(unmatched.ok() && unmatched.monitors[0].adapter_luid == virtual_path.adapter_luid,
+              "partial DXGI identity match cannot override CCD adapter");
+        Check(!fthr::monitor::ResolveDxgiOutput(unmatched.monitors[0], {wrong}).ok(),
+              "partial DXGI identity match cannot open output");
+    }
+    auto ambiguous = outputs[1]; ambiguous.adapter_luid = {10, 0};
+    Check(!fthr::monitor::BuildLiveMonitorTopology({virtual_monitor}, {virtual_path}, {outputs[1], ambiguous}).ok(),
+          "multiple exact DXGI adapters remain ambiguous");
+    ambiguous = outputs[1]; ambiguous.output_index++;
+    Check(!fthr::monitor::BuildLiveMonitorTopology({virtual_monitor}, {virtual_path}, {outputs[1], ambiguous}).ok(),
+          "multiple exact DXGI outputs on one adapter remain ambiguous");
+    Check(fthr::monitor::BuildLiveMonitorTopology({physical}, {physical_path, virtual_path}, outputs).monitors.size() == 1,
+          "disconnected virtual target cannot create a live desktop choice");
+
+    virtual_path.target_adapter_luid.low_part++;
+    const auto changed = fthr::monitor::BuildLiveMonitorTopology(
+        {physical, virtual_monitor}, {physical_path, virtual_path}, outputs);
+    Check(changed.topology_generation != topology.topology_generation, "CCD target adapter change updates topology generation");
+    source.Set(changed.monitors);
+    Check(!resolver.IsCurrent(selected.monitor), "CCD target adapter change invalidates resolved monitor");
+    virtual_path.target_adapter_luid = {3, -2};
+    virtual_path.target_adapter_luid_available = false;
+    const auto unavailable = fthr::monitor::BuildLiveMonitorTopology(
+        {physical, virtual_monitor}, {physical_path, virtual_path}, outputs);
+    Check(!unavailable.monitors[1].target_adapter_luid_available
+              && unavailable.topology_generation != topology.topology_generation,
+          "missing CCD target metadata stays unavailable and updates generation");
+    source.Set(unavailable.monitors);
+    Check(!resolver.IsCurrent(selected.monitor), "CCD target metadata loss invalidates resolved monitor");
+    const auto dxgi_only = fthr::monitor::BuildLiveMonitorTopology({virtual_monitor}, {}, {outputs[1]});
+    Check(dxgi_only.ok() && !dxgi_only.monitors[0].target_adapter_luid_available,
+          "DXGI-only identity does not invent CCD target metadata");
+    virtual_path.target_adapter_luid_available = true;
+    auto clone = virtual_path;
+    clone.target_id++;
+    clone.target_adapter_luid = {4, -3};
+    const auto cloned = fthr::monitor::BuildLiveMonitorTopology(
+        {virtual_monitor}, {virtual_path, clone}, {outputs[1]});
+    Check(cloned.ok() && !cloned.monitors[0].target_adapter_luid_available,
+          "cloned CCD source does not choose an arbitrary target for color queries");
 }
 
 void OneMonitorOneAdapter() {
@@ -1275,10 +1367,70 @@ void FocusPauseAndDeferredRecordingConfig() {
     if (!ready || !(output == config)) std::abort();
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--capture-encoding-only") {
+        RunWindowsReplayPolicyTests();
+        RunCaptureTimelineTests();
+        RunContinuousRecordingWriterTests();
+        RunNvencInputLifecycleTests();
+        RunCaptureScaleGeometryTests();
+        RunBgraFrameScalerTests();
+        RunWgcWindowLifecycleTests();
+        RunCaptureSourceSafetyTests();
+        RunNativeEncoderProbeTests();
+        if (RunReplayDiskStoreTests() < 0) return 1;
+        RunWindowsCaptureBackendPolicyTests();
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--audio-exclusions-only") {
+        RunWindowsAudioSessionRegistryTests();
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--capture-recovery-only") {
+        DxgiFrameLeaseReleasesExactlyOnce();
+        DxgiFrameMetadataAndTextureContractsRejectFalseFrames();
+        DxgiRecoveryEligibilityRequiresSameCaptureContract();
+        DxgiRecoveryRunnerIsBoundedAndInterruptible();
+        TenDxgiRecoveryCyclesDoNotAccumulateOwnedFrames();
+        const int window_checks = RunWgcWindowLifecycleTests();
+        std::cout << "Capture recovery tests: " << checks + window_checks
+                  << " checks passed" << std::endl;
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--capture-backend-policy-only") {
+        RunWindowsCaptureBackendPolicyTests();
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--capture-timeline-only") {
+        RunCaptureTimelineTests();
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--monitor-resolver-only") {
+        LiveWindowsDesktopAdapterSmoke();
+        LiveDesktopSurvivesMissingPnpMetadata();
+        VirtualAndPhysicalAdapterMappingsRemainIndependent();
+        OneMonitorOneAdapter();
+        TwoMonitorsSameAdapter();
+        SecondaryMonitorSelected();
+        TwoAdaptersOneMonitorEach();
+        EnumerationOrderChanges();
+        PrimaryMonitorChanges();
+        SelectedMonitorMissing();
+        DevicePathNormalization();
+        MatchingLuidMultipleOutputs();
+        OutputRemovedAfterResolution();
+        StaleTransientMappingRejected();
+        NoFallbackToPrimary();
+        NoFallbackToOutputZero();
+        std::cout << "Monitor resolver tests: " << checks << " checks passed" << std::endl;
+        return 0;
+    }
+    if (RunLiveProcessLoopbackToneTestIfRequested()) return 0;
+    const int capture_timeline_checks = RunCaptureTimelineTests();
     FocusPauseAndDeferredRecordingConfig();
     LiveWindowsDesktopAdapterSmoke();
     LiveDesktopSurvivesMissingPnpMetadata();
+    VirtualAndPhysicalAdapterMappingsRemainIndependent();
     OneMonitorOneAdapter();
     WgcFrameLeaseReturnsEveryPoolSlot();
     TwoMonitorsSameAdapter();
@@ -1320,24 +1472,35 @@ int main() {
     const int amf_checks = RunAmfReplayEncoderTests();
     const int qsv_checks = RunQsvReplayEncoderTests();
     const int policy_checks = RunWindowsReplayPolicyTests();
+    const int memory_checks = RunReplayMemoryBudgetTests();
     const int audio_source_checks = RunAudioSourceModelTests();
     const int windows_audio_checks = RunWindowsAudioSessionRegistryTests();
     const int windows_process_loopback_checks = RunWindowsProcessLoopbackAudioProviderTests();
     const int windows_microphone_checks = RunWindowsMicrophoneAudioProviderTests();
     const int audio_format_checks = RunAudioFormatConverterTests();
+    const int audio_recovery_checks = RunAudioCaptureRecoveryTests();
+    if (audio_recovery_checks < 0) return 1;
     const int capture_border_checks = RunWindowsCaptureBorderPolicyTests();
     const int capture_backend_checks = RunWindowsCaptureBackendPolicyTests();
     const int recording_checks = RunContinuousRecordingWriterTests();
     const int nvenc_lifecycle_checks = RunNvencInputLifecycleTests();
     const int capture_scale_checks = RunCaptureScaleGeometryTests();
+    const int bgra_scale_checks = RunBgraFrameScalerTests();
+    const int wgc_lifecycle_checks = RunWgcWindowLifecycleTests();
+    const int source_safety_checks = RunCaptureSourceSafetyTests();
+    const int encoder_probe_checks = RunNativeEncoderProbeTests();
+    const int replay_disk_checks = RunReplayDiskStoreTests();
+    if (replay_disk_checks < 0) return 1;
     std::cout << "FTHRclips_tests: native suites completed ("
-              << (checks + amf_checks + qsv_checks + policy_checks + audio_source_checks
+              << (checks + capture_timeline_checks + amf_checks + qsv_checks + policy_checks + memory_checks + audio_source_checks
                   + windows_audio_checks + windows_process_loopback_checks)
-                  + windows_microphone_checks + audio_format_checks + capture_border_checks
+                  + windows_microphone_checks + audio_format_checks + audio_recovery_checks + capture_border_checks
                   + capture_backend_checks
                   + recording_checks
                   + nvenc_lifecycle_checks
-                  + capture_scale_checks
+                  + capture_scale_checks + bgra_scale_checks
+                  + wgc_lifecycle_checks
+                  + source_safety_checks + encoder_probe_checks + replay_disk_checks
               << " checks total)" << std::endl;
     return 0;
 }

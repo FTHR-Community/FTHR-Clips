@@ -4,8 +4,9 @@ from __future__ import annotations
 
 
 def multiband_audio_supported() -> bool:
-    # Per-application stems are retired. Clips contain only the system mix and
-    # microphone so capture, playback and export all share one stable model.
+    # This is the retired category-mixer/v3 ABI flag. Independent native
+    # program tracks use audio_source_mode and application_audio_tracks_enabled;
+    # re-enabling this legacy flag would reactivate the wrong capture path.
     return False
 
 

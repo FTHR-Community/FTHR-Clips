@@ -379,9 +379,22 @@ def sound(notes: list[tuple[float, float]], gap: float = 0.025) -> bytes:
     return output.getvalue()
 
 
+def folder_svg() -> bytes:
+    """Original folder polygon/line geometry, version 1, created 2026-10-31."""
+    return (
+        b'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">\n'
+        b'  <g fill="none" stroke="#B4BDC7" stroke-width="1.7" stroke-linejoin="round">\n'
+        b'    <polygon points="4,18.5 4,5.5 9,5.5 11.25,8 20,8 20,18.5"/>\n'
+        b'    <line x1="4" y1="10.5" x2="20" y2="10.5" stroke-linecap="round"/>\n'
+        b'  </g>\n'
+        b'</svg>\n'
+    )
+
+
 def generated_files() -> dict[Path, bytes]:
     draw_mark(512).png()
     files = {
+        ROOT / 'FTHR_UI' / 'assets' / 'icons' / 'folder.svg': folder_svg(),
         ROOT / '.github' / 'social_preview.png': social_preview().png(),
         ROOT / 'installer_assets' / 'wizard_banner.bmp':
             installer_banner(164, 314).bmp(),

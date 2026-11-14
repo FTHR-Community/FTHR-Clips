@@ -4,7 +4,6 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QPixmap
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QWidget
 
@@ -14,13 +13,15 @@ from core import audio_manifest, media_metadata
 import pytest
 
 
-def shell(monkeypatch, qtbot, tmp_path):
+def shell(monkeypatch, qtbot, tmp_path, *, metadata_manager=None, settings_manager=None):
     monkeypatch.setattr(clip_grid, 'get_cached_clip_metadata',
                         lambda *_: (10, 1920, 1080, 30, 1000000, 1000000))
     for name in ('_set_media_source', '_discover_audio_sources_async',
                  '_prepare_playback_source', '_load_timeline_thumbnails_if_idle'):
         monkeypatch.setattr(clip_viewer.ClipViewer, name, lambda *_: None)
-    window = ClipEditorWindow(str(tmp_path / 'first.mp4'), None)
+    window = ClipEditorWindow(str(tmp_path / 'first.mp4'), None,
+                              metadata_manager=metadata_manager,
+                              settings_manager=settings_manager)
     qtbot.addWidget(window)
     return window
 
@@ -129,7 +130,11 @@ def test_switch_and_close_do_not_cancel_application_exports(monkeypatch, qtbot, 
 
 
 def test_repeated_switches_keep_controls_and_reset_edits(monkeypatch, qtbot, tmp_path):
-    window = shell(monkeypatch, qtbot, tmp_path)
+    from core.clip_metadata_manager import ClipMetadataManager
+
+    manager = ClipMetadataManager(database_path=tmp_path / 'metadata.sqlite3')
+    manager.migrate()
+    window = shell(monkeypatch, qtbot, tmp_path, metadata_manager=manager)
     page = window.clip_page
     controls = (page.play_btn, page.trim_slider, page.video_widget, page._native_video_widget)
     original_widgets = len(page.findChildren(QWidget))
@@ -156,9 +161,12 @@ def test_repeated_switches_keep_controls_and_reset_edits(monkeypatch, qtbot, tmp
 def test_uncommitted_metadata_is_saved_to_outgoing_clip(monkeypatch, qtbot, tmp_path):
     from core.clip_metadata_manager import ClipMetadataManager
     monkeypatch.setattr(Path, 'home', lambda: tmp_path)
-    window = shell(monkeypatch, qtbot, tmp_path)
-    manager = ClipMetadataManager()
-    window.clip_page._mm = manager
+    source = tmp_path / 'first.mp4'
+    source.write_bytes(b'synthetic editor media')
+    (tmp_path / 'next.mp4').write_bytes(b'synthetic next editor media')
+    manager = ClipMetadataManager(database_path=tmp_path / 'metadata.sqlite3')
+    manager.migrate(target_version=5)
+    window = shell(monkeypatch, qtbot, tmp_path, metadata_manager=manager)
     old_path = window.clip_path
     window._tag_edit.insert('Keep this tag')
     window._desc_edit.insert('Outgoing description')
@@ -172,7 +180,7 @@ def test_retired_callbacks_cannot_write_into_next_clip(monkeypatch, qtbot, tmp_p
     window = shell(monkeypatch, qtbot, tmp_path)
     page = window.clip_page
     calls = []
-    signals = clip_viewer._ClipMetadataSignals()
+    signals = clip_viewer._ClipMetadataWorker(page.clip_path, page._prepare_cancel).signals
     page._connect_clip_result(signals.ready, lambda value: calls.append(value))
     # Queue a worker result before replacement but deliver it afterwards.
     worker = threading.Thread(target=lambda: signals.ready.emit('old'))
@@ -239,18 +247,6 @@ def test_first_frame_fallback_waits_for_native_playback(monkeypatch, qtbot, tmp_
     assert calls == []
 
 
-def test_snapshot_buffers_release_on_interrupted_transition(qtbot):
-    from ui.shell_transitions import SnapshotSlide
-    parent = QWidget()
-    qtbot.addWidget(parent)
-    parent.resize(100, 100)
-    parent.show()
-    slide = SnapshotSlide(parent, QPixmap(100, 100), QPixmap(100, 100), 1)
-    slide.show()
-    slide.hide()
-    assert slide._outgoing.isNull() and slide._incoming.isNull()
-
-
 @pytest.mark.parametrize('maximized', [False, True])
 def test_fullscreen_navigation_preserves_restore_state(monkeypatch, qtbot, tmp_path, maximized):
     window = shell(monkeypatch, qtbot, tmp_path)
@@ -289,27 +285,14 @@ def test_quick_crop_feedback_resets_after_switch_and_repeated_saves(monkeypatch,
 
 
 def test_rapid_navigation_opens_every_clip_without_recapturing(monkeypatch, qtbot, tmp_path):
-    from ui import clip_editor_window
     window = shell(monkeypatch, qtbot, tmp_path)
     window.show()
-    now = [100.0]
-    monkeypatch.setattr(clip_editor_window.time, 'monotonic', lambda: now[0])
-    captures = []
-    original_grab = window.grab
-    monkeypatch.setattr(window, 'grab', lambda: (captures.append(True), original_grab())[1])
-    for index, direction in enumerate((1, 1, -1, 1)):
-        now[0] += .06
+    monkeypatch.setattr(window, 'grab', lambda: pytest.fail('editor page was snapshotted'))
+    for index in range(4):
         path = str(tmp_path / f'next-{index}.mp4')
-        assert window.replace_clip(path, autoplay=False, navigation_step=direction)
+        assert window.replace_clip(path, autoplay=False)
         assert window.clip_path == path
-        if index:
-            assert window._clip_slide is None
-            assert window.clip_page.geometry() == window.contentsRect()
-    assert len(captures) == 1
-    now[0] += .3
-    window.replace_clip(str(tmp_path / 'settled.mp4'), autoplay=False, navigation_step=-1)
-    assert len(captures) == 2 and window._clip_slide is not None
-    window._finish_clip_slide()
+        assert window.clip_page.geometry() == window.contentsRect()
 
 
 def test_proxy_waits_for_idle_cancels_on_play_and_rejects_retired_result(
@@ -349,3 +332,123 @@ def test_proxy_waits_for_idle_cancels_on_play_and_rejects_retired_result(
     token = page._proxy_cancel
     window.replace_clip(str(tmp_path / 'next.mp4'), autoplay=False)
     assert token.is_set() and not page._proxy_checked
+
+
+def test_preview_quality_switch_preserves_playing_position_edits_and_setting(
+        monkeypatch, qtbot, tmp_path):
+    from core import playback_proxy
+
+    class Settings:
+        values = {}
+        saves = 0
+
+        def get(self, key, default=None):
+            return self.values.get(key, default)
+
+        def set(self, key, value):
+            self.values[key] = value
+
+        def save_settings(self):
+            self.saves += 1
+
+    settings = Settings()
+    monkeypatch.setattr(playback_proxy, 'cached_playback_path', lambda path, mode:
+                        path if mode == 'original' else f'{path}-{mode}.mp4')
+    window = shell(monkeypatch, qtbot, tmp_path, settings_manager=settings)
+    page = window.clip_page
+    page._compatibility_checked = True
+    page._crop_rect = (200, 100, 1200, 800)
+    page._effects['contrast'] = 20
+    page.trim_slider.start_pct = .15
+    edits = page._capture_editor_state()
+    source_size = (page._src_w, page._src_h)
+    page._latest_paused_seek_ms = 1800
+    page._playback_source_worker = object()
+    retired = page._proxy_cancel
+    monkeypatch.setattr(page.player, 'playbackState',
+                        lambda: QMediaPlayer.PlaybackState.PlayingState)
+    monkeypatch.setattr(page.player, 'position', lambda: 3800)
+    selected = []
+    monkeypatch.setattr(page, '_set_media_source', lambda: selected.append(page._playback_path))
+
+    quality = page.preview_quality_combo
+    quality.setCurrentIndex(quality.findData('540p'))
+
+    assert selected == [f'{page.clip_path}-540p.mp4']
+    assert page._renderer_resume_position_ms == 3800
+    assert page._play_when_ready and retired.is_set()
+    assert page.video_widget._playback_height_limit == 540
+    assert page._capture_editor_state() == edits
+    assert (page._src_w, page._src_h) == source_size
+    assert settings.get('editor_preview_quality') == '540p' and settings.saves == 1
+
+    next_path = str(tmp_path / 'next.mp4')
+    window.replace_clip(next_path, autoplay=False)
+
+    assert page.preview_quality_combo is quality
+    assert quality.currentData() == '540p' and settings.saves == 1
+    assert page._playback_path == f'{next_path}-540p.mp4'
+
+
+def test_original_preview_rebuilds_evicted_compatibility_copy(monkeypatch, qtbot, tmp_path):
+    from core import playback_proxy
+
+    monkeypatch.setattr(playback_proxy, 'cached_playback_path', lambda path, mode:
+                        path if mode == 'original' else f'{path}-proxy.mp4')
+    window = shell(monkeypatch, qtbot, tmp_path)
+    page = window.clip_page
+    page._compatibility_checked = True
+    workers = []
+    monkeypatch.setattr(clip_viewer.QThreadPool.globalInstance(), 'start', workers.append)
+    monkeypatch.setattr(page.player, 'position', lambda: 2800)
+    quality = page.preview_quality_combo
+    quality.setCurrentIndex(quality.findData('original'))
+
+    worker = workers[-1]
+    assert page._compatibility_worker is worker
+    assert page._playback_path.endswith('-proxy.mp4')
+    worker.signals.ready.emit('rebuilt-compatibility.mp4')
+    assert page._playback_path == 'rebuilt-compatibility.mp4'
+    assert page._renderer_resume_position_ms == 2800
+
+
+def test_failed_performance_preview_falls_back_to_compatible_source(
+        monkeypatch, qtbot, tmp_path):
+    from core import playback_proxy
+
+    compatible = str(tmp_path / 'compatible.mp4')
+    proxy = str(tmp_path / 'bad-proxy.mp4')
+    monkeypatch.setattr(playback_proxy, 'cached_playback_path',
+                        lambda _path, mode: compatible if mode == 'original' else proxy)
+    removed = []
+    monkeypatch.setattr(playback_proxy, 'discard_playback_cache',
+                        lambda path, candidate: removed.append((path, candidate)))
+    window = shell(monkeypatch, qtbot, tmp_path)
+    page = window.clip_page
+    page._compatibility_checked = True
+    page._play_when_ready = True
+    page._renderer_resume_position_ms = 5200
+
+    page._on_player_error()
+    qtbot.waitUntil(lambda: page._playback_path == compatible)
+
+    assert removed == [(page.clip_path, proxy)]
+    assert page._renderer_resume_position_ms == 5200
+    assert page._play_when_ready and page._proxy_checked
+
+
+def test_prepared_preview_is_applied_after_trim_handle_release(monkeypatch, qtbot, tmp_path):
+    window = shell(monkeypatch, qtbot, tmp_path)
+    page = window.clip_page
+    # Proxy generation starts only after compatibility preparation; model that
+    # completed precondition and cancel the shell's initial background probe.
+    page._compatibility_checked = True
+    page._cancel_compatibility_prepare()
+    page.trim_slider.dragging = 'start'
+    page._on_playback_source_ready('preview.mp4')
+    assert page._prepared_playback_path == 'preview.mp4'
+    assert page._playback_path == page.clip_path
+
+    page.trim_slider.dragging = None
+    page.trim_slider.range_edit_finished.emit()
+    qtbot.waitUntil(lambda: page._playback_path == 'preview.mp4')

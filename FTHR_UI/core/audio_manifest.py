@@ -16,11 +16,11 @@ from uuid import UUID
 
 MANIFEST_VERSION = 1
 MANIFEST_SUFFIX = '.fthr-audio.json'
-# Default Mix + Microphone + the approved eight application stems can produce
-# ten real MP4 audio streams. The reader must accept the same contract as the
+# Default Mix + Microphone + four devices + 32 application groups can produce
+# 38 MP4 audio streams. The reader must accept the same contract as the
 # native muxer; otherwise a valid rich clip would silently fall back to wrong
 # generic playback labels.
-MAX_SOURCES = 10
+MAX_SOURCES = 38
 _SAFE_TEXT = re.compile(r"^[A-Za-z0-9 ._+()'\-]{1,128}$")
 _SOURCE_TYPES = frozenset({'application', 'microphone', 'system'})
 
@@ -84,6 +84,8 @@ def validate_manifest(manifest: dict[str, Any], *, media_path: str | Path | None
         raise AudioManifestError('manifest must be an object')
     if manifest.get('manifest_version') != MANIFEST_VERSION:
         raise AudioManifestError('unsupported manifest version')
+    if manifest.get('mixing_mode') not in (None, 'independent'):
+        raise AudioManifestError('unsupported audio mixing mode')
     _validate_uuid(manifest.get('transaction_id'), 'transaction_id')
     media_file = manifest.get('media_file')
     if not isinstance(media_file, str) or Path(media_file).name != media_file:
@@ -92,8 +94,14 @@ def validate_manifest(manifest: dict[str, Any], *, media_path: str | Path | None
     if not isinstance(media_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', media_hash):
         raise AudioManifestError('media_sha256 must be a SHA-256 digest')
     sources = manifest.get('sources')
-    if not isinstance(sources, list) or not sources or len(sources) > MAX_SOURCES:
-        raise AudioManifestError('sources must contain between one and ten entries')
+    warnings = manifest.get('capture_warnings', [])
+    if (not isinstance(warnings, list) or len(warnings) > 16
+            or any(not isinstance(warning, str) or warning not in {'microphone_unavailable', 'source_limit_reached',
+                                   'application_audio_failed', 'system_audio_failed'}
+                   for warning in warnings)):
+        raise AudioManifestError('invalid capture warnings')
+    if not isinstance(sources, list) or (not sources and not warnings) or len(sources) > MAX_SOURCES:
+        raise AudioManifestError('sources must contain between one and thirty-eight entries')
 
     seen_uuid: set[str] = set()
     seen_stream: set[int] = set()
@@ -196,6 +204,14 @@ def verified_audio_tracks_for_export(
 def _validate_source(source: Any, seen_uuid: set[str], seen_stream: set[int]) -> None:
     if not isinstance(source, dict):
         raise AudioManifestError('source must be an object')
+    processing = source.get('processing', {})
+    if (not isinstance(processing, dict)
+            or type(processing.get('gain_percent', 100)) is not int
+            or not 0 <= processing.get('gain_percent', 100) <= 200
+            or not isinstance(processing.get('mono', False), bool)):
+        raise AudioManifestError('invalid source processing')
+    if not isinstance(source.get('codec', 'aac'), str) or source.get('codec', 'aac') not in {'aac', 'pcm_f32le'}:
+        raise AudioManifestError('unsupported source codec')
     source_uuid = _validate_uuid(source.get('source_uuid'), 'source_uuid')
     if source_uuid in seen_uuid:
         raise AudioManifestError('source UUID appears more than once')

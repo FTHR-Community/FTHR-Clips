@@ -1,9 +1,9 @@
 # FTHR Clips Alpha Fix Roadmap
 
-Last reviewed: 2026-10-10 (Windows backlog; Linux entries unchanged)
+Last reviewed: 2026-10-19 (editor-upload entry; other entries retain their documented qualification scope)
 
-This roadmap tracks the public community reports against the current
-`integrate/latest-project-source` alpha tree. A merged community change is not
+This roadmap tracks the public community reports against the current local
+alpha source tree. A merged community change is not
 considered fixed in this tree until it has been ported and regression-tested.
 Hardware-specific reports remain field-validation pending until an affected
 system confirms a new build.
@@ -270,12 +270,15 @@ Tracking: https://github.com/FTHR-Community/FTHR-Clips/issues/18
 
 ### Upload the edited result — issue #34
 
-Status: **ROADMAP — NOT A SAFE ONE-LINE FIX**
+Status: **IMPLEMENTED IN LOCAL WORKING SOURCE — NEW PACKAGE PENDING**
 
-Upload currently receives the original clip path while edited output is created
-by a separate asynchronous export. The correct implementation must export a
-validated non-destructive result first, enqueue exactly that file once, and
-surface export or upload failure without changing the original clip.
+The editor now creates a separate result through the existing asynchronous
+export queue and hands only its validated, committed output to the existing
+optional uploader. A MainWindow-owned coordinator survives editor navigation
+and close; source/output identity checks and the existing uploader duplicate
+checks protect repeated requests. A known neutral edit retains the original
+fast path. Unknown duration or failed audio inspection blocks the request.
+A new package and release acceptance remain pending for this working-source change.
 
 Acceptance criteria:
 

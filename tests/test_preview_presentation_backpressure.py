@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+import threading
+
+from PySide6.QtCore import QRunnable, QThreadPool, Qt
 from PySide6.QtGui import QImage
 
 from ui import clip_viewer
@@ -17,15 +19,88 @@ def _capture_preview_tasks(monkeypatch):
     started = []
 
     class _Pool:
-        @staticmethod
-        def globalInstance():
-            return _Pool()
-
         def start(self, task):
             started.append(task)
 
-    monkeypatch.setattr(clip_viewer, 'QThreadPool', _Pool)
+    monkeypatch.setattr(clip_viewer, '_preview_frame_pool', _Pool)
     return started
+
+
+def test_preview_progresses_while_the_global_pool_is_saturated(qtbot):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Blocker(QRunnable):
+        def run(self):
+            entered.set()
+            release.wait(5)
+
+    pool = QThreadPool.globalInstance()
+    previous_limit = pool.maxThreadCount()
+    pool.setMaxThreadCount(1)
+    pool.start(Blocker())
+    try:
+        qtbot.waitUntil(entered.is_set, timeout=2000)
+        preview = LiveVideoPreview(16, 9)
+        qtbot.addWidget(preview)
+        preview.resize(160, 90)
+        preview.show()
+        preview.set_edit_state(None, {'brightness': 20}, 1.0)
+        assert preview.publish_initial_decoded_image(0, _image())
+        qtbot.waitUntil(lambda: preview._has_real_frame, timeout=1000)
+        assert not release.is_set()
+        assert clip_viewer._preview_frame_pool().maxThreadCount() == 1
+    finally:
+        release.set()
+        pool.setMaxThreadCount(previous_limit)
+
+
+def test_reused_preview_waits_for_the_retired_conversion_slot(
+        monkeypatch, qtbot, request):
+    preview = LiveVideoPreview(16, 9)
+    qtbot.addWidget(preview)
+    request.addfinalizer(preview.shutdown)
+    preview.resize(160, 90)
+    preview.show()
+    started = _capture_preview_tasks(monkeypatch)
+    red = _image()
+    green = _image(color=Qt.GlobalColor.green)
+    assert preview.publish_initial_decoded_image(0, red)
+    assert len(started) == 1
+    first = started[0]
+
+    preview.shutdown()
+    preview._preview_shutdown = False
+    preview.video_sink.videoFrameChanged.connect(preview._on_video_frame)
+    preview.begin_source_generation()
+    assert preview.publish_initial_decoded_image(1, green)
+    assert len(started) == 1
+
+    preview._on_preview_result(first.generation, first.serial, red, 1.0, None)
+    assert not preview._has_real_frame
+    assert len(started) == 2
+    latest = started[-1]
+    preview._on_preview_result(latest.generation, latest.serial, green, 1.0, None)
+    assert preview._prepared_frame.cacheKey() == green.cacheKey()
+
+
+def test_software_playback_quality_caps_work_and_pause_refreshes_full_viewport(qtbot):
+    preview = LiveVideoPreview(2560, 1440)
+    qtbot.addWidget(preview)
+    preview.resize(1600, 900)
+    preview.show()
+    preview.set_edit_state((320, 160, 1280, 960), {'contrast': 25}, 1.25)
+    viewport = preview._video_display_rect()
+    crop = preview._effect_display_rect(viewport)
+    preview.set_playback_height_limit(540)
+    assert preview.publish_initial_decoded_image(0, _image(2560, 1440))
+    qtbot.waitUntil(lambda: preview._has_real_frame)
+    assert preview._prepared_frame.height() <= 540
+
+    preview.set_playback_height_limit(None)
+    qtbot.waitUntil(lambda: preview._prepared_frame.width() == viewport.width())
+    assert preview._video_display_rect() == viewport
+    assert preview._effect_display_rect(viewport) == crop
 
 
 def test_prepared_image_blocks_next_conversion_until_postpaint_drain(

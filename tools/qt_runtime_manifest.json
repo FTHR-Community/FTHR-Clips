@@ -33,14 +33,6 @@
       }
     },
     {
-      "source": "FTHR_UI/ui/qml/Snapshot.qml",
-      "sha256": "a6c9425e9e02804929d062cf215a64b876c73a4c3588e6cbcb743a9804d2ca81",
-      "artifact_paths": {
-        "windows": "_internal/ui/qml/Snapshot.qml",
-        "linux": "usr/share/fthrclips/ui/qml/Snapshot.qml"
-      }
-    },
-    {
       "source": "FTHR_UI/ui/qml/color.frag.qsb",
       "sha256": "b22b51d2270219755541d43110a7e5bf412674b7ded63e1ffdc6913e791c75f8",
       "artifact_paths": {

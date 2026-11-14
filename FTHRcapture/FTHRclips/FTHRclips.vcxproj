@@ -19,10 +19,18 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\window_capture_identity.h" />
+    <ClInclude Include="include\async_content_sampler.h" />
+    <ClInclude Include="include\bgra_direct_copy.h" />
+    <ClInclude Include="include\bgra_frame_scaler.h" />
+    <ClInclude Include="include\wgc_update_interval_policy.h" />
+    <ClInclude Include="include\native_encoder_probe.h" />
     <ClInclude Include="include\wgc_cadence_wait.h" />
+    <ClInclude Include="include\wgc_window_lifecycle.h" />
     <ClInclude Include="include\continuous_recording_writer.h" />
     <ClInclude Include="include\audio_packet_ring.h" />
     <ClInclude Include="include\audio_source_model.h" />
+    <ClInclude Include="include\audio_device_tracks.h" />
     <ClInclude Include="include\clip_audio_manifest.h" />
     <ClInclude Include="include\windows_capture_border_policy.h" />
     <ClInclude Include="include\windows_audio_session_registry.h" />
@@ -35,6 +43,7 @@
       <ClInclude Include="include\audio_signal_metrics.h" />
     <ClInclude Include="include\audio_ring_buffer.h" />
     <ClInclude Include="include\capture_engine.h" />
+    <ClInclude Include="include\dxgi_cursor.h" />
     <ClInclude Include="include\capture_scale_geometry.h" />
     <ClInclude Include="include\encoded_ring_buffer.h" />
     <ClInclude Include="include\frame_rate_scheduler.h" />
@@ -56,6 +65,8 @@
     <ClInclude Include="..\..\FTHRcapture_common\transactional_save.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\native_encoder_probe.cpp" />
+    <ClCompile Include="src\wgc_window_lifecycle.cpp" />
     <ClCompile Include="src\continuous_recording_writer.cpp" />
     <ClCompile Include="src\audio_packet_ring.cpp" />
     <ClCompile Include="src\audio_source_model.cpp" />
@@ -70,12 +81,15 @@
     <ClCompile Include="src\audio_format_converter.cpp" />
     <ClCompile Include="src\audio_ring_buffer.cpp" />
     <ClCompile Include="src\capture_engine.cpp" />
+    <ClCompile Include="src\dxgi_cursor.cpp" />
     <ClCompile Include="src\encoded_ring_buffer.cpp" />
     <ClCompile Include="src\encoded_video_config.cpp" />
     <ClCompile Include="src\ffmpeg_amf_replay_encoder.cpp" />
     <ClCompile Include="src\software_replay_encoder.cpp" />
     <ClCompile Include="src\ffmpeg_qsv_replay_encoder.cpp" />
     <ClCompile Include="src\hardware_encoder.cpp" />
+    <ClCompile Include="src\hdr_frame_converter.cpp" />
+    <ClCompile Include="src\bgra_frame_scaler.cpp" />
     <ClCompile Include="src\nvenc_codec_config.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\packet_buffer_pool.cpp" />
@@ -185,7 +199,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <AdditionalLibraryDirectories>$(ProjectDir)third_party\ffmpeg\lib</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;d3d11.lib;dxgi.lib;windowsapp.lib;User32.lib</AdditionalDependencies>
+      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;windowsapp.lib;User32.lib</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>xcopy /Y /D "$(ProjectDir)third_party\ffmpeg\bin\*.dll" "$(OutDir)"</Command>
@@ -208,7 +222,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <AdditionalLibraryDirectories>$(ProjectDir)third_party\ffmpeg\lib</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;d3d11.lib;dxgi.lib;windowsapp.lib;User32.lib</AdditionalDependencies>
+      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;windowsapp.lib;User32.lib</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>xcopy /Y /D "$(ProjectDir)third_party\ffmpeg\bin\*.dll" "$(OutDir)"</Command>

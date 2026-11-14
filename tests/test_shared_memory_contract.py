@@ -1,6 +1,7 @@
 """Verify ctypes/C++ layout agreement and reject deliberately mismatched layouts."""
 
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,6 @@ def test_contract_verifier_passes_on_current_tree():
 
 @pytest.mark.parametrize('platform,header', [
     ('win32', WIN_HEADER),
-    ('linux', LINUX_HEADER),
 ])
 def test_field_order_and_offsets_match(platform, header):
     cpp = vsmc.parse_struct(header)
@@ -39,7 +39,7 @@ def test_field_order_and_offsets_match(platform, header):
     assert cpp_align == py_align
 
 
-@pytest.mark.parametrize('header', [WIN_HEADER, LINUX_HEADER])
+@pytest.mark.parametrize('header', [WIN_HEADER])
 def test_enums_match(header):
     from core.capture_bridge import CommandType, ResponseType
 
@@ -111,3 +111,56 @@ def test_enum_typed_as_uint32_is_not_treated_as_drift():
     assert vsmc._normalise('CommandType') == vsmc._normalise('uint32_t')
     assert vsmc._normalise('ResponseType') == vsmc._normalise('uint32_t')
     assert vsmc._normalise('uint64_t') != vsmc._normalise('uint32_t')
+
+
+@pytest.mark.parametrize('platform', ['win32', 'linux'])
+@pytest.mark.parametrize('prior', ['absent', 'module', 'none'])
+def test_actual_branch_load_restores_temporary_module_context(platform, prior, monkeypatch):
+    name = f'_bridge_{platform}'
+    previous = types.ModuleType(name) if prior == 'module' else None
+    if prior == 'absent':
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    else:
+        monkeypatch.setitem(sys.modules, name, previous)
+    original_platform = sys.platform
+    layout = vsmc.load_bridge_struct(platform)
+    assert layout.__name__ == 'SharedMemoryLayout'
+    assert vsmc.python_fields(layout)
+    assert sys.platform == original_platform
+    if prior == 'absent':
+        assert name not in sys.modules
+    else:
+        assert name in sys.modules and sys.modules[name] is previous
+
+
+@pytest.mark.parametrize('platform', ['win32', 'linux'])
+@pytest.mark.parametrize('prior', ['absent', 'module', 'none'])
+def test_failed_prefix_execution_restores_module_and_platform(platform, prior, tmp_path, monkeypatch):
+    name = f'_bridge_{platform}'
+    previous = types.ModuleType(name) if prior == 'module' else None
+    if prior == 'absent':
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    else:
+        monkeypatch.setitem(sys.modules, name, previous)
+    bridge = tmp_path / 'bridge_prefix.py'
+    bridge.write_text(
+        'from __future__ import annotations\n'
+        'import sys\n'
+        'from dataclasses import dataclass\n'
+        '@dataclass\n'
+        'class Evidence:\n'
+        '    value: int = 1\n'
+        'assert sys.modules[__name__].__dict__ is globals()\n'
+        f'assert sys.platform == {platform!r}\n'
+        'raise RuntimeError("intentional prefix execution failure")\n'
+        'class CaptureBridge:\n'
+        '    pass\n', encoding='utf-8')
+    monkeypatch.setattr(vsmc, 'BRIDGE', bridge)
+    original_platform = sys.platform
+    with pytest.raises(RuntimeError, match='intentional prefix execution failure'):
+        vsmc.load_bridge_struct(platform)
+    assert sys.platform == original_platform
+    if prior == 'absent':
+        assert name not in sys.modules
+    else:
+        assert name in sys.modules and sys.modules[name] is previous

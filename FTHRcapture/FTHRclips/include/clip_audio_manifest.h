@@ -32,7 +32,7 @@ bool WriteClipAudioManifest(
     const std::filesystem::path& manifest_temporary_path,
     const std::string& transaction_id,
     const std::vector<EncodedAudioTrack>& tracks,
-    std::string* error);
+    std::string* error, const std::vector<std::string>& warnings = {});
 
 }  // namespace fthr
 

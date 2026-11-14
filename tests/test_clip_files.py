@@ -102,6 +102,10 @@ def test_cleanup_failure_is_secondary_and_reported(
 
 
 def test_startup_cleanup_removes_only_old_orphaned_fthr_audio_manifests(tmp_path: Path) -> None:
+    from core.clip_metadata_manager import ClipMetadataManager
+
+    manager = ClipMetadataManager(database_path=tmp_path / 'metadata.sqlite3')
+    manager.migrate()
     old_orphan = (
         tmp_path / 'Desktop' / 'desktop_clip_from_11Aug2026_12-00-00.mp4.fthr-audio.json'
     )
@@ -119,7 +123,7 @@ def test_startup_cleanup_removes_only_old_orphaned_fthr_audio_manifests(tmp_path
 
     assert is_fthr_owned_orphan_audio_manifest_path(old_orphan)
     assert not is_fthr_owned_orphan_audio_manifest_path(unrelated)
-    result = cleanup_stale_partial_clips(tmp_path, now=now)
+    result = cleanup_stale_partial_clips(tmp_path, now=now, metadata_manager=manager)
 
     assert result.removed == (old_orphan,)
     assert not old_orphan.exists()
@@ -130,3 +134,61 @@ def test_startup_cleanup_removes_only_old_orphaned_fthr_audio_manifests(tmp_path
 def test_negative_cleanup_age_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match='non-negative'):
         cleanup_stale_partial_clips(tmp_path, minimum_age_seconds=-1)
+
+
+@pytest.mark.parametrize('protection', ['favorite', 'protected', 'unprotected'])
+def test_orphan_manifest_cleanup_reads_fresh_primary_flags_even_without_sidecar_binding(
+        tmp_path, protection):
+    from core.clip_metadata_manager import ClipMetadataManager
+
+    media = tmp_path / 'desktop_clip_from_11Aug2026_12-00-00.mp4'
+    media.write_bytes(b'synthetic media')
+    manifest = media.with_name(media.name + '.fthr-audio.json')
+    manifest.write_bytes(b'synthetic manifest retained byte for byte')
+    database = tmp_path / 'metadata.sqlite3'
+    stale = ClipMetadataManager(database_path=database)
+    stale.migrate()
+    binding = stale.register_media(stale.inspect_media(media))
+    fresh = ClipMetadataManager(database_path=database)
+    if protection != 'unprotected':
+        fresh.set_library_flags(media, **{protection: True})
+    # This is precisely the unassociated JSON window: no SIDECAR registration.
+    assert len(fresh.files_for_clip(binding.clip_id)) == 1
+    media.rename(tmp_path / 'retained-primary.mp4')
+    now = 2_000_000.0
+    os.utime(manifest, (now - 90_000, now - 90_000))
+    result = cleanup_stale_partial_clips(tmp_path, now=now, metadata_manager=stale)
+    if protection == 'unprotected':
+        assert result.removed == (manifest,) and not manifest.exists()
+    else:
+        assert result.removed == ()
+        assert manifest.read_bytes() == b'synthetic manifest retained byte for byte'
+        assert result.failures
+    assert (tmp_path / 'retained-primary.mp4').read_bytes() == b'synthetic media'
+
+
+@pytest.mark.parametrize('context', ['none', 'corrupt', 'future'])
+def test_orphan_manifest_is_kept_when_protection_context_cannot_be_trusted(tmp_path, context):
+    from contextlib import closing
+    import sqlite3
+    from core.clip_metadata_manager import ClipMetadataManager
+
+    manifest = tmp_path / 'desktop_clip_from_11Aug2026_12-00-00.mp4.fthr-audio.json'
+    manifest.write_bytes(b'retained orphan data')
+    manager = None
+    if context != 'none':
+        database = tmp_path / 'metadata.sqlite3'
+        manager = ClipMetadataManager(database_path=database)
+        manager.migrate()
+        if context == 'future':
+            with closing(sqlite3.connect(database)) as connection, connection:
+                connection.execute('PRAGMA user_version=99')
+        else:
+            database.rename(tmp_path / 'retained-valid-metadata.sqlite3')
+            database.write_bytes(b'corrupt synthetic database')
+    now = 2_000_000.0
+    os.utime(manifest, (now - 90_000, now - 90_000))
+    result = cleanup_stale_partial_clips(tmp_path, now=now, metadata_manager=manager)
+    assert result.removed == ()
+    assert manifest.read_bytes() == b'retained orphan data'
+    assert result.failures

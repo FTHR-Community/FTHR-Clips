@@ -1,20 +1,7 @@
-# FTHR Clips 2.0.0 Alpha — source snapshot (17 October 2026)
+# FTHR Clips 2.1.0 — Windows source
 
-This snapshot includes the short replay save fix: save available healthy footage
-from 0.5 seconds onward during startup/recovery, even for longer clip requests.
+Snapshot: 14 November 2026. See [BUILDING.md](BUILDING.md) for Windows prerequisites, dependency verification, build and test commands.
 
-Extract the entire folder before building. Read BUILDING.md for prerequisites,
-pinned Python dependencies, native Windows/Linux builds, optional uploader,
-verified dependency downloads, packaging and verification commands.
+This tree includes the Windows app, native engine, shared code, optional uploader support, assets, tests and licences. Website files, standalone plugins, Linux engine and AppImage packaging are excluded. The app retains its plugin host so separately distributed plugins can be installed.
 
-The archive preserves app and helper source, both native engines, shared code,
-website, original assets, tests, licenses, build scripts, dependency manifests,
-and Windows FFmpeg headers/import libraries. Source files are losslessly stored.
-Generated builds, installers, downloadable runtimes, caches and personal data
-are omitted. Fetch the verified dependencies using tools/fetch_third_party.py
-as described in BUILDING.md; this is not an offline binary bundle.
-
-SOURCE_MANIFEST.json contains the size and SHA-256 of every other archived file.
-The ZIP uses maximum standard Deflate compression for Windows compatibility.
-After building, tools/update_latest_build_shortcut.ps1 creates a shortcut to
-the latest local packaged app.
+Three Linux-named Python helpers are retained because shared Windows UI modules import them. Generated builds, installers, runtimes, caches and personal data are excluded. SOURCE_MANIFEST.json records the committed source file sizes and SHA-256 hashes.

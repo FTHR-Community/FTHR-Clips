@@ -33,6 +33,11 @@ EncodedVideoConfig BuildQsvVideoConfig(
 
 namespace detail {
 
+// oneVPL shares the immediate context with capture and requires D3D11's
+// multithread lock before the device handle is supplied to the runtime.
+bool EnableQsvMultithreadProtection(
+    ID3D11DeviceContext* context, std::string& error);
+
 enum class QsvSubmitStatus : uint32_t {
     Accepted,
     NeedDrain,

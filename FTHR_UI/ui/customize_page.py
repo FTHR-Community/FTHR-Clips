@@ -1,7 +1,6 @@
 """Accordion settings for colors, icons, fonts, and sounds.
 
-Use a static preview, lazy icon caches, and preloaded sound cues. Apply
-updates the main theme in one QSS pass.
+Use a static preview, lazy icon caches, and preloaded sound cues.
 """
 from __future__ import annotations
 
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
-    Qt, Signal, QRect, QPoint,
+    Qt, Signal, QRect, QPoint, QSignalBlocker, QTimer,
 )
 from PySide6.QtGui import (
     QPixmap, QColor, QPainter, QPen, QBrush, QFont, QCursor,
@@ -26,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 from ui.style import (
     Colors, Fonts, Sizes, label_uppercase, label_body,
-    button_primary_qss, button_outline_qss, button_secondary_qss,
+    button_outline_qss, button_secondary_qss,
     combo_qss, slider_qss, ThemedDropdownArrow, WheelSafeComboBox,
 )
 from core.theme_manager import (
@@ -48,6 +47,29 @@ def _default_icon_pixmap(filename: str, size: int) -> QPixmap:
     """Preview the same supplied artwork used by live controls."""
     from ui.icons import icon_pixmap
     return icon_pixmap(filename, size, bundled=True)
+
+
+def _customize_file_service(parent):
+    while parent is not None:
+        service = getattr(parent, '_studio_dialogs', None)
+        if service is not None:
+            return service
+        parent = parent.parentWidget()
+    return None
+
+
+def _customize_open_file(parent, title, directory, filters):
+    service = _customize_file_service(parent)
+    if service is not None:
+        return service.open_file(parent, title, filters), ''
+    return QFileDialog.getOpenFileName(parent, title, directory, filters)
+
+
+def _customize_save_file(parent, title, suggested, filters):
+    service = _customize_file_service(parent)
+    if service is not None:
+        return service.save_file(parent, title, suggested, filters), ''
+    return QFileDialog.getSaveFileName(parent, title, suggested, filters)
 
 
 # Dark-themed stylesheet for the non-native QColorDialog
@@ -342,6 +364,8 @@ class _AccordionSection(QFrame):
         # Header (clickable trigger)
         self._header = QPushButton()
         self._header.setObjectName('accordionHeader')
+        self._header.setCheckable(True)
+        self._header.setAccessibleName(title)
         self._header.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._header.setFixedHeight(Sizes.CAPTURE_CONTROL_H)
         self._header.clicked.connect(self.toggle)
@@ -423,7 +447,10 @@ class _AccordionSection(QFrame):
                 text-align: left;
             }}
             QPushButton#accordionHeader:hover {{
-                background-color: {Colors.BORDER_HI};
+                background-color: {Colors.CARD_BG_HI};
+            }}
+            QPushButton#accordionHeader:focus {{
+                border: 1px solid {Colors.ACCENT};
             }}
             QWidget#accordionBody,
             QWidget#accordionBody > QWidget#accordionContent {{
@@ -450,6 +477,7 @@ class _AccordionSection(QFrame):
 
     def toggle(self):
         self._expanded = not self._expanded
+        self._header.setChecked(self._expanded)
         self._indicator.setExpanded(self._expanded)
         self._body.setVisible(self._expanded)
 
@@ -702,7 +730,7 @@ class _ColorPreviewMockup(QFrame):
 # Icon Crop Dialog — crop imported image to match original icon dimensions
 
 class _IconCropWidget(QWidget):
-    """Crop area selector with free resize via corner handles and scroll wheel."""
+    """Crop area selector with explicit resizing via corner handles."""
 
     _HANDLE_R = 6  # corner handle radius in display px
 
@@ -854,12 +882,7 @@ class _IconCropWidget(QWidget):
         self._resize_corner = -1
 
     def wheelEvent(self, event):
-        delta = event.angleDelta().y()
-        step = max(4, int(self._crop_rect.width() * 0.05))
-        new_size = self._crop_rect.width() + (step if delta > 0 else -step)
-        new_size = max(self._min_crop, min(new_size, self._max_crop))
-        self._resize_crop_centered(new_size)
-        self.update()
+        event.ignore()
 
     # resize helpers
 
@@ -1005,7 +1028,7 @@ class _IconRow(QFrame):
 
     def _on_import(self):
         formats = ' '.join(f'*{ext}' for ext in SUPPORTED_IMAGE_FORMATS)
-        file_path, _ = QFileDialog.getOpenFileName(
+        file_path, _ = _customize_open_file(
             self, f'Select icon for {self._label}',
             '', f'Images ({formats})',
         )
@@ -1280,7 +1303,8 @@ class _SoundRow(QFrame):
         layout.addWidget(volume_label)
         self._volume_slider = QSlider(Qt.Orientation.Horizontal)
         self._volume_slider.setRange(0, 100)
-        self._volume_slider.setFixedWidth(120)
+        self._volume_slider.setTracking(False)
+        self._volume_slider.setFixedWidth(Sizes.SLIDER_COMPACT_W)
         set_theme_style(self._volume_slider, lambda: (slider_qss()))
         current_volume = int(
             self._settings.get(self._volume_setting, 100)
@@ -1386,7 +1410,7 @@ class _SoundRow(QFrame):
 
     def _on_import(self):
         formats = ' '.join(f'*{ext}' for ext in SUPPORTED_SOUND_FORMATS)
-        file_path, _ = QFileDialog.getOpenFileName(
+        file_path, _ = _customize_open_file(
             self, f'Select sound for {self._label}',
             '', f'Audio files ({formats})',
         )
@@ -1414,14 +1438,18 @@ class _SoundRow(QFrame):
 class CustomizePage(QWidget):
     """Complete Customize settings tab with accordion sections."""
 
-    theme_applied = Signal()  # Emitted when user clicks Apply
+    theme_applied = Signal()
 
-    def __init__(self, settings_manager=None, parent=None):
+    def __init__(self, settings_manager=None, parent=None, *, theme_manager=None):
         super().__init__(parent)
         self.setObjectName('customizePage')
         set_theme_style(self, lambda: (f'QWidget#customizePage {{ background: {Colors.BG}; }}'))
-        self._theme = ThemeManager()
+        self._theme = theme_manager if theme_manager is not None else ThemeManager()
         self._settings = settings_manager
+        self._theme_refresh_timer = QTimer(self)
+        self._theme_refresh_timer.setSingleShot(True)
+        self._theme_refresh_timer.setInterval(120)
+        self._theme_refresh_timer.timeout.connect(self.theme_applied.emit)
         self._swatches: list[_ColorSwatch] = []
         self._setup_ui()
 
@@ -1526,14 +1554,12 @@ class CustomizePage(QWidget):
         self._reset_btn = reset_btn
         action_bar.addWidget(reset_btn)
 
-        apply_btn = QPushButton('Apply theme')
-        set_theme_style(apply_btn, lambda: (button_primary_qss()))
-        apply_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        apply_btn.clicked.connect(self._on_apply)
-        self._apply_btn = apply_btn
-        action_bar.addWidget(apply_btn)
-
         outer.addLayout(action_bar)
+        self._save_error = QLabel('Theme settings could not be saved. Try again.')
+        self._save_error.setWordWrap(True)
+        set_theme_style(self._save_error, lambda: label_body(Colors.ERROR, Fonts.SIZE_BODY))
+        self._save_error.hide()
+        outer.addWidget(self._save_error)
         self._layout.addStretch()
 
         scroll.setWidget(container)
@@ -1574,8 +1600,6 @@ class CustomizePage(QWidget):
                 combo.addItem(family, family)
             if current not in families:
                 current = DEFAULT_FONTS[role]
-                self._theme.set_font(role, current)
-                self._theme.save()
             index = combo.findData(current)
             combo.setCurrentIndex(max(0, index))
             combo.currentIndexChanged.connect(
@@ -1616,13 +1640,17 @@ class CustomizePage(QWidget):
         combo = self._font_combos.get(role)
         if combo is None:
             return
+        previous = self._theme.get_font(role)
         self._theme.set_font(role, combo.currentData() or combo.currentText())
-        self._theme.save()
+        if not self._finish_theme_edit():
+            self._theme.set_font(role, previous)
+            with QSignalBlocker(combo):
+                combo.setCurrentIndex(max(0, combo.findData(previous)))
         self._update_font_preview()
 
     def _on_import_font(self, role: str):
         formats = ' '.join(f'*{ext}' for ext in SUPPORTED_FONT_FORMATS)
-        file_path, _ = QFileDialog.getOpenFileName(
+        file_path, _ = _customize_open_file(
             self, 'Import font', '', f'Font files ({formats})')
         if not file_path:
             return
@@ -1667,6 +1695,7 @@ class CustomizePage(QWidget):
             combo.setCurrentIndex(max(0, index))
             combo.blockSignals(False)
         self._update_font_preview()
+        self._theme_refresh_timer.start()
 
     def _update_font_preview(self):
         display = self._theme.get_font('display').replace('"', '')
@@ -1740,10 +1769,24 @@ class CustomizePage(QWidget):
 
         self._colors_section.add_content(wrapper)
 
+    def _finish_theme_edit(self):
+        saved = self._theme.save()
+        self._save_error.setVisible(not saved)
+        if saved:
+            self._theme_refresh_timer.start()
+        return saved
+
     def _on_color_changed(self, token: str, hex_value: str):
+        previous = self._theme.get_color(token)
         self._theme.set_color(token, hex_value)
-        self._theme.save()
-        self._preview.update_single_color(token, hex_value)
+        if self._finish_theme_edit():
+            self._preview.update_single_color(token, hex_value)
+        else:
+            self._theme.set_color(token, previous)
+            for swatch in self._swatches:
+                if swatch.token == token:
+                    swatch.set_color(previous)
+                    break
 
     def _on_reset_all_colors(self):
         self._theme.reset_all_colors()
@@ -1751,6 +1794,7 @@ class CustomizePage(QWidget):
         for swatch in self._swatches:
             swatch.set_color(DEFAULT_COLORS.get(swatch.token, '#000000'))
         self._preview.update_colors(DEFAULT_COLORS)
+        self._theme_refresh_timer.start()
 
     # Icons section
 
@@ -1768,7 +1812,7 @@ class CustomizePage(QWidget):
         self._icons_section.add_content(wrapper)
 
     def _on_icon_changed(self, filename: str):
-        pass  # Icons apply on next app restart or when Apply is clicked
+        self._theme_refresh_timer.start()
 
     # Icon Colors section
 
@@ -1845,6 +1889,7 @@ class CustomizePage(QWidget):
             self._update_global_tint_swatch()
             for row in self._tint_rows:
                 row.refresh()
+            self._theme_refresh_timer.start()
 
     def _on_reset_all_tints(self):
         self._theme.reset_all_icon_tints()
@@ -1852,9 +1897,10 @@ class CustomizePage(QWidget):
         self._update_global_tint_swatch()
         for row in self._tint_rows:
             row.refresh()
+        self._theme_refresh_timer.start()
 
     def _on_tint_changed(self, filename: str):
-        pass  # Tints apply when user clicks Apply Theme
+        self._theme_refresh_timer.start()
 
     # Capture Card section
 
@@ -1870,8 +1916,6 @@ class CustomizePage(QWidget):
             ('CAPTURE_CARD_TEXT',            'Text'),
             ('CAPTURE_CARD_DIVIDER',        'Divider'),
             ('CAPTURE_CARD_STATS_DIM',      'Stats Label'),
-            ('CAPTURE_CARD_PROGRESS_TRACK', 'Progress Track'),
-            ('CAPTURE_CARD_PROGRESS_FILL',  'Progress Fill'),
         ]
 
         self._cc_swatches: list[_ColorSwatch] = []
@@ -1903,8 +1947,14 @@ class CustomizePage(QWidget):
         self._capture_card_section.add_content(wrapper)
 
     def _on_cc_color_changed(self, token: str, hex_value: str):
+        previous = self._theme.get_capture_card_color(token)
         self._theme.set_capture_card_color(token, hex_value)
-        self._theme.save()
+        if not self._finish_theme_edit():
+            self._theme.set_capture_card_color(token, previous)
+            for swatch in self._cc_swatches:
+                if swatch.token == token:
+                    swatch.set_color(previous)
+                    break
 
     def _on_reset_cc_colors(self):
         self._theme.reset_capture_card_colors()
@@ -1912,6 +1962,7 @@ class CustomizePage(QWidget):
         for swatch in self._cc_swatches:
             swatch.set_color(
                 DEFAULT_CAPTURE_CARD_COLORS.get(swatch.token, '#ffffff'))
+        self._theme_refresh_timer.start()
 
     # Sounds section
 
@@ -1940,7 +1991,7 @@ class CustomizePage(QWidget):
     # Export / Import
 
     def _on_export(self):
-        dest, _ = QFileDialog.getSaveFileName(
+        dest, _ = _customize_save_file(
             self, 'Export Theme',
             str(Path.home() / 'fthr_theme.zip'),
             'ZIP files (*.zip)',
@@ -1956,7 +2007,7 @@ class CustomizePage(QWidget):
             )
 
     def _on_import(self):
-        src, _ = QFileDialog.getOpenFileName(
+        src, _ = _customize_open_file(
             self, 'Import Theme', '', 'ZIP files (*.zip)',
         )
         if not src:
@@ -1972,12 +2023,7 @@ class CustomizePage(QWidget):
         ok = self._theme.import_theme(Path(src))
         if ok:
             self._refresh_all()
-            _fthr_message_box(
-                self, 'Imported',
-                'Theme imported successfully.\n'
-                'Click APPLY THEME to see changes in the app.',
-                ok_cancel=False,
-            )
+            self._theme_refresh_timer.start()
 
     def refresh_theme(self):
         """Restyle existing controls without rebuilding sections or sound players."""
@@ -2001,10 +2047,7 @@ class CustomizePage(QWidget):
                 self._settings.set(f'sound_volume_{key}', 100)
             self._settings.save_settings()
         self._refresh_all()
-        self.theme_applied.emit()
-
-    def _on_apply(self):
-        self.theme_applied.emit()
+        self._theme_refresh_timer.start()
 
     def _refresh_all(self):
         """Reload all UI elements from current theme state."""

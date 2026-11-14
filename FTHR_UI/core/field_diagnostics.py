@@ -586,20 +586,46 @@ class EngineLogCapture:
         stream = self._stream
         if stream is None:
             return
+        handle = None
+        handle_identity = None
+
+        def close_writer():
+            nonlocal handle
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+                handle = None
+
         try:
             for line in iter(stream.readline, ''):
                 self._append_startup(line)
                 log_line = bounded_tail(redact_path(line), self._max_bytes)
                 encoded_size = len(log_line.encode('utf-8', errors='replace'))
-                self._rotate_if_needed(encoded_size)
                 try:
-                    with self.path.open(
-                            'a', encoding='utf-8', errors='replace', newline='') as handle:
-                        handle.write(log_line)
+                    try:
+                        current = self.path.stat()
+                    except FileNotFoundError:
+                        current = None
+                    identity = (current.st_dev, current.st_ino) if current else None
+                    rotate = current is not None and current.st_size + encoded_size > self._max_bytes
+                    if handle is not None and (rotate or identity != handle_identity):
+                        close_writer()
+                    if rotate:
+                        # Windows requires our writer to be closed before rename.
+                        self._rotate_if_needed(encoded_size)
+                    if handle is None:
+                        handle = self.path.open(
+                            'a', encoding='utf-8', errors='replace', newline='')
+                        opened = os.fstat(handle.fileno())
+                        handle_identity = (opened.st_dev, opened.st_ino)
+                    handle.write(log_line)
+                    handle.flush()
                 except OSError:
                     # The engine pipe must keep draining even if diagnostic
                     # storage becomes unavailable mid-session.
-                    pass
+                    close_writer()
                 stripped = line.strip()
                 if stripped.startswith(_ENGINE_EVENT_PREFIX) and self._session is not None:
                     try:
@@ -615,6 +641,8 @@ class EngineLogCapture:
             # A closing/invalid pipe ends this best-effort drain; engine process
             # lifecycle diagnostics are emitted by the UI separately.
             pass
+        finally:
+            close_writer()
 
     def startup_text(self) -> str:
         with self._lock:

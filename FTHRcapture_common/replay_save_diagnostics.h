@@ -19,10 +19,12 @@ enum class SnapshotOutcome {
     MissingStartKeyframe,
     RetryExhaustedGenerationOrSlotRace,
     Valid,
+    MemoryBudgetExceeded,
 };
 
 inline const char* SnapshotOutcomeName(SnapshotOutcome value) noexcept {
     switch (value) {
+    case SnapshotOutcome::MemoryBudgetExceeded: return "MEMORY_BUDGET_EXCEEDED";
     case SnapshotOutcome::Unknown: return "UNKNOWN";
     case SnapshotOutcome::EmptyRing: return "EMPTY_RING";
     case SnapshotOutcome::NoEligiblePackets: return "NO_ELIGIBLE_PACKETS";
@@ -44,10 +46,12 @@ enum class Classification {
     EncoderStarvation,
     ReplaySnapshotRace,
     OtherProvenReason,
+    MemoryBudgetExceeded,
 };
 
 inline const char* ClassificationName(Classification value) noexcept {
     switch (value) {
+    case Classification::MemoryBudgetExceeded: return "MEMORY_BUDGET_EXCEEDED";
     case Classification::NotReadyAfterStart: return "NOT_READY_AFTER_START";
     case Classification::InsufficientRetainedHistory:
         return "INSUFFICIENT_RETAINED_HISTORY";
@@ -100,6 +104,9 @@ inline Classification Classify(
     const SnapshotEvidence& snapshot,
     const RuntimeEvidence& runtime,
     double requested_duration_s) noexcept {
+    if (snapshot.outcome == SnapshotOutcome::MemoryBudgetExceeded) {
+        return Classification::MemoryBudgetExceeded;
+    }
     if (snapshot.outcome == SnapshotOutcome::MissingStartKeyframe) {
         return Classification::MissingStartKeyframe;
     }

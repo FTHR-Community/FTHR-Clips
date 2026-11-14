@@ -94,7 +94,7 @@ def test_rebind_refuses_invalid_sidecar(tmp_path):
     assert sidecar.read_text(encoding='utf-8') == '{"not":"a manifest"}'
 
 
-def test_manifest_rejects_duplicate_streams_and_more_than_ten_sources(tmp_path):
+def test_manifest_rejects_duplicate_streams_and_more_than_thirty_eight_sources(tmp_path):
     media = tmp_path / 'clip.mp4'
     media.write_bytes(b'finished clip bytes')
     manifest = build_manifest(
@@ -104,13 +104,24 @@ def test_manifest_rejects_duplicate_streams_and_more_than_ten_sources(tmp_path):
     with pytest.raises(AudioManifestError, match='stream index'):
         validate_manifest(manifest, media_path=media)
 
+
     manifest['sources'] = [_entry(stream_index=index + 2, name=f'App {index}')
-                           .__dict__ for index in range(10)]
+                           .__dict__ for index in range(38)]
     validate_manifest(manifest)
 
-    manifest['sources'].append(_entry(stream_index=12, name='App 10').__dict__)
-    with pytest.raises(AudioManifestError, match='between one and ten'):
+    manifest['sources'].append(_entry(stream_index=40, name='App 38').__dict__)
+    with pytest.raises(AudioManifestError, match='between one and thirty-eight'):
         validate_manifest(manifest, media_path=media)
+
+
+@pytest.mark.parametrize('codec', [['pcm_f32le'], {'codec': 'pcm_f32le'}, None])
+def test_manifest_rejects_malformed_codec_without_type_errors(tmp_path, codec):
+    media = tmp_path / 'clip.mp4'
+    media.write_bytes(b'finished clip bytes')
+    manifest = build_manifest(media_path=media, transaction_id=str(uuid4()), sources=[_entry()])
+    manifest['sources'][0]['codec'] = codec
+    with pytest.raises(AudioManifestError, match='source codec'):
+        validate_manifest(manifest)
 
 
 def test_verified_export_tracks_use_manifest_order_not_raw_stream_labels(tmp_path):

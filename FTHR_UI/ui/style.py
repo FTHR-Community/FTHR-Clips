@@ -1,6 +1,6 @@
 """Shared color, font, and spacing tokens for FTHR widgets.
 
-Near-black green surfaces, a bright mint accent, and a clear type hierarchy.
+Neutral charcoal surfaces, a mint accent, and a clear type hierarchy.
 Imported themes can override fonts and colors.
 """
 from __future__ import annotations
@@ -204,6 +204,12 @@ class WheelSafeComboBox(QComboBox):
     # paint step themselves; ordinary settings combos use this shared path.
     _custom_arrow_managed = False
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumContentsLength(14)
+        self.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+
     def paintEvent(self, event):  # noqa: N802 - Qt API name
         super().paintEvent(event)
         if self._custom_arrow_managed:
@@ -214,9 +220,8 @@ class WheelSafeComboBox(QComboBox):
         painter.end()
 
     def wheelEvent(self, event):  # noqa: N802 - Qt API name
-        if self.view().isVisible():
-            super().wheelEvent(event)
-            return
+        # The popup's scrollbar can scroll its list, but wheel input on the
+        # combo itself must never commit a different selection.
         event.ignore()
 
 
@@ -284,6 +289,17 @@ class Sizes:
     STATS_BAR_H = 28
     BUTTON_H    = 38
     INPUT_H     = 38
+    COMBO_MIN_W = 160
+    COMBO_COMPACT_MIN_W = 90
+    COMBO_CONTENT_H = 22
+    COMBO_PADDING_Y = 6
+    COMBO_COMPACT_CONTENT_H = 18
+    COMBO_COMPACT_PADDING_Y = 3
+    COMBO_ITEM_H = 28
+    SLIDER_COMPACT_W = 170
+    SLIDER_H = 24
+    SLIDER_TRACK_H = 2
+    SLIDER_HANDLE_SIZE = 12
     HW_BAR_H    = 36
 
     # Subtle rounding keeps dense controls and cards easy to distinguish.
@@ -361,28 +377,33 @@ def status_warning_qss() -> str:
 
 
 # Reusable QSS fragments
-def combo_qss(background: str | None = None) -> str:
+def combo_qss(background: str | None = None, *, compact: bool = False) -> str:
     """Return the shared combo style, with an optional non-default surface."""
     combo_background = background or Colors.SURFACE_3
+    minimum_width = Sizes.COMBO_COMPACT_MIN_W if compact else Sizes.COMBO_MIN_W
+    content_height = Sizes.COMBO_COMPACT_CONTENT_H if compact else Sizes.COMBO_CONTENT_H
+    padding_y = Sizes.COMBO_COMPACT_PADDING_Y if compact else Sizes.COMBO_PADDING_Y
     return f'''
     QComboBox {{
         combobox-popup: 0;
         background-color: {combo_background};
         border: 1px solid {Colors.BORDER};
         border-radius: {Sizes.RADIUS_MD}px;
-        padding: 6px 12px;
+        padding: {padding_y}px 12px;
         color: {Colors.TEXT};
         font-size: {Fonts.SIZE_BODY}px;
         font-family: {Fonts.BODY};
-        min-width: 90px;
-        min-height: 22px;
+        min-width: {minimum_width}px;
+        min-height: {content_height}px;
     }}
     QComboBox:hover {{
-        background-color: {Colors.SURFACE_3};
+        border-color: {Colors.BORDER_HI};
+        background-color: {Colors.CARD_BG_HI};
         color: {Colors.TEXT};
     }}
     QComboBox:focus {{
-        background-color: {Colors.SURFACE_3};
+        border-color: {Colors.BORDER_HI};
+        background-color: {Colors.CARD_BG_HI};
         outline: none;
     }}
     QComboBox::drop-down {{ border: none; width: 22px; }}
@@ -394,25 +415,25 @@ def combo_qss(background: str | None = None) -> str:
         color: {Colors.TEXT};
         font-size: {Fonts.SIZE_BODY}px;
         font-family: {Fonts.BODY};
-        selection-background-color: {Colors.SURFACE_3};
-        selection-color: {Colors.ACCENT};
-        padding: 0px;
+        selection-background-color: {Colors.CARD_BG_HI};
+        selection-color: {Colors.TEXT};
+        padding: 4px;
         outline: none;
     }}
     QComboBox QAbstractItemView::item {{
         background-color: {combo_background};
         color: {Colors.TEXT};
-        min-height: 26px;
+        min-height: {Sizes.COMBO_ITEM_H}px;
         padding-left: 10px;
-        border-radius: 0px;
+        border-radius: {Sizes.RADIUS_SM}px;
     }}
     QComboBox QAbstractItemView::item:hover {{
-        background-color: {Colors.SURFACE_3};
+        background-color: {Colors.CARD_BG_HI};
         color: {Colors.TEXT};
     }}
     QComboBox QAbstractItemView::item:selected {{
-        background-color: {Colors.SURFACE_3};
-        color: {Colors.ACCENT};
+        background-color: {Colors.CARD_BG_HI};
+        color: {Colors.TEXT};
     }}
 '''
 
@@ -554,18 +575,19 @@ def slider_qss() -> str:
     return f'''
     QSlider {{
         background: transparent;
+        min-height: {Sizes.SLIDER_H}px;
     }}
     QSlider::groove:horizontal {{
         background: {Colors.BORDER};
-        height: 2px;
+        height: {Sizes.SLIDER_TRACK_H}px;
         border: none;
     }}
     QSlider::sub-page:horizontal {{ background: {Colors.ACCENT}; }}
     QSlider::add-page:horizontal {{ background: {Colors.BORDER}; }}
     QSlider::handle:horizontal {{
         background: {Colors.ACCENT};
-        width: 12px; height: 12px;
-        margin: -5px 0;
+        width: {Sizes.SLIDER_HANDLE_SIZE}px; height: {Sizes.SLIDER_HANDLE_SIZE}px;
+        margin: -{(Sizes.SLIDER_HANDLE_SIZE - Sizes.SLIDER_TRACK_H) // 2}px 0;
         border: none;
         border-radius: {Sizes.RADIUS_SM}px;
     }}
@@ -629,7 +651,7 @@ def scrollbar_qss() -> str:
     QScrollBar:vertical {{
         background-color: {Colors.BG};
         width: 8px;
-        margin: 4px 0;
+        margin: 0;
         border: none;
     }}
     QScrollBar::handle:vertical {{
@@ -776,6 +798,6 @@ def context_menu_qss() -> str:
     QMenu::separator {{
         height: 1px;
         background: {Colors.BORDER};
-        margin: 4px 0;
+        margin: 0;
     }}
 '''

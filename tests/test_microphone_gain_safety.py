@@ -23,13 +23,13 @@ def test_microphone_gain_range_and_warning_state(
         qtbot, monkeypatch, tmp_path, mic_volume, warning_hidden):
     page, settings = _make_page(qtbot, monkeypatch, tmp_path, mic_volume)
 
-    assert page.mic_gain_label.text() == 'Microphone gain'
+    assert page.mic_gain_label.text() == 'Volume'
     assert page.mic_vol_slider.minimum() == 0
     assert page.mic_vol_slider.maximum() == 200
     assert page.mic_vol_slider.value() == mic_volume
     assert page.mic_gain_warning.isHidden() is warning_hidden
     assert 'digital boost' in page.mic_gain_warning.text()
-    assert 'Restart capture' in page.mic_gain_warning.text()
+    assert 'restarts capture' in page.mic_gain_warning.text()
     assert '100% is unity' in page.mic_vol_slider.toolTip()
     assert 'Windows audio enhancements are independent' in (
         page.mic_vol_slider.toolTip())
@@ -85,3 +85,14 @@ def test_windows_master_multiplies_notification_volumes(monkeypatch):
     monkeypatch.setattr(capture_card, 'SettingsManager', Settings)
     monkeypatch.setattr('sys.platform', 'win32')
     assert capture_card._master_volume(80) == 20
+
+
+def test_failed_microphone_gain_save_restores_slider_without_restart(qtbot, monkeypatch, tmp_path):
+    page, settings = _make_page(qtbot, monkeypatch, tmp_path, 100)
+    slider = page.mic_vol_slider
+    monkeypatch.setattr(settings, 'save_settings', lambda: False)
+    with qtbot.assertNotEmitted(page.audio_capture_changed):
+        slider.setValue(150)
+    assert slider.value() == 100
+    assert settings.get('mic_volume') == 100
+    assert not page.mic_save_error.isHidden()

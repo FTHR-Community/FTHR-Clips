@@ -54,16 +54,15 @@ constexpr uint32_t kCanonicalSampleRate = kCanonicalAudioSampleRate;
 constexpr uint32_t kCanonicalChannels = kCanonicalAudioChannels;
 constexpr DWORD kActivationTimeoutMs = 5000;
 constexpr DWORD kCaptureWaitMs = 250;
+constexpr uint64_t kCaptureWait100ns = kCaptureWaitMs * 10'000ULL;
 constexpr uint32_t kMaxRecoveryAttempts = 3;
 
 int64_t CurrentQpc100ns() {
-    LARGE_INTEGER counter{};
-    LARGE_INTEGER frequency{};
-    if (!QueryPerformanceCounter(&counter) || !QueryPerformanceFrequency(&frequency)
-            || frequency.QuadPart <= 0) {
-        return 0;
-    }
-    return static_cast<int64_t>((counter.QuadPart * 10'000'000LL) / frequency.QuadPart);
+    // WASAPI packet QPC values and all native audio timelines use the same
+    // 100-ns domain. Reuse the shared conversion, which divides before the
+    // remainder multiplication and therefore cannot overflow on a normal
+    // long-running QPC counter.
+    return static_cast<int64_t>(CurrentAudioTimeline100ns());
 }
 
 bool WaitForStop(HANDLE stop_event, DWORD timeout_ms) {
@@ -207,6 +206,7 @@ struct WindowsProcessLoopbackAudioProvider::Impl {
     std::atomic<bool> running{false};
     std::atomic<bool> failed{false};
     std::atomic<uint64_t> timeline_origin_100ns{0};
+    std::atomic<uint64_t> replay_origin_100ns{0};
     mutable std::mutex state_mutex;
     std::string error;
     std::unique_ptr<AudioEncoder> encoder;
@@ -383,28 +383,47 @@ struct WindowsProcessLoopbackAudioProvider::Impl {
 
     bool EnsureEncoder(uint64_t first_qpc_100ns) {
         if (admitted.load(std::memory_order_acquire) || pending.empty()) return true;
-        const uint64_t origin = first_qpc_100ns > 0 ? first_qpc_100ns : pending.front().qpc_100ns;
+        // Pending activity-gate pre-roll belongs to the source too. Starting
+        // at the admission packet discarded the beginning of the first sound.
+        const uint64_t origin = pending.front().qpc_100ns > 0
+            ? pending.front().qpc_100ns : first_qpc_100ns;
         if (origin == 0) {
             ReportFailure("process-loopback source received no usable capture timestamp");
             return false;
         }
         auto new_ring = std::make_unique<EncodedAudioPacketRing>(
             config.source.identity.id, config.generation,
-            AudioSourceFormat{kCanonicalSampleRate, kCanonicalChannels, "fltp"},
-            config.retention_seconds);
+            AudioSourceFormat{kCanonicalSampleRate, kCanonicalChannels, "flt", "pcm_f32le"},
+            config.retention_seconds, config.replay_storage);
         auto new_encoder = std::make_unique<AudioEncoder>();
+        const auto replay_origin = config.replay_pause_clock
+            ? config.replay_pause_clock->Map(origin) : origin;
         if (!new_encoder->Initialize(kCanonicalSampleRate, kCanonicalChannels,
                 config.bitrate_kbps,
-                [this, ring = new_ring.get()](const uint8_t* data, uint32_t size, int64_t pts) {
-                    if (!ring->Push({std::vector<uint8_t>(data, data + size), pts, 1024})) {
+                [this, ring = new_ring.get(), clock = config.replay_pause_clock,
+                 origin, replay_origin](const uint8_t* data, uint32_t size, int64_t pts) {
+                    const int64_t duration = size / (kCanonicalChannels * sizeof(float));
+                    if (clock) {
+                        const auto mapped = clock->MapAudio(
+                            origin, replay_origin, pts, duration, kCanonicalSampleRate);
+                        if (!mapped) return;
+                        pts = *mapped;
+                    }
+                    // Continuous recordings own their disk queue and must not
+                    // lose samples when the replay spool exhausts its budget.
+                    if (config.packet_sink)
+                        config.packet_sink(config.source, data, size,
+                            AudioSamplePositionToTimeline100ns(replay_origin, pts, kCanonicalSampleRate), duration);
+                    if (!ring->Push({std::vector<uint8_t>(data, data + size), pts, duration})) {
                         rejected_packets.fetch_add(1, std::memory_order_relaxed);
+                        ReportFailure("Lossless audio spool failed or exceeded its memory/disk budget");
                         return;
                     }
                     encoded_packets.fetch_add(1, std::memory_order_relaxed);
                     last_encoded_qpc_100ns.store(
                         last_submission_qpc_100ns.load(std::memory_order_relaxed),
                         std::memory_order_relaxed);
-                })) {
+                }, 0, true)) {
             ReportFailure("process-loopback AAC encoder initialization failed");
             pending.clear();
             return false;
@@ -419,6 +438,7 @@ struct WindowsProcessLoopbackAudioProvider::Impl {
         // and diagnostic readers acquire the origin before touching either
         // pointer, so they cannot observe a half-initialized provider.
         timeline_origin_100ns.store(origin, std::memory_order_release);
+        replay_origin_100ns.store(replay_origin, std::memory_order_release);
         admitted.store(true, std::memory_order_release);
         next_timeline_100ns = origin;
         for (const auto& block : pending) {
@@ -604,7 +624,12 @@ struct WindowsProcessLoopbackAudioProvider::Impl {
                     no_packet_intervals.fetch_add(1, std::memory_order_relaxed);
                     no_packet_interval = true;
                 }
-                if (!FillSilenceUntil(static_cast<uint64_t>(CurrentQpc100ns())))
+                // Packet timestamps describe when audio was captured, before
+                // WASAPI publishes it. Keep one wait interval available for
+                // delayed packets when extending a silent source.
+                const uint64_t now = static_cast<uint64_t>(CurrentQpc100ns());
+                if (now > kCaptureWait100ns
+                        && !FillSilenceUntil(now - kCaptureWait100ns))
                     return E_FAIL;
                 continue;
             }
@@ -665,9 +690,8 @@ struct WindowsProcessLoopbackAudioProvider::Impl {
                 hr = session->capture_client->GetNextPacketSize(&packet_frames);
                 if (FAILED(hr)) return hr;
             }
-            if (packet_frames == 0
-                    && !FillSilenceUntil(static_cast<uint64_t>(CurrentQpc100ns())))
-                return E_FAIL;
+            // Draining the queue is normal between events. The next packet's
+            // timestamp determines whether there is a gap to fill.
         }
         return S_FALSE;
     }
@@ -815,7 +839,7 @@ std::optional<EncodedAudioTrack> WindowsProcessLoopbackAudioProvider::TakeTrackF
     double presentation_start_qpc_s, double presentation_end_qpc_s,
     const AudioSourceMetadata& source) const {
     if (!impl_ || presentation_end_qpc_s <= presentation_start_qpc_s) return std::nullopt;
-    const uint64_t origin = impl_->timeline_origin_100ns.load(std::memory_order_acquire);
+    const uint64_t origin = impl_->replay_origin_100ns.load(std::memory_order_acquire);
     if (origin == 0) return std::nullopt;
     const auto range = MapAudioSourcePresentationRange(
         presentation_start_qpc_s, presentation_end_qpc_s, origin, kCanonicalSampleRate);
@@ -829,6 +853,11 @@ std::optional<EncodedAudioTrack> WindowsProcessLoopbackAudioProvider::TakeTrackF
     if (!snapshot.valid()) return std::nullopt;
     EncodedAudioTrack track;
     track.source = source;
+    track.source.format = snapshot.format;
+    track.source.state.first_active_100ns = AudioSamplePositionToTimeline100ns(
+        origin, snapshot.first_pts_samples, kCanonicalSampleRate);
+    track.source.state.last_active_100ns = AudioSamplePositionToTimeline100ns(
+        origin, snapshot.last_pts_samples, kCanonicalSampleRate);
     track.snapshot = std::move(snapshot);
     track.presentation_start_pts_samples = range.start_pts_samples;
     return track;
@@ -934,8 +963,14 @@ const AudioSourceMetadata* WindowsApplicationSourceCoordinator::Find(const Audio
 }
 
 struct WindowsApplicationAudioSourceManager::Impl {
-    explicit Impl(uint64_t initial_generation, uint32_t initial_retention_seconds)
+    explicit Impl(uint64_t initial_generation, uint32_t initial_retention_seconds,
+                  std::shared_ptr<ReplayPauseClock> clock, AudioPacketSink sink,
+                  std::shared_ptr<ReplayStorage> storage, std::vector<std::string> exclusions)
         : generation(initial_generation), retention_seconds(initial_retention_seconds),
+          replay_pause_clock(std::move(clock)),
+          packet_sink(std::move(sink)),
+          replay_storage(std::move(storage)),
+          excluded_identities(std::move(exclusions)),
           capability(DetectWindowsProcessLoopbackCapability()) {}
 
     struct ProviderEntry {
@@ -946,7 +981,11 @@ struct WindowsApplicationAudioSourceManager::Impl {
 
     uint64_t generation;
     uint32_t retention_seconds;
+    std::shared_ptr<ReplayStorage> replay_storage;
+    std::shared_ptr<ReplayPauseClock> replay_pause_clock;
+    AudioPacketSink packet_sink;
     WindowsProcessLoopbackCapability capability;
+    std::vector<std::string> excluded_identities;
     mutable std::mutex mutex;
     std::unique_ptr<WindowsApplicationSourceCoordinator> coordinator;
     std::map<std::string, ProviderEntry> providers_by_source_id;
@@ -1019,6 +1058,8 @@ struct WindowsApplicationAudioSourceManager::Impl {
     }
 
     void EnsureProvider(const WindowsAudioSessionDescriptor& descriptor) {
+        if (std::find(excluded_identities.begin(), excluded_identities.end(),
+                      descriptor.identity.persistent_identity) != excluded_identities.end()) return;
         WindowsProcessLoopbackAudioProvider* to_start = nullptr;
         AudioSourceId start_id;
         std::string start_group;
@@ -1042,7 +1083,10 @@ struct WindowsApplicationAudioSourceManager::Impl {
             config.target_process_id = binding->process_id;
             config.include_process_tree = true;
             config.retention_seconds = retention_seconds;
+            config.replay_storage = replay_storage;
             config.source = binding->source;
+            config.replay_pause_clock = replay_pause_clock;
+            config.packet_sink = packet_sink;
             auto provider = std::make_shared<WindowsProcessLoopbackAudioProvider>(
                 std::move(config),
                 [this](const AudioSourceId& id, float rms, int64_t timestamp) {
@@ -1109,6 +1153,9 @@ struct WindowsApplicationAudioSourceManager::Impl {
     }
 
     void HandleUpdate(const WindowsAudioSessionUpdate& update) {
+        // Retire an old nested owner before activating its replacement. The
+        // registry publishes only non-overlapping process trees.
+        for (const auto& removed : update.disappeared_runtime_groups) RetireProvider(removed);
         // Inactive WASAPI sessions can linger for hours. Starting a process-
         // loopback client for all of them created an unbounded set of idle
         // threads and made genuinely audible sources unreliable. State-change
@@ -1118,14 +1165,13 @@ struct WindowsApplicationAudioSourceManager::Impl {
         for (const auto& descriptor : update.current) {
             const bool quiet_expired = ProviderShouldRetire(
                 descriptor.runtime_group_key, now_100ns);
-            if (!quiet_expired && (descriptor.currently_active
-                    || ProviderHasCapturedAudio(descriptor.runtime_group_key))) {
+            if (descriptor.currently_active || (!quiet_expired
+                    && ProviderHasCapturedAudio(descriptor.runtime_group_key))) {
                 EnsureProvider(descriptor);
             } else {
                 RetireProvider(descriptor.runtime_group_key);
             }
         }
-        for (const auto& removed : update.disappeared_runtime_groups) RetireProvider(removed);
     }
 
     void RunMonitor() {
@@ -1135,7 +1181,7 @@ struct WindowsApplicationAudioSourceManager::Impl {
             running.store(false, std::memory_order_release);
             return;
         }
-        WindowsAudioSessionRegistry sessions;
+        WindowsAudioSessionRegistry sessions(excluded_identities);
         if (!sessions.Start()) {
             SetError(sessions.last_error());
             if (SUCCEEDED(apartment)) CoUninitialize();
@@ -1150,7 +1196,7 @@ struct WindowsApplicationAudioSourceManager::Impl {
         HandleUpdate(initial);
         auto next_topology_refresh = std::chrono::steady_clock::now()
             + std::chrono::seconds(2);
-        while (!WaitForStop(stop_event, 250)) {
+        while (!WaitForStop(stop_event, 25)) {
             const auto now = std::chrono::steady_clock::now();
             CleanupRetired(static_cast<int64_t>(CurrentQpc100ns()));
             if (now >= next_topology_refresh) {
@@ -1169,8 +1215,12 @@ struct WindowsApplicationAudioSourceManager::Impl {
 };
 
 WindowsApplicationAudioSourceManager::WindowsApplicationAudioSourceManager(
-    uint64_t generation, uint32_t retention_seconds)
-    : impl_(std::make_unique<Impl>(generation, retention_seconds)) {}
+    uint64_t generation, uint32_t retention_seconds,
+    std::shared_ptr<ReplayPauseClock> replay_pause_clock, AudioPacketSink packet_sink,
+    std::shared_ptr<ReplayStorage> replay_storage, std::vector<std::string> excluded_identities)
+    : impl_(std::make_unique<Impl>(generation, retention_seconds,
+                                 std::move(replay_pause_clock), std::move(packet_sink),
+                                 std::move(replay_storage), std::move(excluded_identities))) {}
 
 WindowsApplicationAudioSourceManager::~WindowsApplicationAudioSourceManager() {
     Stop();
@@ -1260,6 +1310,7 @@ WindowsApplicationAudioSourceManager::runtime_info() const {
     for (const auto& provider : providers) {
         const auto info = provider->runtime_info();
         result.input_frames += info.input_frames;
+        if (info.state == "FAILED") ++result.failed_sources;
         result.packet_count += info.packet_count;
         result.converted_frames += info.converted_frames;
         result.submitted_frames += info.submitted_frames;
@@ -1283,12 +1334,14 @@ std::vector<EncodedAudioTrack> WindowsApplicationAudioSourceManager::TakeTracksF
     double presentation_start_qpc_s, double presentation_end_qpc_s) const {
     std::vector<std::pair<std::shared_ptr<WindowsProcessLoopbackAudioProvider>, AudioSourceMetadata>> candidates;
     if (!impl_ || presentation_end_qpc_s <= presentation_start_qpc_s) return {};
-    const int64_t start = static_cast<int64_t>(std::llround(presentation_start_qpc_s * 10'000'000.0));
-    const int64_t end = static_cast<int64_t>(std::llround(presentation_end_qpc_s * 10'000'000.0));
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (!impl_->coordinator) return {};
-        for (const auto& source : impl_->coordinator->SourcesForInterval(start, end)) {
+        // Registry activity uses wall QPC; presentation windows use compact
+        // replay time after focus pauses. Let the mapped packet rings perform
+        // interval selection instead of comparing the two clock domains.
+        for (const auto& source : impl_->coordinator->SourcesForInterval(
+                0, CurrentQpc100ns())) {
             const auto entry = impl_->providers_by_source_id.find(source.identity.id.value);
             if (entry != impl_->providers_by_source_id.end() && entry->second.provider)
                 candidates.emplace_back(entry->second.provider, source);

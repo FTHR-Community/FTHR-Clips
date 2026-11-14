@@ -71,7 +71,6 @@ def test_settings_padding_and_live_theme_cover_detached_dialogs(
     page.resize(1150, 760)
     page.show()
     page.stack.setCurrentIndex(2)
-    page.stack._finish_slide()
     QApplication.processEvents()
     if hasattr(page, 'playback_combo'):
         label = page.findChild(QLabel, 'playbackDeviceLabel')
@@ -94,7 +93,6 @@ def test_settings_padding_and_live_theme_cover_detached_dialogs(
         assert Colors.BG in dialog.styleSheet()
         assert Colors.BORDER_HI in dialog.styleSheet()
         assert Colors.TEXT in page._customize_page._export_btn.styleSheet()
-        assert Colors.ACCENT in page._customize_page._apply_btn.styleSheet()
         for surface in (page, dialog):
             for widget in [surface, *surface.findChildren(main.QWidget)]:
                 recipe = getattr(widget, '_theme_style_factory', None)

@@ -39,7 +39,7 @@ bool IsNvencInputFormatSupported(
 bool ConfigureNvencCodec(
     VideoCodec codec,
     uint32_t fps,
-    NV_ENC_CONFIG& config) noexcept;
+    NV_ENC_CONFIG& config, bool hdr10 = false) noexcept;
 
 EncodedVideoConfig BuildNvencVideoConfig(
     VideoCodec codec,
@@ -47,7 +47,7 @@ EncodedVideoConfig BuildNvencVideoConfig(
     uint32_t height,
     uint32_t fps,
     uint32_t bitrate_kbps,
-    const std::vector<uint8_t>& codec_extradata);
+    const std::vector<uint8_t>& codec_extradata, bool hdr10 = false);
 
 } // namespace fthr
 

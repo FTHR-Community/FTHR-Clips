@@ -1,10 +1,12 @@
-// audio_packet_ring.h -- bounded, timestamped AAC replay storage.
+// Bounded timestamped audio replay: disk-backed float PCM or legacy AAC.
 
 #pragma once
 #ifndef FTHR_AUDIO_PACKET_RING_H
 #define FTHR_AUDIO_PACKET_RING_H
 
 #include "audio_source_model.h"
+#include "audio_spool.h"
+#include "replay_storage.h"
 
 #include <cstdint>
 #include <deque>
@@ -17,9 +19,21 @@ struct EncodedAudioPacket {
     std::vector<uint8_t> data;
     int64_t pts_samples = 0;
     int64_t duration_samples = 1024;
+    std::shared_ptr<AudioSpoolPayload> storage;
+    std::shared_ptr<ReplayStoragePayload> replay_storage;
+    size_t byte_size() const {
+        if (replay_storage) return replay_storage->size();
+        return storage ? storage->size() : data.size();
+    }
+    std::shared_ptr<const std::vector<uint8_t>> ReadData() const {
+        if (replay_storage) return replay_storage->Read();
+        return storage ? storage->Read() : std::make_shared<const std::vector<uint8_t>>(data);
+    }
 };
 
 struct EncodedAudioSnapshot {
+    // Several selection layers briefly copy a snapshot's packet descriptors.
+    std::shared_ptr<ReplayMemoryReservation> memory;
     AudioSourceId source_id;
     uint64_t generation = 0;
     AudioSourceFormat format;
@@ -45,7 +59,8 @@ struct EncodedAudioRingStats {
 class EncodedAudioPacketRing {
 public:
     EncodedAudioPacketRing(AudioSourceId source_id, uint64_t generation,
-                           AudioSourceFormat format, uint32_t retention_seconds);
+                           AudioSourceFormat format, uint32_t retention_seconds,
+                           std::shared_ptr<ReplayStorage> storage = nullptr);
 
     void SetCodecExtradata(std::vector<uint8_t> codec_extradata);
     bool Push(EncodedAudioPacket packet);
@@ -57,7 +72,7 @@ public:
     uint32_t retention_seconds() const { return retention_seconds_; }
 
 private:
-    void TrimLocked();
+    void TrimLocked(int64_t newest);
 
     AudioSourceId source_id_;
     uint64_t generation_;
@@ -69,6 +84,8 @@ private:
     size_t byte_count_ = 0;
     EncodedAudioRingStats stats_;
     mutable std::mutex mutex_;
+    std::unique_ptr<AudioSpool> spool_;
+    std::shared_ptr<ReplayStorage> replay_storage_;
 };
 
 }  // namespace fthr

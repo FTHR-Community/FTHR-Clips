@@ -46,6 +46,7 @@ class _DialogHeader(QFrame):
         layout.setSpacing(0)
 
         title_label = QLabel(title)
+        title_label.setTextFormat(Qt.TextFormat.PlainText)
         title_label.setObjectName('fthrDialogTitle')
         set_theme_style(title_label, lambda: (label_uppercase(
             Colors.TEXT, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL)))
@@ -226,8 +227,11 @@ class FthrInputDialog(FthrDialog):
     @classmethod
     def get_text(cls, parent, title: str, label: str, *, text: str = '') -> tuple[str, bool]:
         dialog = cls(title, label, text, parent)
-        accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        return dialog.text_edit.text(), accepted
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            return dialog.text_edit.text(), accepted
+        finally:
+            dialog.deleteLater()
 
 
 class FthrMessageDialog(FthrDialog):
@@ -235,9 +239,11 @@ class FthrMessageDialog(FthrDialog):
 
     _live_non_modal: list['FthrMessageDialog'] = []
 
-    def __init__(self, title: str, message: str, parent=None, *, question=False):
+    def __init__(self, title: str, message: str, parent=None, *, question=False, plain_text=False):
         super().__init__(title, parent, width=360 if question else 340)
         copy = QLabel(message)
+        if plain_text:
+            copy.setTextFormat(Qt.TextFormat.PlainText)
         copy.setWordWrap(True)
         set_theme_style(copy, lambda: (label_body(Colors.TEXT, Fonts.SIZE_BODY_L)))
         self.body_layout.addWidget(copy)
@@ -261,30 +267,30 @@ class FthrMessageDialog(FthrDialog):
             self.action_layout.addWidget(ok)
 
     @classmethod
-    def information(cls, parent, title: str, message: str) -> None:
-        dialog = cls(title, message, parent)
+    def information(cls, parent, title: str, message: str, *, plain_text=False) -> None:
+        cls._show_non_modal(parent, title, message, plain_text=plain_text)
+
+    @classmethod
+    def warning(cls, parent, title: str, message: str, *, plain_text=False) -> None:
+        cls._show_non_modal(parent, title, message, plain_text=plain_text)
+
+    @classmethod
+    def _show_non_modal(cls, parent, title, message, *, plain_text):
+        dialog = cls(title, message, parent, plain_text=plain_text)
         dialog.setModal(False)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         cls._live_non_modal.append(dialog)
-        dialog.finished.connect(
-            lambda _code, d=dialog: cls._live_non_modal.remove(d)
-            if d in cls._live_non_modal else None)
+        dialog.destroyed.connect(
+            lambda _object=None, d=dialog: cls._live_non_modal.remove(d))
         dialog.show()
 
     @classmethod
-    def warning(cls, parent, title: str, message: str) -> None:
-        dialog = cls(title, message, parent)
-        dialog.setModal(False)
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        cls._live_non_modal.append(dialog)
-        dialog.finished.connect(
-            lambda _code, d=dialog: cls._live_non_modal.remove(d)
-            if d in cls._live_non_modal else None)
-        dialog.show()
-
-    @classmethod
-    def question(cls, parent, title: str, message: str) -> bool:
-        return cls(title, message, parent, question=True).exec() == QDialog.DialogCode.Accepted
+    def question(cls, parent, title: str, message: str, *, plain_text=False) -> bool:
+        dialog = cls(title, message, parent, question=True, plain_text=plain_text)
+        try:
+            return dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            dialog.deleteLater()
 
 
 __all__ = [

@@ -9,14 +9,17 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <functional>
 
 namespace fthr {
 
-inline constexpr uint32_t kMaxRetainedAudioSources = 8;
-// Default Mix is mandatory compatibility audio, not an application-source
-// admission. A completed clip can therefore carry it, a native Microphone,
-// and the eight real application stems permitted by the AUDIT-050 source cap.
-inline constexpr uint32_t kMaxClipAudioTracks = kMaxRetainedAudioSources + 2;
+inline constexpr uint32_t kMaxRetainedAudioSources = 32;
+// Default Mix remains the legacy compatibility source when requested.
+// A clip can also carry a native Microphone, process stems, and up to four
+// explicitly selected render-endpoint tracks.
+inline constexpr uint32_t kMaxDeviceAudioTracks = 4;
+inline constexpr uint32_t kMaxClipAudioTracks =
+    kMaxRetainedAudioSources + 2 + kMaxDeviceAudioTracks;
 
 enum class AudioSourceType : uint8_t {
     Application,
@@ -58,6 +61,7 @@ struct AudioSourceFormat {
     uint32_t sample_rate = 48000;
     uint32_t channels = 2;
     std::string sample_format = "fltp";
+    std::string codec = "aac";
 };
 
 struct AudioSourceState {
@@ -73,20 +77,23 @@ struct AudioSourceMetadata {
     AudioSourceIdentity identity;
     AudioSourceFormat format;
     AudioSourceState state;
+    uint32_t input_gain_percent = 100;
+    bool mono = false;
 };
+
+using AudioPacketSink = std::function<void(const AudioSourceMetadata&, const uint8_t*,
+    uint32_t, int64_t, int64_t)>;
 
 struct AudioActivityGateConfig {
     // Process loopback returns digital silence for an idle app, so the gate can
-    // safely admit quiet background music without confusing endpoint noise for
-    // a real source. 0.0005 is roughly -66 dBFS.
-    float activate_rms = 0.0005f;
-    float deactivate_rms = 0.0001f;
-    uint32_t activate_blocks = 2;
+    // admit the first nonzero block without discarding quiet material.
+    float activate_rms = 1.40129846e-45f;
+    float deactivate_rms = 0.0f;
+    uint32_t activate_blocks = 1;
     uint32_t deactivate_blocks = 10;
 };
 
-// Cheap per-callback activity state. Hysteresis rejects the digital-silence
-// and near-zero noise floor which appear in WASAPI sessions.
+// Cheap per-callback activity state. Only exact digital silence is idle by default.
 class AudioActivityGate {
 public:
     explicit AudioActivityGate(AudioActivityGateConfig config = {});

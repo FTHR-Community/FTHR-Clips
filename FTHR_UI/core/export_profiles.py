@@ -31,6 +31,8 @@ from core.transactional_output import (
 
 MIB = 1024 * 1024
 DEFAULT_SAFETY_MARGIN = 0.94
+MIN_TARGET_DIMENSION = 16
+MAX_TARGET_DIMENSION = 8192
 
 
 @dataclass(frozen=True)
@@ -145,10 +147,16 @@ class ExportPresetManager:
     """Atomic JSON storage for user-created presets."""
 
     def __init__(self, path: str | Path | None = None):
+        self._include_plugins = path is None
         self.path = Path(path) if path else Path.home() / '.fthr' / 'export_presets.json'
 
     def all(self) -> tuple[ExportPreset, ...]:
-        return (DISCORD_PRESET, *self.custom())
+        if self._include_plugins:
+            from core.plugin_manager import PluginManager
+            plugins = PluginManager().export_presets()
+        else:
+            plugins = ()
+        return (DISCORD_PRESET, *self.custom(), *plugins)
 
     def custom(self) -> tuple[ExportPreset, ...]:
         try:
@@ -166,7 +174,7 @@ class ExportPresetManager:
                 if not isinstance(item, dict):
                     continue
                 preset = ExportPreset(**item).validated()
-                if preset.preset_id in seen:
+                if preset.preset_id in seen or preset.preset_id.startswith('plugin:'):
                     continue
                 seen.add(preset.preset_id)
                 presets.append(ExportPreset(**{**asdict(preset), 'built_in': False}))
@@ -181,7 +189,8 @@ class ExportPresetManager:
 
     def save(self, preset: ExportPreset) -> ExportPreset:
         preset = preset.validated()
-        if preset.preset_id == DISCORD_PRESET.preset_id or preset.built_in:
+        if (preset.preset_id == DISCORD_PRESET.preset_id or preset.built_in
+                or preset.preset_id.startswith('plugin:')):
             raise ValueError('Built-in presets cannot be replaced')
         values = list(self.custom())
         values = [value for value in values if value.preset_id != preset.preset_id]
@@ -190,7 +199,7 @@ class ExportPresetManager:
         return preset
 
     def delete(self, preset_id: str) -> bool:
-        if preset_id == DISCORD_PRESET.preset_id:
+        if preset_id == DISCORD_PRESET.preset_id or preset_id.startswith('plugin:'):
             return False
         values = list(self.custom())
         remaining = [value for value in values if value.preset_id != preset_id]
@@ -404,6 +413,8 @@ def compress_media(source_path: str | Path, output_path: str | Path,
     else:
         cmd += ['-an']
     cmd += ['-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', str(staged)]
+    from core.hdr_color import sdr_command
+    cmd = sdr_command(cmd, source.path)
     process = None
     stderr_thread = None
     stderr_tail: deque[str] = deque(maxlen=80)
@@ -488,8 +499,9 @@ def _optional_dimension(value, label: str) -> int | None:
     if value in (None, 0, ''):
         return None
     number = int(value)
-    if not 16 <= number <= 8192:
-        raise ValueError(f'Target {label} must be between 16 and 8192 pixels')
+    if not MIN_TARGET_DIMENSION <= number <= MAX_TARGET_DIMENSION:
+        raise ValueError(f'Target {label} must be between {MIN_TARGET_DIMENSION} '
+                         f'and {MAX_TARGET_DIMENSION} pixels')
     return number & ~1
 
 
@@ -537,7 +549,8 @@ def _no_window() -> dict:
 
 __all__ = [
     'DEFAULT_SAFETY_MARGIN', 'DISCORD_PRESET', 'ExportPlan', 'ExportPreset',
-    'ExportPresetManager', 'MIB', 'MediaInfo', 'compress_media',
+    'ExportPresetManager', 'MAX_TARGET_DIMENSION', 'MIB', 'MIN_TARGET_DIMENSION',
+    'MediaInfo', 'compress_media',
     'plan_export', 'plan_video_filters', 'probe_media',
     'provider_compression_preset', 'provider_limit_mb',
 ]

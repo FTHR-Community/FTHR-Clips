@@ -197,17 +197,6 @@ def _engine_source(rel: str) -> str:
     return (REPO / rel).read_text(encoding='utf-8', errors='replace')
 
 
-def test_linux_clears_the_message_at_the_start_of_every_save():
-    """Sequence A/B: after 'ERROR failure A' is consumed, save B must not be
-    able to show A's text. The Linux engine clears engine_string when it picks
-    up SAVE_CLIP, before anything else."""
-    src = _engine_source('FTHRcapture_linux/src/main.cpp')
-    body = src[src.index('case fthr::CommandType::SAVE_CLIP'):]
-    body = body[:body.index('case fthr::CommandType::GET_STATUS')]
-
-    clear = body.index('set_engine_string(layout, "")')
-    ack = body.index('ResponseType::SAVE_STARTED')
-    assert clear < ack, 'the message must be cleared before the save is acked'
 
 
 def test_windows_clears_the_message_before_announcing_success():
@@ -246,7 +235,6 @@ def test_engine_string_is_only_written_through_bounded_helpers():
     """T4: an over-long error text must be truncated, not overflow. Every
     write goes through a helper that bounds and terminates."""
     for rel, helper in (
-        ('FTHRcapture_linux/src/main.cpp', 'set_engine_string'),
         ('FTHRcapture/FTHRclips/src/capture_engine.cpp', 'SetEngineString'),
         ('FTHRcapture/FTHRclips/src/main.cpp', 'SetEngineString'),
     ):

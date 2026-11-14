@@ -102,8 +102,8 @@ def check_source(report: Report) -> None:
             'upgrades retain the previous Start Menu group')
     require(report, source, 'DisableWelcomePage=yes',
             'the policy acknowledgement is the first interactive page')
-    require(report, source, 'DisableFinishedPage=yes',
-            'the stock Windows finish page is replaced by the branded close page')
+    require(report, source, 'DisableFinishedPage=no',
+            'the native finish lifecycle retains postinstall and restart behavior')
     require(report, source, 'WizardForm.BorderStyle := bsNone;',
             'the installer uses the app-style frameless popup shell')
     require(report, source, 'SetupIconFile=FTHR_UI\\assets\\favicon.ico',
@@ -132,6 +132,17 @@ def check_source(report: Report) -> None:
             'selected clip-library directory is handed to the app settings')
     require(report, source, 'CreateFinishPage',
             'installer has a branded completion page')
+    require(report, source, 'Flags: postinstall nowait skipifsilent runasoriginaluser',
+            'completion launches once on Finish with original-user privileges, never silently')
+    launch_entries = re.findall(r'(?m)^Filename: "\{app\}\\\{#MyAppExeName\}".*(?:\n[ \t]+.*)?', source)
+    if len(launch_entries) == 1 and 'unchecked' not in launch_entries[0]:
+        report.ok('Open FTHR Clips is a single checked-by-default native postinstall option')
+    else:
+        report.fail('completion must have one checked-by-default application launch entry')
+    for color in ('#242629', '#202326', '#2C2F33', '#00FFAA'):
+        require(report, source, color, 'guided installer palette includes ' + color)
+    require(report, source, 'SidebarPanel := TPanel.Create(WizardForm);',
+            'guided setup uses the approved left step sidebar')
     if re.search(r'(?m)^Wizard(?:Image|SmallImage)File=', source):
         report.fail('installer still embeds unrelated wizard banner artwork')
     else:
@@ -149,6 +160,14 @@ def check_source(report: Report) -> None:
             'in-use closure is limited to FTHR executables')
     require(report, source, 'RestartApplications=no',
             'installer never silently relaunches a capture session')
+    require(report, source, "NavNextLabel.Caption := 'CONTINUE';",
+            'applications-in-use page labels the continue button CONTINUE')
+    require(report, source,
+            'if (WizardForm.CurPageID = wpPreparing) and '
+            'WizardForm.NextButton.Enabled then',
+            'applications-in-use page cancels through its own CANCEL button')
+    require(report, source, "NavBackLabel.Caption := 'CANCEL';",
+            'applications-in-use page shows CANCEL where BACK normally is')
     require(report, source, 'function PrepareToInstall(var NeedsRestart: Boolean): String;',
             'downgrade decision is explicit')
     require(report, source, "'/ALLOWDOWNGRADE'", 'explicit downgrade override is documented in code')
@@ -177,12 +196,18 @@ def check_source(report: Report) -> None:
             'headless legacy removal requires an explicit maintenance switch')
     require(report, source, 'if DelTree(LegacyDir, True, True, True) then begin',
             'legacy removal is limited to the verified legacy install directory')
-    require(report, source,
-            'Name: "{code:UserProfilePath}\\.fthr"; Check: ShouldRemoveSettingsAndCache',
-            'settings/cache removal is opt-in')
-    require(report, source,
-            'Name: "{localappdata}\\FTHR Clips\\plugins"',
-            'uninstall removes separately activated optional packages')
+    require(report, source, 'Source: "tools\\uninstall_cleanup.ps1"',
+            'installer includes the bounded cleanup helper')
+    require(report, source, "RunUninstallCleanup('Shutdown')",
+            'uninstall requests recording-safe app shutdown first')
+    require(report, source, "RunUninstallCleanup('Cleanup')",
+            'uninstall automatically removes app data with media protection')
+    require(report, source, 'Abort;',
+            'uninstall can stop before deleting files when shutdown or cleanup fails')
+    if 'ShouldRemoveSettingsAndCache' in source:
+        report.fail('obsolete opt-in settings cleanup remains')
+    else:
+        report.ok('silent and interactive uninstall both clean app data')
 
     delete_sections = '\n'.join(re.findall(
         r'(?ms)^\[(?:InstallDelete|UninstallDelete)\]\s*(.*?)(?=^\[|\Z)', source))

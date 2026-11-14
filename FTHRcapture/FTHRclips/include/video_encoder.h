@@ -58,6 +58,7 @@ namespace fthr {
         // 1 = preserve source aspect inside enc dims, pad with black bars.
         // Only consulted when enc dims differ from src dims AND aspects mismatch.
         uint32_t    scaling_mode = 0;
+        bool        hdr10 = false;       // P010 input with BT.2100 PQ signaling
     };
 
 

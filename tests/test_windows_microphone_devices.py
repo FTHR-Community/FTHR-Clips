@@ -78,6 +78,34 @@ def test_invalid_native_inventory_is_rejected():
         parse_microphone_inventory('not json')
 
 
+@pytest.mark.parametrize('payload', [
+    '{"schema_version":1,"microphones":[42]}',
+    '{"schema_version":1,"microphones":[{"endpoint_id":"a","display_name":"A","device_state":1},{"endpoint_id":"a","display_name":"Again","device_state":1}]}',
+    '{"schema_version":1,"microphones":[{"endpoint_id":"a","display_name":"A","device_state":true}]}',
+    '{"schema_version":true,"microphones":[]}',
+    '{"schema_version":1.0,"microphones":[]}',
+    '{"schema_version":1,"microphones":[{"endpoint_id":"a","display_name":"A","device_state":1,"is_default":"yes"}]}',
+])
+def test_strict_inventory_rejects_incomplete_or_ill_typed_rows(payload):
+    with pytest.raises(ValueError):
+        parse_microphone_inventory(payload, strict=True)
+
+
+def test_strict_inventory_accepts_a_successful_empty_endpoint_list():
+    assert parse_microphone_inventory(
+        '{"schema_version":1,"microphones":[]}', strict=True) == []
+
+
+def test_default_microphone_inventory_parser_keeps_legacy_lenient_behavior():
+    payload = '{"schema_version":true,"microphones":[' \
+        '{"endpoint_id":"legacy","display_name":"Mic",' \
+        '"device_state":true,"is_default":"yes"},42]}'
+    endpoints = parse_microphone_inventory(payload)
+
+    assert [(item.endpoint_id, item.device_state, item.is_default)
+            for item in endpoints] == [('legacy', True, True)]
+
+
 class _HangingProcess:
     def __init__(self, *_args, **_kwargs):
         self.returncode = None

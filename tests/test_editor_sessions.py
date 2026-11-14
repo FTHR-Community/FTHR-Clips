@@ -38,6 +38,7 @@ def editor_shell(qtbot, monkeypatch, tmp_path):
     root.resize(1100, 720)
     root.settings_manager = SettingsManager()
     root.clip_metadata_manager = ClipMetadataManager()
+    root.clip_metadata_manager.migrate(target_version=5)
     root._active_clip_viewer = root._active_editor_session = None
     root._editor_sessions = []
     root._shutdown_requested = root._background_ui_paused = False
@@ -60,6 +61,7 @@ def editor_shell(qtbot, monkeypatch, tmp_path):
     for button in root.settings_items:
         settings_layout.addWidget(button)
     root.main_stack.addWidget(settings)
+    root.main_stack.addWidget(QWidget())
     root.setCentralWidget(root.main_stack)
     root.nav_panel = QWidget(root.main_stack.widget(0))
     library_layout = QVBoxLayout(root.main_stack.widget(0))
@@ -72,15 +74,20 @@ def editor_shell(qtbot, monkeypatch, tmp_path):
     root._sidebar_layout = QVBoxLayout(root.nav_panel)
     root.close_settings_btn = QToolButton()
     root.settings_gear_btn = QToolButton()
+    root.trash_sidebar_btn = QToolButton()
     root._navigation_group = QButtonGroup(root)
-    for index, button in enumerate((root.close_settings_btn, root.settings_gear_btn)):
-        button.setText(('Clips', 'Settings')[index])
+    for index, button in enumerate((root.close_settings_btn, root.settings_gear_btn,
+                                    root.trash_sidebar_btn)):
+        button.setText(('Clips', 'Settings', 'Trash')[index])
         button.setCheckable(True)
         root._navigation_group.addButton(button, index)
-        root._sidebar_layout.addWidget(button)
+    root._sidebar_layout.addWidget(root.close_settings_btn)
     root._sidebar_layout.addStretch()
+    root._sidebar_layout.addWidget(root.settings_gear_btn)
+    root._sidebar_layout.addWidget(root.trash_sidebar_btn)
     root.clip_grid = SimpleNamespace(
         is_linked_import=lambda _: False, set_background_paused=lambda _: None,
+        refresh_library_flags=lambda _: None,
         adjacent_clip=lambda path, step: paths[paths.index(path) + step]
         if 0 <= paths.index(path) + step < len(paths) else None,
         thumbnails=[], navigation_paths=lambda: [],
@@ -95,12 +102,14 @@ def editor_shell(qtbot, monkeypatch, tmp_path):
         '_minimize_active_editor', '_restore_editor_session', '_navigate_sidebar',
         '_set_main_page', '_toggle_settings_page', '_setup_keyboard_navigation',
         '_scroll_clip_library', '_restart_engine_shortcut',
-        '_cancel_editor_transition', '_editor_transition_finished',
+        '_on_library_flags_changed',
+        '_editor_trash_pending', '_request_clip_trash',
     ):
         setattr(root, name, MethodType(getattr(MainWindow, name), root))
     root._setup_keyboard_navigation()
     root.close_settings_btn.clicked.connect(lambda: root._set_main_page(0))
     root.settings_gear_btn.clicked.connect(lambda: root._set_main_page(1))
+    root.trash_sidebar_btn.clicked.connect(lambda: root._set_main_page(2))
     root.show()
     yield root
     root._shutdown_requested = True
@@ -115,40 +124,62 @@ def _open(root, index=0):
     return root._active_clip_viewer
 
 
-def test_reduced_motion_switch_and_restore_preserve_editor_state(editor_shell, monkeypatch):
-    from ui.motion import set_reduce_motion
+def test_upload_coordinator_survives_switch_and_close(editor_shell, monkeypatch, tmp_path):
+    from core import export_queue
+    from core.editor_upload import EditorUploadRequest
+    import threading
+
     root = editor_shell
-    root.settings_manager.set('reduce_ui_animations', True)
-    set_reduce_motion(True)
-    try:
-        viewer = _open(root)
-        viewer.showNormal()
-        viewer.resize(1000, 650)
-        viewer.trim_slider.set_playhead(.45)
-        assert viewer.trim_slider.split_at_playhead()
-        snapshot = viewer._capture_editor_state()
-        monkeypatch.setattr(viewer, 'grab', lambda *_:
-                            pytest.fail('editor snapshot with reduced motion'))
-        root._minimize_active_editor(viewer)
-        assert getattr(root, '_editor_flight', None) is None
-        session = root._editor_sessions[0]
-        root._restore_editor_session(session)
-        assert root._active_clip_viewer is viewer
-        assert not viewer.isMaximized()
-        assert viewer.size() == QSize(1000, 650)
-        assert viewer.windowOpacity() == 1.0
-        assert viewer._capture_editor_state() == snapshot
-        root._navigate_editor_clip(viewer, 1)
-        assert viewer.clip_path == root.paths[1]
-        assert viewer._clip_slide is None
-        assert viewer.clip_page is not None
-    finally:
-        set_reduce_motion(False)
+    uploads = []
+    # Install the sink before the MainWindow lazily wires its coordinator.
+    root.upload_manager.enqueue_upload = uploads.append
+    viewer = _open(root, 0)
+    coordinator = root._editor_upload_coordinator
+    assert coordinator.parent() is root
+
+    task = SimpleNamespace(
+        output=str(tmp_path / 'old-export.mp4'), status='Queued', detail='',
+        cancel=threading.Event(), done=False)
+    monkeypatch.setattr(export_queue, 'submit', lambda *args, **kwargs: task)
+    request = EditorUploadRequest(
+        source=viewer.clip_path, directory=tmp_path, quality='quality', duration=1,
+        build_command=lambda output: ['fake', output], validate=lambda *_: None,
+        edited=True, audio_ready=True)
+    assert coordinator.submit(request)
+    old_source = viewer.clip_path
+    root._navigate_editor_clip(viewer, 1)
+    assert viewer.clip_path != old_source
+    viewer._close()
+    Path(task.output).write_bytes(b'committed')
+    task.status, task.done = 'Completed', True
+    coordinator._poll()
+    assert uploads == [task.output]
+
+
+def test_immediate_switch_and_restore_preserve_editor_state(editor_shell, monkeypatch):
+    root = editor_shell
+    viewer = _open(root)
+    viewer.showNormal()
+    viewer.resize(1000, 650)
+    viewer.trim_slider.set_playhead(.45)
+    assert viewer.trim_slider.split_at_playhead()
+    snapshot = viewer._capture_editor_state()
+    monkeypatch.setattr(viewer, 'grab', lambda *_:
+                        pytest.fail('editor page was snapshotted'))
+    root._minimize_active_editor(viewer)
+    session = root._editor_sessions[0]
+    root._restore_editor_session(session)
+    assert root._active_clip_viewer is viewer
+    assert not viewer.isMaximized()
+    assert viewer.size() == QSize(1000, 650)
+    assert viewer.windowOpacity() == 1.0
+    assert viewer._capture_editor_state() == snapshot
+    root._navigate_editor_clip(viewer, 1)
+    assert viewer.clip_path == root.paths[1]
+    assert viewer.clip_page is not None
 
 
 def _native_chord(viewer, key, modifier=Qt.KeyboardModifier.NoModifier, tab=False):
-    if getattr(viewer.parentWidget(), '_editor_flight', None) is not None:
-        QTest.qWait(260)
     viewer.activateWindow()
     QApplication.processEvents()
     window = viewer.windowHandle()
@@ -187,14 +218,8 @@ def test_native_tab_arrows_replace_the_clip_without_hiding_or_recreating_the_win
     assert second.clip_path == root.paths[1]
     assert second.clip_page is old_page
     assert second._play_when_ready
-    assert second._clip_slide is not None
-    assert second._clip_slide._horizontal
-    assert second._clip_slide._direction == 1
     assert len(root._editor_sessions) == 1
     _native_chord(second, Qt.Key.Key_Left, tab=True)
-    # A second keypress in the same burst opens immediately, without another
-    # full-window capture or restarting a slide over the newest destination.
-    assert second._clip_slide is None
     assert not transitions
     assert root._active_clip_viewer is first
     assert int(first.winId()) == handle
@@ -215,13 +240,12 @@ def test_minimize_button_releases_resources_and_restores_autoplay_edit(editor_sh
     viewer._on_seek_requested(0.65)
     slider.set_zoom(4)
     undo = tuple(viewer._undo_stack)
-    snapshot = viewer._capture_editor_state()
     viewer._source_volumes['game'] = 37
     viewer._source_mutes['game'] = True
+    # Audio edits are part of the snapshot retained when the editor is parked.
+    snapshot = viewer._capture_editor_state()
     viewer.minimize_btn.click()
     assert root._active_clip_viewer is None
-    flight = root._editor_flight
-    assert flight is not None and flight._compact
     assert viewer._teardown_complete and viewer._prepare_cancel.is_set()
     assert not viewer.isVisible() and not viewer.isMinimized()
     assert viewer.player.source().isEmpty()
@@ -231,13 +255,11 @@ def test_minimize_button_releases_resources_and_restores_autoplay_edit(editor_sh
     assert not any(timer.isActive() for timer in viewer.findChildren(QTimer)
                    if timer is not viewer._idle_memory_timer)
     session = root._editor_sessions[0]
-    assert root._sidebar_layout.indexOf(session.button) == 2
+    assert root._sidebar_layout.indexOf(session.button) == 1
     qtbot.waitUntil(lambda: session.button.isVisible())
     assert session.state['snapshot'] == snapshot
     assert session.state['position_ms'] == 6500
-    # Restoring during the minimize flight must cancel its pending completion.
     session.button.click()
-    assert not flight.isVisible()
     restored = root._active_clip_viewer
     assert restored is viewer
     assert session.state is None
@@ -275,26 +297,22 @@ def test_restore_finishes_at_original_editor_size_without_second_resize(
     assert session.window_geometry == original
     session.button.click()
     restored = root._active_clip_viewer
-    qtbot.waitUntil(lambda: getattr(root, '_editor_flight', None) is not None)
-    flight = root._editor_flight
-    destination = flight._animation.endValue().translated(flight.geometry().topLeft())
-    assert destination == original
+    qtbot.waitUntil(lambda: restored.isMaximized() == maximized)
     resolved = QRect(restored.mapToGlobal(restored.rect().topLeft()), restored.size())
-    assert resolved == destination
-    qtbot.waitUntil(lambda: restored.windowOpacity() == 1.0)
+    assert resolved == original
+    assert restored.windowOpacity() == 1.0
     assert QRect(restored.mapToGlobal(restored.rect().topLeft()), restored.size()) == resolved
     assert restored.isMaximized() == maximized
 
 
-def test_minimize_defers_library_previews_until_flight_finishes(editor_shell, qtbot):
+def test_minimize_immediately_resumes_library_previews(editor_shell):
     root = editor_shell
     viewer = _open(root)
     pauses = []
     root.clip_grid.set_background_paused = pauses.append
+
     viewer.minimize_btn.click()
-    assert root._editor_flight is not None
-    assert pauses == []
-    qtbot.waitUntil(lambda: root._editor_flight is None)
+
     assert pauses == [False]
     assert root._active_clip_viewer is None
     assert len(root._editor_sessions) == 1
@@ -313,7 +331,7 @@ def test_timeline_display_option_persists_across_editor_restore(editor_shell):
     assert root._active_clip_viewer.trim_slider.hide_deleted_segments
 
 
-def test_minimize_during_export_keeps_editor_and_skips_flight(editor_shell, monkeypatch):
+def test_minimize_during_export_keeps_editor(editor_shell, monkeypatch):
     root = editor_shell
     viewer = _open(root)
     notices = []
@@ -325,7 +343,6 @@ def test_minimize_during_export_keeps_editor_and_skips_flight(editor_shell, monk
         assert root._active_clip_viewer is viewer
         assert viewer.isVisible()
         assert not viewer._teardown_complete
-        assert getattr(root, '_editor_flight', None) is None
     finally:
         viewer._export_thread = None
 
@@ -449,8 +466,6 @@ def test_sidebar_shortcuts_cycle_pages_and_editors_and_tab_s_works_in_editor(edi
     second = _open(root, 1)
     second.minimize_btn.click()
     _native_chord(root, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
-    assert root.main_stack.currentIndex() == 1
-    _native_chord(root, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
     editor = root._active_clip_viewer
     assert editor.clip_path == root.paths[0]
     token = editor._prepare_cancel
@@ -466,6 +481,20 @@ def test_sidebar_shortcuts_cycle_pages_and_editors_and_tab_s_works_in_editor(edi
     _native_chord(root, Qt.Key.Key_S, tab=True)
     assert root.main_stack.currentIndex() == 0
     assert len(root._editor_sessions) == 2
+
+
+def test_sidebar_shortcuts_cycle_three_shell_pages_in_visual_order(editor_shell):
+    root = editor_shell
+    root._set_main_page(0)
+    root.close_settings_btn.setFocus()
+    _native_chord(root, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
+    assert root.main_stack.currentIndex() == 1
+    assert root.settings_gear_btn.isChecked()
+    _native_chord(root, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
+    assert root.main_stack.currentIndex() == 2
+    assert root.trash_sidebar_btn.isChecked()
+    _native_chord(root, Qt.Key.Key_Up, Qt.KeyboardModifier.ShiftModifier)
+    assert root.main_stack.currentIndex() == 1
 
 
 def test_settings_blocks_item_keys_but_mouse_controls_still_work(editor_shell):

@@ -6,11 +6,13 @@
 
 #include "encoded_video_config.h"
 #include "video_encoder.h"
+#include "capture_stage_timing.h"
 
 #include <cstdint>
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -159,6 +161,19 @@ constexpr ReplayEncoderBackend SelectProductionReplayBackend(
         return ReplayEncoderBackend::Software;
     }
     return ReplayEncoderBackend::Software;
+}
+
+// Probe this candidate on the real device before committing the replay format.
+constexpr std::optional<VideoCodec> SelectHdrReplayCodec(
+    ReplayEncoderBackend backend, VideoCodec requested_codec,
+    bool codec_auto) noexcept {
+    const auto codec = codec_auto ? VideoCodec::HEVC : requested_codec;
+    if ((backend == ReplayEncoderBackend::NativeNvenc
+            && (codec == VideoCodec::HEVC || codec == VideoCodec::AV1))
+        || (backend == ReplayEncoderBackend::FfmpegQsv && codec == VideoCodec::HEVC)) {
+        return codec;
+    }
+    return std::nullopt;
 }
 
 constexpr bool IsProductionReplayBackendEnabled(
@@ -331,6 +346,7 @@ public:
     virtual bool IsVideoConfigReady() const { return true; }
     virtual ActiveEncoderInfo GetActiveEncoderInfo() const = 0;
     virtual std::string GetLastError() const { return {}; }
+    virtual CaptureStagePercentiles TakeDrainTimings() noexcept { return {}; }
     virtual ReplayEncoderDiagnostics GetDiagnostics() const noexcept {
         return {};
     }
@@ -359,6 +375,9 @@ private:
 const char* EncoderVendorName(EncoderVendor vendor) noexcept;
 const char* ReplayEncoderBackendName(ReplayEncoderBackend backend) noexcept;
 const char* ReplayStartupErrorName(ReplayStartupError error) noexcept;
+bool CreateD3D11DeviceForVendor(
+    EncoderVendor vendor, ID3D11Device** device, ID3D11DeviceContext** context,
+    std::string& diagnostic);
 EncoderVendor QueryD3D11DeviceVendor(ID3D11Device* device) noexcept;
 ReplayStartupError ClassifyReplayInitializationFailure(
     std::string_view detail) noexcept;

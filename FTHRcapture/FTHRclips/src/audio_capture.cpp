@@ -220,8 +220,20 @@ namespace fthr {
 
 
 
+    void AudioCapture::ResetGenerationRecoveryState() {
+        device_lost_.store(false, std::memory_order_relaxed);
+        failure_reason_.store(FailureReason::None, std::memory_order_relaxed);
+        recovery_pending_.store(false, std::memory_order_relaxed);
+        timestamp_error_packet_count_.store(0, std::memory_order_relaxed);
+        processing_time_fallback_count_.store(0, std::memory_order_relaxed);
+        unavailable_timestamp_count_.store(0, std::memory_order_relaxed);
+        timeline_origin_qpc_100ns_.store(0, std::memory_order_release);
+        session_real_progress_frames_ = 0;
+    }
+
     bool AudioCapture::Initialize(AudioRingBuffer* ring,
         const AudioCaptureConfig& config) {
+        ResetGenerationRecoveryState();
         ring_      = ring;
         device_id_ = config.device_id;
         requested_sample_rate_ = config.preferred_sample_rate;
@@ -286,6 +298,10 @@ namespace fthr {
 
 
     bool AudioCapture::Start() {
+        if (device_lost_.load(std::memory_order_acquire)) {
+            std::cerr << "[AudioCapture] Lost generation requires Shutdown/Initialize." << std::endl;
+            return false;
+        }
         if (!audio_client_ || !capture_client_ || (!ring_ && !encoder_)) {
             std::cerr << "[AudioCapture] Start() called before Initialize()"
                 << std::endl;
@@ -364,6 +380,9 @@ namespace fthr {
         encoder_     = nullptr;
         timeline_origin_qpc_100ns_.store(0, std::memory_order_release);
         device_lost_.store(false, std::memory_order_relaxed);
+        failure_reason_.store(FailureReason::None, std::memory_order_relaxed);
+        recovery_pending_.store(false, std::memory_order_relaxed);
+        session_real_progress_frames_ = 0;
     }
 
 
@@ -372,318 +391,409 @@ namespace fthr {
 
     void AudioCapture::CaptureThread() {
         std::cout << "[AudioCapture] Thread started." << std::endl;
-
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-
-        // COM must be initialized on this thread so SetupWASAPISession() can call
-        // CoCreateInstance during recovery. RPC_E_CHANGED_MODE = already done, fine.
-        HRESULT hr_co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const HRESULT hr_co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         const bool co_owned = SUCCEEDED(hr_co);
+        const CaptureLoopOps ops{
+            [this] { return capture_client_ && buffer_event_; },
+            [this](uint64_t& next) { return RunNativeSession(next); },
+            [this] { TeardownWASAPISession(); },
+            [this] { device_id_.clear(); return SetupWASAPISession(); },
+            [this] {
+                if (!audio_client_) {
+                    std::cerr << "[AudioCapture] Recovery Start has no IAudioClient; "
+                        << "no HRESULT is available." << std::endl;
+                    return false;
+                }
+                const HRESULT hr = static_cast<IAudioClient*>(audio_client_)->Start();
+                if (FAILED(hr)) {
+                    std::cerr << "[AudioCapture] IAudioClient::Start failed during recovery "
+                        << "HRESULT=0x" << std::hex << hr << std::dec << std::endl;
+                }
+                return SUCCEEDED(hr);
+            },
+            [this](int delay_ms) {
+                for (int elapsed = 0; elapsed < delay_ms; elapsed += 100) {
+                    if (!running_.load(std::memory_order_relaxed)) break;
+                    Sleep(100);
+                }
+            },
+        };
+        RunCaptureLoop(ops);
+        if (co_owned) CoUninitialize();
+        std::cout << "[AudioCapture] Thread stopped." << std::endl;
+    }
 
-        // Recovery loop — runs the inner capture loop, and on device loss tears down
-        // and rebuilds the WASAPI session (handles BT reconnect, driver resets, etc.).
-        // Retries with increasing back-off. Gives up after kMaxRetries failures.
+    void AudioCapture::RunCaptureLoop(const CaptureLoopOps& ops) {
         static const int kMaxRetries = 5;
-        int  retry_count = 0;
-        bool gave_up     = false;
-
+        int retry_count = 0;
         uint64_t next_timeline_100ns = CurrentAudioTimeline100ns();
         while (running_.load(std::memory_order_relaxed)) {
-
-            IAudioCaptureClient* client =
-                static_cast<IAudioCaptureClient*>(capture_client_);
-            HANDLE evt = static_cast<HANDLE>(buffer_event_);
-
-            if (!client || !evt) {
-                std::cerr << "[AudioCapture] Null WASAPI state, cannot capture." << std::endl;
-                gave_up = true;
+            session_real_progress_frames_ = 0;
+            const auto result = ops.Ready() ? ops.RunSession(next_timeline_100ns)
+                : SessionResult::EndpointFailure;
+            if (!running_.load(std::memory_order_relaxed)
+                    || result == SessionResult::Stopped) break;
+            if (result == SessionResult::TimelineGap) {
+                MarkTerminalFailure(FailureReason::TimelineGap);
+                return;
+            }
+            if (result == SessionResult::TimestampUnavailable) {
+                MarkTerminalFailure(FailureReason::TimestampUnavailable);
+                return;
+            }
+            if (session_real_progress_frames_ >= kCanonicalAudioSampleRate) {
+                retry_count = 0;
+            }
+            recovery_pending_.store(true, std::memory_order_release);
+            bool reopened = false;
+            while (running_.load(std::memory_order_relaxed) && retry_count < kMaxRetries) {
+                ops.Backoff(1000 * ++retry_count);
+                if (!running_.load(std::memory_order_relaxed)) break;
+                std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"audio\","
+                    << "\"event\":\"system_audio_recovery_attempt\",\"state\":\"RECOVERING\","
+                    << "\"attempt\":" << retry_count << ",\"max_attempts\":" << kMaxRetries
+                    << ",\"backoff_ms\":" << (1000 * retry_count) << "}" << std::endl;
+                ops.Teardown();
+                if (!running_.load(std::memory_order_relaxed)) break;
+                const bool setup = ops.Setup();
+                if (!running_.load(std::memory_order_relaxed)) {
+                    ops.Teardown();
+                    break;
+                }
+                if (!setup) {
+                    ops.Teardown();  // Failed setup may own partial COM objects.
+                    continue;
+                }
+                const bool started = ops.Start();
+                if (!running_.load(std::memory_order_relaxed)) {
+                    ops.Teardown();
+                    break;
+                }
+                if (!started) {
+                    ops.Teardown();
+                    continue;
+                }
+                restart_count_.fetch_add(1, std::memory_order_relaxed);
+                reopened = true;  // Reopened is not yet recovered: require real packet progress.
                 break;
             }
+            if (!running_.load(std::memory_order_relaxed)) break;
+            if (!reopened) {
+                MarkTerminalFailure(FailureReason::EndpointRecoveryExhausted);
+                return;
+            }
+        }
+        recovery_pending_.store(false, std::memory_order_release);
+        running_.store(false, std::memory_order_release);
+    }
 
-            // Inner capture loop — runs until the device is lost or Stop() is called
-            bool device_error = false;
-            // A render endpoint can legitimately stop producing WASAPI
-            // packets when every application is silent. Keep the Default Mix
-            // source continuous in the same QPC domain so a microphone-only
-            // clip still has its mandatory compatibility stream. This is not
-            // a second clock: synthetic silence only fills measured gaps
-            // between QPC-stamped endpoint packets.
-            const auto advance_timeline = [](uint64_t timestamp, uint32_t frames,
-                                             uint32_t rate) {
-                if (rate == 0) return timestamp;
-                return timestamp + (static_cast<uint64_t>(frames) * 10'000'000ULL)
-                    / static_cast<uint64_t>(rate);
-            };
-            const auto fill_silence_until = [this, &next_timeline_100ns,
-                                             &device_error](
-                                                uint64_t end_100ns,
-                                                uint64_t packet_qpc_100ns,
-                                                uint32_t input_frames,
-                                                AudioTimelinePacketAdjustment* result_out) -> bool {
-                if (end_100ns == 0 || sample_rate_ == 0) return true;
-                const uint64_t expected_qpc_100ns = next_timeline_100ns;
-                // Reuse the same bounded continuity policy as microphone
-                // capture. For a real packet, pass its frame count so the
-                // shared helper owns both gap insertion and overlap skipping.
-                const auto adjustment = ReconcileAudioTimelinePacket(
-                    next_timeline_100ns, end_100ns, input_frames,
-                    input_frames > 0 ? input_sample_rate_ : sample_rate_,
-                    sample_rate_, kMaxSyntheticAudioGapSeconds);
-                if (result_out) *result_out = adjustment;
-                if (adjustment.normal_jitter_absorbed) {
-                    normal_jitter_absorbed_count_.fetch_add(
-                        1, std::memory_order_relaxed);
-                }
-                if (adjustment.classification == AudioTimelineAdjustmentClass::HardGap
-                        || adjustment.classification
-                            == AudioTimelineAdjustmentClass::HardOverlap) {
-                    hard_discontinuity_recovery_count_.fetch_add(
-                        1, std::memory_order_relaxed);
-                }
-                if (adjustment.large_gap) {
-                    // The AAC ring has no discontinuity marker. Refuse a
-                    // suspend-sized catch-up rather than encoding an
-                    // unbounded silence burst or collapsing resumed PTS.
-                    discontinuity_count_.fetch_add(1, std::memory_order_relaxed);
-                    std::cerr << "[AudioCapture] Synthetic silence gap exceeds "
-                        << kMaxSyntheticAudioGapSeconds
-                        << "s; restarting audio session." << std::endl;
+    uint64_t AudioCapture::SelectPacketTimestamp(uint64_t qpc_position, uint32_t flags,
+        uint64_t fallback_100ns) {
+        const bool invalid_timestamp = (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0;
+        if (invalid_timestamp) timestamp_error_packet_count_.fetch_add(1, std::memory_order_relaxed);
+        if (qpc_position == 0 || invalid_timestamp) {
+            processing_time_fallback_count_.fetch_add(1, std::memory_order_relaxed);
+            // Processing-time approximation, not the physical packet's capture time.
+            if (fallback_100ns == 0) unavailable_timestamp_count_.fetch_add(1, std::memory_order_relaxed);
+            return fallback_100ns;
+        }
+        return qpc_position;  // WASAPI already reports 100 ns units, not raw QPC ticks.
+    }
+
+    const char* AudioCapture::GetFailureReasonName() const {
+        switch (GetFailureReason()) {
+        case FailureReason::TimelineGap: return "SYSTEM_AUDIO_TIMELINE_GAP";
+        case FailureReason::EndpointRecoveryExhausted: return "SYSTEM_AUDIO_RECOVERY_EXHAUSTED";
+        case FailureReason::TimestampUnavailable: return "SYSTEM_AUDIO_TIMESTAMP_UNAVAILABLE";
+        default: return "NONE";
+        }
+    }
+
+    void AudioCapture::MarkTerminalFailure(FailureReason reason) {
+        FailureReason previous = FailureReason::None;
+        const bool first_failure = failure_reason_.compare_exchange_strong(
+            previous, reason, std::memory_order_release, std::memory_order_relaxed);
+        recovery_pending_.store(false, std::memory_order_release);
+        device_lost_.store(true, std::memory_order_release);
+        running_.store(false, std::memory_order_release);
+        if (first_failure) {
+            std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"audio\","
+                << "\"event\":\"system_audio_terminal_failure\",\"state\":\"FAILED\","
+                << "\"error_code\":\"" << GetFailureReasonName() << "\"}" << std::endl;
+        }
+    }
+
+    void AudioCapture::ObserveRealPacketProgress(uint64_t submitted_frames) {
+        session_real_progress_frames_ += std::min<uint64_t>(submitted_frames,
+            kCanonicalAudioSampleRate - session_real_progress_frames_);
+        if (session_real_progress_frames_ >= kCanonicalAudioSampleRate
+                && recovery_pending_.exchange(false, std::memory_order_acq_rel)) {
+            std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"audio\","
+                << "\"event\":\"system_audio_recovery_progress\",\"state\":\"ACTIVE\","
+                << "\"submitted_real_packet_frames\":" << kCanonicalAudioSampleRate
+                << "}" << std::endl;
+        }
+    }
+
+    bool AudioCapture::SubmitCapturedPacket(const uint8_t* data, uint32_t frames,
+        uint64_t qpc_100ns) {
+        if (qpc_100ns == 0) return false;  // Never silently resolve a packet timestamp twice.
+        // Only GetBuffer packets use this path. Idle/gap-fill silence does not
+        // prove endpoint recovery, and zero converter output proves nothing.
+        const uint64_t before = submitted_frame_count_.load(std::memory_order_relaxed);
+        if (!SubmitNativeSamples(data, frames, qpc_100ns)) return false;
+        const uint64_t after = submitted_frame_count_.load(std::memory_order_relaxed);
+        ObserveRealPacketProgress(after - before);
+        return true;
+    }
+
+    AudioCapture::SessionResult AudioCapture::RunNativeSession(uint64_t& next_timeline_100ns) {
+        IAudioCaptureClient* client =
+            static_cast<IAudioCaptureClient*>(capture_client_);
+        HANDLE evt = static_cast<HANDLE>(buffer_event_);
+
+        // Inner capture loop — runs until the device is lost or Stop() is called
+        bool device_error = false;
+        bool timeline_gap = false;
+        bool timestamp_unavailable = false;
+        // A render endpoint can legitimately stop producing WASAPI
+        // packets when every application is silent. Keep the Default Mix
+        // source continuous in the same QPC domain so a microphone-only
+        // clip still has its mandatory compatibility stream. This is not
+        // a second clock: synthetic silence only fills measured gaps
+        // between QPC-stamped endpoint packets.
+        const auto advance_timeline = [](uint64_t timestamp, uint32_t frames,
+                                         uint32_t rate) {
+            if (rate == 0) return timestamp;
+            return timestamp + (static_cast<uint64_t>(frames) * 10'000'000ULL)
+                / static_cast<uint64_t>(rate);
+        };
+        const auto fill_silence_until = [this, &next_timeline_100ns,
+                                         &device_error, &timeline_gap](
+                                            uint64_t end_100ns,
+                                            uint64_t packet_qpc_100ns,
+                                            uint32_t input_frames,
+                                            AudioTimelinePacketAdjustment* result_out) -> bool {
+            if (end_100ns == 0 || sample_rate_ == 0) return true;
+            const uint64_t expected_qpc_100ns = next_timeline_100ns;
+            // Reuse the same bounded continuity policy as microphone
+            // capture. For a real packet, pass its frame count so the
+            // shared helper owns both gap insertion and overlap skipping.
+            const auto adjustment = ReconcileAudioTimelinePacket(
+                next_timeline_100ns, end_100ns, input_frames,
+                input_frames > 0 ? input_sample_rate_ : sample_rate_,
+                sample_rate_, kMaxSyntheticAudioGapSeconds);
+            if (result_out) *result_out = adjustment;
+            if (adjustment.normal_jitter_absorbed) {
+                normal_jitter_absorbed_count_.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            if (adjustment.classification == AudioTimelineAdjustmentClass::HardGap
+                    || adjustment.classification
+                        == AudioTimelineAdjustmentClass::HardOverlap) {
+                hard_discontinuity_recovery_count_.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            if (adjustment.large_gap) {
+                // The AAC ring has no discontinuity marker. Refuse a
+                // suspend-sized catch-up rather than encoding an
+                // unbounded silence burst or collapsing resumed PTS.
+                discontinuity_count_.fetch_add(1, std::memory_order_relaxed);
+                std::cerr << "[AudioCapture] Synthetic silence gap exceeds "
+                    << kMaxSyntheticAudioGapSeconds
+                    << "s; current audio generation cannot continue." << std::endl;
+                device_error = true;
+                timeline_gap = true;
+                return false;
+            }
+            if (adjustment.silence_frames > 0) {
+                if (!InjectSilence(adjustment.silence_frames,
+                                   expected_qpc_100ns)) {
                     device_error = true;
                     return false;
                 }
-                if (adjustment.silence_frames > 0) {
-                    if (!InjectSilence(adjustment.silence_frames,
-                                       expected_qpc_100ns)) {
-                        device_error = true;
-                        return false;
-                    }
-                    const uint64_t last_swr =
-                        last_swr_compensation_qpc_100ns_.load(
-                            std::memory_order_acquire);
-                    const uint64_t swr_delta = expected_qpc_100ns >= last_swr
-                        ? expected_qpc_100ns - last_swr : last_swr - expected_qpc_100ns;
-                    correction_events_.Record(AudioCorrectionEvent{
-                        AudioCorrectionSource::System,
-                        AudioCorrectionDirection::Insert,
-                        expected_qpc_100ns,
-                        packet_qpc_100ns,
-                        expected_qpc_100ns,
-                        adjustment.silence_frames,
-                        sample_rate_,
-                        0.0,
-                        0,
-                        0.0,
-                        last_swr > 0
-                            && swr_delta <= kAudioCorrectionRecentWindow100ns});
-                }
-                next_timeline_100ns = adjustment.next_timeline_100ns;
-                return true;
-            };
+                const uint64_t last_swr =
+                    last_swr_compensation_qpc_100ns_.load(
+                        std::memory_order_acquire);
+                const uint64_t swr_delta = expected_qpc_100ns >= last_swr
+                    ? expected_qpc_100ns - last_swr : last_swr - expected_qpc_100ns;
+                correction_events_.Record(AudioCorrectionEvent{
+                    AudioCorrectionSource::System,
+                    AudioCorrectionDirection::Insert,
+                    expected_qpc_100ns,
+                    packet_qpc_100ns,
+                    expected_qpc_100ns,
+                    adjustment.silence_frames,
+                    sample_rate_,
+                    0.0,
+                    0,
+                    0.0,
+                    last_swr > 0
+                        && swr_delta <= kAudioCorrectionRecentWindow100ns});
+            }
+            next_timeline_100ns = adjustment.next_timeline_100ns;
+            return true;
+        };
 
-            while (running_.load(std::memory_order_relaxed) && !device_error) {
+        while (running_.load(std::memory_order_relaxed) && !device_error) {
 
-                const DWORD wait_result = WaitForSingleObject(evt, 50);
-                if (!running_.load(std::memory_order_relaxed)) break;
+            const DWORD wait_result = WaitForSingleObject(evt, 50);
+            if (!running_.load(std::memory_order_relaxed)) break;
 
-                if (wait_result == WAIT_FAILED) {
-                    std::cerr << "[AudioCapture] WaitForSingleObject failed: "
-                        << GetLastError() << std::endl;
-                    device_error = true;
-                    break;
-                }
+            if (wait_result == WAIT_FAILED) {
+                std::cerr << "[AudioCapture] WaitForSingleObject failed: "
+                    << GetLastError() << std::endl;
+                device_error = true;
+                break;
+            }
 
-                UINT32  next_packet_size = 0;
-                HRESULT hr = client->GetNextPacketSize(&next_packet_size);
+            UINT32  next_packet_size = 0;
+            HRESULT hr = client->GetNextPacketSize(&next_packet_size);
+            if (FAILED(hr)) {
+                std::cerr << "[AudioCapture] GetNextPacketSize failed: 0x"
+                    << std::hex << hr << std::dec << std::endl;
+                device_error = true;
+                break;
+            }
+
+            // When the default render endpoint is totally idle it can
+            // report no packet on both an event wake and a timeout. The
+            // gap is real timeline silence, not a missing source.
+            if (next_packet_size == 0) {
+                no_packet_interval_count_.fetch_add(1, std::memory_order_relaxed);
+                if (!fill_silence_until(CurrentAudioTimeline100ns(), 0, 0, nullptr)) break;
+            }
+
+            while (next_packet_size > 0) {
+
+                BYTE*  data  = nullptr;
+                UINT32 frames = 0;
+                DWORD  flags  = 0;
+                UINT64 qpc_position = 0;
+
+                hr = client->GetBuffer(&data, &frames, &flags,
+                    nullptr, &qpc_position);
                 if (FAILED(hr)) {
-                    std::cerr << "[AudioCapture] GetNextPacketSize failed: 0x"
+                    std::cerr << "[AudioCapture] GetBuffer failed: 0x"
                         << std::hex << hr << std::dec << std::endl;
                     device_error = true;
                     break;
                 }
 
-                // When the default render endpoint is totally idle it can
-                // report no packet on both an event wake and a timeout. The
-                // gap is real timeline silence, not a missing source.
-                if (next_packet_size == 0) {
-                    no_packet_interval_count_.fetch_add(1, std::memory_order_relaxed);
-                    if (!fill_silence_until(CurrentAudioTimeline100ns(), 0, 0, nullptr)) break;
-                }
-
-                while (next_packet_size > 0) {
-
-                    BYTE*  data  = nullptr;
-                    UINT32 frames = 0;
-                    DWORD  flags  = 0;
-                    UINT64 qpc_position = 0;
-
-                    hr = client->GetBuffer(&data, &frames, &flags,
-                        nullptr, &qpc_position);
-                    if (FAILED(hr)) {
-                        std::cerr << "[AudioCapture] GetBuffer failed: 0x"
-                            << std::hex << hr << std::dec << std::endl;
+                if (frames > 0) {
+                    const bool is_silent =
+                        (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || !data;
+                    if (is_silent) {
+                        silent_packet_count_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    const uint64_t fallback_qpc = qpc_position == 0
+                            || (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0
+                        ? CurrentAudioTimeline100ns() : 0;
+                    const uint64_t packet_qpc = SelectPacketTimestamp(qpc_position, flags, fallback_qpc);
+                    if (packet_qpc == 0) {
+                        // No common clock: release this owned buffer without
+                        // publishing metrics, reconciliation, samples or AAC origin.
+                        timestamp_unavailable = true;
                         device_error = true;
+                        client->ReleaseBuffer(frames);
+                        break;
+                    }
+                    packet_count_.fetch_add(1, std::memory_order_relaxed);
+                    if ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0) {
+                        discontinuity_count_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    uint64_t no_packet = 0;
+                    first_packet_qpc_100ns_.compare_exchange_strong(
+                        no_packet, packet_qpc, std::memory_order_release,
+                        std::memory_order_relaxed);
+                    const uint64_t previous_packet_end_qpc =
+                        last_packet_end_qpc_100ns_.load(std::memory_order_relaxed);
+                    if (previous_packet_end_qpc > 0 && packet_qpc > previous_packet_end_qpc) {
+                        const uint64_t gap = packet_qpc - previous_packet_end_qpc;
+                        uint64_t largest = largest_no_packet_gap_100ns_.load(
+                            std::memory_order_relaxed);
+                        while (gap > largest && !largest_no_packet_gap_100ns_.compare_exchange_weak(
+                            largest, gap, std::memory_order_release,
+                            std::memory_order_relaxed)) {}
+                    }
+                    last_packet_qpc_100ns_.store(
+                        packet_qpc, std::memory_order_release);
+                    const uint64_t packet_duration = input_sample_rate_ > 0
+                        ? (static_cast<uint64_t>(frames) * 10'000'000ULL)
+                            / input_sample_rate_ : 0;
+                    last_packet_end_qpc_100ns_.store(
+                        packet_qpc + packet_duration, std::memory_order_release);
+                    const uint64_t expected_skip_qpc = next_timeline_100ns;
+                    AudioTimelinePacketAdjustment adjustment;
+                    if (!fill_silence_until(packet_qpc, packet_qpc, frames,
+                                            &adjustment)) {
+                        client->ReleaseBuffer(frames);
                         break;
                     }
 
-                    if (frames > 0) {
-                        const bool is_silent =
-                            (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || !data;
+                    // The shared policy has already classified a small
+                    // overlap as absorbed jitter and only returns a
+                    // prefix skip for a real hard overlap.
+                    const uint32_t skip_frames = adjustment.skip_input_frames;
+                    const uint32_t submit_frames = frames - skip_frames;
+                    if (skip_frames > 0) {
+                        skipped_input_frame_count_.fetch_add(
+                            skip_frames, std::memory_order_relaxed);
+                        skip_correction_distribution_.Observe(skip_frames);
+                        const uint64_t last_swr =
+                            last_swr_compensation_qpc_100ns_.load(
+                                std::memory_order_acquire);
+                        const uint64_t swr_delta = expected_skip_qpc >= last_swr
+                            ? expected_skip_qpc - last_swr : last_swr - expected_skip_qpc;
+                        correction_events_.Record(AudioCorrectionEvent{
+                            AudioCorrectionSource::System,
+                            AudioCorrectionDirection::Skip,
+                            expected_skip_qpc,
+                            packet_qpc,
+                            expected_skip_qpc,
+                            skip_frames,
+                            input_sample_rate_,
+                            0.0,
+                            0,
+                            0.0,
+                            last_swr > 0
+                                && swr_delta <= kAudioCorrectionRecentWindow100ns});
+                    }
+                    if (submit_frames > 0) {
+                        const uint64_t submit_qpc = advance_timeline(packet_qpc, skip_frames,
+                            input_sample_rate_);
                         if (is_silent) {
-                            silent_packet_count_.fetch_add(1, std::memory_order_relaxed);
-                        }
-                        const uint64_t packet_qpc = qpc_position != 0
-                            ? qpc_position : CurrentAudioTimeline100ns();
-                        packet_count_.fetch_add(1, std::memory_order_relaxed);
-                        if ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0) {
-                            discontinuity_count_.fetch_add(1, std::memory_order_relaxed);
-                        }
-                        uint64_t no_packet = 0;
-                        first_packet_qpc_100ns_.compare_exchange_strong(
-                            no_packet, packet_qpc, std::memory_order_release,
-                            std::memory_order_relaxed);
-                        const uint64_t previous_packet_end_qpc =
-                            last_packet_end_qpc_100ns_.load(std::memory_order_relaxed);
-                        if (previous_packet_end_qpc > 0 && packet_qpc > previous_packet_end_qpc) {
-                            const uint64_t gap = packet_qpc - previous_packet_end_qpc;
-                            uint64_t largest = largest_no_packet_gap_100ns_.load(
-                                std::memory_order_relaxed);
-                            while (gap > largest && !largest_no_packet_gap_100ns_.compare_exchange_weak(
-                                largest, gap, std::memory_order_release,
-                                std::memory_order_relaxed)) {}
-                        }
-                        last_packet_qpc_100ns_.store(
-                            packet_qpc, std::memory_order_release);
-                        const uint64_t packet_duration = input_sample_rate_ > 0
-                            ? (static_cast<uint64_t>(frames) * 10'000'000ULL)
-                                / input_sample_rate_ : 0;
-                        last_packet_end_qpc_100ns_.store(
-                            packet_qpc + packet_duration, std::memory_order_release);
-                        const uint64_t expected_skip_qpc = next_timeline_100ns;
-                        AudioTimelinePacketAdjustment adjustment;
-                        if (!fill_silence_until(packet_qpc, packet_qpc, frames,
-                                                &adjustment)) {
-                            client->ReleaseBuffer(frames);
-                            break;
-                        }
-
-                        // The shared policy has already classified a small
-                        // overlap as absorbed jitter and only returns a
-                        // prefix skip for a real hard overlap.
-                        const uint32_t skip_frames = adjustment.skip_input_frames;
-                        const uint32_t submit_frames = frames - skip_frames;
-                        if (skip_frames > 0) {
-                            skipped_input_frame_count_.fetch_add(
-                                skip_frames, std::memory_order_relaxed);
-                            skip_correction_distribution_.Observe(skip_frames);
-                            const uint64_t last_swr =
-                                last_swr_compensation_qpc_100ns_.load(
-                                    std::memory_order_acquire);
-                            const uint64_t swr_delta = expected_skip_qpc >= last_swr
-                                ? expected_skip_qpc - last_swr : last_swr - expected_skip_qpc;
-                            correction_events_.Record(AudioCorrectionEvent{
-                                AudioCorrectionSource::System,
-                                AudioCorrectionDirection::Skip,
-                                expected_skip_qpc,
-                                packet_qpc,
-                                expected_skip_qpc,
-                                skip_frames,
-                                input_sample_rate_,
-                                0.0,
-                                0,
-                                0.0,
-                                last_swr > 0
-                                    && swr_delta <= kAudioCorrectionRecentWindow100ns});
-                        }
-                        if (submit_frames > 0) {
-                            const uint64_t submit_qpc = advance_timeline(packet_qpc, skip_frames,
-                                input_sample_rate_);
-                            if (is_silent) {
-                                if (!SubmitNativeSamples(nullptr, submit_frames, submit_qpc)) {
-                                    device_error = true;
-                                    client->ReleaseBuffer(frames);
-                                    break;
-                                }
-                            } else {
-                                if (!SubmitNativeSamples(data + static_cast<size_t>(skip_frames)
-                                        * input_bytes_per_frame_, submit_frames, submit_qpc)) {
-                                    device_error = true;
-                                    client->ReleaseBuffer(frames);
-                                    break;
-                                }
+                            if (!SubmitCapturedPacket(nullptr, submit_frames, submit_qpc)) {
+                                device_error = true;
+                                client->ReleaseBuffer(frames);
+                                break;
+                            }
+                        } else {
+                            if (!SubmitCapturedPacket(data + static_cast<size_t>(skip_frames)
+                                    * input_bytes_per_frame_, submit_frames, submit_qpc)) {
+                                device_error = true;
+                                client->ReleaseBuffer(frames);
+                                break;
                             }
                         }
-                        next_timeline_100ns = adjustment.next_timeline_100ns;
                     }
-
-                    client->ReleaseBuffer(frames);
-
-                    if (FAILED(client->GetNextPacketSize(&next_packet_size))) {
-                        device_error = true;
-                        break;
-                    }
+                    next_timeline_100ns = adjustment.next_timeline_100ns;
                 }
-            }
 
-            if (!running_.load(std::memory_order_relaxed)) break;
+                client->ReleaseBuffer(frames);
 
-            // Reopen the WASAPI session after device loss, allowing Windows to settle.
-            // Retry with delays of 1 through 5 seconds, then stop recovery.
-            if (device_error) {
-                if (retry_count >= kMaxRetries) {
-                    std::cerr << "[AudioCapture] WASAPI recovery failed after "
-                        << kMaxRetries << " attempts — disabling audio." << std::endl;
-                    gave_up = true;
+                if (FAILED(client->GetNextPacketSize(&next_packet_size))) {
+                    device_error = true;
                     break;
                 }
-
-                const int delay_ms = 1000 * (retry_count + 1);
-                std::cout << "[AudioCapture] Audio device lost. Recovery attempt "
-                    << (retry_count + 1) << "/" << kMaxRetries
-                    << " in " << delay_ms << "ms..." << std::endl;
-
-                // Interruptible sleep: wake immediately if Stop() is called.
-                for (int elapsed = 0; elapsed < delay_ms; elapsed += 100) {
-                    if (!running_.load(std::memory_order_relaxed)) break;
-                    Sleep(100);
-                }
-                if (!running_.load(std::memory_order_relaxed)) break;
-
-                TeardownWASAPISession();
-
-                // Connection loss switches this session to the Windows default.
-                // Keep the user's preference on disk for the next app launch.
-                device_id_.clear();
-                if (SetupWASAPISession()) {
-                    IAudioClient* ac = static_cast<IAudioClient*>(audio_client_);
-                    if (SUCCEEDED(ac->Start())) {
-                        std::cout << "[AudioCapture] WASAPI session restored ("
-                            << sample_rate_ << "Hz, " << channels_ << "ch)." << std::endl;
-                        retry_count = 0;  // successful recovery resets the counter
-                        restart_count_.fetch_add(1, std::memory_order_relaxed);
-                        continue;        // re-enter inner loop with fresh client/evt
-                    }
-                    std::cerr << "[AudioCapture] IAudioClient::Start failed after recovery." << std::endl;
-                    // Session was set up but Start() failed — tear down to avoid leaking
-                    // a partially-running session that would block the next SetupWASAPISession().
-                    TeardownWASAPISession();
-                }
-                else {
-                    TeardownWASAPISession();  // clean up partial state from failed setup
-                    std::cerr << "[AudioCapture] SetupWASAPISession failed on recovery attempt "
-                        << (retry_count + 1) << std::endl;
-                }
-
-                retry_count++;
-                // Outer loop will retry (with a longer delay next time)
             }
         }
 
-        if (gave_up) {
-            device_lost_.store(true, std::memory_order_release);
-        }
 
-        if (co_owned) CoUninitialize();
-        std::cout << "[AudioCapture] Thread stopped." << std::endl;
+        if (!running_.load(std::memory_order_relaxed)) return SessionResult::Stopped;
+        return timeline_gap ? SessionResult::TimelineGap
+            : timestamp_unavailable ? SessionResult::TimestampUnavailable : SessionResult::EndpointFailure;
     }
 
 

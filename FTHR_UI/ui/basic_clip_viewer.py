@@ -1,10 +1,13 @@
-"""Small original-media player: deliberately independent of the clip editor."""
+"""Small clip player independent of the clip editor."""
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QThreadPool, QUrl, Slot
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout
+
+from ui.clip_worker import CompatibilitySourceWorker
 
 
 class BasicClipViewer(QDialog):
@@ -14,9 +17,9 @@ class BasicClipViewer(QDialog):
         self.setWindowTitle(f'{Path(clip_path).name} — Clip viewer')
         self.resize(960, 600)
         layout = QVBoxLayout(self)
-        note = QLabel('Original clip • Editing is disabled in Settings → Performance')
-        note.setWordWrap(True)
-        layout.addWidget(note)
+        self.note = QLabel('Editing is disabled in Settings → Performance')
+        self.note.setWordWrap(True)
+        layout.addWidget(self.note)
         self.video = QVideoWidget(self)
         layout.addWidget(self.video, 1)
         self.player = QMediaPlayer(self)
@@ -50,7 +53,26 @@ class BasicClipViewer(QDialog):
         self.error.setWordWrap(True)
         layout.addWidget(self.error)
         self.player.errorOccurred.connect(lambda *_: self.error.setText(self.player.errorString()))
-        self.player.setSource(QUrl.fromLocalFile(str(Path(clip_path).resolve())))
+        self._prepare_cancel = threading.Event()
+        cancelled = self._prepare_cancel
+        self.destroyed.connect(lambda *_: cancelled.set())
+        self._clip_path = str(Path(clip_path).resolve())
+        self.error.setText('Preparing clip…')
+        self.play.setEnabled(False)
+        worker = CompatibilitySourceWorker(self._clip_path, self._prepare_cancel)
+        worker.signals.ready.connect(self._set_source, Qt.ConnectionType.QueuedConnection)
+        QThreadPool.globalInstance().start(worker)
+
+    @Slot(object)
+    def _set_source(self, path):
+        if not self._prepare_cancel.is_set():
+            from core.playback_proxy import is_sdr_preview_path
+
+            self.error.clear()
+            if is_sdr_preview_path(self._clip_path, path):
+                self.note.setText('HDR source · SDR preview')
+            self.player.setSource(QUrl.fromLocalFile(path))
+            self.play.setEnabled(True)
 
     def _position_changed(self, position):
         if not self.seek.isSliderDown():
@@ -65,11 +87,14 @@ class BasicClipViewer(QDialog):
             self.player.play()
 
     def done(self, result):
-        self.player.stop()
-        self.player.setSource(QUrl())
+        self._release_source()
         super().done(result)
 
     def closeEvent(self, event):
+        self._release_source()
+        super().closeEvent(event)
+
+    def _release_source(self):
+        self._prepare_cancel.set()
         self.player.stop()
         self.player.setSource(QUrl())
-        super().closeEvent(event)

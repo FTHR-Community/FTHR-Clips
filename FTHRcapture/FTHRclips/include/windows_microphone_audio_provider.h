@@ -45,7 +45,9 @@ struct WindowsMicrophoneAudioProviderConfig {
     // Empty only when use_default_endpoint is true.
     std::wstring endpoint_id;
     bool use_default_endpoint = true;
+    bool loopback = false;
     uint32_t retention_seconds = 30;
+    std::shared_ptr<ReplayStorage> replay_storage;
     // Canonical 48 kHz stereo AAC is intentionally lower bitrate than the
     // Default Mix: a microphone is normally voice, while the stereo channel
     // layout keeps future native mixing format-stable.
@@ -56,6 +58,7 @@ struct WindowsMicrophoneAudioProviderConfig {
     bool downmix_mono = false;
     AudioSourceMetadata source;
     std::shared_ptr<ReplayPauseClock> replay_pause_clock;
+    AudioPacketSink packet_sink;
 };
 
 // Downmix canonical interleaved stereo samples and duplicate mono to both

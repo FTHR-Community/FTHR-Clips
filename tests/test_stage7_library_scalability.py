@@ -240,26 +240,36 @@ def test_large_section_uses_bounded_virtual_canvas(
     assert len(grid._thumb_widgets) <= 96
     assert grid._virtual_sections
     assert not grid._section_grids
-    assert grid._all_count_label.text().endswith("(120)")
+    assert grid._all_count_label.accessibleName().endswith("(120)")
     grid.shutdown()
     grid.deleteLater()
 
 
-def test_owned_thumbnail_process_is_cancelled_and_reaped() -> None:
-    from ui.clip_grid import _run_owned_media_process, media_process_snapshot
+def test_owned_thumbnail_process_is_cancelled_and_reaped(monkeypatch) -> None:
+    from core import media_process
+    from ui.clip_grid import _run_owned_media_process
 
     cancelled = threading.Event()
-    timer = threading.Timer(0.1, cancelled.set)
-    timer.start()
-    before = media_process_snapshot()[0]
-    try:
-        result = _run_owned_media_process(
-            [sys.executable, "-c", "import time; time.sleep(10)"],
-            cancelled, timeout_seconds=3.0)
-    finally:
-        timer.cancel()
+    command = [sys.executable, "-c", "import time; time.sleep(10)"]
+    started = media_process._media_process_started
+    owned = []
+
+    def cancel_owned_child(process):
+        started(process)
+        if process.args is command:
+            with media_process._MEDIA_PROCESS_LOCK:
+                assert media_process._MEDIA_PROCESS_OWNERS[id(process)] is process
+            owned.append(process)
+            cancelled.set()
+
+    monkeypatch.setattr(media_process, "_media_process_started", cancel_owned_child)
+    result = _run_owned_media_process(command, cancelled, timeout_seconds=3.0)
+
     assert result is None
-    assert media_process_snapshot()[0] == before
+    assert len(owned) == 1
+    assert owned[0].returncode is not None
+    with media_process._MEDIA_PROCESS_LOCK:
+        assert id(owned[0]) not in media_process._MEDIA_PROCESS_OWNERS
 
 
 def test_cancelled_thumbnail_worker_does_not_publish_failure_generation(

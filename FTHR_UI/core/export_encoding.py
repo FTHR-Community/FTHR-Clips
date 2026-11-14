@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import re
 
 from core.ffmpeg_tools import (
     _NO_WINDOW, _sdr_color_args, _seekable_video_args, software_video_args,
@@ -14,6 +15,55 @@ QUALITY_OPTIONS = (('Very fast', 'fast'), ('High quality', 'quality'),
 VIDEO_PLACEHOLDER = ['-c:v', 'fthr_export_encoder']
 _working = {}
 _probe_lock = threading.Lock()
+
+
+def hdr_safe_template(template):
+    """Only preserve HDR through filters reviewed to retain colour and depth."""
+    safe = {'crop', 'scale', 'setsar', 'setdar', 'fps', 'trim', 'setpts',
+            'concat', 'split', 'null', 'asplit', 'atrim', 'asetpts', 'amix',
+            'volume', 'alimiter', 'aformat', 'aresample', 'atempo', 'asetrate',
+            'anull', 'pan', 'adelay', 'apad'}
+    for i, flag in enumerate(template[:-1]):
+        if flag not in {'-vf', '-filter_complex'}:
+            continue
+        for part in re.split('[,;]', template[i + 1]):
+            part = re.sub(r'^(\[[^]]+\])+', '', part.strip())
+            name = re.split(r'[=\[]', part, maxsplit=1)[0]
+            if name not in safe:
+                return False
+    return True
+
+
+def choose_hdr_video_args(ffmpeg, color, quality='quality', cancel=None):
+    """Preserve HDR only after a real 10-bit HEVC encoder initialization."""
+    from core.media_process import run_media_process
+    cancel = cancel or threading.Event()
+    for encoder in ('hevc_nvenc', 'hevc_qsv', 'hevc_amf'):
+        if cancel.is_set():
+            break
+        args = ['-c:v', encoder, '-profile:v', 'main10', '-pix_fmt', 'p010le',
+                '-b:v', '16000k' if quality == 'fast' else '32000k',
+                '-g', '30', '-bf', '0', '-tag:v', 'hvc1', '-color_range', color.range,
+                '-colorspace', color.matrix, '-color_primaries', color.primaries,
+                '-color_trc', color.transfer]
+        if encoder == 'hevc_nvenc':
+            args += ['-preset', 'p1' if quality == 'fast' else 'p5']
+        key = (ffmpeg, 'hdr10', encoder, quality, color)
+        with _probe_lock:
+            works = _working.get(key)
+        if works is None:
+            result = run_media_process(
+                [ffmpeg, '-v', 'error', '-f', 'lavfi', '-i',
+                 'color=s=128x128:r=30,format=p010le', '-frames:v', '2',
+                 *args, '-f', 'null', '-'], cancel, timeout_seconds=8)
+            if cancel.is_set():
+                return None
+            works = result is not None and result[0] == 0
+            with _probe_lock:
+                _working[key] = works
+        if works:
+            return args
+    return None
 
 
 def normalize_quality(value):
@@ -92,7 +142,9 @@ def encode_command(template, args, quality):
         command[index:index + 2] = args
     # Limit decoder/filter/encoder CPU work even with a hardware encoder.
     command[1:1] = ['-threads', '2', '-filter_threads', '2', '-filter_complex_threads', '2']
-    command[-1:-1] = ['-threads:v', '2']
+    # An edited export no longer has the original capture-to-playback mapping.
+    # Preserve provenance only in the dedicated, timeline-aware merge writer.
+    command[-1:-1] = ['-threads:v', '2', '-metadata', 'fthr_capture_timeline=']
     if quality == 'lossless' and '-c:a' in command:
         index = command.index('-c:a') + 1
         if command[index] != 'copy':

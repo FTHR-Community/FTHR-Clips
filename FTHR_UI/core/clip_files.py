@@ -17,6 +17,7 @@ PARTIAL_SUFFIX = '.partial'
 _AUDIO_MANIFEST_SUFFIX = '.fthr-audio.json'
 _FTHR_CLIP_MARKER = '_clip_from_'
 FTHR_TEMP_DIR_PREFIX = '.fthr-'
+PENDING_RESTORE_MARKER = '.fthr-restore-pending.json'
 DEFAULT_PARTIAL_MAX_AGE_SECONDS = 24 * 60 * 60
 _REPARSE_POINT = getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x0400)
 
@@ -97,6 +98,25 @@ def is_fthr_temporary_dir(path: str | Path) -> bool:
     return Path(path).name.casefold().startswith(FTHR_TEMP_DIR_PREFIX)
 
 
+def is_pending_restore_directory(path: str | Path) -> bool:
+    """Return whether a directory is still protected by a restore marker.
+
+    Marker inspection is deliberately no-follow and fail-closed.  A marker
+    that appears while a scan is running, or that cannot be inspected, keeps
+    the directory hidden until the restore owner has completed cleanup.
+    """
+
+    marker = Path(path) / PENDING_RESTORE_MARKER
+    try:
+        os.lstat(marker)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        # An unreadable marker keeps a restore directory hidden fail-closed.
+        return True
+    return True
+
+
 def is_completed_video_path(path: str | Path) -> bool:
     """Return whether ``path`` names a supported, completed video clip."""
 
@@ -142,6 +162,7 @@ def cleanup_stale_partial_clips(
     minimum_age_seconds: float = DEFAULT_PARTIAL_MAX_AGE_SECONDS,
     now: float | None = None,
     cancel_event: threading.Event | None = None,
+    metadata_manager=None,
 ) -> PartialCleanupResult:
     """Remove FTHR partial clips older than ``minimum_age_seconds``.
 
@@ -177,9 +198,14 @@ def cleanup_stale_partial_clips(
                     candidate.name[:-len(_AUDIO_MANIFEST_SUFFIX)])
                 if media.exists():
                     continue
-            candidate.unlink()
+            if is_orphan_manifest:
+                from core.library_ownership import delete_media, media_file_identity
+                delete_media(candidate, metadata_manager=metadata_manager,
+                             expected_identity=media_file_identity(candidate))
+            else:
+                candidate.unlink()  # Technical .partial artifacts cannot carry library flags.
             removed.append(candidate)
-        except OSError as error:
+        except (OSError, ValueError, TypeError) as error:
             failures.append((candidate, str(error)))
 
     return PartialCleanupResult(
@@ -189,6 +215,7 @@ def cleanup_stale_partial_clips(
 def start_stale_partial_cleanup(
         clips_root: str | Path, *,
         on_complete: Callable[[PartialCleanupResult], None] | None = None,
+        metadata_manager=None,
 ) -> tuple[threading.Thread, threading.Event]:
     """Run stale-partial recovery outside Qt's main thread.
 
@@ -199,7 +226,7 @@ def start_stale_partial_cleanup(
 
     def _run() -> None:
         result = cleanup_stale_partial_clips(
-            clips_root, cancel_event=cancel_event)
+            clips_root, cancel_event=cancel_event, metadata_manager=metadata_manager)
         if on_complete is not None and not cancel_event.is_set():
             try:
                 on_complete(result)

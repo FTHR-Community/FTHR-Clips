@@ -1,12 +1,19 @@
 #include "windows_process_loopback_audio_provider.h"
 
 #include <windows.h>
+#include <mmsystem.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <utility>
 #include <vector>
+
+#pragma comment(lib, "winmm.lib")
 
 namespace {
 
@@ -71,12 +78,12 @@ void DiscoveryActivityAndSilentFilteringUseTheCommonModel() {
             && discord->source.format.channels == 2
             && discord->source.identity.type == fthr::AudioSourceType::Application,
         "provider sources declare the canonical processing format and application type");
-    CheckProcessLoopback(coordinator.ObserveActivity(discord->source.identity.id, 0.020f, 100)
+    CheckProcessLoopback(coordinator.ObserveActivity(firefox->source.identity.id, 0.0f, 100)
             == fthr::AudioSourceAdmission::RejectedAtCapacity,
-        "first meaningful block is held by activity hysteresis");
-    CheckProcessLoopback(coordinator.ObserveActivity(discord->source.identity.id, 0.020f, 200)
+        "a digital-silence block does not admit a discovered source");
+    CheckProcessLoopback(coordinator.ObserveActivity(discord->source.identity.id, 0.0006f, 200)
             == fthr::AudioSourceAdmission::Accepted,
-        "second meaningful block admits the real application source");
+        "the first nonzero block admits a quiet application source");
     const auto audible = coordinator.SourcesForInterval(0, 300);
     CheckProcessLoopback(audible.size() == 1
             && audible.front().identity.display_name == "Discord",
@@ -198,10 +205,9 @@ void SourceLimitAndTrackContractRemainBounded() {
     coordinator.ObserveActivity(one->source.identity.id, 0.02f, 200);
     coordinator.ObserveActivity(two->source.identity.id, 0.02f, 300);
     coordinator.ObserveActivity(two->source.identity.id, 0.02f, 400);
-    coordinator.ObserveActivity(three->source.identity.id, 0.02f, 500);
-    CheckProcessLoopback(coordinator.ObserveActivity(three->source.identity.id, 0.02f, 600)
+    CheckProcessLoopback(coordinator.ObserveActivity(three->source.identity.id, 0.02f, 500)
             == fthr::AudioSourceAdmission::RejectedAtCapacity,
-        "the source admission limit rejects a ninth-equivalent stem deterministically");
+        "the configured source admission limit rejects a third stem deterministically");
     const auto sources = coordinator.SourcesForInterval(0, 700);
     CheckProcessLoopback(sources.size() == 2
             && sources[0].identity.id.IsValid() && sources[1].identity.id.IsValid(),
@@ -224,10 +230,9 @@ void ExpiredReplayHistoryReleasesAnApplicationSlot() {
     coordinator.ObserveActivity(two->source.identity.id, 0.02f, 400);
     coordinator.ObserveActivity(two->source.identity.id, 0.02f, 500);
 
-    coordinator.ObserveActivity(three->source.identity.id, 0.02f, 20'000'000);
     CheckProcessLoopback(
         coordinator.ObserveActivity(
-            three->source.identity.id, 0.02f, 20'000'100)
+            three->source.identity.id, 0.02f, 20'000'000)
             == fthr::AudioSourceAdmission::Accepted,
         "an inactive source older than the replay window releases its stem slot");
     const auto current = coordinator.SourcesForInterval(0, 21'000'000);
@@ -237,41 +242,37 @@ void ExpiredReplayHistoryReleasesAnApplicationSlot() {
         "slot recycling retains current sources without reviving expired history");
 }
 
-void EightApplicationStemBoundaryIsExplicit() {
+void DefaultApplicationStemBoundaryIsExplicit() {
     fthr::WindowsProcessLoopbackCapability supported{22631, true, false};
+    constexpr uint32_t expected_limit = 32;
+    std::vector<std::string> ids;
+    for (uint32_t index = 0; index <= expected_limit; ++index) {
+        ids.push_back("60000000-0000-4000-8000-0000000000" + std::to_string(10 + index));
+    }
     fthr::WindowsApplicationSourceCoordinator coordinator(
-        6, supported, Generator({
-            "60000000-0000-4000-8000-000000000001",
-            "60000000-0000-4000-8000-000000000002",
-            "60000000-0000-4000-8000-000000000003",
-            "60000000-0000-4000-8000-000000000004",
-            "60000000-0000-4000-8000-000000000005",
-            "60000000-0000-4000-8000-000000000006",
-            "60000000-0000-4000-8000-000000000007",
-            "60000000-0000-4000-8000-000000000008",
-            "60000000-0000-4000-8000-000000000009"}));
+        6, supported, Generator(std::move(ids)));
     std::vector<fthr::WindowsApplicationSourceBinding> bindings;
-    for (uint32_t index = 0; index < 9; ++index) {
+    for (uint32_t index = 0; index <= expected_limit; ++index) {
         const std::string number = std::to_string(index + 1);
         const auto binding = coordinator.Discover(Session(
             ("app#" + number).c_str(), index + 1,
             ("app" + number).c_str(), ("App " + number).c_str()));
-        CheckProcessLoopback(binding.has_value(), "all nine candidate sessions are discoverable");
+        CheckProcessLoopback(binding.has_value(), "all candidate sessions are discoverable");
         bindings.push_back(*binding);
-        coordinator.ObserveActivity(binding->source.identity.id, 0.02f,
-            static_cast<int64_t>(index) * 1000);
     }
-    for (uint32_t index = 0; index < 8; ++index) {
+    for (uint32_t index = 0; index < expected_limit; ++index) {
         CheckProcessLoopback(coordinator.ObserveActivity(bindings[index].source.identity.id,
-                0.02f, static_cast<int64_t>(index) * 1000 + 100)
+                0.02f, static_cast<int64_t>(index + 1) * 1000)
                 == fthr::AudioSourceAdmission::Accepted,
-            "each of the first eight real app stems is admitted");
+            "each of the first 32 real app stems is admitted");
     }
-    CheckProcessLoopback(coordinator.ObserveActivity(bindings[8].source.identity.id,
-            0.02f, 8100) == fthr::AudioSourceAdmission::RejectedAtCapacity,
-        "the ninth real app stem is rejected without displacing retained history");
-    CheckProcessLoopback(coordinator.SourcesForInterval(0, 9000).size() == 8,
-        "the production app-stem boundary is exactly eight before Default Mix is added");
+    const int64_t over_limit_timestamp = static_cast<int64_t>(expected_limit + 1) * 1000;
+    CheckProcessLoopback(coordinator.ObserveActivity(bindings.back().source.identity.id,
+            0.02f, over_limit_timestamp) == fthr::AudioSourceAdmission::RejectedAtCapacity,
+        "the 33rd real app stem is rejected without displacing retained history");
+    CheckProcessLoopback(
+        coordinator.SourcesForInterval(0, over_limit_timestamp).size() == expected_limit,
+        "the production limit retains exactly 32 application stems");
 }
 
 void OptionalLiveApplicationCaptureDiagnostics() {
@@ -302,7 +303,96 @@ void OptionalLiveApplicationCaptureDiagnostics() {
     manager.Stop();
 }
 
+void OptionalLiveProcessLoopbackPreservesContinuousAudio() {
+    // A quiet, continuous one-second 1 kHz mono WAV. Loop it in this process
+    // so the actual WASAPI capture thread sees consecutive render packets.
+    constexpr uint32_t sample_rate = 48'000;
+    struct ToneWave {
+        char riff[4] = {'R', 'I', 'F', 'F'};
+        uint32_t riff_size = 36 + sample_rate * sizeof(int16_t);
+        char wave[4] = {'W', 'A', 'V', 'E'};
+        char format[4] = {'f', 'm', 't', ' '};
+        uint32_t format_size = 16;
+        uint16_t pcm = WAVE_FORMAT_PCM;
+        uint16_t channels = 1;
+        uint32_t rate = sample_rate;
+        uint32_t byte_rate = sample_rate * sizeof(int16_t);
+        uint16_t block_align = sizeof(int16_t);
+        uint16_t bits = 16;
+        char data[4] = {'d', 'a', 't', 'a'};
+        uint32_t data_size = sample_rate * sizeof(int16_t);
+        int16_t samples[sample_rate];
+    } tone;
+    static_assert(offsetof(ToneWave, samples) == 44);
+    for (uint32_t frame = 0; frame < sample_rate; ++frame) {
+        tone.samples[frame] = static_cast<int16_t>(
+            std::sin((frame % 48) * (6.283185307179586 / 48.0)) * 819.0);
+    }
+    CheckProcessLoopback(PlaySoundA(reinterpret_cast<LPCSTR>(&tone), nullptr,
+            SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT) != FALSE,
+        "the live process-loopback regression has an active render stream");
+
+    fthr::WindowsProcessLoopbackProviderConfig config;
+    config.generation = 1;
+    config.target_process_id = GetCurrentProcessId();
+    config.source.identity.id = fthr::AudioSourceId{"52000000-0000-4000-8000-000000000001"};
+    config.source.identity.type = fthr::AudioSourceType::Application;
+    uint64_t observed_frames = 0;
+    uint32_t observed_packets = 0;
+    uint32_t consecutive_zero_frames = 0;
+    uint32_t longest_zero_run = 0;
+    config.packet_sink = [&](const fthr::AudioSourceMetadata&, const uint8_t* data,
+                             uint32_t, int64_t, int64_t frames) {
+        // Give the capture queue time to run out while the next 10 ms tone
+        // packet is pending. Emulate a short processing delay that exceeds
+        // the timeline's 1 ms tolerance without skipping a render period.
+        if (++observed_packets % 10 == 0) {
+            LARGE_INTEGER frequency{}, begin{}, now{};
+            QueryPerformanceFrequency(&frequency);
+            QueryPerformanceCounter(&begin);
+            do {
+                SwitchToThread();
+                QueryPerformanceCounter(&now);
+            } while (now.QuadPart - begin.QuadPart < frequency.QuadPart * 4 / 1000);
+        }
+        for (int64_t frame = 0; frame < frames; ++frame) {
+            // Ignore the first 200 ms to allow the render stream to settle.
+            if (++observed_frames <= sample_rate / 5) continue;
+            float stereo[2];
+            std::memcpy(stereo, data + frame * sizeof(stereo), sizeof(stereo));
+            if (stereo[0] == 0.0f && stereo[1] == 0.0f) {
+                ++consecutive_zero_frames;
+                longest_zero_run = (std::max)(longest_zero_run, consecutive_zero_frames);
+            } else {
+                consecutive_zero_frames = 0;
+            }
+        }
+    };
+    fthr::WindowsProcessLoopbackAudioProvider provider(
+        std::move(config), [](const fthr::AudioSourceId&, float rms, int64_t) {
+            return rms > 0.001f ? fthr::AudioSourceAdmission::Accepted
+                : fthr::AudioSourceAdmission::RejectedInvalidIdentity;
+        }, {}, {});
+    const bool started = provider.Start();
+    if (started) Sleep(3000);
+    provider.Stop();
+    PlaySoundA(nullptr, nullptr, 0);
+    std::cout << "LIVE PROCESS LOOPBACK: " << observed_frames << " frames, longest zero run "
+              << longest_zero_run << " frames" << std::endl;
+    CheckProcessLoopback(started && observed_frames >= sample_rate,
+        "the live process-loopback provider captures the test tone");
+    CheckProcessLoopback(longest_zero_run < 20,
+        "draining the WASAPI queue does not insert silence before the next tone packet");
+}
+
 }  // namespace
+
+bool RunLiveProcessLoopbackToneTestIfRequested() {
+    if (GetEnvironmentVariableW(
+            L"FTHR_TEST_LIVE_PROCESS_LOOPBACK_TONE", nullptr, 0) == 0) return false;
+    OptionalLiveProcessLoopbackPreservesContinuousAudio();
+    return true;
+}
 
 int RunWindowsProcessLoopbackAudioProviderTests() {
     CapabilityGateDoesNotAttemptWindows10Sources();
@@ -313,7 +403,7 @@ int RunWindowsProcessLoopbackAudioProviderTests() {
     TimelineDiscontinuityDoesNotCreateUnboundedSilenceWork();
     SourceLimitAndTrackContractRemainBounded();
     ExpiredReplayHistoryReleasesAnApplicationSlot();
-    EightApplicationStemBoundaryIsExplicit();
+    DefaultApplicationStemBoundaryIsExplicit();
     OptionalLiveApplicationCaptureDiagnostics();
     std::cout << "AUDIT-050 Windows process-loopback provider tests: "
               << process_loopback_checks << " checks passed" << std::endl;

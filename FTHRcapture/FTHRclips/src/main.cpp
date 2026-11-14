@@ -1,4 +1,4 @@
-﻿// Native Windows startup and shared-memory command dispatch.
+// Native Windows startup and shared-memory command dispatch.
 // CaptureEngine owns capture, encoding, and save workers.
 // The positional startup contract is documented in docs/engine-startup.md.
 
@@ -7,6 +7,8 @@
 #include "capture_config_limits.h"
 #include "hardware_encoder.h"  // DetectNVENC() for pre-init logging
 #include "windows_microphone_audio_provider.h"
+#include "wgc_window_lifecycle.h"
+#include "native_encoder_probe.h"
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
@@ -144,13 +146,14 @@ static void PrintConfig(const fthr::CaptureConfig& cfg) {
     else
         std::cout << cfg.target_width << "x" << cfg.target_height << std::endl;
     std::cout << "  Bitrate      : " << cfg.bitrate_kbps << " kbps" << std::endl;
-    std::cout << "  Video codec  : " << fthr::VideoCodecName(cfg.video_codec)
+    std::cout << "  Video codec  : "
+              << (cfg.video_codec_auto ? "Auto" : fthr::VideoCodecName(cfg.video_codec))
               << std::endl;
     std::cout << "  Encoder pref : "
               << static_cast<uint32_t>(cfg.encoder_preference) << std::endl;
     std::cout << "  NVENC preset : P" << cfg.encoder_preset << std::endl;
-    std::cout << "  Raw budget   : " << cfg.max_buffer_mb
-              << " MB (diagnostic only; automatic fallback disabled)" << std::endl;
+    std::cout << "  Video budget : " << cfg.max_buffer_mb
+              << " MiB (replay ring and live save snapshots)" << std::endl;
 
     using Mode = fthr::CaptureConfig::CaptureModeEnum;
     if (cfg.capture_mode == Mode::WINDOW && cfg.target_hwnd != 0) {
@@ -160,6 +163,11 @@ static void PrintConfig(const fthr::CaptureConfig& cfg) {
         std::cout << "  Capture mode : Desktop" << std::endl;
     }
 
+    std::cout << "  Capture cursor: " << (cfg.capture_cursor ? "Enabled" : "Disabled")
+              << std::endl;
+    std::cout << "  Capture backend: "
+              << fthr::WindowsCaptureBackendPreferenceName(cfg.capture_backend_preference)
+              << std::endl;
     using Scl = fthr::CaptureConfig::ScalingModeEnum;
     std::cout << "  Scaling mode : "
               << (cfg.scaling_mode == Scl::FIT ? "Fit (letterbox)" : "Stretch")
@@ -184,7 +192,29 @@ static void PrintConfig(const fthr::CaptureConfig& cfg) {
 
 // Entry point
 
-int main(int argc, char* argv[]) {
+int wmain(int argc, wchar_t* wide_argv[]) {
+    std::vector<std::string> utf8_argv;
+    utf8_argv.reserve(argc);
+    for (int i = 0; i < argc; ++i)
+        utf8_argv.push_back(Utf8FromWide(wide_argv[i]));
+    std::vector<char*> arguments;
+    arguments.reserve(argc + 1);
+    for (auto& argument : utf8_argv) arguments.push_back(argument.data());
+    arguments.push_back(nullptr);
+    char** argv = arguments.data();
+    if (argc >= 2 && std::strcmp(argv[1], "--probe-encoder") == 0) {
+        return fthr::RunNativeEncoderProbe(argc, argv);
+    }
+    // This thread creates and later destroys WinRT capture objects. Keep an
+    // explicit MTA alive until after every engine and WinRT interface is gone.
+    const fthr::wgc::WinRtApartmentGuard winrt_apartment;
+    if (!winrt_apartment.Succeeded()) {
+        std::cerr << "FTHR_STARTUP_ERROR: RoInitialize(RO_INIT_MULTITHREADED)"
+                  << " failed with HRESULT 0x" << std::hex
+                  << static_cast<uint32_t>(winrt_apartment.Result())
+                  << std::dec << std::endl;
+        return 1;
+    }
     if (argc == 2 && std::strcmp(argv[1], "--list-playback-devices") == 0) {
         return ListMicrophones(true);
     }
@@ -215,6 +245,82 @@ int main(int argc, char* argv[]) {
 
     // 1. Parse command-line arguments into CaptureConfig
     fthr::CaptureConfig config;
+    wchar_t allow_replay_gaps[2]{};
+    config.allow_replay_gaps = GetEnvironmentVariableW(
+        L"FTHR_ALLOW_REPLAY_GAPS", allow_replay_gaps, 2) == 1
+        && allow_replay_gaps[0] == L'1';
+    wchar_t allow_low_fps_clips[2]{};
+    config.allow_low_fps_clips = !(GetEnvironmentVariableW(
+        L"FTHR_ALLOW_LOW_FPS_CLIPS", allow_low_fps_clips, 2) == 1
+        && allow_low_fps_clips[0] == L'0');
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--audio-exclusions") != 0) continue;
+        if (i + 1 >= argc) {
+            std::cerr << "FTHR_STARTUP_ERROR: --audio-exclusions requires executable identities" << std::endl;
+            return 1;
+        }
+        const std::string encoded = argv[i + 1];
+        size_t start = 0;
+        while (start < encoded.size()) {
+            const size_t end = encoded.find('|', start);
+            const auto identity = encoded.substr(start, end == std::string::npos
+                ? std::string::npos : end - start);
+            const bool valid = !identity.empty() && identity.size() <= 128
+                && identity.front() != ' ' && identity.back() != ' '
+                && std::all_of(identity.begin(), identity.end(), [](unsigned char c) {
+                    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                        || c == ' ' || c == '.' || c == '_' || c == '+'
+                        || c == '(' || c == ')' || c == '\'' || c == '-';
+                });
+            if (!valid || config.application_audio_exclusions.size() >= 64
+                    || (end != std::string::npos && end + 1 == encoded.size())) {
+                std::cerr << "FTHR_STARTUP_ERROR: invalid application audio exclusion" << std::endl;
+                return 1;
+            }
+            config.application_audio_exclusions.push_back(identity);
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        for (int remaining = i + 2; remaining <= argc; ++remaining)
+            argv[remaining - 2] = argv[remaining];
+        argc -= 2;
+        --i;
+    }
+    for (int i = 1; i < argc; ++i) {
+        const bool backup_setting = std::strcmp(argv[i], "--keep-system-audio-backup") == 0;
+        if (!backup_setting && std::strcmp(argv[i], "--capture-cursor") != 0) continue;
+        if (i + 1 >= argc || (std::strcmp(argv[i + 1], "0") != 0
+                            && std::strcmp(argv[i + 1], "1") != 0)) {
+            std::cerr << "FTHR_STARTUP_ERROR: " << argv[i] << " requires 0 or 1" << std::endl;
+            return 1;
+        }
+        if (backup_setting) config.keep_system_audio_backup = std::strcmp(argv[i + 1], "1") == 0;
+        else config.capture_cursor = std::strcmp(argv[i + 1], "1") == 0;
+        for (int remaining = i + 2; remaining <= argc; ++remaining)
+            argv[remaining - 2] = argv[remaining];
+        argc -= 2;
+        --i;
+    }
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--capture-backend") != 0) continue;
+        if (i + 1 >= argc || !fthr::ParseWindowsCaptureBackendPreference(
+                argv[i + 1], config.capture_backend_preference)) {
+            std::cerr << "FTHR_STARTUP_ERROR: --capture-backend requires auto, dxgi or wgc"
+                      << std::endl;
+            return 1;
+        }
+        for (int remaining = i + 2; remaining <= argc; ++remaining)
+            argv[remaining - 2] = argv[remaining];
+        argc -= 2;
+        --i;
+    }
+
+    std::string replay_storage_error;
+    if (!fthr::ParseReplayStorageArgs(argc, argv, config.replay_storage, replay_storage_error)) {
+        std::cerr << "FTHR_STARTUP_ERROR: " << replay_storage_error << std::endl;
+        return 1;
+    }
 
     config.framerate = ParseArgU32(argc, argv, 1, 60);
     config.buffer_seconds = ParseArgU32(argc, argv, 2, 30);
@@ -242,7 +348,7 @@ int main(int argc, char* argv[]) {
     }
 
     // argv[10] = capture_monitor  (stable Windows monitor device path)
-    // argv[11] = codec_pref       (0=auto/H.264, 1=H.264, 2=HEVC, 3=AV1)
+    // argv[11] = codec_pref       (0=auto, 1=H.264, 2=HEVC, 3=AV1)
     // argv[12] = encoder_preset   (same)
     // argv[13] = retired multiband slot (ignored)
     // argv[14] = audio_enabled    (0 = disable WASAPI loopback capture)
@@ -250,6 +356,8 @@ int main(int argc, char* argv[]) {
     const uint32_t codec_preference_arg = ParseArgU32(argc, argv, 11, 0);
     switch (codec_preference_arg) {
     case 0:
+        config.video_codec_auto = true;
+        break;
     case 1:
         config.video_codec = fthr::VideoCodec::H264;
         break;
@@ -260,9 +368,9 @@ int main(int argc, char* argv[]) {
         config.video_codec = fthr::VideoCodec::AV1;
         break;
     default:
-        std::cerr << "[Config] Unknown codec preference - using Auto/H.264"
+        std::cerr << "[Config] Unknown codec preference - using Auto"
                   << std::endl;
-        config.video_codec = fthr::VideoCodec::H264;
+        config.video_codec_auto = true;
         break;
     }
     config.encoder_preset = std::clamp<uint32_t>(
@@ -273,6 +381,13 @@ int main(int argc, char* argv[]) {
     config.microphone_endpoint_id = ParseArgUtf8(argc, argv, 15);
     config.playback_endpoint_id = ParseArgUtf8(argc, argv, 24);
     config.microphone_mono = ParseArgU32(argc, argv, 25, 0) != 0;
+    // argv[26] = named render-endpoint tracks: name;endpoint|name;endpoint|...
+    // argv[27] = explicit process-loopback application track flag. When this
+    // slot is absent, retain the legacy separate_audio_enabled behavior.
+    config.audio_device_tracks = fthr::ParseAudioDeviceTracks(
+        Utf8FromWide(ParseArgUtf8(argc, argv, 26)));
+    config.application_audio_tracks_enabled = ParseArgU32(
+        argc, argv, 27, config.separate_audio_enabled ? 1 : 0) != 0;
     config.microphone_gain_percent = std::min<uint32_t>(
         ParseArgU32(argc, argv, 16, 100), 200);
     switch (ParseArgU32(argc, argv, 17, 0)) {
@@ -417,7 +532,8 @@ int main(int argc, char* argv[]) {
     // NOW the engine is fully running — signal Python it's safe to connect.
     layout->is_initialized = true;
     layout->nvenc_active = engine.IsNvencActive();
-    layout->capture_health_flags = engine.GetCaptureHealthFlags();
+    layout->capture_health_flags = engine.GetCaptureHealthFlags()
+        | fthr::CAPTURE_HEALTH_HIGHLIGHTS;
     layout->capture_generation = engine.GetCaptureGeneration();
 
     // Populate v2 fields so Python get_active_codec() returns a meaningful string.
@@ -452,16 +568,23 @@ int main(int argc, char* argv[]) {
 
     // 5. Command loop - polls shared memory for UI commands
     bool shutdown_requested = false;
+    bool replay_memory_error_reported = false;
     while (!shutdown_requested) {
+
+        if (!replay_memory_error_reported && engine.HasReplayMemoryFailure()) {
+            replay_memory_error_reported = true;
+            fthr::SetEngineError(layout, engine.GetReplayFailureMessage().c_str());
+        }
 
         if (layout->ui_command != fthr::CommandType::NONE) {
 
             fthr::CommandType current_cmd = layout->ui_command;
-            layout->ui_command = fthr::CommandType::NONE;
-
             wchar_t  cmd_string[256] = { 0 };
             wcsncpy_s(cmd_string, layout->ui_string, 255);
             uint32_t cmd_param1 = layout->ui_param1;
+            // Copy payload fields before clearing ui_command. The UI may
+            // immediately reuse ui_string after observing the cleared slot.
+            layout->ui_command = fthr::CommandType::NONE;
 
             switch (current_cmd) {
 
@@ -527,6 +650,16 @@ int main(int argc, char* argv[]) {
                 }
                 break;
 
+            case fthr::CommandType::MARK_HIGHLIGHT: {
+                const std::string marker_id = Utf8FromWide(cmd_string);
+                if (!engine.MarkHighlight(marker_id)) {
+                    std::cerr << "[Cmd] MARK_HIGHLIGHT rejected" << std::endl;
+                }
+                // Fire-and-forget by contract: do not consume or overwrite
+                // the response slot and never claim persistence here.
+                break;
+            }
+
             case fthr::CommandType::RECONFIGURE_ENCODER:
                 std::cout << "[Cmd] RECONFIGURE_ENCODER (stub - restart required)" << std::endl;
                 layout->engine_response = fthr::ResponseType::STATUS_UPDATE;
@@ -548,7 +681,8 @@ int main(int argc, char* argv[]) {
 
         layout->is_recording = engine.IsRecording();
         layout->frames_captured = engine.GetFrameCount();
-        layout->capture_health_flags = engine.GetCaptureHealthFlags();
+        layout->capture_health_flags = engine.GetCaptureHealthFlags()
+            | fthr::CAPTURE_HEALTH_HIGHLIGHTS;
         layout->capture_generation = engine.GetCaptureGeneration();
         layout->content_sample_sequence = engine.GetContentSampleSequence();
         layout->content_suspicious_streak = engine.GetContentSuspiciousStreak();

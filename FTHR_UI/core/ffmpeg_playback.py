@@ -25,6 +25,8 @@ from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
 from core.audio_manifest import read_manifest_for_media, manifest_path_for
 from core.media_identity import file_identity
 from core.media_process import run_media_process
+from core.audio_processing import master_filter, parse_source_handler
+from dataclasses import replace
 from core.ffmpeg_tools import FFmpegUnavailable, get_ffprobe_exe
 from core.playback_mix_model import (
     CANONICAL_CHANNELS,
@@ -41,8 +43,8 @@ _NO_WINDOW = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == '
 _FRAMES_PER_BLOCK = 1024
 # Keep gain changes perceptually immediate. A half-second pre-render queue made
 # every slider appear stale because it continued playing PCM mixed with the old
-# values. 150 ms is still ample protection from ordinary decoder jitter.
-_MAX_QUEUED_FRAMES = CANONICAL_SAMPLE_RATE * 3 // 20
+# values. 50 ms provides a short response without resetting device buffers.
+_MAX_QUEUED_FRAMES = CANONICAL_SAMPLE_RATE // 20
 _SYNC_RECOVERY_SECONDS = 0.75
 _SYNC_DRIFT_LIMIT_MS = 120
 _SYNC_RESUME_MARGIN_MS = 40
@@ -200,6 +202,7 @@ def _load_bridge() -> ctypes.CDLL:
         if not path.is_file():
             continue
         try:
+            dll_directories = []
             if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
                 # The bridge and FFmpeg runtime are either together in the
                 # frozen ``engine`` directory or beside the development engine.
@@ -208,7 +211,7 @@ def _load_bridge() -> ctypes.CDLL:
                                   source_root / 'FTHRcapture' / 'FTHRclips'
                                   / 'third_party' / 'ffmpeg' / 'bin'):
                     if directory.is_dir():
-                        os.add_dll_directory(str(directory))
+                        dll_directories.append(os.add_dll_directory(str(directory)))
             return ctypes.CDLL(str(path))
         except OSError as error:
             errors.append(f'{path.name}: {error}')
@@ -219,7 +222,7 @@ def _load_bridge() -> ctypes.CDLL:
 class InProcessFFmpegMixer:
     """``ctypes`` ownership wrapper around the native in-process FFmpeg bridge."""
 
-    def __init__(self, media_path: str, sources: Sequence[PlaybackSource]):
+    def __init__(self, media_path: str, sources: Sequence[PlaybackSource], *, limiter_enabled: bool = True):
         selected = [source for source in sources
                     if source.available and source.container_index is not None]
         if not selected:
@@ -230,12 +233,40 @@ class InProcessFFmpegMixer:
         indexes = (ctypes.c_int * len(self.sources))(
             *(source.container_index for source in self.sources))
         error = ctypes.create_string_buffer(512)
-        self._handle = self._library.fthr_playback_open(
-            os.fsencode(media_path), indexes, len(self.sources), error, len(error))
+        if any(source.media_path for source in self.sources):
+            open_sources = getattr(self._library, 'fthr_playback_open_sources', None)
+            if open_sources is None:
+                raise PlaybackError('Rebuild the playback mixer to preview imported audio.')
+            open_sources.argtypes = [ctypes.POINTER(ctypes.c_char_p),
+                                     ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+                                     ctypes.c_char_p, ctypes.c_size_t]
+            open_sources.restype = ctypes.c_void_p
+            paths = (ctypes.c_char_p * len(self.sources))(
+                *((source.media_path or media_path).encode('utf-8') for source in self.sources))
+            self._handle = open_sources(paths, indexes, len(self.sources), error, len(error))
+        else:
+            self._handle = self._library.fthr_playback_open(
+                media_path.encode('utf-8'), indexes, len(self.sources), error, len(error))
         if not self._handle:
             raise PlaybackError(error.value.decode(errors='replace') or 'could not open clip audio')
         self._pitch_compensation_available = hasattr(
             self._library, 'fthr_playback_set_playback_rate')
+        configure = getattr(self._library, 'fthr_playback_configure_dsp', None)
+        self._shared_dsp = configure is not None
+        if configure is not None:
+            configure.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_char_p),
+                                   ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+            configure.restype = ctypes.c_int
+            filters = (ctypes.c_char_p * len(self.sources))(*(
+                source.processing_filter.encode('utf-8')
+                for source in self.sources))
+            if not configure(self._handle, filters, len(self.sources),
+                             master_filter(limiter_enabled).encode('ascii'), error, len(error)):
+                self.close()
+                raise PlaybackError(error.value.decode(errors='replace') or 'Audio DSP unavailable')
+        else:
+            self.close()
+            raise PlaybackError('The playback mixer is outdated. Rebuild FTHRPlaybackMixer to edit audio.')
 
     def _configure_signatures(self) -> None:
         library = self._library
@@ -278,7 +309,7 @@ class InProcessFFmpegMixer:
             raise PlaybackError(
                 error.value.decode(errors='replace')
                 or 'could not configure pitch-preserving playback')
-        return active
+        return abs(float(rate) - 1.0) > 1e-6 if self._shared_dsp else active
 
     def pull(self, frames: int, gains: Sequence[float], master_gain: float) -> bytes | None:
         output = (ctypes.c_float * (frames * CANONICAL_CHANNELS))()
@@ -290,6 +321,22 @@ class InProcessFFmpegMixer:
         if result == 0:
             return None
         return ctypes.string_at(output, result * CANONICAL_CHANNELS * ctypes.sizeof(ctypes.c_float))
+
+    def buffered_frames(self) -> int:
+        count = getattr(self._library, 'fthr_playback_buffered_frames', None)
+        if count is None or not self._handle:
+            return 0
+        count.argtypes = [ctypes.c_void_p]
+        count.restype = ctypes.c_int64
+        return int(count(self._handle))
+
+    def output_peak(self) -> float:
+        peak = getattr(self._library, 'fthr_playback_output_peak', None)
+        if peak is None:
+            return 0.0
+        peak.argtypes = [ctypes.c_void_p]
+        peak.restype = ctypes.c_float
+        return float(peak(self._handle))
 
     def seek(self, position_ms: int) -> None:
         error = ctypes.create_string_buffer(512)
@@ -317,7 +364,7 @@ def probe_audio_streams(media_path: str, cancelled: threading.Event | None = Non
         raise PlaybackError(str(error)) from error
     try:
         command = [probe, '-v', 'error', '-show_entries',
-             'format_tags=comment,fthr_audio_mode:stream=index,codec_type:stream_tags=title,handler_name',
+             'format_tags=comment,fthr_audio_mode,fthr_capture_audio:stream=index,codec_type,codec_name:stream_tags=title,handler_name',
              '-of', 'json', media_path]
         if cancelled is None:
             result = subprocess.run(command, capture_output=True, text=True,
@@ -352,15 +399,27 @@ def probe_audio_streams(media_path: str, cancelled: threading.Event | None = Non
                   and raw_audio_mode.strip().lower() in {'combined', 'separated'}
                   else None)
     streams: list[ProbedAudioStream] = []
+    audio_ordinal = -1
     for stream in raw_streams:
         if stream.get('codec_type') != 'audio' or not isinstance(stream.get('index'), int):
             continue
+        audio_ordinal += 1
         tags = stream.get('tags') if isinstance(stream.get('tags'), dict) else {}
+        if (isinstance(format_tags, dict)
+                and format_tags.get('fthr_capture_audio') == 'independent-float-v1'
+                and str(tags.get('handler_name', '')).startswith('FTHR reserved audio ')):
+            continue
         title = tags.get('title') or tags.get('handler_name')
+        native = parse_source_handler(tags.get('handler_name'))
         streams.append(ProbedAudioStream(
-            container_index=stream['index'], audio_index=len(streams),
-            title=title if isinstance(title, str) else None,
-            audio_mode=audio_mode))
+            container_index=stream['index'], audio_index=audio_ordinal,
+            title=native['display_name'] if native else title if isinstance(title, str) else None,
+            audio_mode=audio_mode,
+            source_id=native['source_id'] if native else None,
+            source_type=native['source_type'] if native else None,
+            gain_percent=native['gain_percent'] if native else 100,
+            mono=native['mono'] if native else False,
+            codec=stream.get('codec_name')))
     if audio_mode is None:
         labels = {
             str((stream.get('tags') or {}).get('title')
@@ -374,11 +433,7 @@ def probe_audio_streams(media_path: str, cancelled: threading.Event | None = Non
         elif {'system audio', 'microphone'} <= labels:
             audio_mode = 'separated'
         if audio_mode is not None:
-            streams = [ProbedAudioStream(
-                container_index=stream.container_index,
-                audio_index=stream.audio_index,
-                title=stream.title,
-                audio_mode=audio_mode)
+            streams = [replace(stream, audio_mode=audio_mode)
                        for stream in streams]
     return tuple(streams)
 
@@ -425,7 +480,9 @@ def discover_playback_sources(media_path: str, cancelled: threading.Event | None
             cached = _SOURCE_CACHE.get(key)
             if cached is not None:
                 _SOURCE_CACHE.move_to_end(key)
-                return cached
+                # Cache probing, not plugin settings. Each newly opened clip
+                # receives a fresh immutable graph shared by preview/export.
+                return tuple(replace(source, effect_filter_snapshot=None) for source in cached)
     streams = (probe_audio_streams(media_path) if cancelled is None
                else probe_audio_streams(media_path, cancelled))
     if cancelled is not None and cancelled.is_set():
@@ -455,8 +512,8 @@ class _DecodeWorker(threading.Thread):
                  mix_values: Callable[[], tuple[list[float], float]],
                  ready: Callable[[str | None], None],
                  failed: Callable[[str], None], source_failed: Callable[[str], None],
-                  eof: Callable[[], None], pcm_ready: Callable[[], None] = lambda: None,
-                  finished: Callable[[], None] = lambda: None):
+                 eof: Callable[[], None], pcm_ready: Callable[[], None] = lambda: None,
+                 finished: Callable[[], None] = lambda: None):
         super().__init__(name='FTHR-audio-decode', daemon=True)
         self._media_path = media_path
         self._sources = tuple(sources)
@@ -471,6 +528,7 @@ class _DecodeWorker(threading.Thread):
         self._finished = finished
         self._condition = threading.Condition()
         self._playing = False
+        self._at_eof = False
         self._stopping = False
         self._seek_ms: int | None = 0
         self._decoded_frames = 0
@@ -482,12 +540,15 @@ class _DecodeWorker(threading.Thread):
         # audible audio at the new playhead position.
         self._command_generation = 0
         self._reported_failed_sources: set[int] = set()
+        self._meter = lambda _peak: None
+        self.limiter_enabled = True
 
     def play(self, position_ms: int) -> None:
         with self._condition:
             self._command_generation += 1
             self._seek_ms = max(0, position_ms)
             self._playing = True
+            self._at_eof = False
             self._queue.clear()
             self._condition.notify_all()
 
@@ -502,6 +563,7 @@ class _DecodeWorker(threading.Thread):
         with self._condition:
             self._command_generation += 1
             self._seek_ms = max(0, position_ms)
+            self._at_eof = False
             self._queue.clear()
             self._condition.notify_all()
 
@@ -514,6 +576,7 @@ class _DecodeWorker(threading.Thread):
             if position_ms is not None:
                 self._command_generation += 1
                 self._seek_ms = max(0, int(position_ms))
+                self._at_eof = False
                 self._queue.clear()
                 self._condition.notify_all()
 
@@ -524,6 +587,11 @@ class _DecodeWorker(threading.Thread):
             self._playing = False
             self._queue.clear()
             self._condition.notify_all()
+
+    @property
+    def at_eof(self) -> bool:
+        with self._condition:
+            return self._at_eof
 
     @property
     def estimated_position_ms(self) -> int:
@@ -537,14 +605,17 @@ class _DecodeWorker(threading.Thread):
     def run(self) -> None:
         mixer: InProcessFFmpegMixer | None = None
         try:
-            mixer = InProcessFFmpegMixer(self._media_path, self._sources)
+            mixer = InProcessFFmpegMixer(self._media_path, self._sources,
+                                         limiter_enabled=self.limiter_enabled)
             self._ready(None)
             configured_rate: float | None = None
             configured_preserve_pitch: bool | None = None
             native_pitch_compensation = False
+            last_meter_at = 0.0
+            peak_window = 0.0
             while True:
                 with self._condition:
-                    while not self._stopping and not self._playing:
+                    while not self._stopping and (not self._playing or self._at_eof):
                         self._condition.wait()
                     if self._stopping:
                         return
@@ -577,6 +648,14 @@ class _DecodeWorker(threading.Thread):
                                     else max(1, round(
                                         _FRAMES_PER_BLOCK * playback_rate)))
                 block = mixer.pull(requested_frames, gains, master)
+                get_peak = getattr(mixer, 'output_peak', None)
+                if callable(get_peak):
+                    peak_window = max(peak_window, get_peak())
+                    now = time.monotonic()
+                    if now - last_meter_at >= .05:
+                        self._meter(peak_window)
+                        peak_window = 0.0
+                        last_meter_at = now
                 with self._condition:
                     stale = (generation != self._command_generation
                              or not self._playing or self._stopping)
@@ -590,7 +669,7 @@ class _DecodeWorker(threading.Thread):
                     with self._condition:
                         if generation != self._command_generation:
                             continue
-                        self._playing = False
+                        self._at_eof = True
                     self._eof()
                     continue
                 output_frames = len(block) // (CANONICAL_CHANNELS * 4)
@@ -639,13 +718,17 @@ class FFmpegPlaybackController(QObject):
     reached_eof = Signal()
     pcm_available = Signal()
     decode_finished = Signal()
+    output_level = Signal(float)
 
-    def __init__(self, media_path: str, sources: Sequence[PlaybackSource], parent: QObject):
+    def __init__(self, media_path: str, sources: Sequence[PlaybackSource], parent: QObject,
+                 *, limiter_enabled: bool = True):
         super().__init__(parent)
         self.sources = tuple(source for source in sources if source.available)
-        self._states = {source.source_id: SourceMixState() for source in self.sources}
+        self._states = {source.source_id: SourceMixState(muted=source.default_muted)
+                        for source in self.sources}
         self._master_gain = 1.0
         self._mix_lock = threading.Lock()
+        self._playback_rate = 1.0
         self._sync_guard_until = 0.0
         # A clock correction may briefly hold an early audio endpoint while
         # the video catches up.  Automatic sync must never seek audio
@@ -668,6 +751,8 @@ class FFmpegPlaybackController(QObject):
             self._worker_ready, self._worker_failed, self.source_failed.emit,
             self.reached_eof.emit, self.pcm_available.emit,
             self.decode_finished.emit)
+        self._worker._meter = self.output_level.emit
+        self._worker.limiter_enabled = limiter_enabled
         # The owner must connect ready/error signals before this thread starts;
         # otherwise a fast bridge open can emit readiness before Qt has any
         # receiver and leave the fallback output permanently muted.
@@ -702,12 +787,9 @@ class FFmpegPlaybackController(QObject):
 
     def _mix_values(self) -> tuple[list[float], float]:
         with self._mix_lock:
-            # Application stems are reversible deltas against Default Mix.
-            # Feeding their raw 0..1 UI gain here duplicated every app at 100%
-            # and made 0% merely remove that duplicate. source_gain() converts
-            # them to the required -1..0 delta while leaving mic/import tracks
-            # as ordinary direct gains and the hidden base fixed at 1.
-            return ([source_gain(source, self._states) for source in self.sources],
+            # Shared with export: direct gains for new recordings, mutually
+            # exclusive backup, and delta interpretation for legacy clips.
+            return ([source_gain(source, self._states, self.sources) for source in self.sources],
                     self._master_gain)
 
     def _worker_ready(self, error: str | None) -> None:
@@ -735,6 +817,7 @@ class FFmpegPlaybackController(QObject):
         """Match live mixed audio to speed, with optional pitch preservation."""
 
         normalized = max(0.25, min(2.0, float(rate)))
+        self._playback_rate = normalized
         self._worker.set_playback_rate(
             normalized, position_ms, preserve_pitch=preserve_pitch)
         if position_ms is not None:
@@ -743,17 +826,8 @@ class FFmpegPlaybackController(QObject):
             self._keep_sink_running()
 
     def refresh_mix(self, position_ms: int) -> None:
-        """Apply new gains at the video clock after discarding queued old-mix PCM.
-
-        The editor coalesces changes to at most one call per 40 ms to limit seeks.
-        """
-
-        if not self._worker_started:
-            return
-        self._worker.seek(max(0, position_ms))
-        self._discard_output_buffer()
-        self._sync_guard_until = time.monotonic() + _SYNC_RECOVERY_SECONDS
-        self._keep_sink_running()
+        """Gains are sampled by the next pull and ramped without seeking."""
+        del position_ms
 
     def source_state(self, source_id: str) -> SourceMixState:
         with self._mix_lock:
@@ -767,6 +841,7 @@ class FFmpegPlaybackController(QObject):
         self._sink_timer.start()
 
     def pause(self) -> None:
+        self._sink_timer.stop()
         self._worker.pause()
         self._discard_output_buffer()
 
@@ -792,7 +867,7 @@ class FFmpegPlaybackController(QObject):
             if drift_ms > _SYNC_RESUME_MARGIN_MS:
                 return
             self._sync_holding = False
-            if drift_ms < -_SYNC_DRIFT_LIMIT_MS:
+            if drift_ms < -_SYNC_DRIFT_LIMIT_MS and not self._worker.at_eof:
                 # Video passed the held endpoint: skip forward, never rewind.
                 self.seek(position_ms)
                 return
@@ -816,8 +891,9 @@ class FFmpegPlaybackController(QObject):
                     # A disappearing output endpoint is handled by state polling.
                     pass
             return
-        if drift_ms < -_SYNC_DRIFT_LIMIT_MS:
+        if drift_ms < -_SYNC_DRIFT_LIMIT_MS and not self._worker.at_eof:
             # Skipping late audio forward cannot replay anything already heard.
+            # Once audio ends, the video may legitimately continue on its own.
             self.seek(position_ms)
 
     def _estimated_output_position_ms(self) -> int:
@@ -832,7 +908,8 @@ class FFmpegPlaybackController(QObject):
                 # A device can disappear between the state check and these Qt
                 # calls.  Error reporting remains owned by _on_sink_state().
                 buffered_frames = 0
-        buffered_ms = round(buffered_frames * 1000 / CANONICAL_SAMPLE_RATE)
+        buffered_ms = round(
+            buffered_frames * self._playback_rate * 1000 / CANONICAL_SAMPLE_RATE)
         return max(0, self._worker.estimated_position_ms - buffered_ms)
 
     def _discard_output_buffer(self) -> None:

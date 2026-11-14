@@ -23,9 +23,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal, QMetaMethod
 
 from core.clip_files import is_completed_video_path, iter_safe_tree
+from core.library_index import canonical_media_path
+from core.library_ownership import media_file_identity
 from core.settings_manager import clips_directory_from
 from core.field_diagnostics import emit_event
 from core.clip_readiness import (
@@ -167,6 +169,7 @@ class UploadManager(QObject):
 
     upload_started = Signal(str)
     upload_finished = Signal(str, bool, str)
+    automatic_trash_requested = Signal(str, object)
     upload_error = Signal(str, str, str, str)
     compression_required = Signal(str, str, int)  # path, provider, hard limit MB
     compression_started = Signal(str, str)
@@ -176,9 +179,11 @@ class UploadManager(QObject):
     def __init__(
             self,
             settings_manager,
-            readiness: ClipReadinessRegistry | None = None):
+            readiness: ClipReadinessRegistry | None = None, *,
+            initializing: bool = False, metadata_manager=None):
         super().__init__()
         self._core_settings = settings_manager
+        self._metadata_manager = metadata_manager
         self._readiness = readiness or get_clip_readiness_registry()
         self._settings = self._load_settings()
         self._queue: queue.Queue = queue.Queue()
@@ -192,9 +197,13 @@ class UploadManager(QObject):
         self._in_flight: set[str] = set()
         self._local_mutations: set[str] = set()
         self._in_flight_lock = threading.Lock()
+        self._initializing = bool(initializing)
+        self._suspended = False
         self._history: dict[str, Any] = {}
         self._history_mtime_ns = -1
         self._bundle_cache: dict[str, tuple[str, dict[str, Any], str, str]] = {}
+        self._display_installation = None
+        self._display_executable: Path | None = None
 
     # Settings adapter
 
@@ -563,7 +572,8 @@ class UploadManager(QObject):
 
     def start(self) -> None:
         self._stop_event.clear()
-        self._interval_scan_cancel.clear()
+        if not self._suspended:
+            self._interval_scan_cancel.clear()
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
             daemon=True,
@@ -583,12 +593,27 @@ class UploadManager(QObject):
         if scan_thread is not None and scan_thread.is_alive():
             scan_thread.join(timeout=1.0)
 
+    def set_suspended(self, suspended: bool) -> None:
+        """Park queued uploads and let already admitted transfers finish."""
+        with self._in_flight_lock:
+            if suspended == self._suspended:
+                return
+            self._suspended = suspended
+        if suspended:
+            self._interval_scan_cancel.set()
+        else:
+            # The retired worker keeps its own cancelled event.
+            self._interval_scan_cancel = threading.Event()
+        if self._worker_thread is not None and not self._stop_event.is_set():
+            self._apply_interval_timer()
+
     def refresh_settings(self) -> None:
         self._apply_interval_timer()
 
     def _apply_interval_timer(self) -> None:
         self._interval_timer.stop()
-        if not self.is_enabled() or self.get('upload_mode', 'manual') != 'interval':
+        if (getattr(self, '_suspended', False) or not self.is_enabled()
+                or self.get('upload_mode', 'manual') != 'interval'):
             return
         value = int(self.get('upload_interval_value', 5) or 5)
         unit = self.get('upload_interval_unit', 'minutes')
@@ -602,6 +627,43 @@ class UploadManager(QObject):
     def is_enabled(self) -> bool:
         return bool(self.get('upload_enabled', False) and self.is_plugin_installed())
 
+    def is_enabled_for_display(self) -> bool:
+        """Cheap card status only; invocation still performs fresh integrity checks."""
+        if not self.get('upload_enabled', False):
+            return False
+
+        def signature(executable):
+            identities = []
+            for path in (_UPLOADER_ACTIVATION_FILE, executable):
+                if path is None:
+                    identities.append(None)
+                    continue
+                try:
+                    info = path.stat()
+                    identities.append((str(path), info.st_dev, info.st_ino,
+                                       info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+                except OSError:
+                    identities.append((str(path), None))
+            return (UPLOADER_PLUGIN_VERSION, EXPECTED_UPLOADER_BUNDLE_SHA256,
+                    UPLOADER_TERMS_VERSION, UPLOADER_PRIVACY_VERSION, tuple(identities))
+
+        before = signature(self._display_executable)
+        cached = self._display_installation
+        if cached is not None and cached[0] == before:
+            return cached[1]
+        try:
+            receipt = _read_object(_UPLOADER_ACTIVATION_FILE)
+            value = receipt.get('executable')
+            executable = Path(value) if isinstance(value, str) and value else None
+        except (OSError, ValueError, TypeError):
+            executable = None
+        before = signature(executable)
+        installed = self.is_plugin_installed()
+        after = signature(executable)
+        self._display_executable = executable
+        self._display_installation = (after, installed) if before == after else None
+        return installed
+
     def notify_clip_saved(
             self,
             path: str,
@@ -613,7 +675,8 @@ class UploadManager(QObject):
             return event
         handle = self._readiness.engine_committed(path, needs_finalization=has_mic_mux)
         event = handle.event
-        if self.is_enabled() and self.get('upload_mode', 'manual') == 'immediate':
+        if (not getattr(self, '_suspended', False) and self.is_enabled()
+                and self.get('upload_mode', 'manual') == 'immediate'):
             # File size may still change during finalization. Preflight in the
             # worker only after the readiness event opens.
             self._enqueue(path, event, task_kind='preflight_upload')
@@ -623,7 +686,7 @@ class UploadManager(QObject):
         if not is_completed_video_path(path):
             print(f'[Uploader] Refused incomplete clip path: {os.path.basename(path)}')
             return
-        if not self.is_enabled():
+        if getattr(self, '_suspended', False) or not self.is_enabled():
             return
         oversized, provider, limit_mb = self._compression_preflight(path)
         if oversized:
@@ -641,10 +704,15 @@ class UploadManager(QObject):
         repeated click cannot launch duplicate compression jobs. The produced
         copy lives under ``Shared`` and the original is never modified.
         """
-        if not is_completed_video_path(path) or not self.is_enabled():
+        if (getattr(self, '_suspended', False)
+                or not is_completed_video_path(path) or not self.is_enabled()):
             return
         with self._in_flight_lock:
-            if path in self._in_flight:
+            key = canonical_media_path(path)
+            if (getattr(self, '_initializing', False)
+                    or getattr(self, '_suspended', False)
+                    or key in self._local_mutations
+                    or any(canonical_media_path(item) == key for item in self._in_flight)):
                 return
             self._in_flight.add(path)
         self._queue.put(('compress_upload', path, self._readiness.event_for(path)))
@@ -652,8 +720,11 @@ class UploadManager(QObject):
     def _enqueue(self, path: str, event: threading.Event,
                  *, task_kind: str = 'upload') -> None:
         with self._in_flight_lock:
-            if (self.is_uploaded(path) or path in self._in_flight
-                    or path in self._local_mutations):
+            key = canonical_media_path(path)
+            if (getattr(self, '_initializing', False)
+                    or getattr(self, '_suspended', False) or self.is_uploaded(path)
+                    or any(canonical_media_path(item) == key for item in self._in_flight)
+                    or key in self._local_mutations):
                 return
             self._in_flight.add(path)
         self._queue.put((task_kind, path, event))
@@ -679,41 +750,71 @@ class UploadManager(QObject):
             task_kind, path, event = task
             while not self._stop_event.is_set():
                 event.wait(timeout=0.25)
+                with self._in_flight_lock:
+                    paused = (getattr(self, '_initializing', False)
+                              or getattr(self, '_suspended', False))
+                if paused:
+                    # A previously signalled readiness event cannot bypass startup recovery.
+                    self._stop_event.wait(0.1)
+                    continue
                 state = self._readiness.state(path)
+                if state is ClipReadinessState.INITIALIZING:
+                    self._stop_event.wait(0.1)
+                    continue
                 if state in {
                         ClipReadinessState.READY,
                         ClipReadinessState.READY_WITH_WARNING,
+                        ClipReadinessState.RECOVERY_REQUIRED,
                         ClipReadinessState.FINALIZATION_FAILED}:
-                    break
+                    # Recheck at the last admission boundary. Once admitted,
+                    # this transaction may complete even if suspension wins
+                    # the next boundary before this thread returns.
+                    with self._in_flight_lock:
+                        if not getattr(self, '_suspended', False):
+                            break
             if self._stop_event.is_set():
                 with self._in_flight_lock:
                     self._in_flight.discard(path)
                 continue
             publish_finished = True
-            if not self._readiness.can_access(path):
-                success, message = False, 'Clip finalization failed; upload was not started'
-            elif task_kind == 'preflight_upload':
-                oversized, provider, limit_mb = self._compression_preflight(path)
-                if oversized:
-                    if self.get('upload_auto_compress', False):
-                        self.upload_started.emit(path)
-                        success, message = self._compress_then_upload(path)
+            cleanup_candidates = []
+            try:
+                if not self._readiness.can_access(path):
+                    if self._readiness.state(path) is ClipReadinessState.RECOVERY_REQUIRED:
+                        success, message = False, 'Clip file recovery is required; upload was not started'
                     else:
-                        self.compression_required.emit(
-                            path, provider, int(limit_mb or 0))
-                        success, message = False, 'Compression confirmation required'
-                        publish_finished = False
+                        success, message = False, 'Clip finalization failed; upload was not started'
+                elif task_kind == 'preflight_upload':
+                    oversized, provider, limit_mb = self._compression_preflight(path)
+                    if oversized:
+                        if self.get('upload_auto_compress', False):
+                            self.upload_started.emit(path)
+                            success, message = self._compress_then_upload(path)
+                        else:
+                            self.compression_required.emit(
+                                path, provider, int(limit_mb or 0))
+                            success, message = False, 'Compression confirmation required'
+                            publish_finished = False
+                    else:
+                        self.upload_started.emit(path)
+                        success, message = self._do_single_upload(path, cleanup_candidates=cleanup_candidates)
+                elif task_kind == 'compress_upload':
+                    self.upload_started.emit(path)
+                    success, message = self._compress_then_upload(path)
                 else:
                     self.upload_started.emit(path)
-                    success, message = self._do_single_upload(path)
-            elif task_kind == 'compress_upload':
-                self.upload_started.emit(path)
-                success, message = self._compress_then_upload(path)
-            else:
-                self.upload_started.emit(path)
-                success, message = self._do_single_upload(path)
-            with self._in_flight_lock:
-                self._in_flight.discard(path)
+                    success, message = self._do_single_upload(path, cleanup_candidates=cleanup_candidates)
+            except Exception as error:
+                # A failed provider/compressor must never strand the upload's
+                # mutation reservation or request destructive local follow-up.
+                success, message = False, str(error)
+                cleanup_candidates.clear()
+            finally:
+                with self._in_flight_lock:
+                    self._in_flight.discard(path)
+            for candidate_path, identity in cleanup_candidates:
+                if not self._stop_event.is_set():
+                    self.automatic_trash_requested.emit(candidate_path, identity)
             if publish_finished:
                 self.upload_finished.emit(path, success, message)
 
@@ -775,7 +876,7 @@ class UploadManager(QObject):
                 original_path, str(compressed), actual_size)
             return True, (
                 f'Uploaded compressed copy ({actual_size / MIB:.1f} MB); '
-                f'original preserved. {plan.summary}')
+                f'original preserved. {plan.summary} {message}')
         return False, message
 
     def _alias_compressed_upload_history(
@@ -801,13 +902,18 @@ class UploadManager(QObject):
             # the network request or misreport the provider result.
             return
 
-    def _do_single_upload(self, path: str) -> tuple[bool, str]:
+    def _do_single_upload(self, path: str, *, cleanup_candidates=None) -> tuple[bool, str]:
         if not is_completed_video_path(path):
             return False, 'Incomplete clip files cannot be uploaded'
         if not os.path.isfile(path):
             return False, 'File no longer exists (deleted before upload)'
         if not self.is_enabled():
             return False, 'Upload Extension is disabled or not installed'
+        before = None
+        try:
+            before = media_file_identity(path)
+        except OSError:
+            pass  # Upload can succeed even when safe automatic deletion is unavailable.
         try:
             response = self._invoke_plugin(
                 'upload',
@@ -815,19 +921,29 @@ class UploadManager(QObject):
                     'path': path,
                     'allowed_roots': self._approved_roots(),
                     'clips_root': str(self.clips_directory()),
+                    'config': {'upload_auto_delete': False},
                 },
             )
         except Exception as exc:
             response = {'ok': False, 'message': str(exc)}
         self._invalidate_history()
-        success = bool(response.get('ok'))
+        success = response.get('ok') is True
         message = str(response.get('message', '') or 'Upload failed')
         if not success:
             self.upload_error.emit('UPLOAD FAILED', message, 'warning', path)
+        elif self.get('upload_auto_delete', False) is True:
+            if before is None:
+                message += ' File kept: its pre-upload identity could not be confirmed.'
+            elif (cleanup_candidates is not None and self.isSignalConnected(
+                    QMetaMethod.fromSignal(self.automatic_trash_requested))):
+                cleanup_candidates.append((path, dict(before)))
+                message += ' Local file retained pending an automatic Trash request.'
+            else:
+                message += ' Local file kept: no automatic Trash handler is available for this upload.'
         return success, message
 
     def _interval_scan(self) -> None:
-        if not self.is_enabled():
+        if getattr(self, '_suspended', False) or not self.is_enabled():
             return
         with self._interval_scan_lock:
             if (self._interval_scan_thread is not None
@@ -930,18 +1046,57 @@ class UploadManager(QObject):
             'test_connection', {'config': config}, timeout=75)
         return bool(response.get('ok')), str(response.get('message', ''))
 
+    def acquire_local_mutations(self, paths):
+        from core.export_queue import LocalMutationReservation
+        keys = frozenset(canonical_media_path(path) for path in paths)
+        with self._in_flight_lock:
+            active = {canonical_media_path(path) for path in self._in_flight}
+            if (getattr(self, '_initializing', False) or keys.intersection(active)
+                    or keys.intersection(self._local_mutations)):
+                return None
+            reservation = LocalMutationReservation(keys)
+            if not hasattr(self, '_mutation_tokens'):
+                self._mutation_tokens = {}
+            self._mutation_tokens[reservation] = keys
+            self._local_mutations.update(keys)
+            return reservation
+
+    def release_local_mutations(self, reservation) -> None:
+        from core.export_queue import LocalMutationReservation
+        if not isinstance(reservation, LocalMutationReservation):
+            return
+        with self._in_flight_lock:
+            keys = getattr(self, '_mutation_tokens', {}).pop(reservation, None)
+            if keys is not None:
+                self._local_mutations.difference_update(keys)
+
     def begin_local_mutation(self, path: str) -> bool:
         """Reserve a clip against uploads while the library renames/deletes it."""
+        return self.begin_local_mutations((path,))
+
+    def begin_local_mutations(self, paths) -> bool:
+        keys = {canonical_media_path(path) for path in paths}
         with self._in_flight_lock:
-            if path in self._in_flight:
+            active = {canonical_media_path(path) for path in self._in_flight}
+            if (getattr(self, '_initializing', False) or keys.intersection(active)
+                    or keys.intersection(self._local_mutations)):
                 return False
-            self._local_mutations.add(path)
+            self._local_mutations.update(keys)
             return True
 
+    def set_initializing(self, initializing: bool) -> None:
+        with self._in_flight_lock:
+            self._initializing = bool(initializing)
 
     def end_local_mutation(self, path: str) -> None:
+        self.end_local_mutations((path,))
+
+    def end_local_mutations(self, paths) -> None:
         with self._in_flight_lock:
-            self._local_mutations.discard(path)
+            tokens = getattr(self, '_mutation_tokens', {})
+            owned = set().union(*tokens.values()) if tokens else set()
+            self._local_mutations.difference_update(
+                {canonical_media_path(path) for path in paths}.difference(owned))
 
 
     def rename_history_path(self, old_path: str, new_path: str) -> None:

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from ui.app_style import apply_app_style
 from ui.customize_page import _AccordionSection
 from main import _DropdownCombo, TopBarButton
 from ui.clip_viewer import ClipViewer
+from PySide6.QtWidgets import QScrollArea
 from ui.style import (
     Colors, Sizes, ThemedDropdownArrow, ThemedDropdownButton, combo_qss,
 )
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
-from PySide6.QtWidgets import QWidget
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QComboBox, QVBoxLayout, QWidget
 
 
 def test_combo_style_uses_a_real_dropdown_popup():
@@ -106,3 +109,34 @@ def test_closed_combo_ignores_wheel_selection_changes(qtbot):
 
     assert combo.currentIndex() == 1
     assert not event.isAccepted()
+
+
+def test_focused_native_dropdown_passes_wheel_to_settings_scroll_area(qapp, qtbot):
+    apply_app_style(qapp)
+    page = QScrollArea()
+    page.setObjectName('settingsPage')
+    qtbot.addWidget(page)
+    content = QWidget()
+    layout = QVBoxLayout(content)
+    combo = QComboBox()
+    combo.setStyleSheet(combo_qss())
+    combo.addItems(['One', 'Two', 'Three'])
+    combo.setCurrentIndex(1)
+    layout.addWidget(combo)
+    layout.addSpacing(600)
+    page.setWidget(content)
+    page.resize(260, 150)
+    page.show()
+    qtbot.waitExposed(page)
+    combo.setFocus()
+    qtbot.waitUntil(combo.hasFocus)
+
+    position = combo.mapTo(page, combo.rect().center())
+    with qtbot.assertNotEmitted(combo.currentIndexChanged):
+        QTest.wheelEvent(page.windowHandle(), position, QPoint(0, -120))
+        qtbot.waitUntil(lambda: page.verticalScrollBar().value() > 0)
+
+    assert combo.hasFocus()
+    assert combo.currentIndex() == 1
+    qtbot.keyClick(combo, Qt.Key.Key_Down)
+    assert combo.currentIndex() == 2

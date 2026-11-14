@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,3 +114,25 @@ def test_release_ci_runs_response_and_exception_contracts() -> None:
 
     assert "verify_engine_response_contract.py" in release_job
     assert "verify_exception_handling.py" in release_job
+
+
+def test_platform_integration_branches_receive_push_and_pr_checks() -> None:
+    triggers = _workflow().split("# No secrets", 1)[0]
+    branch_lists = re.findall(r"branches: \[([^\]]+)\]", triggers)
+    assert len(branch_lists) == 2
+    for branch_list in branch_lists:
+        branches = {branch.strip() for branch in branch_list.split(",")}
+        assert {"master", "windows", "linux", "linux-2.0", "experimental"} <= branches
+
+
+def test_windows_ci_executes_native_tests_and_builds_amd_helper() -> None:
+    workflow = _workflow()
+    job = workflow[workflow.index("  windows-engine:"):workflow.index("  release-verification:")]
+    assert job.index("msbuild FTHRcapture") < job.index("& $nativeTests")
+    assert job.index("& $nativeTests") < job.index("python -m PyInstaller")
+    assert "FTHRcapture/x64/Release/FTHRclips_tests.exe" in job
+    assert '$env:PATH = "$ffmpegRuntime;$env:PATH"' in job
+    assert "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }" in job
+    assert "timeout-minutes: 10" in job
+    assert "tools/amd_isolation_smoke.cpp" in job
+    assert "build_harness(" in job

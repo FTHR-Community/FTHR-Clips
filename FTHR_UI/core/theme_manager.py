@@ -68,9 +68,8 @@ _V3_COLORS: dict[str, str] = {
     'WARNING': '#dfb77c', 'SUCCESS': '#63cfb0', 'DELETE': '#b45d68',
 }
 
-# Reference launcher palette: near-black green surfaces and a bright mint accent.
-# Editors, shell controls, library cards, and capture notifications share it.
-DEFAULT_COLORS: dict[str, str] = {
+# Previous green-black launcher palette, retained for per-token migration.
+_V4_COLORS: dict[str, str] = {
     'BG': '#070a09', 'SURFACE_1': '#0a0f0d', 'SURFACE_2': '#101512',
     'SURFACE_3': '#141b17', 'SHELL_BG': '#0a0f0d',
     'SHELL_BG_2': '#101512', 'SHELL_DIVIDER': '#1b231e',
@@ -80,6 +79,21 @@ DEFAULT_COLORS: dict[str, str] = {
     'TEXT_GHOST': '#7e8a83', 'ACCENT': '#20e3a0', 'ACCENT_DIM': '#16bf87',
     'ACCENT_SOFT': '#0d2b20', 'ERROR': '#ff795d', 'ERROR_SOFT': '#270b0f',
     'WARNING': '#e7b56e', 'SUCCESS': '#20e3a0', 'DELETE': '#b84f45',
+}
+
+
+# Website palette: neutral charcoal surfaces, readable grays, and mint accents.
+# Editors, shell controls, library cards, and capture notifications share it.
+DEFAULT_COLORS: dict[str, str] = {
+    'BG': '#242629', 'SURFACE_1': '#202326', 'SURFACE_2': '#2c2f33',
+    'SURFACE_3': '#2c2f33', 'SHELL_BG': '#202326',
+    'SHELL_BG_2': '#2c2f33', 'SHELL_DIVIDER': '#45494d',
+    'CARD_BG': '#2c2f33', 'CARD_BG_HI': '#35393d', 'CARD_BORDER': '#45494d',
+    'HAIRLINE': '#35393d', 'BORDER': '#45494d', 'BORDER_HI': '#89938f',
+    'TEXT': '#f3f5f4', 'TEXT_DIM': '#b9bfbe', 'TEXT_MUTED': '#adb5b2',
+    'TEXT_GHOST': '#adb5b2', 'ACCENT': '#00ffaa', 'ACCENT_DIM': '#62e8bb',
+    'ACCENT_SOFT': '#2a3634', 'ERROR': '#ff8585', 'ERROR_SOFT': '#502b30',
+    'WARNING': '#ffc078', 'SUCCESS': '#00ffaa', 'DELETE': '#9e444d',
 }
 
 # Every semantic color consumed by the application is exposed here and in the
@@ -201,6 +215,17 @@ _V3_CAPTURE_CARD_COLORS: dict[str, str] = {
     'CAPTURE_CARD_PROGRESS_FILL': _V3_COLORS['ACCENT'],
 }
 
+
+_V4_CAPTURE_CARD_COLORS: dict[str, str] = {
+    'CAPTURE_CARD_BG': _V4_COLORS['SURFACE_1'],
+    'CAPTURE_CARD_ACCENT': _V4_COLORS['ACCENT'],
+    'CAPTURE_CARD_TEXT': _V4_COLORS['TEXT'],
+    'CAPTURE_CARD_DIVIDER': _V4_COLORS['BORDER'],
+    'CAPTURE_CARD_STATS_DIM': _V4_COLORS['TEXT_DIM'],
+    'CAPTURE_CARD_PROGRESS_TRACK': _V4_COLORS['SURFACE_2'],
+    'CAPTURE_CARD_PROGRESS_FILL': _V4_COLORS['ACCENT'],
+}
+
 DEFAULT_CAPTURE_CARD_COLORS: dict[str, str] = {
     'CAPTURE_CARD_BG': DEFAULT_COLORS['SURFACE_1'],
     'CAPTURE_CARD_ACCENT': DEFAULT_COLORS['ACCENT'],
@@ -252,7 +277,7 @@ class ThemeManager:
 
     def _load(self) -> dict:
         default = {
-            'palette_version': 4,
+            'palette_version': 5,
             'typography_version': 2,
             'colors': dict(DEFAULT_COLORS),
             'icons': {},   # filename -> custom path (relative to icons_dir)
@@ -271,47 +296,39 @@ class ThemeManager:
             merged = dict(default)
             if 'colors' in loaded:
                 merged['colors'] = {**DEFAULT_COLORS, **loaded['colors']}
-                if loaded.get('palette_version', 1) < 2:
-                    # Upgrade the old shipped palette, preserving intentional
-                    # overrides and all imported icons/fonts/sounds.
-                    for token, legacy in _LEGACY_COLORS.items():
-                        if merged['colors'].get(token) == legacy:
-                            merged['colors'][token] = DEFAULT_COLORS[token]
-                if loaded.get('palette_version', 1) < 3:
-                    for token, previous in _V2_COLORS.items():
-                        if merged['colors'].get(token) == previous:
-                            merged['colors'][token] = DEFAULT_COLORS[token]
-                if loaded.get('palette_version', 1) < 4:
-                    for token, previous in _V3_COLORS.items():
-                        if merged['colors'].get(token) == previous:
-                            merged['colors'][token] = DEFAULT_COLORS[token]
+                # Compare only with the defaults of the saved version. A
+                # custom color may intentionally match another older palette.
+                previous_colors = {
+                    1: _LEGACY_COLORS, 2: _V2_COLORS,
+                    3: _V3_COLORS, 4: _V4_COLORS,
+                }.get(loaded.get('palette_version', 1), {})
+                for token, previous in previous_colors.items():
+                    if merged['colors'].get(token) == previous:
+                        merged['colors'][token] = DEFAULT_COLORS[token]
             if 'icons' in loaded:
                 merged['icons'] = loaded['icons']
             if 'sounds' in loaded:
                 merged['sounds'] = loaded['sounds']
             if 'icon_tints' in loaded:
                 merged['icon_tints'] = dict(loaded['icon_tints'])
-                if (loaded.get('palette_version', 1) < 3
-                        and merged['icon_tints'].get('_global') == '#00ffaa'):
-                    merged['icon_tints']['_global'] = DEFAULT_ICON_TINT
-                if (loaded.get('palette_version', 1) < 4
-                        and merged['icon_tints'].get('_global') == _V3_COLORS['TEXT_DIM']):
+                previous_tints = {
+                    1: ('#00ffaa',),
+                    2: ('#00ffaa', _V2_COLORS['TEXT_DIM']),
+                    3: (_V3_COLORS['TEXT_DIM'],),
+                    4: (_V4_COLORS['TEXT_DIM'],),
+                }.get(loaded.get('palette_version', 1), ())
+                if merged['icon_tints'].get('_global') in previous_tints:
                     merged['icon_tints']['_global'] = DEFAULT_ICON_TINT
             if 'capture_card' in loaded:
                 merged['capture_card'] = {**DEFAULT_CAPTURE_CARD_COLORS,
                                           **loaded['capture_card']}
-                if loaded.get('palette_version', 1) < 2:
-                    for token, legacy in _LEGACY_CAPTURE_CARD_COLORS.items():
-                        if merged['capture_card'].get(token) == legacy:
-                            merged['capture_card'][token] = DEFAULT_CAPTURE_CARD_COLORS[token]
-                if loaded.get('palette_version', 1) < 3:
-                    for token, previous in _V2_CAPTURE_CARD_COLORS.items():
-                        if merged['capture_card'].get(token) == previous:
-                            merged['capture_card'][token] = DEFAULT_CAPTURE_CARD_COLORS[token]
-                if loaded.get('palette_version', 1) < 4:
-                    for token, previous in _V3_CAPTURE_CARD_COLORS.items():
-                        if merged['capture_card'].get(token) == previous:
-                            merged['capture_card'][token] = DEFAULT_CAPTURE_CARD_COLORS[token]
+                previous_capture = {
+                    1: _LEGACY_CAPTURE_CARD_COLORS, 2: _V2_CAPTURE_CARD_COLORS,
+                    3: _V3_CAPTURE_CARD_COLORS, 4: _V4_CAPTURE_CARD_COLORS,
+                }.get(loaded.get('palette_version', 1), {})
+                for token, previous in previous_capture.items():
+                    if merged['capture_card'].get(token) == previous:
+                        merged['capture_card'][token] = DEFAULT_CAPTURE_CARD_COLORS[token]
             if 'fonts' in loaded:
                 merged['fonts'] = {**DEFAULT_FONTS, **loaded['fonts']}
             if 'font_files' in loaded:
@@ -332,20 +349,22 @@ class ThemeManager:
             print(f'[Theme] Load failed: {e}')
             return default
 
-    def save(self):
+    def save(self) -> bool:
         import os
-        self._theme_dir.mkdir(parents=True, exist_ok=True)
         tmp = self._config_file.with_suffix('.json.tmp')
         try:
+            self._theme_dir.mkdir(parents=True, exist_ok=True)
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(self._data, f, indent=2)
             os.replace(str(tmp), str(self._config_file))
+            return True
         except Exception as e:
             print(f'[Theme] Save failed: {e}')
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
+            return False
 
     # Color access
 
@@ -591,7 +610,7 @@ class ThemeManager:
                     dest.write_bytes(data)
 
                 self._data = {
-                    'palette_version': 4,
+                    'palette_version': 5,
                     'typography_version': 2,
                     'colors': {**DEFAULT_COLORS, **config_data.get('colors', {})},
                     'icons': config_data.get('icons', {}),
@@ -608,8 +627,7 @@ class ThemeManager:
                     family = str(self._data['fonts'].get(role, DEFAULT_FONTS[role]))
                     if family not in BUILTIN_FONT_FAMILIES and family not in imported:
                         self._data['fonts'][role] = DEFAULT_FONTS[role]
-                self.save()
-            return True
+                return self.save()
         except Exception as e:
             print(f'[Theme] Import failed: {e}')
             return False
@@ -646,7 +664,7 @@ class ThemeManager:
     def reset_all(self) -> None:
         """Restore every active theme choice, retaining imported files on disk."""
         self._data = {
-            'palette_version': 4,
+            'palette_version': 5,
             'typography_version': 2,
             'colors': dict(DEFAULT_COLORS),
             'icons': {},

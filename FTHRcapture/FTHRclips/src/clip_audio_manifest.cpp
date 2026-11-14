@@ -193,16 +193,16 @@ bool WriteClipAudioManifest(
     const std::filesystem::path& manifest_temporary_path,
     const std::string& transaction_id,
     const std::vector<EncodedAudioTrack>& tracks,
-    std::string* error) {
-    if (tracks.empty() || tracks.size() > kMaxClipAudioTracks || !IsUuid(transaction_id)) {
-        if (error) *error = "audio manifest needs one to ten tracks and a valid transaction UUID";
+    std::string* error, const std::vector<std::string>& warnings) {
+    if ((tracks.empty() && warnings.empty()) || tracks.size() > kMaxClipAudioTracks || !IsUuid(transaction_id)) {
+        if (error) *error = "audio manifest needs recorded tracks or capture warnings and a transaction UUID";
         return false;
     }
     std::string media_hash;
     if (!Sha256File(media_temporary_path, &media_hash, error)) return false;
 
     std::ostringstream json;
-    json << "{\"manifest_version\":1,\"transaction_id\":\""
+    json << "{\"manifest_version\":1,\"mixing_mode\":\"independent\",\"transaction_id\":\""
          << EscapeJson(transaction_id) << "\",\"media_file\":\"";
     const auto filename = media_final_path.filename().u8string();
     for (const auto character : filename) json << static_cast<char>(character);
@@ -229,7 +229,15 @@ bool WriteClipAudioManifest(
              << ",\"sample_rate\":" << format.sample_rate
              << ",\"channels\":" << format.channels
              << ",\"sample_format\":\"" << EscapeJson(format.sample_format)
-             << "\"}";
+             << "\",\"codec\":\"" << EscapeJson(format.codec)
+             << "\",\"processing\":{\"gain_percent\":" << track.source.input_gain_percent
+             << ",\"mono\":" << (track.source.mono ? "true" : "false") << "}}";
+    }
+    json << "],\"capture_warnings\":[";
+    for (size_t index = 0; index < warnings.size(); ++index) {
+        if (!IsManifestSafe(warnings[index], 64)) return false;
+        if (index) json << ',';
+        json << '"' << EscapeJson(warnings[index]) << '"';
     }
     json << "]}";
 

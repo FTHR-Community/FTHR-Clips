@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check payload-before-response ordering and error details in both engines.
+"""Check payload-before-response ordering and error details in the Windows engine.
 
 Inspect enclosing C++ blocks rather than fixed line numbers. This source
 gate supplements runtime tests for error paths that are hard to trigger.
@@ -20,7 +20,6 @@ REPO = Path(__file__).resolve().parent.parent
 DEFAULT_ROOTS = [
     REPO / 'FTHRcapture' / 'FTHRclips' / 'src',
     REPO / 'FTHRcapture' / 'FTHRclips' / 'include',
-    REPO / 'FTHRcapture_linux' / 'src',
 ]
 
 # what counts as an event

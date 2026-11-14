@@ -40,3 +40,22 @@ doesn't silently switch to raw replay or another adapter.
 
 Microphone capture is native on Windows and handled by Python on Linux.
 Completed clips pass through UI finalization to produce the chosen audio layout.
+
+## Cursor capture
+
+Both engines accept `--capture-cursor 1|0` after the positional arguments,
+including after the replay-storage options. Omission defaults to enabled.
+The cursor arguments are removed before parsing the replay option tail.
+Settings > Capture > Video encoding exposes **Capture cursor**; changing it
+restarts capture and its replay buffer.
+
+On Windows, enabled desktop capture retains DXGI cursor composition. Disabled
+cursor capture selects WGC in Auto mode, because DXGI can embed the pointer in
+its desktop pixels. Forced DXGI with cursor capture disabled is rejected rather
+than silently recording the cursor. WGC window and monitor sessions explicitly
+apply the cursor setting; exclusion requires the cursor-control session API.
+
+On Linux, the preference controls X11 `draw_mouse`, wlr-screencopy overlay,
+ext-image-copy-capture paint-cursors, and portal HIDDEN/EMBEDDED cursor mode.
+Game-rendered cursors and crosshairs are part of the game image and are not
+removed by this setting. A cursor deliberately hidden by a game is not invented.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import re
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from typing import Iterable
 _DISPLAY_DEVICE_ACTIVE = 0x00000001
 _DISPLAY_DEVICE_ATTACHED_TO_DESKTOP = 0x00000001
 _DISPLAY_DEVICE_PRIMARY_DEVICE = 0x00000004
+_MONITORINFOF_PRIMARY = 0x00000001
 _EDD_GET_DEVICE_INTERFACE_NAME = 0x00000001
 
 
@@ -28,6 +30,7 @@ class DisplayDeviceRecord:
     width: int = 0
     height: int = 0
     hmonitor: int = 0
+    refresh_rate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,7 @@ class MonitorChoice:
     width: int = 0
     height: int = 0
     hmonitor: int = 0
+    refresh_rate: float = 0.0
 
 
 class MonitorSelectionState(str, Enum):
@@ -174,6 +178,7 @@ def build_monitor_choices(records: Iterable[DisplayDeviceRecord]) -> list[Monito
             width=record.width,
             height=record.height,
             hmonitor=record.hmonitor,
+            refresh_rate=float(record.refresh_rate or 0.0),
         ))
     return choices
 
@@ -197,6 +202,396 @@ class _MonitorInfoExW(ctypes.Structure):
         ('dwFlags', wintypes.DWORD),
         ('szDevice', wintypes.WCHAR * 32),
     ]
+
+
+# The Display Configuration API uses fixed-width integer fields.  Keeping
+# these declarations explicit matters on 64-bit Windows: an LUID is still
+# eight bytes and the rational refresh rate is two UINT32 values.
+class _DisplayConfigLuid(ctypes.Structure):
+    _fields_ = [
+        ('LowPart', ctypes.c_uint32),
+        ('HighPart', ctypes.c_int32),
+    ]
+
+
+class _DisplayConfigRational(ctypes.Structure):
+    _fields_ = [
+        ('Numerator', ctypes.c_uint32),
+        ('Denominator', ctypes.c_uint32),
+    ]
+
+
+class _DisplayConfig2DRegion(ctypes.Structure):
+    _fields_ = [
+        ('cx', ctypes.c_uint32),
+        ('cy', ctypes.c_uint32),
+    ]
+
+
+class _DisplayConfigPointL(ctypes.Structure):
+    _fields_ = [
+        ('x', ctypes.c_int32),
+        ('y', ctypes.c_int32),
+    ]
+
+
+class _DisplayConfigRect(ctypes.Structure):
+    _fields_ = [
+        ('left', ctypes.c_int32),
+        ('top', ctypes.c_int32),
+        ('right', ctypes.c_int32),
+        ('bottom', ctypes.c_int32),
+    ]
+
+
+class _DisplayConfigPathSourceInfo(ctypes.Structure):
+    _fields_ = [
+        ('adapterId', _DisplayConfigLuid),
+        ('id', ctypes.c_uint32),
+        ('modeInfoIdx', ctypes.c_uint32),
+        ('statusFlags', ctypes.c_uint32),
+    ]
+
+
+class _DisplayConfigPathTargetInfo(ctypes.Structure):
+    _fields_ = [
+        ('adapterId', _DisplayConfigLuid),
+        ('id', ctypes.c_uint32),
+        ('modeInfoIdx', ctypes.c_uint32),
+        ('outputTechnology', ctypes.c_int32),
+        ('rotation', ctypes.c_int32),
+        ('scaling', ctypes.c_int32),
+        ('refreshRate', _DisplayConfigRational),
+        ('scanLineOrdering', ctypes.c_int32),
+        ('targetAvailable', ctypes.c_int32),
+        ('statusFlags', ctypes.c_uint32),
+    ]
+
+
+class _DisplayConfigPathInfo(ctypes.Structure):
+    _fields_ = [
+        ('sourceInfo', _DisplayConfigPathSourceInfo),
+        ('targetInfo', _DisplayConfigPathTargetInfo),
+        ('flags', ctypes.c_uint32),
+    ]
+
+
+class _DisplayConfigVideoSignalInfo(ctypes.Structure):
+    _fields_ = [
+        ('pixelRate', ctypes.c_uint64),
+        ('hSyncFreq', _DisplayConfigRational),
+        ('vSyncFreq', _DisplayConfigRational),
+        ('activeSize', _DisplayConfig2DRegion),
+        ('totalSize', _DisplayConfig2DRegion),
+        ('videoStandard', ctypes.c_uint32),
+        ('scanLineOrdering', ctypes.c_uint32),
+    ]
+
+
+class _DisplayConfigSourceMode(ctypes.Structure):
+    _fields_ = [
+        ('width', ctypes.c_uint32),
+        ('height', ctypes.c_uint32),
+        ('pixelFormat', ctypes.c_uint32),
+        ('position', _DisplayConfigPointL),
+    ]
+
+
+class _DisplayConfigDesktopImageInfo(ctypes.Structure):
+    _fields_ = [
+        ('PathSourceSize', _DisplayConfigPointL),
+        ('DesktopImageRegion', _DisplayConfigRect),
+        ('DesktopImageClip', _DisplayConfigRect),
+    ]
+
+
+class _DisplayConfigModeUnion(ctypes.Union):
+    _fields_ = [
+        ('targetMode', _DisplayConfigVideoSignalInfo),
+        ('sourceMode', _DisplayConfigSourceMode),
+        ('desktopImageInfo', _DisplayConfigDesktopImageInfo),
+    ]
+
+
+class _DisplayConfigModeInfo(ctypes.Structure):
+    _fields_ = [
+        ('infoType', ctypes.c_uint32),
+        ('id', ctypes.c_uint32),
+        ('adapterId', _DisplayConfigLuid),
+        ('modeInfo', _DisplayConfigModeUnion),
+    ]
+
+
+class _DisplayConfigDeviceInfoHeader(ctypes.Structure):
+    _fields_ = [
+        ('type', ctypes.c_uint32),
+        ('size', ctypes.c_uint32),
+        ('adapterId', _DisplayConfigLuid),
+        ('id', ctypes.c_uint32),
+    ]
+
+
+class _DisplayConfigSourceDeviceName(ctypes.Structure):
+    _fields_ = [
+        ('header', _DisplayConfigDeviceInfoHeader),
+        ('viewGdiDeviceName', wintypes.WCHAR * 32),
+    ]
+
+
+class _DisplayConfigTargetDeviceName(ctypes.Structure):
+    _fields_ = [
+        ('header', _DisplayConfigDeviceInfoHeader),
+        ('flags', ctypes.c_uint32),
+        ('outputTechnology', ctypes.c_int32),
+        ('edidManufactureId', ctypes.c_uint16),
+        ('edidProductCodeId', ctypes.c_uint16),
+        ('connectorInstance', ctypes.c_uint32),
+        ('monitorFriendlyDeviceName', wintypes.WCHAR * 64),
+        ('monitorDevicePath', wintypes.WCHAR * 128),
+    ]
+
+
+_QDC_ONLY_ACTIVE_PATHS = 0x00000002
+_DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1
+_DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME = 2
+_ERROR_SUCCESS = 0
+_ERROR_INSUFFICIENT_BUFFER = 122
+_MAX_DISPLAY_CONFIG_PATHS = 256
+_MAX_DISPLAY_CONFIG_MODES = 1024
+
+
+@dataclass(frozen=True)
+class _DisplayConfigMonitorMetadata:
+    gdi_name: str
+    friendly_name: str
+    device_path: str
+    refresh_rate: float
+
+
+def _display_config_luid_key(luid: _DisplayConfigLuid) -> tuple[int, int]:
+    return int(luid.LowPart), int(luid.HighPart)
+
+
+def _normalise_display_config_gdi_name(value: str | None) -> str:
+    value = str(value or '').strip()
+    if not value:
+        return ''
+    if re.fullmatch(r'display[0-9]+', value, re.IGNORECASE):
+        value = r'\\.' + '\\' + value
+    return value.casefold()
+
+
+def _normalise_refresh_rate(value: float | int | None) -> float:
+    try:
+        value = float(value or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        # Invalid optional Hz metadata must not block the monitor selection.
+        return 0.0
+    if not math.isfinite(value) or not 1.0 <= value <= 1000.0:
+        return 0.0
+    return value
+
+
+def _valid_display_config_refresh_rate(
+        rational: _DisplayConfigRational) -> float:
+    numerator = int(rational.Numerator)
+    denominator = int(rational.Denominator)
+    if numerator <= 0 or denominator <= 0:
+        return 0.0
+    return _normalise_refresh_rate(numerator / denominator)
+
+
+def _configure_display_config_api(user32):
+    get_sizes = user32.GetDisplayConfigBufferSizes
+    get_sizes.argtypes = [
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    get_sizes.restype = ctypes.c_int32
+
+    query = user32.QueryDisplayConfig
+    query.argtypes = [
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(_DisplayConfigPathInfo),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(_DisplayConfigModeInfo),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    query.restype = ctypes.c_int32
+
+    get_info = user32.DisplayConfigGetDeviceInfo
+    get_info.argtypes = [ctypes.POINTER(_DisplayConfigDeviceInfoHeader)]
+    get_info.restype = ctypes.c_int32
+    return get_sizes, query, get_info
+
+
+def _query_display_config_arrays(user32):
+    """Read active Display Configuration paths with bounded resize retries."""
+    get_sizes, query, _get_info = _configure_display_config_api(user32)
+    flags = _QDC_ONLY_ACTIVE_PATHS
+    for _attempt in range(3):
+        path_count = ctypes.c_uint32(0)
+        mode_count = ctypes.c_uint32(0)
+        status = int(get_sizes(flags, ctypes.byref(path_count),
+                                ctypes.byref(mode_count)))
+        if status != _ERROR_SUCCESS:
+            return [], [], None
+        if (int(path_count.value) > _MAX_DISPLAY_CONFIG_PATHS
+                or int(mode_count.value) > _MAX_DISPLAY_CONFIG_MODES):
+            return [], [], None
+        paths = (_DisplayConfigPathInfo * int(path_count.value))()
+        modes = (_DisplayConfigModeInfo * int(mode_count.value))()
+        actual_paths = ctypes.c_uint32(path_count.value)
+        actual_modes = ctypes.c_uint32(mode_count.value)
+        status = int(query(
+            flags, ctypes.byref(actual_paths), paths,
+            ctypes.byref(actual_modes), modes, None))
+        if status == _ERROR_SUCCESS:
+            if (int(actual_paths.value) > len(paths)
+                    or int(actual_modes.value) > len(modes)):
+                return [], [], None
+            return (list(paths[:int(actual_paths.value)]),
+                    list(modes[:int(actual_modes.value)]), _get_info)
+        if status != _ERROR_INSUFFICIENT_BUFFER:
+            return [], [], None
+    return [], [], None
+
+
+def _display_config_device_name(get_info, info_type: int, adapter_id,
+                                device_id: int, info_class):
+    info = info_class()
+    info.header.type = info_type
+    info.header.size = ctypes.sizeof(info)
+    info.header.adapterId = adapter_id
+    info.header.id = device_id
+    if int(get_info(ctypes.byref(info.header))) != _ERROR_SUCCESS:
+        return None
+    return info
+
+
+def _enumerate_display_config_metadata() -> list[_DisplayConfigMonitorMetadata]:
+    """Return only unambiguous source-to-target DisplayConfig joins."""
+    try:
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        paths, _modes, get_info = _query_display_config_arrays(user32)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return []
+    if get_info is None:
+        return []
+
+    source_path_counts: dict[tuple[tuple[int, int], int], int] = {}
+    for path in paths:
+        source_key = (_display_config_luid_key(path.sourceInfo.adapterId),
+                      int(path.sourceInfo.id))
+        source_path_counts[source_key] = source_path_counts.get(source_key, 0) + 1
+
+    by_gdi: dict[str, list[_DisplayConfigMonitorMetadata]] = {}
+    source_to_gdi: dict[tuple[tuple[int, int], int], str] = {}
+    source_name_failed = False
+    for path in paths:
+        try:
+            source = _display_config_device_name(
+                get_info, _DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                path.sourceInfo.adapterId, int(path.sourceInfo.id),
+                _DisplayConfigSourceDeviceName)
+        except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+            source_name_failed = True
+            continue
+        if source is None:
+            source_name_failed = True
+            continue
+        gdi_name = _normalise_display_config_gdi_name(
+            source.viewGdiDeviceName)
+        if not gdi_name:
+            source_name_failed = True
+            continue
+        source_key = (_display_config_luid_key(path.sourceInfo.adapterId),
+                      int(path.sourceInfo.id))
+        source_to_gdi[source_key] = gdi_name
+        try:
+            target = _display_config_device_name(
+                get_info, _DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                path.targetInfo.adapterId, int(path.targetInfo.id),
+                _DisplayConfigTargetDeviceName)
+        except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+            # Keep the legacy monitor identity when optional target details fail.
+            continue
+        if target is None:
+            continue
+        device_path = normalize_monitor_device_path(target.monitorDevicePath)
+        if not is_canonical_monitor_device_path(device_path):
+            continue
+        by_gdi.setdefault(gdi_name, []).append(
+            _DisplayConfigMonitorMetadata(
+                gdi_name=gdi_name,
+                friendly_name=str(target.monitorFriendlyDeviceName).strip(),
+                device_path=device_path,
+                refresh_rate=_valid_display_config_refresh_rate(
+                    path.targetInfo.refreshRate),
+            ))
+
+    # If any source name could not be read, its target cannot be joined to a
+    # GDI source safely.  Keep the complete legacy result instead of allowing
+    # a surviving clone target to look like a unique monitor.
+    if source_name_failed:
+        return []
+
+    # A source with several active targets can be a clone/mirror topology.
+    # Refuse to select one target by path order; the legacy EnumDisplayDevices
+    # result remains the safe fallback for that source.
+    ambiguous_gdi = {
+        source_to_gdi[source_key]
+        for source_key, path_count in source_path_counts.items()
+        if path_count != 1
+    }
+    return [values[0] for gdi_name, values in by_gdi.items()
+            if gdi_name not in ambiguous_gdi and len(values) == 1]
+
+
+def _format_monitor_refresh_rate(value: float) -> str:
+    value = _normalise_refresh_rate(value)
+    if value <= 0:
+        return ''
+    rounded = round(float(value), 2)
+    if rounded <= 0:
+        return ''
+    return f'{rounded:.2f}'.rstrip('0').rstrip('.')
+
+
+def format_monitor_choice_label(
+        choice: MonitorChoice, display_number: int,
+        *, fallback_width: int = 0, fallback_height: int = 0,
+        fallback_refresh_rate: float = 0.0,
+        include_primary: bool = True) -> str:
+    """Build a stable, user-facing source label without changing its path."""
+    try:
+        number = int(display_number)
+    except (TypeError, ValueError):
+        number = 0
+    number = number if number > 0 else 1
+    gdi_match = re.search(r'display([0-9]+)$',
+                         str(choice.gdi_name or ''), re.IGNORECASE)
+    if gdi_match:
+        number = int(gdi_match.group(1))
+    friendly_name = str(choice.friendly_name or '').strip()
+    if not friendly_name:
+        friendly_name = str(choice.gdi_name or '').strip() or 'Monitor'
+    width = int(choice.width or fallback_width or 0)
+    height = int(choice.height or fallback_height or 0)
+    refresh_rate = _normalise_refresh_rate(choice.refresh_rate)
+    if refresh_rate <= 0:
+        refresh_rate = _normalise_refresh_rate(fallback_refresh_rate)
+    parts = [friendly_name, f'Display {number}']
+    if width > 0 and height > 0:
+        resolution = f'{width}\N{MULTIPLICATION SIGN}{height}'
+        refresh = _format_monitor_refresh_rate(refresh_rate)
+        parts.append(f'{resolution} @ {refresh} Hz' if refresh else resolution)
+    primary = 'Primary' if bool(choice.primary) else ''
+    if primary and include_primary:
+        parts.append(primary)
+    return ' · '.join(parts)
 
 
 def _enumerate_monitor_snapshot() -> dict[str, tuple[int, int, int, int, int, bool]]:
@@ -226,7 +621,7 @@ def _enumerate_monitor_snapshot() -> dict[str, tuple[int, int, int, int, int, bo
                 rect.right - rect.left,
                 rect.bottom - rect.top,
                 int(monitor),
-                bool(info.dwFlags & _DISPLAY_DEVICE_PRIMARY_DEVICE),
+                bool(info.dwFlags & _MONITORINFOF_PRIMARY),
             )
         return True
 
@@ -283,6 +678,10 @@ def enumerate_windows_monitor_records() -> list[DisplayDeviceRecord]:
     enum_display_devices.restype = wintypes.BOOL
 
     records: list[DisplayDeviceRecord] = []
+    display_config_metadata = {
+        metadata.gdi_name: metadata
+        for metadata in _enumerate_display_config_metadata()
+    }
     # A live desktop handle is authoritative even when the PnP monitor is disabled.
     for gdi_name, (x, y, width, height, hmonitor, primary) in _enumerate_monitor_snapshot().items():
         children = []
@@ -297,12 +696,25 @@ def enumerate_windows_monitor_records() -> list[DisplayDeviceRecord]:
             children.append(monitor)
         candidates = _active_monitor_children(children, adapter_in_monitor_snapshot=True)
         monitor = candidates[0] if len(candidates) == 1 else None
+        metadata = display_config_metadata.get(gdi_name.casefold())
+        monitor_device_path = monitor.DeviceID if monitor else ''
+        friendly_name = monitor.DeviceString if monitor else gdi_name
+        refresh_rate = 0.0
+        # DisplayConfig is used only when it agrees with the stable PnP path
+        # from EnumDisplayDevices.  This prevents a mirror/driver target from
+        # changing the identity that is persisted for capture.
+        if (metadata is not None
+                and normalize_monitor_device_path(monitor_device_path)
+                == metadata.device_path):
+            friendly_name = metadata.friendly_name or friendly_name
+            refresh_rate = metadata.refresh_rate
         records.append(DisplayDeviceRecord(
             gdi_name=gdi_name,
-            friendly_name=monitor.DeviceString if monitor else gdi_name,
-            monitor_device_path=monitor.DeviceID if monitor else '',
+            friendly_name=friendly_name,
+            monitor_device_path=monitor_device_path,
             active=width > 0 and height > 0, primary=primary,
             x=x, y=y, width=width, height=height, hmonitor=hmonitor,
+            refresh_rate=refresh_rate,
         ))
     return records
 

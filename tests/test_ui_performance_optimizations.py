@@ -8,13 +8,12 @@ import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtMultimedia import QAudioFormat
-from PySide6.QtWidgets import QLabel, QWidget
+from PySide6.QtWidgets import QWidget
 from shiboken6 import isValid
 
 from core import ffmpeg_playback, media_process, playback_proxy
 from ui import clip_viewer
 from ui.clip_viewer import TimelineSegment, TrimSlider
-from ui.shell_transitions import compact_snapshot
 
 
 def test_timeline_cached_pixels_match_fresh_render_after_edits_and_undo(qtbot):
@@ -41,22 +40,6 @@ def test_timeline_cached_pixels_match_fresh_render_after_edits_and_undo(qtbot):
         for source in (0, .2, .3, .5, .6, .8, 1):
             expected = sum(max(0, min(source, end) - start) for start, end in ranges) / total
             assert slider._source_to_display(source) == pytest.approx(expected)
-
-
-def test_compact_snapshot_preserves_children_and_bounds_backing_store(qtbot):
-    widget = QWidget()
-    qtbot.addWidget(widget)
-    widget.resize(2400, 1600)
-    widget.setStyleSheet('background: red')
-    child = QLabel(widget)
-    child.setGeometry(1200, 0, 1200, 1600)
-    child.setStyleSheet('background: blue')
-    snapshot = compact_snapshot(widget)
-    logical_size = snapshot.size() / snapshot.devicePixelRatioF()
-    assert logical_size.width() <= 560 and logical_size.height() <= 350
-    image = snapshot.toImage()
-    assert image.pixelColor(image.width() // 4, image.height() // 2) == QColor('red')
-    assert image.pixelColor(image.width() * 3 // 4, image.height() // 2) == QColor('blue')
 
 
 def test_audio_discovery_reuses_validated_results_and_invalidates_sidecar(tmp_path, monkeypatch):
@@ -108,8 +91,15 @@ def test_proxy_negative_decision_is_reused_but_failed_probe_is_retried(tmp_path,
         calls.append(True)
         if len(calls) == 1:
             return None
-        return 0, json.dumps({'format': {'duration': '60'}, 'packets': [
-            {'pts_time': str(i), 'flags': 'K_'} for i in range(8)]}).encode(), b''
+        # A negative performance-proxy decision requires valid dimensions,
+        # codec and frame rate as well as short GOPs.
+        return 0, json.dumps({'format': {'duration': '60'}, 'streams': [{
+            'index': 0, 'codec_type': 'video',
+            'width': 1280, 'height': 720, 'codec_name': 'h264',
+            'avg_frame_rate': '30/1', 'color_transfer': 'bt709',
+        }], 'packets': [
+            {'pts_time': str(i), 'flags': 'K_', 'stream_index': 0}
+            for i in range(8)]}).encode(), b''
 
     monkeypatch.setattr(playback_proxy, 'run_media_process', run)
     for _ in range(3):
@@ -142,7 +132,7 @@ def test_cancelled_filmstrip_resumes_completed_samples(qtbot, tmp_path, monkeypa
     monkeypatch.setattr(clip_viewer, 'get_ffmpeg_exe', lambda: 'ffmpeg')
     slider.load_thumbnails(str(media), 4)
     qtbot.waitUntil(finished.is_set)
-    key = clip_viewer._timeline_cache_key(str(media), 4)
+    key = clip_viewer._timeline_cache_key(str(media), 4, slider.duration_ms)
     assert clip_viewer._cached_timeline_images(key) is None
     assert len(clip_viewer._cached_timeline_images(key, allow_partial=True)) == 2
     slider.load_thumbnails(str(media), 4)
@@ -206,7 +196,7 @@ def test_async_audio_stop_keeps_callbacks_alive_until_native_close(qtbot, monkey
     closed = threading.Event()
 
     class Mixer:
-        def __init__(self, *_):
+        def __init__(self, *_, **_kwargs):
             opening.set()
             assert release.wait(3)
 

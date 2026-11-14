@@ -55,7 +55,7 @@ def test_theme_actions_stay_visible_above_scrolled_sections(qtbot, monkeypatch, 
     qtbot.addWidget(page)
     page.resize(960, 600)
     page.show()
-    buttons = (page._export_btn, page._import_btn, page._apply_btn)
+    buttons = (page._export_btn, page._import_btn, page._reset_btn)
     positions = [button.mapTo(page, button.rect().topLeft()) for button in buttons]
     for section in (page._typography_section, page._colors_section,
                     page._icon_colors_section, page._icons_section,
@@ -77,3 +77,27 @@ def test_customize_font_dropdowns_use_a_raised_surface(qtbot, monkeypatch, tmp_p
 
     for combo in page._font_combos.values():
         assert f'background-color: {Colors.SURFACE_3}' in combo.styleSheet()
+
+
+def test_theme_changes_apply_automatically(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
+    monkeypatch.setattr(ThemeManager, '_instance', None)
+    page = CustomizePage()
+    qtbot.addWidget(page)
+    with qtbot.waitSignal(page.theme_applied):
+        page._on_color_changed('ACCENT', '#145678')
+    assert ThemeManager().get_color('ACCENT') == '#145678'
+
+
+def test_failed_theme_color_save_restores_active_color(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
+    monkeypatch.setattr(ThemeManager, '_instance', None)
+    page = CustomizePage()
+    qtbot.addWidget(page)
+    previous = ThemeManager().get_color('ACCENT')
+    monkeypatch.setattr(ThemeManager(), 'save', lambda: False)
+    with qtbot.assertNotEmitted(page.theme_applied):
+        page._on_color_changed('ACCENT', '#145678')
+    assert ThemeManager().get_color('ACCENT') == previous
+    assert not page._save_error.isHidden()
+    assert not page._theme_refresh_timer.isActive()

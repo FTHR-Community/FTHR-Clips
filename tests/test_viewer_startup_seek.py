@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QImage
 from PySide6.QtMultimedia import QMediaPlayer
+from PySide6.QtTest import QTest
 
+from ui import clip_grid, clip_viewer
 from ui.clip_viewer import ClipViewer
 
 
@@ -71,6 +75,7 @@ def test_flushed_seek_anchor_survives_async_source_swap(monkeypatch):
     player = _DelayedPlayer(position=1200)
     viewer = SimpleNamespace(
         _closing=False,
+        clip_path='original.mp4',
         player=player,
         _pending_seek_ms=9000,
         _audio_mixer=None,
@@ -218,6 +223,7 @@ def test_expired_guard_does_not_replace_durable_seek_during_source_preparation(
     player = _DelayedPlayer(position=1200)
     viewer = SimpleNamespace(
         _closing=False,
+        clip_path='original.mp4',
         player=player,
         _pending_seek_ms=None,
         _latest_paused_seek_ms=9000,
@@ -445,3 +451,70 @@ def test_playback_position_resumption_clears_paused_seek_state():
     assert viewer._latest_paused_seek_ms is None
     assert viewer._paused_seek_fallback_visible is False
     assert clock_updates == [7050]
+
+
+def test_paused_drag_samples_during_motion_and_only_seeks_on_release(
+        monkeypatch, qtbot, tmp_path):
+    monkeypatch.setattr(clip_grid, 'get_cached_clip_metadata',
+                        lambda *_: (10, 1920, 1080, 30, 1000000, 1000000))
+    for name in ('_prepare_initial_media_source', '_discover_audio_sources_async',
+                 '_load_timeline_thumbnails_if_idle'):
+        monkeypatch.setattr(ClipViewer, name, lambda *_: None)
+    jobs = []
+    monkeypatch.setattr(clip_viewer, '_frame_decode_pool',
+                        lambda: SimpleNamespace(start=jobs.append))
+    viewer = ClipViewer(str(tmp_path / 'clip.mp4'), None)
+    qtbot.addWidget(viewer)
+    viewer.show()
+    viewer._media_ready = True
+    player = _DelayedPlayer()
+    monkeypatch.setattr(viewer.player, 'playbackState', player.playbackState)
+    monkeypatch.setattr(viewer.player, 'setPosition', player.setPosition)
+    viewer._playback_source_worker = object()
+    proxy_token = viewer._proxy_cancel = threading.Event()
+    timeline = viewer.trim_slider
+    start = QPoint(timeline.width() // 5, 48)
+    middle = QPoint(timeline.width() // 2, 48)
+    forward = QPoint(timeline.width() * 3 // 4, 48)
+    released = QPoint(timeline.width() * 7 // 10, 48)
+    image = QImage(16, 9, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.red)
+
+    def complete(job):
+        job.signals.ready.emit((
+            job.cancelled, job.source_generation, job.seek_generation,
+            job.target_ms, image))
+
+    QTest.mousePress(timeline, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.waitUntil(lambda: len(jobs) == 1, timeout=1000)
+    assert proxy_token.is_set()
+    assert viewer._playback_source_worker is None
+    first = jobs[0]
+    QTest.mouseMove(timeline, middle)
+    assert len(jobs) == 1
+    complete(first)
+    qtbot.waitUntil(
+        lambda: viewer.video_widget._latest_video_pts_ms == first.target_ms, timeout=1000)
+    qtbot.waitUntil(lambda: len(jobs) == 2, timeout=1000)
+    second = jobs[1]
+    assert second.target_ms > first.target_ms
+    QTest.mouseMove(timeline, forward)
+    complete(second)
+    qtbot.waitUntil(
+        lambda: viewer.video_widget._latest_video_pts_ms == second.target_ms, timeout=1000)
+    qtbot.waitUntil(lambda: len(jobs) == 3, timeout=1000)
+    third = jobs[2]
+    assert player.seek_requests == []
+
+    QTest.mouseMove(timeline, released)
+    assert third.cancelled.is_set()
+    complete(third)
+    assert viewer.video_widget._latest_video_pts_ms == second.target_ms
+    qtbot.waitUntil(lambda: len(jobs) == 4, timeout=1000)
+    last = jobs[3]
+    QTest.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=released)
+    assert player.seek_requests == [int(timeline._pct_from_x(released.x()) * viewer.duration_ms)]
+    assert last.cancelled.is_set()
+    complete(last)
+    assert viewer.video_widget._latest_video_pts_ms == second.target_ms
+    assert viewer._scrub_preview_worker is None

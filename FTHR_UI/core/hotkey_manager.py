@@ -35,6 +35,8 @@ _HOTKEY_ACTIONS = (
     'stop_recording',
     'confirm_game_detection',
     'dismiss_game_detection',
+    # Appended last so existing Windows native IDs remain stable.
+    'mark_highlight',
 )
 
 
@@ -431,9 +433,10 @@ def format_controller_combo(combo) -> str:
 
 class HotkeyManager(QObject):
     """Manages global keyboard and Windows controller hotkeys."""
-    
+
     # Signals
     save_clip_triggered = Signal()
+    mark_highlight_triggered = Signal()
     custom_clip_triggered = Signal(int)
     save_screenshot_triggered = Signal()
     start_recording_triggered = Signal()
@@ -442,7 +445,7 @@ class HotkeyManager(QObject):
     dismiss_game_detection_triggered  = Signal()
     error_occurred = Signal(str, str, str)   # title, detail, level
     controller_buttons_changed = Signal(object)
-    
+
     def __init__(self):
         super().__init__()
         # Lives next to all the other user state in ~/.fthr. Survives reinstalls.
@@ -458,6 +461,8 @@ class HotkeyManager(QObject):
             'stop_recording': '',
             'confirm_game_detection':  'F8',
             'dismiss_game_detection':  'F7',
+            # Deliberately unset on upgrade to avoid claiming a user's key.
+            'mark_highlight': '',
         }
         self.controller_hotkeys = {action: '' for action in self.hotkeys}
 
@@ -499,7 +504,7 @@ class HotkeyManager(QObject):
         self._controller_timer.timeout.connect(self._poll_controller_buttons)
 
         self._load_hotkeys()
-    
+
     def _load_hotkeys(self):
         """Load hotkeys from config file"""
         # This also keeps the migration helper usable in isolated tests and
@@ -561,7 +566,7 @@ class HotkeyManager(QObject):
                     self._save_hotkeys()
             except Exception as e:
                 print(f"Failed to load hotkeys: {e}")
-    
+
     def _save_hotkeys(self):
         """Atomically save hotkeys and report whether they were persisted."""
         tmp = self.config_file.with_suffix('.json.tmp')
@@ -598,7 +603,7 @@ class HotkeyManager(QObject):
             except OSError:
                 pass
             return False
-    
+
     def set_hotkey(self, action: str, key: str, device: str = 'keyboard'):
         """Bind an action from ``_HOTKEY_ACTIONS`` to a key such as ctrl+shift+s."""
         if action not in self.hotkeys:
@@ -648,7 +653,7 @@ class HotkeyManager(QObject):
         # both keys registered and trigger the action twice.
         old_key = self.hotkeys.get(action)
         self._unregister_keyboard_action(action, old_key)
-        
+
         # Validate the new Windows chord before persisting it. RegisterHotKey
         # gives us an authoritative collision result; if another app owns the
         # chord, restore the old working binding instead of saving a dead one.
@@ -674,7 +679,7 @@ class HotkeyManager(QObject):
             return False
 
         return True
-    
+
     def configure_custom_clips(self, lengths, *, register=True):
         """Synchronize independent clip actions with the configured durations."""
         from core.capture_settings import custom_clip_lengths
@@ -706,7 +711,7 @@ class HotkeyManager(QObject):
 
     def set_controller_hotkey(self, action: str, key: str) -> bool:
         return self.set_hotkey(action, key, device='controller')
-    
+
     def _register_keyboard_hotkey(self, key: str, signal, *, action: str = '') -> bool:
         """Register one keyboard shortcut on the platform's reliable path."""
         if not key:
@@ -799,6 +804,7 @@ class HotkeyManager(QObject):
             'stop_recording': self._register_stop_recording,
             'confirm_game_detection': self._register_confirm_game_detection,
             'dismiss_game_detection': self._register_dismiss_game_detection,
+            'mark_highlight': self._register_mark_highlight,
         }
         register = registrations.get(action)
         if register is None:
@@ -837,6 +843,11 @@ class HotkeyManager(QObject):
             self.hotkeys['dismiss_game_detection'],
             self.dismiss_game_detection_triggered,
             action='dismiss_game_detection')
+
+    def _register_mark_highlight(self):
+        return self._register_keyboard_hotkey(
+            self.hotkeys['mark_highlight'], self.mark_highlight_triggered,
+            action='mark_highlight')
 
     def register_all(self):
         """Register all hotkeys"""
@@ -1033,6 +1044,7 @@ class HotkeyManager(QObject):
             'stop_recording': self.stop_recording_triggered,
             'confirm_game_detection': self.confirm_game_detection_triggered,
             'dismiss_game_detection': self.dismiss_game_detection_triggered,
+            'mark_highlight': self.mark_highlight_triggered,
         }
         signal = signals.get(action)
         if signal:
@@ -1356,7 +1368,8 @@ class HotkeyManager(QObject):
         """Return compositor instructions built from the real private socket."""
         commands = {
             action: self.socket_command(action)
-            for action in ('save_clip', 'save_screenshot')
+            for action in ('save_clip', 'save_screenshot', 'mark_highlight')
+            if self.hotkeys.get(action, '')
         }
         if compositor == 'kwin':
             heading = 'KDE: System Settings -> Keyboard -> Shortcuts -> Add New -> Command or Script'
@@ -1382,8 +1395,10 @@ class HotkeyManager(QObject):
             '# Change hotkeys inside FTHR Clips → Hotkeys menu.',
             self._build_bind_line('save_clip'),
             self._build_bind_line('save_screenshot'),
-            '',
         ]
+        if self.hotkeys.get('mark_highlight', ''):
+            lines.append(self._build_bind_line('mark_highlight'))
+        lines.append('')
         temporary = _FTHR_HYPR_CONF.with_suffix('.conf.tmp')
         try:
             _FTHR_HYPR_CONF.parent.mkdir(parents=True, exist_ok=True)
@@ -1503,6 +1518,7 @@ class HotkeyManager(QObject):
             'stop_recording': self.stop_recording_triggered,
             'confirm_game_detection': self.confirm_game_detection_triggered,
             'dismiss_game_detection': self.dismiss_game_detection_triggered,
+            'mark_highlight': self.mark_highlight_triggered,
         }
 
         def _serve():

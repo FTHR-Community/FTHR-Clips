@@ -4,6 +4,7 @@
 // and retain keyframe pre-roll. Packet format conversion belongs to the encoder.
 
 #pragma once
+#include "capture_timeline.h"
 #ifndef FTHR_ENCODED_RING_BUFFER_H
 #define FTHR_ENCODED_RING_BUFFER_H
 
@@ -18,10 +19,15 @@
 #include <mutex>
 
 #include "encoded_video_config.h"
+#include "capture_highlights.h"
 #include "replay_save_diagnostics.h"
+#include "replay_memory_budget.h"
 
 
 namespace fthr {
+
+    class ReplayStorage;
+    class ReplayStoragePayload;
 
     constexpr uint32_t kEncodedReplayKeyframePrerollSeconds = 4;
     constexpr uint32_t kEncodedReplaySafetySeconds = 1;
@@ -57,6 +63,17 @@ namespace fthr {
         bool                 valid = false; // False on uninitialized slots
         uint64_t             absolute_position =
             std::numeric_limits<uint64_t>::max();
+        std::shared_ptr<ReplayStoragePayload> storage;
+        size_t byte_size() const;
+        bool ReadInto(uint8_t* output) const;
+    };
+
+    // Immutable publication evidence from the same lock boundary as Push().
+    // A recording writer must carry this token forward instead of rereading
+    // the mutable ring generation after publication.
+    struct PublishedVideoPoint {
+        int64_t pts = 0;
+        uint64_t generation = 0;
     };
 
 
@@ -65,8 +82,20 @@ namespace fthr {
     // Returned by TakeSnapshot(). Caller owns all data - safe to use while
     // CaptureThread continues encoding into the ring buffer.
     struct EncodedRingSnapshot {
+        EncodedRingSnapshot() = default;
+        EncodedRingSnapshot(const EncodedRingSnapshot&) = delete;
+        EncodedRingSnapshot& operator=(const EncodedRingSnapshot&) = delete;
+        EncodedRingSnapshot(EncodedRingSnapshot&&) noexcept = default;
+        EncodedRingSnapshot& operator=(EncodedRingSnapshot&&) noexcept = default;
+        ~EncodedRingSnapshot() {
+            // Free allocations before returning their admission to another save.
+            std::vector<EncodedRingPacket>().swap(packets);
+            std::vector<uint8_t>().swap(video_config.codec_extradata);
+        }
         std::vector<EncodedRingPacket> packets;   // Ordered oldest -> newest
+        std::vector<HighlightMarker> highlights;  // Mapped to presentation time
         EncodedVideoConfig video_config;
+        CaptureTimeline capture_timeline; // Owned save-time provenance; survives Clear().
         uint64_t capture_generation = 0;
         bool generation_continuous = true;
 
@@ -110,6 +139,7 @@ namespace fthr {
         int64_t target_end_qpc = 0;
         int64_t interval_spanned_qpc = 0;
         bool valid_starting_keyframe = false;
+        ReplayMemoryReservation memory;
     };
 
 
@@ -120,7 +150,9 @@ namespace fthr {
         // qpc_freq:  QueryPerformanceFrequency value, used to convert wall_qpc to seconds.
         // CalculateEncodedReplaySlotCapacity() retains the requested history,
         // one maximum four-second GOP of pre-roll, and one second of safety.
-        explicit EncodedRingBuffer(size_t capacity, uint32_t fps, int64_t qpc_freq = 0);
+        explicit EncodedRingBuffer(size_t capacity, uint32_t fps, int64_t qpc_freq = 0,
+            std::shared_ptr<ReplayMemoryBudget> memory_budget = nullptr,
+            std::shared_ptr<ReplayStorage> storage = nullptr);
 
         // Not copyable or movable - owns large pre-allocated storage.
         EncodedRingBuffer(const EncodedRingBuffer&) = delete;
@@ -130,7 +162,14 @@ namespace fthr {
         // Store a packet from CaptureThread in video_config.packet_format.
         // The encoder must finish any format conversion before publication.
         bool Push(const uint8_t* encoded_data, uint32_t size,
-            int64_t pts, bool is_keyframe, int64_t wall_qpc = 0);
+            int64_t pts, bool is_keyframe, int64_t wall_qpc = 0,
+            PublishedVideoPoint* published = nullptr);
+
+        // Capture a marker against the latest published packet while holding
+        // the same publication boundary used by Clear() and Push().
+        bool MarkHighlight(const std::string& marker_id,
+            int64_t out_point_qpc = 0,
+            CapturedHighlightMark* captured = nullptr);
 
 
         // Store codec, geometry, timing, packet format and decoder config as
@@ -151,7 +190,8 @@ namespace fthr {
         bool WaitUntilPublished(
             int64_t target_qpc, std::chrono::milliseconds timeout) const;
 
-        // Invalidate replay after recovery without reallocating slot storage.
+        // Invalidate replay after recovery and release packet payload storage.
+        // Slot metadata and synchronization objects stay allocated.
         // Concurrent snapshots see an empty/non-ready ring. Reject delayed packets
         // at or before recovery_cutoff_qpc so old output cannot enter the new generation.
         void Clear(int64_t recovery_cutoff_qpc = 0);
@@ -168,12 +208,21 @@ namespace fthr {
         size_t   GetCount()    const { return count_.load(std::memory_order_relaxed); }
         size_t   GetCapacity() const { return capacity_; }
         uint64_t GetPushCount() const { return head_.load(std::memory_order_relaxed); }
+        bool HasMemoryFailure() const { return memory_failed_.load(); }
+        std::shared_ptr<ReplayMemoryBudget> GetMemoryBudget() const { return memory_budget_; }
 
 
     private:
         size_t              capacity_;
         uint32_t            fps_;
         int64_t             qpc_freq_;
+
+        EncodedRingSnapshot TakeSnapshotByTimeImpl(
+            uint32_t duration_seconds, int64_t target_end_qpc) const;
+        std::shared_ptr<ReplayMemoryBudget> memory_budget_;
+        ReplayMemoryReservation ring_memory_;
+        std::shared_ptr<ReplayStorage> storage_;
+        std::atomic<bool> memory_failed_{false};
 
         std::vector<EncodedRingPacket>  slots_;
 
@@ -193,6 +242,11 @@ namespace fthr {
         std::atomic<int64_t>   latest_wall_qpc_{ 0 };
         std::atomic<uint64_t>  generation_{ 0 };
         std::atomic<int64_t>   recovery_cutoff_qpc_{ 0 };
+
+        // Owned by the ring generation. Snapshot copies are independent and
+        // therefore remain valid after the next Clear().
+        std::vector<CapturedHighlightMark> highlight_marks_;
+        std::string capture_generation_id_ = NewCaptureGenerationId();
 
         mutable std::mutex publication_mutex_;
         mutable std::condition_variable publication_cv_;

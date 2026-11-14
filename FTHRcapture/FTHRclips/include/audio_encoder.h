@@ -1,6 +1,6 @@
-// Single-producer AAC encoder for interleaved float32 PCM.
-// Accumulate partial input until a full AAC frame is available; packet PTS
-// uses the input sample-rate timebase. GetExtradata() supplies the muxer ASC.
+// Single-producer packetizer for lossless float PCM or legacy AAC encoding.
+// Packet PTS uses the input sample-rate timebase. Raw mode retains a partial
+// final packet exactly; AAC mode supplies muxer ASC through GetExtradata().
 // Finalize on the producer thread or after it has stopped.
 
 #pragma once
@@ -44,10 +44,11 @@ namespace fthr {
                         uint32_t       channels,
                         uint32_t       bitrate_kbps,
                         PacketCallback callback,
-                        int64_t        initial_pts_samples = 0);
+                        int64_t        initial_pts_samples = 0,
+                        bool           lossless_float = false);
 
         // Feed interleaved float32 PCM; num_samples counts frames * channels.
-        // Buffer partial AAC frames. A call can emit zero or multiple packets.
+        // Raw mode emits immediately. AAC mode buffers partial codec frames.
         bool EncodeSamples(const float* pcm_data, uint32_t num_samples);
 
         // Flush any remaining buffered samples and free all FFmpeg resources.
@@ -86,6 +87,7 @@ namespace fthr {
         uint32_t channels_;
         uint32_t bitrate_kbps_;
         bool     initialized_;
+        bool     lossless_float_ = false;
 
         // Monotonically increasing PTS in samples
         int64_t pts_samples_;

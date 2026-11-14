@@ -1,10 +1,10 @@
-﻿; FTHR Clips — Windows Installer (Inno Setup 6)
+; FTHR Clips — Windows Installer (Inno Setup 6)
 ; Bundles the native Windows capture engine.
 ; Build: iscc installer_windows.iss
 ; Prerequisite: redist\vc_redist.x64.exe — https://aka.ms/vs/17/release/vc_redist.x64.exe
 
 #define MyAppName      "FTHR Clips"
-#define MyAppVersion   "2.0.0-alpha"
+#define MyAppVersion   "2.1.0"
 #define MyAppPublisher "FTHR Community"
 #define MyAppExeName   "FTHRClips.exe"
 #define MyAppURL       "https://github.com/fthr/clips"
@@ -45,24 +45,24 @@ VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=FTHR Clips Windows Setup
 VersionInfoProductName={#MyAppName}
 ; PE ProductVersion is numeric; keep the alpha suffix in the textual field.
-VersionInfoProductVersion=2.0.0.0
+VersionInfoProductVersion=2.1.0.0
 VersionInfoTextVersion={#MyAppVersion}
-VersionInfoVersion=2.0.0.0
+VersionInfoVersion=2.1.0.0
 
 ; Compression — maximum, solid
 Compression=lzma2/max
 SolidCompression=yes
 LZMANumBlockThreads=2
 
-; Dark green FTHR shell with numbered steps and roomy page surfaces.
+; Guided setup: neutral charcoal surfaces, left steps, mint primary actions.
 WizardStyle=modern dark hidebevels
 WizardSizePercent=140
 DisableWelcomePage=yes
-DisableFinishedPage=yes
+DisableFinishedPage=no
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
-WizardBackColor=#131C17
+WizardBackColor=#242629
 
 ; Icon
 SetupIconFile=FTHR_UI\assets\favicon.ico
@@ -94,7 +94,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 english.WelcomeLabel1=Welcome to FTHR Clips Setup
 english.WelcomeLabel2=FTHR Clips is a lightweight game capture tool for Windows.%n%nThis will install or update version {#MyAppVersion} on your computer. An existing matching version is repaired in place.%n%nClose FTHR Clips before continuing so capture can shut down cleanly.
 english.FinishedHeadingLabel=FTHR Clips is installed!
-english.FinishedLabel=FTHR Clips has been installed on your computer. Use the desktop shortcut or Start Menu to launch it.%n%nFor global hotkeys to work, no additional setup is required on Windows.
+english.FinishedLabel=FTHR Clips is ready. Choose Finish to complete setup.
 english.SelectDirLabel3=Choose where the FTHR Clips application files should live, then continue.
 english.SelectTasksLabel2=Choose whether Setup should create a desktop shortcut.
 
@@ -122,6 +122,7 @@ Source: "installer_assets\polished\step-*.png"; Flags: dontcopy noencryption
 Source: "LICENSE";                DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "tools\uninstall_cleanup.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
@@ -139,15 +140,14 @@ Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/quiet /norestart"; \
     StatusMsg: "Installing Visual C++ Runtime..."; Flags: waituntilterminated runhidden; \
     Check: NeedsVCRedist
 
-[UninstallDelete]
-; Optional packages are activated outside Program Files only after in-app
-; consent. Remove those executables on uninstall; uploader preferences remain
-; governed by the existing settings-cleanup prompt below.
-Type: filesandordirs; Name: "{localappdata}\FTHR Clips\plugins"
-; Clips, screenshots, exports, and sidecar manifests are deliberately outside
-; the installer tree at %USERPROFILE%\FTHR_Clips and are never an uninstall
-; target. The app-owned settings/cache directory is opt-in only.
-Type: filesandordirs; Name: "{code:UserProfilePath}\.fthr"; Check: ShouldRemoveSettingsAndCache
+; Inno owns the checked-by-default completion option and launches it only
+; after successful interactive setup when Finish is chosen. A pending restart
+; suppresses postinstall actions automatically; preserve that native behavior.
+Filename: "{app}\{#MyAppExeName}"; Description: "Open FTHR Clips"; \
+    WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent runasoriginaluser
+
+[Messages]
+ConfirmUninstall=Remove %1 and its settings, logs, caches, and installed FTHR plugins?%n%nFTHR Clips will close first. Clips, recordings, screenshots, and exports will be kept.
 
 [Code]
 const
@@ -162,11 +162,16 @@ const
 var
   InstalledVersion: String;
   PreserveAutostart: Boolean;
-  RemoveSettingsAndCache: Boolean;
   LegacyCleanupPage: TInputOptionWizardPage;
   ConsentPage: TWizardPage;
   LocationPage: TWizardPage;
-  FinishPage: TWizardPage;
+#ifdef PreviewBuild
+  PreviewInstallingPage: TWizardPage;
+  PreviewFinishedPage: TWizardPage;
+#endif
+  SidebarPanel: TPanel;
+  StepRows: array[1..3] of TPanel;
+  StepLabels: array[1..3] of TNewStaticText;
   ConsentCheck: TNewCheckBox;
   DesktopShortcutCheck: TNewCheckBox;
   StepImages: array[1..3] of TBitmapImage;
@@ -190,6 +195,8 @@ var
   NavNextBorder: TPanel;
   NavNextFill: TPanel;
   NavNextLabel: TNewStaticText;
+  ProgressTrack: TPanel;
+  ProgressFill: TPanel;
   InstallingTitle: TNewStaticText;
   InstallingCopy: TNewStaticText;
 
@@ -278,7 +285,10 @@ end;
 
 procedure BackPanelClick(Sender: TObject);
 begin
-  if WizardForm.BackButton.Enabled then
+  // With applications in use the left button is CANCEL, not BACK.
+  if (WizardForm.CurPageID = wpPreparing) and WizardForm.NextButton.Enabled then
+    WizardForm.CancelButton.OnClick(WizardForm.CancelButton)
+  else if WizardForm.BackButton.Enabled then
     WizardForm.BackButton.OnClick(WizardForm.BackButton);
 end;
 
@@ -293,8 +303,12 @@ end;
 
 procedure CloseSetupClick(Sender: TObject);
 begin
-  if (FinishPage <> nil) and (WizardForm.CurPageID = FinishPage.ID) then
-    WizardForm.NextButton.OnClick(WizardForm.NextButton)
+  if WizardForm.CurPageID = wpFinished then begin
+    { Closing the window is not an instruction to open the app. }
+    if WizardForm.RunList.Items.Count > 0 then
+      WizardForm.RunList.Checked[0] := False;
+    WizardForm.NextButton.OnClick(WizardForm.NextButton);
+  end
   else if WizardForm.CancelButton.Enabled then
     WizardForm.CancelButton.OnClick(WizardForm.CancelButton);
 end;
@@ -341,12 +355,12 @@ end;
 
 procedure CreateNavigation;
 var
-  Gap, BackWidth, NextWidth, RightEdge: Integer;
+  BackWidth, NextWidth, RightEdge: Integer;
 begin
   FooterPanel := TPanel.Create(WizardForm);
-  FooterPanel.Left := ScaleX(1);
+  FooterPanel.Left := ScaleX(201);
   FooterPanel.Top := WizardForm.ClientHeight - ScaleY(68);
-  FooterPanel.Width := WizardForm.ClientWidth - ScaleX(2);
+  FooterPanel.Width := WizardForm.ClientWidth - ScaleX(202);
   FooterPanel.Height := ScaleY(67);
   FooterPanel.BevelOuter := bvNone;
   FooterPanel.Color := InstallerBackground;
@@ -354,7 +368,6 @@ begin
   FooterPanel.StyleElements := [];
   FooterPanel.Parent := WizardForm;
 
-  Gap := ScaleX(8);
   BackWidth := ScaleX(100);
   NextWidth := ScaleX(130);
   RightEdge := FooterPanel.Width - ScaleX(36);
@@ -367,7 +380,7 @@ begin
   NavNextLabel.OnClick := @NextPanelClick;
   CreateBoxButton(WizardForm, FooterPanel,
     NavBackBorder, NavBackFill, NavBackLabel,
-    RightEdge - NextWidth - Gap - BackWidth, ScaleY(10), BackWidth, 'BACK', False);
+    ScaleX(36), ScaleY(10), BackWidth, 'BACK', False);
   NavBackBorder.OnClick := @BackPanelClick;
   NavBackFill.OnClick := @BackPanelClick;
   NavBackLabel.OnClick := @BackPanelClick;
@@ -381,83 +394,105 @@ var
   I, Size: Integer;
   State: String;
 begin
-  Size := ScaleX(54);
-  if Size <= 54 then Size := 54
-  else if Size <= 68 then Size := 68
-  else if Size <= 81 then Size := 81
-  else if Size <= 95 then Size := 95
-  else if Size <= 108 then Size := 108
-  else if Size <= 122 then Size := 122
-  else if Size <= 135 then Size := 135
-  else if Size <= 162 then Size := 162
-  else Size := 216;
+  Size := ScaleX(24);
+  if Size <= 24 then Size := 24
+  else if Size <= 30 then Size := 30
+  else if Size <= 36 then Size := 36
+  else if Size <= 48 then Size := 48
+  else Size := 72;
   for I := 1 to 3 do begin
     if I = CurrentStep then State := 'active'
     else if I < CurrentStep then State := 'done'
     else State := 'pending';
     StepImages[I].PngImage.LoadFromFile(ExpandConstant('{tmp}\step-') +
       IntToStr(I) + '-' + State + '-' + IntToStr(Size) + '.png');
+    if I = CurrentStep then begin
+      StepRows[I].Color := InstallerSurface;
+      StepLabels[I].Font.Color := InstallerText;
+    end else begin
+      StepRows[I].Color := InstallerHeader;
+      if I < CurrentStep then StepLabels[I].Font.Color := InstallerText
+      else StepLabels[I].Font.Color := InstallerTextDim;
+    end;
   end;
 end;
 
 procedure CreateSteps;
 var
-  I, StartX: Integer;
+  I: Integer;
+  Brand, VersionLabel: TNewStaticText;
 begin
-  StartX := (TitleBarPanel.Width - ScaleX(210)) div 2;
+  SidebarPanel := TPanel.Create(WizardForm);
+  SidebarPanel.SetBounds(ScaleX(1), ScaleY(49), ScaleX(199),
+    WizardForm.ClientHeight - ScaleY(50));
+  SidebarPanel.BevelOuter := bvNone;
+  SidebarPanel.Color := InstallerHeader;
+  SidebarPanel.ParentBackground := False;
+  SidebarPanel.StyleElements := [];
+  SidebarPanel.Parent := WizardForm;
+
+  Brand := TNewStaticText.Create(WizardForm);
+  Brand.SetBounds(ScaleX(28), ScaleY(30), ScaleX(150), ScaleY(40));
+  Brand.AutoSize := False;
+  Brand.Caption := 'FTHR Clips';
+  ApplyDisplayStyle(Brand, 20, InstallerText);
+  Brand.Parent := SidebarPanel;
+
   for I := 1 to 3 do begin
+    StepRows[I] := TPanel.Create(WizardForm);
+    StepRows[I].SetBounds(ScaleX(12), ScaleY(106 + (I - 1) * 58),
+      ScaleX(175), ScaleY(46));
+    StepRows[I].BevelOuter := bvNone;
+    StepRows[I].ParentBackground := False;
+    StepRows[I].StyleElements := [];
+    StepRows[I].Parent := SidebarPanel;
     StepImages[I] := TBitmapImage.Create(WizardForm);
-    StepImages[I].Parent := TitleBarPanel;
-    StepImages[I].SetBounds(StartX + ScaleX((I - 1) * 78),
-      ScaleY(160), ScaleX(54), ScaleX(54));
+    StepImages[I].Parent := StepRows[I];
+    StepImages[I].SetBounds(ScaleX(14), ScaleY(11), ScaleX(24), ScaleX(24));
     StepImages[I].Stretch := True;
-    StepImages[I].BackColor := InstallerHeader;
+    StepLabels[I] := TNewStaticText.Create(WizardForm);
+    StepLabels[I].SetBounds(ScaleX(50), ScaleY(11), ScaleX(116), ScaleY(27));
+    StepLabels[I].AutoSize := False;
+    case I of
+      1: StepLabels[I].Caption := 'Privacy';
+      2: StepLabels[I].Caption := 'Folders';
+      3: StepLabels[I].Caption := 'Install';
+    end;
+    ApplyTextStyle(StepLabels[I], 11, InstallerText, True);
+    StepLabels[I].Parent := StepRows[I];
   end;
+  VersionLabel := TNewStaticText.Create(WizardForm);
+  VersionLabel.SetBounds(ScaleX(28), SidebarPanel.Height - ScaleY(48),
+    ScaleX(150), ScaleY(24));
+  VersionLabel.AutoSize := False;
+  VersionLabel.Caption := 'Version {#MyAppVersion}';
+  ApplyTextStyle(VersionLabel, 9, InstallerTextDim, False);
+  VersionLabel.Parent := SidebarPanel;
   UpdateSteps(1);
 end;
 
 procedure CreateTitleBar;
 var
-  AppIcon: TBitmapImage;
   TitleLabel: TNewStaticText;
   CloseButton: TBitmapButton;
 begin
   TitleBarPanel := TPanel.Create(WizardForm);
-  TitleBarPanel.Left := ScaleX(1);
-  TitleBarPanel.Top := ScaleY(1);
-  TitleBarPanel.Width := WizardForm.ClientWidth - ScaleX(2);
-  TitleBarPanel.Height := ScaleY(238);
+  TitleBarPanel.SetBounds(ScaleX(1), ScaleY(1),
+    WizardForm.ClientWidth - ScaleX(2), ScaleY(47));
   TitleBarPanel.BevelOuter := bvNone;
   TitleBarPanel.Color := InstallerHeader;
   TitleBarPanel.ParentBackground := False;
   TitleBarPanel.StyleElements := [];
   TitleBarPanel.Parent := WizardForm;
-
-  AppIcon := TBitmapImage.Create(WizardForm);
-  AppIcon.Left := ScaleX(20);
-  AppIcon.Top := ScaleY(16);
-  AppIcon.Width := ScaleX(40);
-  AppIcon.Height := ScaleY(40);
-  AppIcon.BackColor := InstallerHeader;
-  AppIcon.Parent := TitleBarPanel;
-  InitializeBitmapImageFromIcon(AppIcon,
-    ExpandConstant('{tmp}\favicon.ico'), InstallerHeader, [48, 64, 32]);
-
   TitleLabel := TNewStaticText.Create(WizardForm);
-  TitleLabel.Left := ScaleX(36);
-  TitleLabel.Top := ScaleY(82);
-  TitleLabel.Width := TitleBarPanel.Width - ScaleX(100);
-  TitleLabel.Height := ScaleY(54);
+  TitleLabel.SetBounds(ScaleX(20), ScaleY(10), ScaleX(260), ScaleY(28));
   TitleLabel.AutoSize := False;
-  TitleLabel.Caption := 'INSTALL FTHRCLIPS';
-  ApplyDisplayStyle(TitleLabel, 28, InstallerText);
+  TitleLabel.Caption := 'FTHR Clips Setup';
+  ApplyTextStyle(TitleLabel, 10, InstallerText, True);
   TitleLabel.Parent := TitleBarPanel;
-
   CloseButton := TBitmapButton.Create(WizardForm);
-  CloseButton.Left := TitleBarPanel.Width - ScaleX(48);
-  CloseButton.Top := ScaleY(12);
-  CloseButton.Width := ScaleX(32);
-  CloseButton.Height := ScaleX(32);
+  CloseButton.SetBounds(TitleBarPanel.Width - ScaleX(45), ScaleY(7),
+    ScaleX(32), ScaleX(32));
   CloseButton.BackColor := InstallerHeader;
   CloseButton.Caption := 'Close setup';
   CloseButton.Hint := 'Close setup';
@@ -484,8 +519,8 @@ var
 begin
   OldWidth := WizardForm.Width;
   OldHeight := WizardForm.Height;
-  WizardForm.ClientWidth := ScaleX(760);
-  WizardForm.ClientHeight := ScaleY(660);
+  WizardForm.ClientWidth := ScaleX(860);
+  WizardForm.ClientHeight := ScaleY(600);
   WizardForm.Left := WizardForm.Left + (OldWidth - WizardForm.Width) div 2;
   WizardForm.Top := WizardForm.Top + (OldHeight - WizardForm.Height) div 2;
   WizardForm.BorderStyle := bsNone;
@@ -505,10 +540,10 @@ begin
   WizardForm.WizardBitmapImage2.Visible := False;
   WizardForm.WizardSmallBitmapImage.Visible := False;
 
-  WizardForm.OuterNotebook.Left := ScaleX(1);
-  WizardForm.OuterNotebook.Top := ScaleY(239);
-  WizardForm.OuterNotebook.Width := WizardForm.ClientWidth - ScaleX(2);
-  WizardForm.OuterNotebook.Height := WizardForm.ClientHeight - ScaleY(307);
+  WizardForm.OuterNotebook.Left := ScaleX(201);
+  WizardForm.OuterNotebook.Top := ScaleY(49);
+  WizardForm.OuterNotebook.Width := WizardForm.ClientWidth - ScaleX(202);
+  WizardForm.OuterNotebook.Height := WizardForm.ClientHeight - ScaleY(117);
   WizardForm.OuterNotebook.StyleElements := [];
   WizardForm.InnerPage.Color := InstallerBackground;
   WizardForm.InnerPage.ParentBackground := False;
@@ -558,7 +593,7 @@ end;
 
 procedure CreateConsentPage;
 var
-  AgreeText, PolicyText: TNewStaticText;
+  PolicyText: TNewStaticText;
   Title: TNewStaticText;
   Body: TNewStaticText;
 begin
@@ -571,7 +606,7 @@ begin
   Title.Width := ConsentPage.SurfaceWidth - ScaleX(72);
   Title.Height := ScaleY(48);
   Title.AutoSize := False;
-  Title.Caption := 'LET''S GET STARTED';
+  Title.Caption := 'Welcome to FTHR Clips';
   ApplyDisplayStyle(Title, 22, InstallerText);
   Title.Parent := ConsentPage.Surface;
 
@@ -582,32 +617,25 @@ begin
   Body.Height := ScaleY(42);
   Body.AutoSize := False;
   Body.WordWrap := True;
-  Body.Caption := 'Choose your install locations on the next screen.';
+  Body.Caption := 'Review the Privacy Policy, then choose where to install the app and store your clips.';
   ApplyTextStyle(Body, 10, InstallerTextDim, False);
   Body.Parent := ConsentPage.Surface;
 
   ConsentCheck := TNewCheckBox.Create(ConsentPage);
   ConsentCheck.Left := Title.Left;
-  ConsentCheck.Top := Body.Top + ScaleY(58);
-  ConsentCheck.Width := ScaleX(20);
-  ConsentCheck.Height := ScaleY(20);
-  ConsentCheck.Caption := '';
+  ConsentCheck.Top := Body.Top + ScaleY(120);
+  ConsentCheck.Width := Title.Width;
+  ConsentCheck.Height := ScaleY(28);
+  ConsentCheck.Caption := 'I agree to the Privacy Policy';
   ConsentCheck.Checked := False;
   ConsentCheck.OnClick := @ConsentChanged;
   ApplyCheckStyle(ConsentCheck, 10, InstallerText);
   ConsentCheck.Parent := ConsentPage.Surface;
 
-  AgreeText := TNewStaticText.Create(ConsentPage);
-  AgreeText.Left := ConsentCheck.Left + ScaleX(28);
-  AgreeText.Top := ConsentCheck.Top + ScaleY(1);
-  AgreeText.Caption := 'I agree to the';
-  ApplyTextStyle(AgreeText, 10, InstallerText, False);
-  AgreeText.Parent := ConsentPage.Surface;
-
   PolicyText := TNewStaticText.Create(ConsentPage);
-  PolicyText.Left := AgreeText.Left + AgreeText.Width + ScaleX(4);
-  PolicyText.Top := AgreeText.Top;
-  PolicyText.Caption := 'Privacy Policy.';
+  PolicyText.Left := ConsentCheck.Left;
+  PolicyText.Top := Body.Top + ScaleY(70);
+  PolicyText.Caption := 'Read the Privacy Policy';
   PolicyText.Cursor := crHand;
   PolicyText.OnClick := @PolicyTextClick;
   ApplyTextStyle(PolicyText, 10, InstallerAccent, False);
@@ -639,17 +667,17 @@ begin
 
   Title := TNewStaticText.Create(LocationPage);
   Title.Left := ScaleX(36);
-  Title.Top := ScaleY(22);
+  Title.Top := ScaleY(30);
   Title.Width := LocationPage.SurfaceWidth - ScaleX(72);
   Title.Height := ScaleY(44);
   Title.AutoSize := False;
-  Title.Caption := 'MAKE IT YOURS';
+  Title.Caption := 'Set up FTHR Clips';
   ApplyDisplayStyle(Title, 20, InstallerText);
   Title.Parent := LocationPage.Surface;
 
   InstallLabel := TNewStaticText.Create(LocationPage);
   InstallLabel.Left := Title.Left;
-  InstallLabel.Top := ScaleY(72);
+  InstallLabel.Top := ScaleY(100);
   InstallLabel.Width := Title.Width;
   InstallLabel.Height := ScaleY(20);
   InstallLabel.AutoSize := False;
@@ -661,7 +689,7 @@ begin
   InstallDirEdit := WizardForm.DirEdit;
   InstallDirEdit.Parent := LocationPage.Surface;
   InstallDirEdit.Left := Title.Left;
-  InstallDirEdit.Top := ScaleY(95);
+  InstallDirEdit.Top := ScaleY(126);
   InstallDirEdit.Width := FieldWidth;
   InstallDirEdit.Height := ScaleY(32);
   StyleEdit(InstallDirEdit);
@@ -676,7 +704,7 @@ begin
 
   ClipLabel := TNewStaticText.Create(LocationPage);
   ClipLabel.Left := Title.Left;
-  ClipLabel.Top := ScaleY(141);
+  ClipLabel.Top := ScaleY(190);
   ClipLabel.Width := Title.Width;
   ClipLabel.Height := ScaleY(20);
   ClipLabel.AutoSize := False;
@@ -686,7 +714,7 @@ begin
 
   ClipDirEdit := TNewEdit.Create(LocationPage);
   ClipDirEdit.Left := Title.Left;
-  ClipDirEdit.Top := ScaleY(164);
+  ClipDirEdit.Top := ScaleY(216);
   ClipDirEdit.Width := FieldWidth;
   ClipDirEdit.Height := ScaleY(32);
   StyleEdit(ClipDirEdit);
@@ -702,25 +730,25 @@ begin
 
   Note := TNewStaticText.Create(LocationPage);
   Note.Left := Title.Left;
-  Note.Top := ScaleY(202);
+  Note.Top := ScaleY(258);
   Note.Width := Title.Width;
-  Note.Height := ScaleY(28);
+  Note.Height := ScaleY(40);
   Note.WordWrap := True;
   Note.AutoSize := False;
-  Note.Caption := 'Clips, recordings, screenshots, and exports use the clip folder.';
+  Note.Caption := 'Clips, recordings, screenshots, and exports use this folder. You can change it later in app settings.';
   ApplyTextStyle(Note, 9, InstallerTextDim, False);
   Note.Parent := LocationPage.Surface;
 
   DesktopShortcutCheck := TNewCheckBox.Create(LocationPage);
   DesktopShortcutCheck.Parent := LocationPage.Surface;
-  DesktopShortcutCheck.SetBounds(Title.Left, ScaleY(232), Title.Width, ScaleY(28));
+  DesktopShortcutCheck.SetBounds(Title.Left, ScaleY(300), Title.Width, ScaleY(28));
   DesktopShortcutCheck.Caption := 'Add a desktop shortcut';
   DesktopShortcutCheck.Checked := WizardIsTaskSelected('desktopicon');
   ApplyCheckStyle(DesktopShortcutCheck, 10, InstallerText);
 
   LocationError := TNewStaticText.Create(LocationPage);
   LocationError.Left := Title.Left;
-  LocationError.Top := ScaleY(267);
+  LocationError.Top := ScaleY(342);
   LocationError.Width := Title.Width;
   LocationError.Height := ScaleY(30);
   LocationError.WordWrap := True;
@@ -930,35 +958,39 @@ begin
 end;
 
 procedure CreateFinishPage;
-var
-  Title: TNewStaticText;
-  Body: TNewStaticText;
 begin
-  FinishPage := CreateCustomPage(wpInstalling, '', '');
-  ApplyPageSurface(FinishPage);
+  { Retain Inno's real finish lifecycle: native postinstall selection runs once
+    on Finish, never on cancellation/failure/silent setup, and is withheld when
+    a restart is needed. Do not launch the application from a page event. }
+  WizardForm.FinishedPage.SetBounds(0, 0,
+    WizardForm.OuterNotebook.Width, WizardForm.OuterNotebook.Height);
+  WizardForm.FinishedPage.Color := InstallerBackground;
+  WizardForm.FinishedPage.StyleElements := [];
+  WizardForm.FinishedHeadingLabel.SetBounds(ScaleX(36), ScaleY(32),
+    WizardForm.OuterNotebook.Width - ScaleX(72), ScaleY(52));
+  ApplyDisplayStyle(WizardForm.FinishedHeadingLabel, 22, InstallerText);
+  WizardForm.FinishedLabel.SetBounds(ScaleX(36), ScaleY(98),
+    WizardForm.OuterNotebook.Width - ScaleX(72), ScaleY(112));
+  ApplyTextStyle(WizardForm.FinishedLabel, 10, InstallerTextDim, False);
+  FinishPathLabel := WizardForm.FinishedLabel;
+  WizardForm.RunList.SetBounds(ScaleX(36), ScaleY(234),
+    WizardForm.OuterNotebook.Width - ScaleX(72), ScaleY(52));
+  WizardForm.RunList.Color := InstallerBackground;
+  WizardForm.RunList.Font.Name := 'Segoe UI';
+  WizardForm.RunList.Font.Size := 11;
+  WizardForm.RunList.Font.Color := InstallerText;
+  WizardForm.RunList.StyleElements := [];
+  { Keep the platform restart choice and its keyboard behavior intact. }
+  WizardForm.YesRadio.Left := ScaleX(36);
+  WizardForm.YesRadio.Top := ScaleY(234);
+  WizardForm.NoRadio.Left := ScaleX(36);
+  WizardForm.NoRadio.Top := ScaleY(270);
+end;
 
-  Title := TNewStaticText.Create(FinishPage);
-  Title.Left := ScaleX(36);
-  Title.Top := ScaleY(28);
-  Title.Width := FinishPage.SurfaceWidth - ScaleX(72);
-  Title.Height := ScaleY(48);
-  Title.AutoSize := False;
-  Title.Caption := 'FTHR CLIPS IS READY';
-  ApplyDisplayStyle(Title, 22, InstallerText);
-  Title.Parent := FinishPage.Surface;
-
-  Body := TNewStaticText.Create(FinishPage);
-  Body.Left := Title.Left;
-  Body.Top := Title.Top + ScaleY(48);
-  Body.Width := Title.Width;
-  Body.AutoSize := False;
-  Body.WordWrap := True;
-  Body.Caption := 'The app is installed.' + #13#10 + #13#10 +
-    'Clips will be saved to ' + Trim(ClipDirEdit.Text);
-  ApplyTextStyle(Body, 10, InstallerTextDim, False);
-  Body.AdjustHeight;
-  Body.Parent := FinishPage.Surface;
-  FinishPathLabel := Body;
+procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
+begin
+  if (ProgressTrack <> nil) and (MaxProgress > 0) then
+    ProgressFill.Width := Round(ProgressTrack.Width * (CurProgress / MaxProgress));
 end;
 
 procedure CreateInstallingSurface;
@@ -991,7 +1023,24 @@ begin
   WizardForm.ProgressGauge.Width := InstallingTitle.Width;
   WizardForm.ProgressGauge.Height := ScaleY(12);
   WizardForm.ProgressGauge.StyleElements := [];
-  SendMessage(WizardForm.ProgressGauge.Handle, $0409, 0, InstallerAccent);
+  { Keep the native progress control for its value/accessibility. A simple
+    foreground track gives consistent mint rendering under Windows themes. }
+  ProgressTrack := TPanel.Create(WizardForm);
+  ProgressTrack.SetBounds(WizardForm.ProgressGauge.Left,
+    WizardForm.ProgressGauge.Top, WizardForm.ProgressGauge.Width,
+    WizardForm.ProgressGauge.Height);
+  ProgressTrack.BevelOuter := bvNone;
+  ProgressTrack.Color := InstallerSurface;
+  ProgressTrack.ParentBackground := False;
+  ProgressTrack.StyleElements := [];
+  ProgressTrack.Parent := WizardForm.InstallingPage;
+  ProgressFill := TPanel.Create(WizardForm);
+  ProgressFill.SetBounds(0, 0, 0, ProgressTrack.Height);
+  ProgressFill.BevelOuter := bvNone;
+  ProgressFill.Color := InstallerAccent;
+  ProgressFill.ParentBackground := False;
+  ProgressFill.StyleElements := [];
+  ProgressFill.Parent := ProgressTrack;
 
   WizardForm.StatusLabel.Left := InstallingTitle.Left;
   WizardForm.StatusLabel.Top := ScaleY(170);
@@ -1001,6 +1050,44 @@ begin
   ApplyTextStyle(WizardForm.StatusLabel, 9, InstallerTextDim, False);
   WizardForm.FilenameLabel.Visible := False;
 end;
+
+#ifdef PreviewBuild
+procedure CreatePreviewScreens;
+var
+  PreviewCopy: TNewStaticText;
+begin
+  { These pages use the shipping controls but never enter installation. The
+    immutable PrepareToInstall barrier still prevents all filesystem changes. }
+  PreviewInstallingPage := CreateCustomPage(LocationPage.ID, '', '');
+  ApplyPageSurface(PreviewInstallingPage);
+  InstallingTitle.Parent := PreviewInstallingPage.Surface;
+  InstallingCopy.Parent := PreviewInstallingPage.Surface;
+  InstallingCopy.Caption := 'Visual preview only. No files are being installed.';
+  WizardForm.ProgressGauge.Parent := PreviewInstallingPage.Surface;
+  WizardForm.ProgressGauge.Position := 65;
+  ProgressTrack.Parent := PreviewInstallingPage.Surface;
+  ProgressFill.Width := Round(ProgressTrack.Width * 0.65);
+  WizardForm.StatusLabel.Parent := PreviewInstallingPage.Surface;
+  WizardForm.StatusLabel.Caption := 'Preview of installation progress';
+  PreviewFinishedPage := CreateCustomPage(PreviewInstallingPage.ID, '', '');
+  ApplyPageSurface(PreviewFinishedPage);
+  WizardForm.FinishedHeadingLabel.Parent := PreviewFinishedPage.Surface;
+  WizardForm.FinishedHeadingLabel.Caption := 'FTHR Clips is ready';
+  WizardForm.FinishedLabel.Parent := PreviewFinishedPage.Surface;
+  WizardForm.FinishedLabel.Caption := 'Visual preview only. Nothing was installed.';
+  WizardForm.RunList.Parent := PreviewFinishedPage.Surface;
+  WizardForm.RunList.AddCheckBox('Open FTHR Clips', '', 0, True, True, False, False, nil);
+  WizardForm.RunList.Visible := True;
+  PreviewCopy := TNewStaticText.Create(PreviewFinishedPage);
+  PreviewCopy.SetBounds(ScaleX(36), ScaleY(302),
+    PreviewFinishedPage.SurfaceWidth - ScaleX(72), ScaleY(48));
+  PreviewCopy.AutoSize := False;
+  PreviewCopy.WordWrap := True;
+  PreviewCopy.Caption := 'Completion option preview. This build never launches the app.';
+  ApplyTextStyle(PreviewCopy, 9, InstallerTextDim, False);
+  PreviewCopy.Parent := PreviewFinishedPage.Surface;
+end;
+#endif
 
 function NextVersionNumber(const Value: String; var Position: Integer): Integer;
 var
@@ -1101,11 +1188,17 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
 #ifdef PreviewBuild
-  Result := 'A newer FTHR Clips version (1.4.6) is already installed. ' +
-    'This installer will not downgrade it. Use a matching or newer installer, ' +
-    'or explicitly pass /ALLOWDOWNGRADE.';
+  Result := 'This is a visual preview build. Installation is disabled. ' +
+    'Close this window and use the normal installer to install FTHR Clips.';
   exit;
 #endif
+  { File-lock detection misses source builds and other install locations.
+    Never replace files or launch a successor while an old UI owns capture. }
+  if CheckForMutexes(FTHRMutex) then begin
+    Result := 'FTHR Clips is still running. Use its power button to shut down ' +
+      'the app and background capture completely, then retry installation.';
+    exit;
+  end;
   if (InstalledVersion <> '') and
      (CompareDottedVersion(InstalledVersion, '{#MyAppVersion}') > 0) and
      not IsDowngradeAllowed then begin
@@ -1117,13 +1210,13 @@ end;
 
 procedure InitializeWizard;
 begin
-  InstallerBackground := StrToColor('#131C17');
-  InstallerSurface := StrToColor('#202A24');
-  InstallerHeader := StrToColor('#131C17');
+  InstallerBackground := StrToColor('#242629');
+  InstallerSurface := StrToColor('#2C2F33');
+  InstallerHeader := StrToColor('#202326');
   InstallerText := StrToColor('#FFFFFF');
-  InstallerTextDim := StrToColor('#BCC2BE');
-  InstallerAccent := StrToColor('#D9DCD9');
-  InstallerBorder := StrToColor('#000000');
+  InstallerTextDim := StrToColor('#BFC3C7');
+  InstallerAccent := StrToColor('#00FFAA');
+  InstallerBorder := StrToColor('#4C5055');
   LoadInstallerAssets;
   ApplyWizardShell;
   CreateConsentPage;
@@ -1154,6 +1247,9 @@ begin
 
   CreateFinishPage;
   CreateInstallingSurface;
+#ifdef PreviewBuild
+  CreatePreviewScreens;
+#endif
   CreateTitleBar;
   CreateSteps;
   CreateNavigation;
@@ -1210,7 +1306,6 @@ function InitializeSetup: Boolean;
 begin
   InstalledVersion := ReadInstalledVersion;
   PreserveAutostart := HasOwnedAutostart;
-  RemoveSettingsAndCache := False;
   Result := True;
 end;
 
@@ -1257,7 +1352,17 @@ begin
   else UpdateSteps(3);
   NavBackBorder.Visible := False;
   NavNextBorder.Visible := False;
+  NavBackLabel.Caption := 'BACK';
 
+#ifdef PreviewBuild
+  if (CurPageID = PreviewInstallingPage.ID) or (CurPageID = PreviewFinishedPage.ID) then begin
+    WizardForm.BackButton.Enabled := True;
+    NavBackBorder.Visible := True;
+    NavNextBorder.Visible := True;
+    NavNextLabel.Caption := 'NEXT PREVIEW';
+    exit;
+  end;
+#endif
   if CurPageID = ConsentPage.ID then begin
     WizardForm.BackButton.Enabled := False;
     NavNextLabel.Caption := 'NEXT';
@@ -1269,13 +1374,14 @@ begin
     NavNextBorder.Visible := True;
     NavNextLabel.Caption := 'INSTALL';
     WizardForm.ActiveControl := InstallDirEdit;
-  end else if CurPageID = FinishPage.ID then begin
-    FinishPathLabel.Caption := 'The app is installed.' + #13#10 + #13#10 +
+  end else if CurPageID = wpFinished then begin
+    CreateFinishPage;
+    if not WizardForm.YesRadio.Visible then
+      FinishPathLabel.Caption := 'The app is installed.' + #13#10 + #13#10 +
       'Clips will be saved to ' + Trim(ClipDirEdit.Text);
-    FinishPathLabel.AdjustHeight;
     WizardForm.BackButton.Enabled := False;
     WizardForm.CancelButton.Enabled := False;
-    NavNextLabel.Caption := 'CLOSE';
+    NavNextLabel.Caption := 'FINISH';
     NavNextBorder.Visible := True;
   end else if CurPageID = wpPreparing then begin
     WizardForm.PreparingErrorBitmapImage.Left := ScaleX(36);
@@ -1289,9 +1395,16 @@ begin
     WizardForm.PreparingLabel.Width := WizardForm.InnerNotebook.Width - ScaleX(96);
     ApplyTextStyle(WizardForm.PreparingLabel, 10, InstallerText, False);
     WizardForm.PreparingLabel.AdjustHeight;
-    NavBackBorder.Visible := WizardForm.BackButton.Enabled;
     NavNextBorder.Visible := True;
-    NavNextLabel.Caption := 'CANCEL';
+    if WizardForm.NextButton.Enabled then begin
+      // Applications are in use and Setup may close them: offer a real way out.
+      NavBackLabel.Caption := 'CANCEL';
+      NavBackBorder.Visible := True;
+      NavNextLabel.Caption := 'CONTINUE';
+    end else begin
+      NavBackBorder.Visible := WizardForm.BackButton.Enabled;
+      NavNextLabel.Caption := 'CANCEL';
+    end;
   end else if CurPageID = wpInstalling then begin
     WizardForm.BackButton.Enabled := False;
   end else begin
@@ -1302,7 +1415,8 @@ begin
   end;
 
   StyleBoxButton(NavBackBorder, NavBackFill, NavBackLabel, False,
-    WizardForm.BackButton.Enabled);
+    WizardForm.BackButton.Enabled or
+    ((CurPageID = wpPreparing) and WizardForm.NextButton.Enabled));
   StyleBoxButton(NavNextBorder, NavNextFill, NavNextLabel, True,
     WizardForm.NextButton.Enabled or
     ((CurPageID = wpPreparing) and WizardForm.CancelButton.Enabled));
@@ -1313,33 +1427,42 @@ begin
   Result := PageID = wpSelectTasks;
 end;
 
-function ShouldRemoveSettingsAndCache: Boolean;
-begin
-  Result := RemoveSettingsAndCache;
-end;
-
-function UserProfilePath(Param: String): String;
-begin
-  Result := GetEnv('USERPROFILE');
-end;
-
 function InitializeUninstall: Boolean;
 begin
   Result := True;
-  RemoveSettingsAndCache := False;
-  if not UninstallSilent then
-    RemoveSettingsAndCache :=
-      SuppressibleMsgBox(
-        'Keep your clips, screenshots, exports, and sidecar files?' + #13#10 + #13#10 +
-        'Choose Yes only to also remove FTHR Clips settings, logs, hotkeys, ' +
-        'themes, and cache from %USERPROFILE%\\.fthr. Your clip folder is ' +
-        'never removed by this installer.',
-        mbConfirmation, MB_YESNO, IDNO) = IDYES;
+end;
+
+function RunUninstallCleanup(const Phase: String): Boolean;
+var
+  ExitCode: Integer;
+  ScriptPath, Arguments: String;
+begin
+  ScriptPath := ExpandConstant('{app}\uninstall_cleanup.ps1');
+  Arguments := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+    ScriptPath + '" -InstallRoot "' + ExpandConstant('{app}') + '" -Phase ' + Phase;
+  Result := FileExists(ScriptPath) and
+    Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      Arguments, '', SW_HIDE, ewWaitUntilTerminated, ExitCode);
+  if Result then Result := ExitCode = 0;
+  if not Result then
+    Log('FTHR uninstall ' + Phase + ' failed; uninstall stopped before removing application files.');
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then begin
+    if not RunUninstallCleanup('Shutdown') or CheckForMutexes(FTHRMutex) then begin
+      SuppressibleMsgBox('FTHR Clips could not finish shutting down. ' +
+        'Wait for recordings or exports to finish, close FTHR Clips using its power button, ' +
+        'then run uninstall again. No application files were removed.', mbError, MB_OK, IDOK);
+      Abort;
+    end;
+    if not RunUninstallCleanup('Cleanup') then begin
+      SuppressibleMsgBox('Some FTHR data could not be cleaned up. ' +
+        'Close any programs using its files and run uninstall again. ' +
+        'The application remains installed so you can retry.', mbError, MB_OK, IDOK);
+      Abort;
+    end;
     RegDeleteValue(HKCU, RunKey, RunValueName);
     Log('Removed the FTHR Clips per-user autostart value.');
   end;

@@ -6,7 +6,6 @@ import types
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRect, Signal
 from PySide6.QtGui import QImage, QColor
 from PySide6.QtWidgets import QWidget
-from PySide6.QtTest import QTest
 
 from ui.window_preview import WindowPreview
 
@@ -122,7 +121,7 @@ def test_preview_is_lazy_tracks_exact_selected_window_and_clears_stale_frame(
     host.close()
 
 
-def test_preview_lifecycle_geometry_and_letterboxing(qapp, monkeypatch):
+def test_preview_lifecycle_geometry_and_letterboxing(qapp, qtbot, monkeypatch):
     fake = install_fake_factory(monkeypatch)
     host = QWidget()
     host.resize(500, 400)
@@ -146,9 +145,14 @@ def test_preview_lifecycle_geometry_and_letterboxing(qapp, monkeypatch):
     assert not pixmap.isNull()
     assert pixmap.height() > pixmap.width()
 
+    assert preview._geometry_timer.interval() == 75
     preview.resize(280, 160)
-    QTest.qWait(100)
+    # Bounded test completion guard, not a preview-latency/performance contract.
+    qtbot.waitUntil(
+        lambda: bool(backend.geometry) and not preview._geometry_timer.isActive()
+        and backend.geometry[-1] == preview._destination(), timeout=1000)
     assert backend.geometry
+    assert backend.geometry[-1] == preview._destination()
     host.hide()
     qapp.processEvents()
     assert backend.stopped >= 1
@@ -182,51 +186,39 @@ def test_source_popup_syncs_selection_refresh_and_desktop_hide(qtbot, monkeypatc
     import main
 
     fake = install_fake_factory(monkeypatch)
-    window = {'hwnd': 91, 'pid': 14, 'title': 'Selected Firefox',
-              'display_name': 'Firefox', 'is_game': False}
+    monkeypatch.setattr(main.sys, 'platform', 'win32')
+    from core.game_detector import GameWindow
+    live = GameWindow(
+        hwnd=91, pid=14, title='Selected Firefox',
+        exe_path=r'C:\Program Files\Mozilla Firefox\firefox.exe',
+        exe_name='firefox.exe', class_name='MozillaWindowClass',
+        process_created=20261017)
+    monkeypatch.setattr(main, 'get_window_info',
+                        lambda _hwnd, own_pid=None: live)
+    window = {
+        **live.as_capture_window(), 'display_name': 'Firefox', 'is_game': False,
+    }
     windows = [window]
     monkeypatch.setattr(main, '_enumerate_capturable_windows', lambda: list(windows))
     popup = main.SourcePopup(SettingsStub())
     qtbot.addWidget(popup)
 
-    assert not popup.window_preview.isVisibleTo(popup)
+    assert not hasattr(popup, 'window_preview')
     assert popup.set_capture_window(window)
-    assert popup.window_preview._entry['hwnd'] == 91
+    assert popup.cur_hwnd == 91
     assert popup.window_combo.itemData(0, 3) == 'Selected Firefox'
-    assert popup.window_preview.isVisibleTo(popup)
     popup.show()
     qtbot.wait(20)
-    assert len(fake.backends) == 1
-    assert 100 <= popup.window_preview.image_label.height() <= 146
-
-    backend = fake.backends[0]
-    backend.status_changed.emit('The selected window is minimized.')
-    refreshed = dict(window, title='Selected Firefox refreshed')
-    windows[:] = [refreshed]
+    assert fake.backends == []
+    windows[:] = [dict(window, title='Selected Firefox refreshed')]
     popup._refresh_windows()
-    assert popup.window_preview._entry['title'] == 'Selected Firefox refreshed'
-    assert len(backend.started) == 2
-
+    assert popup.window_combo.itemData(0, 3) == 'Selected Firefox refreshed'
     windows.clear()
     popup._refresh_windows()
-    assert popup.window_preview._entry is None
-
-    popup.set_capture_window(window)
-    popup.show()
-    qtbot.wait(20)
-    assert popup.window_preview._backend_running
+    assert 'Unavailable' in popup.window_combo.currentText()
     popup.set_capture_desktop()
-    assert popup.window_preview._entry is None
-    assert not popup.window_preview.isVisibleTo(popup)
-    assert backend.stopped >= 2  # refresh-list clear, then desktop transition
-
-    popup.set_capture_window(window)
-    popup.show()
-    qtbot.wait(20)
-    assert popup.window_preview._backend_running
-    popup.hide()
-    qtbot.wait(20)
-    assert not popup.window_preview._backend_running
+    assert not popup.window_combo.isVisibleTo(popup)
+    assert fake.backends == []
 
 
 def test_source_popup_natural_height_is_not_a_small_screen_minimum(qtbot, monkeypatch):
@@ -253,4 +245,4 @@ def test_source_popup_natural_height_is_not_a_small_screen_minimum(qtbot, monkey
     anchor.show()
     popup.show_below(anchor)
     assert popup.height() <= 254
-    assert popup.layout().sizeConstraint() == popup.layout().SizeConstraint.SetMinimumSize
+    assert popup.height() >= popup.sizeHint().height()

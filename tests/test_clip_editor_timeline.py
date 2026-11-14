@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from types import MethodType, SimpleNamespace
 import pytest
 
@@ -8,6 +10,9 @@ from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QPushButton, QSizePolicy
 
+from core.ffmpeg_tools import (
+    FFmpegUnavailable, get_ffmpeg_exe, get_ffprobe_exe, maximum_quality_video_args,
+)
 from ui.clip_viewer import (
     ClipViewer,
     ClickableSlider,
@@ -217,6 +222,16 @@ def test_live_preview_can_keep_visual_edits_for_export_only(qtbot):
         10, 10) == QColor(40, 80, 120)
 
 
+def test_custom_resolution_preview_matches_crop_aspect_beyond_legacy_ratio(qtbot):
+    preview = LiveVideoPreview(1920, 1080)
+    qtbot.addWidget(preview)
+    preview.resize(800, 800)
+    preview.set_edit_state((100, 100, 640, 720), {}, 1.0, stretch_size=(160, 2880))
+    display = preview._video_display_rect()
+    crop_aspect = (display.width() * (640 / 1920)) / (display.height() * (720 / 1080))
+    assert crop_aspect == pytest.approx(160 / 2880, abs=0.001)
+
+
 def test_collapsible_panels_shrink_to_the_sidebar_instead_of_expanding_sideways(qtbot):
     panel, body_layout = ClipViewer._build_collapsible_panel(
         SimpleNamespace(), 'CLIP DETAILS', expanded=False)
@@ -394,6 +409,14 @@ def test_editor_history_undoes_and_redoes_segment_edits(qtbot):
     assert len(timeline.segments) == 2
     assert undo_btn.isEnabled() is True
 
+    before = viewer._capture_editor_state()
+    viewer._stretch_size = (960, 540)
+    viewer._commit_editor_change(before)
+    viewer._undo()
+    assert viewer._stretch_size is None
+    viewer._redo()
+    assert viewer._stretch_size == (960, 540)
+
 
 def test_editor_draft_snapshot_roundtrips_and_rejects_broken_timelines():
     state = EditorSnapshot(
@@ -403,6 +426,7 @@ def test_editor_draft_snapshot_roundtrips_and_rejects_broken_timelines():
         selected_segment=1,
         crop_rect=(10, 20, 1280, 720),
         stretch_ratio=1.2,
+        stretch_size=(720, 1280),
         effects=(('contrast', 25), ('exposure', -10)),
         preserve_pitch=False,
     )
@@ -415,12 +439,21 @@ def test_editor_draft_snapshot_roundtrips_and_rejects_broken_timelines():
     assert restored.segments == state.segments
     assert restored.crop_rect == state.crop_rect
     assert restored.stretch_ratio == state.stretch_ratio
+    assert restored.stretch_size == state.stretch_size
     assert restored.preserve_pitch is False
     assert dict(restored.effects)['contrast'] == 25
 
     corrupt = _editor_snapshot_to_draft(state)
     corrupt['segments'] = [[0.0, 0.4, False], [0.6, 1.0, False]]
     assert _editor_snapshot_from_draft(corrupt) is None
+
+    legacy = _editor_snapshot_to_draft(state)
+    del legacy['stretch_size']
+    assert _editor_snapshot_from_draft(legacy).stretch_size is None
+
+    invalid_size = _editor_snapshot_to_draft(state)
+    invalid_size['stretch_size'] = [721, 1280]
+    assert _editor_snapshot_from_draft(invalid_size) is None
 
 
 def test_stretch_dialog_uses_cropped_dimensions_and_visible_drag_preview(
@@ -452,3 +485,90 @@ def test_stretch_dialog_uses_cropped_dimensions_and_visible_drag_preview(
 
     assert dialog.stretch_ratio > 1.4
     assert '×' in dialog._dimensions.text()
+
+
+def test_custom_stretch_fields_validate_and_update_preview(qtbot, monkeypatch):
+    monkeypatch.setattr(StretchDialog, '_extract_preview_frame', lambda *_: QPixmap())
+    dialog = StretchDialog('clip.mp4', 0, 1920, 1080, crop_rect=(100, 0, 606, 1077))
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    def enter(field, value):
+        field.selectAll()
+        QTest.keyClicks(field, value)
+
+    enter(dialog._width_input, '540')
+    enter(dialog._height_input, '960')
+    assert dialog.stretch_size == (540, 960)
+    assert dialog._apply_btn.isEnabled()
+    rect = dialog.preview._rect_for_ratio(dialog.preview.ratio)
+    assert rect.width() / rect.height() == pytest.approx(540 / 960, abs=0.01)
+
+    enter(dialog._height_input, '961')
+    assert not dialog._apply_btn.isEnabled()
+    assert 'even numbers' in dialog._range_hint.text()
+    assert dialog.stretch_size == (540, 960)
+    QTest.keyClick(dialog._height_input, Qt.Key.Key_Return)
+    assert dialog.isVisible()
+    enter(dialog._height_input, '4310')
+    assert not dialog._apply_btn.isEnabled()
+    assert '4,308' in dialog._range_hint.text()
+    enter(dialog._height_input, '4308')
+    enter(dialog._width_input, '2424')
+    assert not dialog._apply_btn.isEnabled()
+    assert 'total pixels' in dialog._range_hint.text()
+
+    enter(dialog._width_input, '540')
+    enter(dialog._height_input, '960')
+    dialog._on_ratio_changed(1.2)
+    assert dialog.stretch_size == (726, 960)
+    assert dialog._width_input.text() == '726'
+
+    dialog._reset()
+    assert dialog.stretch_size is None
+    assert dialog._width_input.text() == '606'
+    assert dialog._height_input.text() == '1076'
+    assert dialog._apply_btn.isEnabled()
+
+
+@pytest.mark.parametrize('segments,size', [([(0, 1)], (48, 48)),
+                                          ([(0, 0.4), (0.6, 1)], (64, 128))])
+def test_custom_stretch_export_writes_exact_square_pixel_dimensions(tmp_path, segments, size):
+    try:
+        ffmpeg = get_ffmpeg_exe()
+        ffprobe = get_ffprobe_exe()
+    except FFmpegUnavailable as error:
+        pytest.skip(str(error))
+    source = tmp_path / 'input.mp4'
+    output = tmp_path / 'stretched.mp4'
+    subprocess.run([
+        ffmpeg, '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=96x80:rate=20:duration=1',
+        '-c:v', 'mpeg4', str(source),
+    ], check=True, capture_output=True, timeout=20)
+    viewer = SimpleNamespace(clip_path=str(source))
+    command = ClipViewer._build_export_cmd(
+        viewer, ffmpeg, 0, 1, str(output), (4, 6, 64, 64),
+        maximum_quality_video_args(ffmpeg), segments=segments, stretch_size=size)
+    subprocess.run(command, check=True, capture_output=True, timeout=20)
+    probe = subprocess.run([
+        ffprobe, '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+        'stream=width,height,sample_aspect_ratio', '-of', 'json', str(output),
+    ], check=True, capture_output=True, text=True, timeout=20)
+    stream = json.loads(probe.stdout)['streams'][0]
+    assert (stream['width'], stream['height']) == size
+    assert stream['sample_aspect_ratio'] == '1:1'
+
+
+def test_tall_filmstrip_click_is_not_mistaken_for_overview(qtbot):
+    timeline = TrimSlider(10_000)
+    qtbot.addWidget(timeline)
+    timeline.setFixedHeight(260)
+    timeline.resize(800, 260)
+    timeline.set_zoom(2.0, 0.25)
+    timeline.show()
+    before = timeline.view_start_pct
+    QTest.mouseClick(timeline, Qt.MouseButton.LeftButton, pos=QPoint(600, 180))
+    assert timeline.view_start_pct == before
+    assert timeline._playhead_rect().bottom() > 220
+    QTest.mouseClick(timeline, Qt.MouseButton.LeftButton, pos=QPoint(600, 250))
+    assert timeline.view_start_pct > before

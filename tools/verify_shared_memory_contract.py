@@ -170,14 +170,23 @@ def load_bridge_struct(platform: str):
     mod.__dict__['__file__'] = str(BRIDGE)
 
     real_platform = sys.platform
+    absent = object()
+    previous_module = sys.modules.get(mod.__name__, absent)
     # Stop the module at the struct definitions: everything after is runtime
     # IPC code that would try to open a real mapping.
     cut = src.index('class CaptureBridge')
     try:
         sys.platform = platform
+        # Dataclasses resolve postponed annotations through their module's
+        # registered namespace, even for this definitions-only import.
+        sys.modules[mod.__name__] = mod
         exec(compile(src[:cut], str(BRIDGE), 'exec'), mod.__dict__)
     finally:
         sys.platform = real_platform
+        if previous_module is absent:
+            sys.modules.pop(mod.__name__, None)
+        else:
+            sys.modules[mod.__name__] = previous_module
     return mod.SharedMemoryLayout
 
 
@@ -264,14 +273,6 @@ def main() -> int:
         rep.fail(f'win32: {exc}')
 
     print()
-    print('Linux layout (capture_bridge posix branch vs FTHRcapture_linux):')
-    try:
-        lin_cpp = parse_struct(LINUX_HEADER)
-        lin_py = python_fields(load_bridge_struct('linux'))
-        compare(rep, 'linux', lin_cpp, lin_py)
-    except Exception as exc:
-        rep.fail(f'linux: {exc}')
-
     # Enums
     print()
     print('Command / response enums:')
@@ -280,7 +281,7 @@ def main() -> int:
         from core.capture_bridge import CommandType, ResponseType
         py_cmd = {m.name: m.value for m in CommandType}
         py_rsp = {m.name: m.value for m in ResponseType}
-        for header, tag in ((WIN_HEADER, 'win32'), (LINUX_HEADER, 'linux')):
+        for header, tag in ((WIN_HEADER, 'win32'),):
             compare_enums(rep, f'CommandType ({tag})',
                           parse_enum(header, 'CommandType'), py_cmd)
             compare_enums(rep, f'ResponseType ({tag})',

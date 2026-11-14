@@ -80,6 +80,7 @@ inline const char* FailureName(Failure failure) noexcept {
 struct Report {
     bool accepted = false;
     Failure failure = Failure::Empty;
+    Failure tolerated_cadence_failure = Failure::None;
     size_t packet_count = 0;
     double requested_duration_s = 0.0;
     double actual_coverage_s = 0.0;
@@ -112,7 +113,8 @@ struct Report {
     TimelineSubtype timeline_subtype = TimelineSubtype::None;
 };
 
-inline Report Evaluate(const Input& input) noexcept {
+inline Report Evaluate(const Input& input, bool allow_replay_gaps = false,
+                       bool allow_low_fps_clips = false) noexcept {
     Report report;
     report.packet_count = input.packets.size();
     report.requested_duration_s =
@@ -289,23 +291,31 @@ inline Report Evaluate(const Input& input) noexcept {
     // A short scheduling hiccup is recoverable.  A gap above 250 ms (or four
     // nominal frame periods for unusually low configured FPS) is evidence
     // that the selected replay cannot be published as a continuous clip.
-    const double max_bounded_gap_s =
-        std::max(0.250, 4.0 / input.expected_fps);
-    if (report.largest_gap_s > max_bounded_gap_s) {
+    Failure cadence_failure = Failure::None;
+    if (report.largest_gap_s > report.max_allowed_gap_s) {
+        cadence_failure = Failure::LargeTimelineGap;
+    }
+    // Once the requested interval is established, a sustained rate below 80%
+    // of the configured cadence fails the strict policy. This rejects a
+    // 120/144-fps request carrying only a 60-fps source while retaining the
+    // observed 51-56-fps cadence range for a 60-fps request.
+    else if (report.effective_packet_rate < report.minimum_effective_rate) {
+        cadence_failure = Failure::LowEffectiveRate;
+    }
+    if (!allow_replay_gaps && cadence_failure == Failure::LargeTimelineGap) {
         report.failure = Failure::LargeTimelineGap;
         return report;
     }
-
-    // Once the requested interval is established, a sustained rate below 80%
-    // of the configured cadence is not a valid native replay. This rejects a
-    // 120/144-fps request carrying only a 60-fps source while retaining the
-    // observed 51-56-fps cadence range for a 60-fps request.
-    if (report.effective_packet_rate < input.expected_fps * 0.8) {
+    // The two user policies are independent: accepting gaps must not silently
+    // disable the low-rate check, or vice versa.
+    if (!allow_low_fps_clips
+            && report.effective_packet_rate < report.minimum_effective_rate) {
         report.failure = Failure::LowEffectiveRate;
         return report;
     }
     report.accepted = true;
     report.failure = Failure::None;
+    report.tolerated_cadence_failure = cadence_failure;
     return report;
 }
 

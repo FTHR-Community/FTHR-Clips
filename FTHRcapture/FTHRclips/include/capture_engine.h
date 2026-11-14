@@ -1,7 +1,9 @@
 ﻿// Windows capture, compressed replay storage, and asynchronous clip saves.
-// Prefer WGC; its optional border opt-out is best effort and retains the OS
-// privacy border when unavailable. Use DXGI only when required WGC startup fails. Capture
-// and hardware encoding stay on the selected monitor adapter. Public-alpha
+// Desktop Auto prefers DXGI with the cursor enabled; exact-monitor WGC is used
+// when DXGI startup fails or system-cursor exclusion is requested.
+// WGC's optional border opt-out is best effort and retains the OS privacy
+// border when unavailable. Window and protected capture remain WGC-only.
+// Capture and hardware encoding stay on the selected monitor adapter. Public-alpha
 // startup requires NVENC, AMF, or QSV; raw replay is legacy-only. CaptureThread
 // feeds the ring, SaveClipThread muxes snapshots, and ContinuousRecordingWriter
 // can also write incoming packets to fragmented MP4.
@@ -25,14 +27,18 @@
 #include <string>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #include "save_clip_task.h"      // SaveClipTask + SaveClipQueue
 #include "replay_encoder.h"      // codec-neutral Windows replay encoder seam
 #include "encoded_ring_buffer.h" // EncodedRingBuffer
+#include "window_capture_identity.h"
+#include "async_content_sampler.h"
 #include "audio_capture.h"       // AudioCapture (WASAPI loopback -> PCM ring)
 #include "audio_encoder.h"
 #include "audio_packet_ring.h"
 #include "audio_timeline.h"
+#include "audio_device_tracks.h"
 #include "windows_microphone_audio_provider.h"
 #include "windows_process_loopback_audio_provider.h"
 #include "continuous_recording_writer.h"
@@ -43,6 +49,7 @@
 #include "windows_dxgi_recovery.h"
 #include "windows_monitor_resolver.h"
 #include "dxgi_replay_cadence.h"
+#include "dxgi_cursor.h"
 #include "replay_pause_clock.h"
 
 
@@ -50,6 +57,7 @@ namespace fthr {
 
 
     struct SharedMemoryLayout;
+    class BgraFrameScaler;
 
 
     struct CaptureConfig {
@@ -58,9 +66,13 @@ namespace fthr {
         uint32_t target_width = 0;
         uint32_t target_height = 0;
         uint32_t bitrate_kbps = 16000;
-        uint32_t max_buffer_mb = 512;
-        // argv[11]: Auto resolves to H.264; explicit HEVC/AV1 must not fall back to H.264.
+        ReplayStorageConfig replay_storage;
+        bool allow_replay_gaps = false;
+        bool allow_low_fps_clips = true;
+        uint32_t max_buffer_mb = 512; // Compressed video ring + live save snapshots (MiB)
+        // Auto prefers 10-bit HEVC on an HDR source when supported, and uses H.264 for SDR.
         VideoCodec video_codec = VideoCodec::H264;
+        bool video_codec_auto = false;
         EncoderPreference encoder_preference = EncoderPreference::Auto;
         uint32_t encoder_preset = 4;
         // Retired multiband ABI field remains available for old callers.
@@ -87,6 +99,9 @@ namespace fthr {
         // argv[14]: 0 = disable WASAPI loopback audio capture entirely.
         // Useful when the user turns off audio in settings (no system audio in clips).
         bool audio_enabled = true;
+        // Excludes the system pointer when false. App-rendered cursors remain
+        // part of captured content. Desktop exclusion requires WGC.
+        bool capture_cursor = true;
 
         // Stable native eCapture endpoint ID. Empty means the documented
         // "Default microphone" policy. An explicit missing ID never falls
@@ -95,6 +110,25 @@ namespace fthr {
         uint32_t microphone_gain_percent = 100;
         std::wstring playback_endpoint_id;
         bool microphone_mono = false;
+        std::vector<AudioDeviceTrackConfig> audio_device_tracks;
+        // nullopt preserves the pre-device-track contract for direct native
+        // callers: separate_audio_enabled also enables process-loopback tracks.
+        // The command-line entry point supplies an explicit value when argv[27]
+        // is present (or resolves the legacy default when it is absent).
+        std::optional<bool> application_audio_tracks_enabled = std::nullopt;
+        std::vector<std::string> application_audio_exclusions;
+        bool keep_system_audio_backup = true;
+
+        bool ResolvedApplicationAudioTracksEnabled() const noexcept {
+            return application_audio_tracks_enabled.value_or(separate_audio_enabled);
+        }
+        bool HasApplicationAudioExclusions() const noexcept {
+            return ResolvedApplicationAudioTracksEnabled() && !application_audio_exclusions.empty();
+        }
+        bool RetainDefaultMixAudio() const noexcept {
+            return audio_device_tracks.empty() && !HasApplicationAudioExclusions()
+                && (!ResolvedApplicationAudioTracksEnabled() || keep_system_audio_backup);
+        }
 
         // Optional per-game crop in normalized source coordinates. It is
         // resolved to safe pixel geometry after the capture source opens and
@@ -140,6 +174,8 @@ namespace fthr {
 
         bool StartRecording(const wchar_t* path);
         bool StopRecording();
+        bool MarkHighlight(const std::string& marker_id,
+            int64_t out_point_qpc = 0);
 
         bool SaveClip(const wchar_t* path, uint32_t duration_seconds,
             SharedMemoryLayout* shared_memory);
@@ -161,6 +197,7 @@ namespace fthr {
         const std::string& GetLastStartupError() const {
             return last_startup_error_;
         }
+        std::wstring GetReplayFailureMessage() const;
         ReplayStartupError GetLastStartupErrorCode() const {
             return last_startup_error_code_;
         }
@@ -170,7 +207,15 @@ namespace fthr {
         const ActiveReplayCapability& GetActiveReplayCapability() const {
             return active_replay_capability_;
         }
-        uint32_t GetCaptureHealthFlags() const { return capture_health_flags_.load(); }
+        uint32_t GetCaptureHealthFlags() const {
+            const uint32_t flags = capture_health_flags_.load();
+            return replay_storage_ && !replay_storage_->healthy()
+                ? flags | CAPTURE_HEALTH_BACKEND_FAILED : flags;
+        }
+        bool HasReplayMemoryFailure() const {
+            return replay_memory_failed_.load()
+                || (replay_storage_ && !replay_storage_->healthy());
+        }
         uint32_t GetCaptureGeneration() const { return capture_generation_.load(); }
         uint32_t GetContentSampleSequence() const { return content_sample_sequence_.load(); }
         uint32_t GetContentSuspiciousStreak() const { return content_suspicious_streak_.load(); }
@@ -199,6 +244,8 @@ namespace fthr {
         // Save workers return false and publish SetEngineError() on failure.
         // Publish CLIP_SAVED only after the transactional write succeeds.
         bool ProcessSaveClipTask(const SaveClipTask& task); // transactional wrapper
+        void ForwardAudioToRecording(const AudioSourceMetadata& source, const uint8_t* data,
+            uint32_t size, int64_t timeline_100ns, int64_t duration_samples);
         bool MuxEncodedClip(const SaveClipTask& task,
             const std::wstring& output_path);               // Compressed replay: mux only
         bool EncodeRawClip(const SaveClipTask& task,
@@ -211,6 +258,7 @@ namespace fthr {
         // best effort; callers retain the requested WGC target when its optional
         // opt-out is unavailable or denied.
         bool ApplyCaptureBorderPolicy(const char* capture_target);
+        void ApplyCaptureCursorPolicy();
         void ShutdownWGC();
         bool InitializeD3D11();           // DXGI fallback for the resolved adapter/output
         void ShutdownD3D11();
@@ -224,7 +272,7 @@ namespace fthr {
         bool ValidateCaptureTexture(
             ID3D11Texture2D* texture, const char* backend_name);
         bool ValidateMappedCaptureRowPitch(
-            uint32_t row_pitch, const char* backend_name);
+            uint32_t expected_width, uint32_t row_pitch, const char* backend_name);
         void SampleContentBGRA(const uint8_t* data, uint32_t stride,
             uint32_t width, uint32_t height, uint64_t produced_frame);
         void SampleContentTexture(ID3D11Texture2D* texture, uint64_t produced_frame);
@@ -233,9 +281,13 @@ namespace fthr {
         bool ResolveSelectedMonitor(const char* backend_name);
         bool InitializeMonitorCaptureDevice(
             const char* backend_name, IDXGIOutput** selected_output);
-        bool EnsureStagingTexture();
+        bool CreateStagingTexture(uint32_t width, uint32_t height);
         bool ConfigureCrop(const CaptureConfig& config);
         ID3D11Texture2D* PrepareEncodeTexture(ID3D11Texture2D* source);
+        ID3D11Texture2D* PrepareHybridReadbackTexture(
+            ID3D11Texture2D* source, const char* backend_name);
+        void FailHybridReadback(const char* backend_name, const char* operation,
+                                std::string detail);
         const uint8_t* CropMappedData(
             const uint8_t* data, uint32_t stride) const;
         bool EncodeGpuReplayTexture(
@@ -254,11 +306,14 @@ namespace fthr {
         ID3D11Device*           device_;           // D3D11 device on the selected capture adapter
         ID3D11DeviceContext*    context_;
         IDXGIOutputDuplication* duplication_;      // null when WGC is active
-        ID3D11Texture2D*        staging_texture_;  // null on WGC+NVENC path
-        ID3D11Texture2D*        crop_texture_;     // encoder-sized GPU crop
-        ID3D11Texture2D*        health_staging_texture_; // 16x9 grid, sampled ~1 Hz
+        ID3D11Texture2D*        staging_texture_;  // CPU readback on the capture adapter
+        ID3D11Texture2D*        crop_texture_;     // source crop before encoder scaling
+        std::unique_ptr<BgraFrameScaler> hybrid_bgra_scaler_;
+        AsyncContentSampler   content_sampler_; // Two nonblocking 16x9 readbacks
         ID3D11Texture2D*        dxgi_replay_texture_ = nullptr; // owned latest DXGI image
         dxgi_replay::Cadence    dxgi_replay_cadence_;
+        dxgi_cursor::Composer  dxgi_cursor_composer_;
+        bool capture_cursor_ = true;
 
         // Legacy cross-adapter resources. They remain null under the final alpha
         // policy; automatic cross-adapter replay is deliberately unsupported.
@@ -267,6 +322,9 @@ namespace fthr {
 
         // WGC state (PIMPL — WinRT types confined to capture_engine.cpp)
         bool              wgc_active_;
+        bool              source_hdr_ = false;
+        bool              replay_hdr_ = false;
+        float             sdr_reference_white_ = 1.0f;
         struct WGCState;                        // defined in capture_engine.cpp
         std::unique_ptr<WGCState> wgc_state_;
         std::mutex              wgc_frame_mutex_;
@@ -289,11 +347,14 @@ namespace fthr {
         uint32_t  crop_height_;
         uintptr_t target_hwnd_;  // 0 = desktop mode; non-zero = window capture mode
         bool focus_gated_ = false;
+        WindowCaptureIdentity window_source_identity_;
         std::shared_ptr<ReplayPauseClock> replay_pause_clock_;
         std::atomic<int64_t> replay_audio_origin_100ns_{0};
 
         // Config
         uint32_t fps_;
+        bool allow_replay_gaps_ = false;
+        bool allow_low_fps_clips_ = true;
         uint32_t buffer_seconds_;
         CaptureConfig::CaptureModeEnum capture_mode_ =
             CaptureConfig::CaptureModeEnum::DESKTOP;
@@ -327,6 +388,8 @@ namespace fthr {
         std::unique_ptr<IReplayEncoder>    replay_encoder_;
         std::unique_ptr<EncodedRingBuffer> encoded_ring_;
         std::atomic<bool>                  replay_config_publish_failed_{false};
+        std::shared_ptr<ReplayStorage> replay_storage_;
+        std::atomic<bool>                  replay_memory_failed_{false};
         ActiveReplayCapability             active_replay_capability_{};
         ReplayStartupError                 last_startup_error_code_ =
             ReplayStartupError::None;
@@ -343,11 +406,12 @@ namespace fthr {
         SaveClipQueue          save_clip_queue_;
         std::atomic<uint32_t>  next_task_id_{ 1 };
 
-        // AudioCapture feeds persistent AAC encoders and bounded packet rings.
+        // AudioCapture feeds lossless float packetizers and bounded disk rings.
         // The first WASAPI QPC timestamp anchors source-sample PTS; saves select
         // audio against the video presentation interval on that same clock.
         // audio_active_ requires successful initialization of the pipeline.
         bool                             audio_active_;
+        bool                             audio_requested_ = false;
         AudioCapture                     audio_capture_;
         AudioEncoder                      default_mix_audio_encoder_;
         std::unique_ptr<EncodedAudioPacketRing> default_mix_audio_ring_;
@@ -356,6 +420,13 @@ namespace fthr {
         // or the frozen Shared Memory v4 boundary.
         std::unique_ptr<WindowsMicrophoneAudioProvider> microphone_audio_source_;
         AudioSourceMetadata               microphone_audio_metadata_;
+        struct DeviceAudioTrack {
+            std::unique_ptr<WindowsMicrophoneAudioProvider> provider;
+            AudioSourceMetadata metadata;
+        };
+        std::vector<DeviceAudioTrack> device_audio_tracks_;
+        bool application_audio_tracks_enabled_ = false;
+        bool omit_default_mix_track_ = false;
         // Process-loopback application stems are opt-in and exist only for
         // separate-audio generations. The manager owns every provider and is
         // stopped before the system/microphone audio teardown.
@@ -363,13 +434,24 @@ namespace fthr {
             application_audio_source_manager_;
         // Continuous recording state
         mutable std::mutex record_writer_mutex_;
+        std::condition_variable record_writer_cv_;
         std::shared_ptr<ContinuousRecordingWriter> record_writer_;
+        bool recording_recovery_in_progress_ = false;
+        bool recording_stop_in_progress_ = false;
+        bool recovery_stop_result_valid_ = false;
+        bool recovery_stop_result_ = false;
+        std::string recovery_stop_error_;
         std::string last_recording_error_;
 
         // Stats
         std::atomic<uint64_t> frames_captured_;
         std::atomic<uint64_t> frames_dropped_;
         std::atomic<uint64_t> capture_loop_iterations_{0};
+        // Missing scheduled acquisitions are distinct from source-image drops
+        // and API timeouts. Expose them in the periodic health snapshot.
+        std::atomic<uint64_t> dxgi_skipped_capture_slots_{0};
+        std::atomic<uint32_t> dxgi_acquire_wait_ms_{0};
+        std::atomic<uint64_t> dxgi_processing_budget_us_{0};
         std::atomic<uint64_t> capture_acquire_attempts_{0};
         std::atomic<uint64_t> capture_acquire_successes_{0};
         std::atomic<uint64_t> capture_timeouts_{0};
@@ -392,6 +474,11 @@ namespace fthr {
         // WGC publishes only changed images.  Count cadence samples that had
         // to reuse the last owned image; DXGI leaves this at zero.
         std::atomic<uint64_t> wgc_repeated_frame_observations_{0};
+        std::atomic<uint64_t> wgc_missed_output_deadlines_{0};
+        CaptureStageTiming wgc_acquisition_timings_;
+        CaptureStageTiming wgc_readback_timings_;
+        CaptureStageTiming wgc_scale_timings_;
+        CaptureStageTiming wgc_submit_timings_;
         std::atomic<uint64_t> conversion_submissions_{0};
         std::atomic<uint64_t> conversion_completions_{0};
         std::atomic<uint64_t> video_packets_produced_{0};

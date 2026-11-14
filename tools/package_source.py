@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import hashlib
 import json
 import os
@@ -14,14 +15,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = {
     '.github', 'docs', 'FTHR_UI', 'FTHR_Uploader', 'FTHRcapture',
     'FTHRcapture_common', 'installer_assets', 'licenses',
-    'tests', 'tools', 'AppDir', 'FTHRcapture_linux',
-    'FTHR_Hardware_ID', 'public_html',
+    'tests', 'tools',
+    'FTHR_Hardware_ID',
 }
+
 SKIP_DIRS = {
     '.git', '.vs', '__pycache__', '.pytest_cache', '.ruff_cache',
     '.mypy_cache', '.venv', 'venv', 'node_modules', 'x64', 'x86',
     'build', 'dist', 'Output', 'Debug', 'Release', 'CFRRelease',
     'CFRReleaseFinal', 'ipch', '.fthr',
+    '.agent-team', '.agents', '.codex', '.claude',
 }
 SKIP_SUFFIXES = {
     '.pyc', '.pyo', '.pyd', '.exe', '.dll', '.obj', '.o', '.iobj',
@@ -36,27 +39,47 @@ SKIP_NAMES = {
     'credentials.json', 'upload_history.json',
     'START_HERE.md', 'SOURCE_MANIFEST.json',
 }
-START_HERE = """# FTHR Clips 2.0.0 Alpha — source snapshot (17 October 2026)
-
-This snapshot includes the short replay save fix: save available healthy footage
-from 0.5 seconds onward during startup/recovery, even for longer clip requests.
-
-Extract the entire folder before building. Read BUILDING.md for prerequisites,
-pinned Python dependencies, native Windows/Linux builds, optional uploader,
-verified dependency downloads, packaging and verification commands.
-
-The archive preserves app and helper source, both native engines, shared code,
-website, original assets, tests, licenses, build scripts, dependency manifests,
-and Windows FFmpeg headers/import libraries. Source files are losslessly stored.
-Generated builds, installers, downloadable runtimes, caches and personal data
-are omitted. Fetch the verified dependencies using tools/fetch_third_party.py
-as described in BUILDING.md; this is not an offline binary bundle.
-
-SOURCE_MANIFEST.json contains the size and SHA-256 of every other archived file.
-The ZIP uses maximum standard Deflate compression for Windows compatibility.
-After building, tools/update_latest_build_shortcut.ps1 creates a shortcut to
-the latest local packaged app.
-"""
+LOCAL_ONLY_NAMES = {
+    'agents.md', 'claude.md', 'gemini.md', 'handoff.md', 'handoff-manifest.json',
+}
+LOCAL_ONLY_DIRS = {'.agent-team', '.agents', '.codex', '.claude'}
+# Local review/planning records stay in the workspace, not in source exports.
+# Ordinary project documentation and upstream attribution remain included.
+LOCAL_ONLY_PATHS = {
+    'docs/CODEX-CONTINUATION.md',
+    'docs/amd-completion-review-2026-10-18.md',
+    'docs/amd-completion-review-2026-10-18.evidence.json',
+    'docs/amd-completion-review-2026-10-18.json',
+    'docs/amd-nv12-comparison-2026-10-18.md',
+    'docs/amd-nv12-comparison-2026-10-18.evidence.json',
+    'docs/amd-nv12-comparison-2026-10-18.json',
+    'docs/amd-project-assessment-2026-10-18.md',
+    'docs/amd-project-assessment-2026-10-18.evidence.json',
+    'docs/amd-project-assessment-2026-10-18.json',
+    'docs/amd-source-safety-and-gpu-probe-2026-10-18.md',
+    'docs/amd-source-safety-and-gpu-probe-2026-10-18.evidence.json',
+    'docs/amd-source-safety-and-gpu-probe-2026-10-18.json',
+    'docs/amd-test-tooling-2026-10-18.md',
+    'docs/amd-test-tooling-2026-10-18.evidence.json',
+    'docs/amd-test-tooling-2026-10-18.json',
+    'docs/windows-audio-sync-fix-2026-10-19.md',
+    'docs/windows-audio-sync-fix-2026-10-19.evidence.json',
+    'docs/windows-audio-sync-fix-2026-10-19.json',
+    'docs/vxnsin-pr-integration-2026-10-19.md',
+    'docs/vxnsin-pr-integration-2026-10-19.evidence.json',
+    'docs/vxnsin-pr-integration-2026-10-19.json',
+    'docs/editor-upload-fix-2026-10-19.md',
+    'docs/editor-upload-fix-2026-10-19.evidence.json',
+    'docs/editor-upload-fix-2026-10-19.json',
+    'docs/p0-baseline-review-2026-10-19.md',
+    'docs/p0-baseline-review-2026-10-19.evidence.json',
+    'docs/p0-baseline-review-2026-10-19.json',
+    'docs/p0-audio-selection-fix-2026-10-19.md',
+    'docs/FEATURE-CANDIDATES-50-2026-10-19.md',
+    'docs/FEATURE-IMPLEMENTATION-PLAN-2026-10-19.md',
+    'docs/FEATURE-WISHLIST.md',
+    'docs/UPDATE-BACKLOG-2026-10-19.md',
+}
 
 
 def source_paths():
@@ -65,14 +88,27 @@ def source_paths():
         dirs[:] = sorted(
             name for name in dirs
             if name not in SKIP_DIRS
+            and name.casefold() not in LOCAL_ONLY_DIRS
             and not (base / name).is_symlink()
             and (base != ROOT or name in SOURCE_DIRS))
         for name in sorted(files):
             path = base / name
             rel = path.relative_to(ROOT).as_posix()
-            if rel.startswith(('AppDir/usr/', 'FTHRcapture_linux/third_party/')) or rel == 'AppDir/AppRun':
+            shared_ui_helpers = {
+                'FTHR_UI/core/linux_runtime.py',
+                'FTHR_UI/core/linux_tools.py',
+                'FTHR_UI/ui/frameless_window_linux.py',
+            }
+            if (rel not in shared_ui_helpers
+                    and any(term in rel.lower() for term in ('linux', 'appimage', 'wayland'))):
+                continue
+            if (name in {'build_linux.sh', 'FTHR_linux.spec'}
+                    or (rel.startswith('tools/build_') and name.endswith('_plugin.py'))
+                    or (rel.startswith('docs/') and 'plugin' in name.lower())):
                 continue
             if (path.is_symlink() or name in SKIP_NAMES
+                    or name.casefold() in LOCAL_ONLY_NAMES
+                    or rel in LOCAL_ONLY_PATHS
                     or path.suffix.lower() in SKIP_SUFFIXES
                     or name.endswith(('.vcxproj.user', '~'))
                     or (name.startswith('.env') and name != '.env.example')):
@@ -86,11 +122,11 @@ def main():
     args = parser.parse_args()
     destination = args.output.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    prefix = 'FTHRClips-2.0.0-Alpha/'
+    prefix = 'FTHRClips-2.1.0-Windows/'
     manifest = []
     with zipfile.ZipFile(destination, 'w', compression=zipfile.ZIP_DEFLATED,
                          compresslevel=9) as archive:
-        contents = [('START_HERE.md', START_HERE.encode('utf-8'))]
+        contents = [('START_HERE.md', (ROOT / 'START_HERE.md').read_bytes())]
         contents.extend((path.relative_to(ROOT).as_posix(), path.read_bytes())
                         for path in sorted(source_paths()))
         for name, data in contents:
@@ -98,8 +134,8 @@ def main():
             manifest.append({'path': name, 'bytes': len(data),
                              'sha256': hashlib.sha256(data).hexdigest()})
         archive.writestr(prefix + 'SOURCE_MANIFEST.json', json.dumps(
-            {'format': 1, 'version': '2.0.0-alpha',
-             'snapshot_date': '2026-10-17',
+            {'format': 1, 'version': '2.1.0',
+             'snapshot_date': date.today().isoformat(),
              'compression': 'ZIP Deflate level 9', 'files': manifest},
             indent=2).encode('utf-8'))
     # Verify every compressed member and its exact extracted content.

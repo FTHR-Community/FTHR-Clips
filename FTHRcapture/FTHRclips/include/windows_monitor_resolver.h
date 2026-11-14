@@ -55,6 +55,9 @@ struct MonitorTopologyEntry {
     bool adapter_luid_available = true;
     int32_t left = 0, top = 0;
     uint32_t width = 0, height = 0;
+    // CCD target ownership can differ from the DXGI adapter used for capture.
+    bool target_adapter_luid_available = false;
+    AdapterLuid target_adapter_luid;
 
     friend bool operator==(
         const MonitorTopologyEntry& left,
@@ -66,7 +69,9 @@ struct MonitorTopologyEntry {
             && left.target_id == right.target_id
             && left.hmonitor == right.hmonitor
             && left.source_gdi_name == right.source_gdi_name
-            && left.adapter_luid_available == right.adapter_luid_available;
+            && left.adapter_luid_available == right.adapter_luid_available
+            && left.target_adapter_luid_available == right.target_adapter_luid_available
+            && left.target_adapter_luid == right.target_adapter_luid;
     }
 };
 

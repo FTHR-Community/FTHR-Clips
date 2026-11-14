@@ -9,7 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize('spec_name', ['FTHR.spec', 'FTHR_linux.spec'])
+@pytest.mark.parametrize('spec_name', ['FTHR.spec'])
 def test_shared_video_ui_is_not_excluded_from_packaging(spec_name):
     tree = ast.parse((ROOT / spec_name).read_text(encoding='utf-8'))
     analysis = next(
@@ -52,7 +52,7 @@ def test_shared_interface_assets_have_linux_package_paths():
         for directory in ('fonts', 'icons', 'sounds')
         for path in (ROOT / 'FTHR_UI' / 'assets' / directory).iterdir()
         if path.is_file() and path.suffix in ('.ttf', '.ico', '.png', '.svg', '.wav')
-    } | {'FTHR_UI/assets/gatze.png'}
+    }
     entries = {entry['path']: entry for entry in manifest['assets']}
     for path in bundled_paths:
         relative = path.removeprefix('FTHR_UI/')
@@ -60,7 +60,7 @@ def test_shared_interface_assets_have_linux_package_paths():
 
 
 @pytest.mark.parametrize('spec_name, platform', [
-    ('FTHR.spec', 'windows'), ('FTHR_linux.spec', 'linux'),
+    ('FTHR.spec', 'windows'),
 ])
 def test_runtime_filter_preserves_app_qml_and_only_reviewed_qt_modules(spec_name, platform):
     tree = ast.parse((ROOT / spec_name).read_text(encoding='utf-8'))
@@ -75,7 +75,7 @@ def test_runtime_filter_preserves_app_qml_and_only_reviewed_qt_modules(spec_name
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), spec_name, 'exec'), namespace)
     keep = namespace['_keep_reviewed_qt_runtime']
-    for path in ('ui/qml/VideoPreview.qml', 'ui/qml/Snapshot.qml', 'ui/qml/color.frag.qsb'):
+    for path in ('ui/qml/VideoPreview.qml', 'ui/qml/color.frag.qsb'):
         assert keep((path, 'source', 'DATA')), (spec_name, path)
     suffix = '.dll' if platform == 'windows' else '.so.6'
     prefix = 'Qt6' if platform == 'windows' else 'libQt6'

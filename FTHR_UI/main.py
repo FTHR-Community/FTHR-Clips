@@ -1,13 +1,25 @@
 """Application entry point, main window, capture coordination, and save flow."""
 
-from ui.icons import IconButton
-from ui.motion import reduce_motion, set_reduce_motion
-from ui.shell_transitions import (
-    ShellPageStack, SnapshotFlight, SnapshotSlide, sidebar_rect, compact_snapshot,
-)
-
 import sys
+
+# Frozen startup must apply the process-only policy before Qt or any other
+# extension-bearing module is imported.  Ordinary imports used by tests stay
+# side-effect free; the result is reported after file logging is ready below.
+if __name__ == '__main__':
+    from core.windows_startup import apply_startup_policy
+    _STARTUP_POLICY_RESULT = apply_startup_policy()
+    if '--card-process' in sys.argv:
+        from core.startup_logging import setup_file_logging
+        setup_file_logging(startup_policy_result=_STARTUP_POLICY_RESULT)
+        from ui.capture_card_process import main as _card_main
+        raise SystemExit(_card_main())
+else:
+    _STARTUP_POLICY_RESULT = None
+
+from ui.icons import IconButton
+
 import json
+import copy
 import importlib
 import subprocess
 import time
@@ -20,6 +32,7 @@ from html import escape
 from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime
+from uuid import uuid4
 _NO_WINDOW = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
 _BACKGROUND_NO_WINDOW = {
     'creationflags': (
@@ -27,6 +40,18 @@ _BACKGROUND_NO_WINDOW = {
         | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0)
     ),
 } if sys.platform == 'win32' else {}
+_SAVE_DURATION_PROBE_SLOTS = threading.BoundedSemaphore(2)
+_FINALIZATION_CONTEXT = threading.local()
+_ADMISSION_MISSING = object()
+_ADMISSION_UNAVAILABLE = object()
+
+
+def _admission_call(host, name, *args, **kwargs):
+    """Call an admission adapter on Main or a narrow legacy test host."""
+    callback = getattr(host, name, None)
+    if not callable(callback):
+        callback = getattr(globals()['MainWindow'], name).__get__(host)
+    return callback(*args, **kwargs)
 
 # Qt 6.11 defaults to its FFmpeg multimedia plugin on Windows. Profiling this
 # editor found that plugin retained one native handle on every media-source
@@ -41,85 +66,45 @@ if sys.platform == 'win32':
 # File logging - all output also goes to ~/.fthr/logs/fthr.log
 # Important for packaged apps (pythonw) which have no console
 
-class _LogTee:
-    """Mirror a stream (may be None in frozen GUI builds) into a log file."""
-    _MAX_BYTES = 2 * 1024 * 1024  # rotate at 2 MB, keep one .old
-
-    def __init__(self, stream, log_path):
-        self._stream = stream
-        self._log_path = log_path
-        try:
-            if log_path.exists() and log_path.stat().st_size > self._MAX_BYTES:
-                log_path.replace(log_path.with_suffix('.log.old'))
-            self._log = open(log_path, 'a', encoding='utf-8', errors='replace')
-        except Exception:
-            self._log = None
-
-    def write(self, text):
-        if self._stream is not None:
-            try:
-                self._stream.write(text)
-            except Exception:
-                # console may have disappeared
-                pass
-        if self._log is not None:
-            try:
-                self._log.write(text)
-                self._log.flush()
-            except Exception:
-                # can't recursively try to log this
-                pass
-
-    def flush(self):
-        for s in (self._stream, self._log):
-            if s is not None:
-                try:
-                    s.flush()
-                except Exception:
-                    # may be closed at shutdown
-                    pass
-
-
-def _setup_file_logging():
-    try:
-        log_dir = Path.home() / '.fthr' / 'logs'
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / 'fthr.log'
-        sys.stdout = _LogTee(sys.stdout, log_file)
-        sys.stderr = _LogTee(sys.stderr, log_file)
-        from version import __version__ as _ver
-        print(f"\n===== FTHR Clips {_ver} started "
-              f"{datetime.now():%Y-%m-%d %H:%M:%S} ({sys.platform}) =====")
-        # Structured logging uses the same file; print() still works
-        from core import diagnostics
-        diagnostics.configure(log_file=log_file)
-    except Exception as e:
-        # Log setup failed - report on stderr before redirection
-        print(f'[Startup] File logging unavailable: {type(e).__name__}: {e}',
-              file=sys.__stderr__ or sys.stderr)
+from core.startup_logging import (
+    _LogTee as _LogTee,
+    setup_file_logging as _setup_file_logging,
+)
 
 
 _setup_file_logging()
 
+if _STARTUP_POLICY_RESULT is not None:
+    _policy_detail = (
+        f" error={_STARTUP_POLICY_RESULT.error_code}"
+        if _STARTUP_POLICY_RESULT.error_code else "")
+    print(
+        f"[Startup] Extension-point policy: "
+        f"{_STARTUP_POLICY_RESULT.status}{_policy_detail}")
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QScrollArea, QFrame, QComboBox, QGridLayout,
+    QPushButton, QLabel, QScrollArea, QStackedWidget, QFrame, QComboBox, QGridLayout,
     QSizePolicy,
     QCheckBox, QSlider,
     QToolButton, QButtonGroup, QFileDialog, QLineEdit, QMenu,
-    QSystemTrayIcon, QSpinBox, QAbstractSpinBox,
-    QLayout, QDialog, QStyle, QStyleOptionSlider, QMessageBox,
+    QSystemTrayIcon, QLayout, QDialog, QStyle, QStyleOptionSlider, QMessageBox,
 )
 from PySide6.QtCore import (QUrl, QProcess,
     QTimer, Signal, Qt, QPoint, QSize, QRect, QEvent,
-    QPropertyAnimation, QEasingCurve, Slot,
+    QSignalBlocker, Slot,
 )
-from PySide6.QtGui import QDesktopServices, QImage, QPixmap, QFontDatabase, QFont, QCursor, QPainter, QPen, QColor, QIcon, QBrush, QPalette, QAction
+from PySide6.QtGui import QDesktopServices, QImage, QPixmap, QFontDatabase, QCursor, QPainter, QPen, QColor, QIcon, QBrush, QPalette, QAction
 
 from version import __version__ as APP_VERSION, APP_NAME
-from ui.window_preview import WindowPreview
 from core import linux_tools
 from core.capture_bridge import CaptureBridge
+from core.capture_highlights import (
+    CaptureHighlightAppendError,
+    media_identity,
+    read_capture_highlights,
+    write_capture_highlights,
+)
 from core.alpha_capabilities import (
     encoder_preset_supported,
     filter_alpha_preset,
@@ -134,12 +119,43 @@ from core.capture_settings import (
     AUDIO_CAPTURE_MODE_COMBINED,
     AUDIO_CAPTURE_MODE_SEPARATED,
     normalize_audio_capture_mode,
+    audio_plan_from_settings,
+    effective_audio_source_mode,
+    AUDIO_SOURCE_COMBINED,
+    AUDIO_SOURCE_DEVICE,
+    AUDIO_SOURCE_PROGRAMS,
+    AUDIO_SOURCE_DEVICES,
+    encode_audio_device_tracks,
+    normalize_audio_device_tracks,
+    MAX_AUDIO_DEVICE_TRACKS,
+    MAX_AUDIO_DEVICE_TRACK_NAME,
+    ApplyStatus,
     validate_fps,
     validate_normal_clip_length,
     custom_clip_lengths,
 )
+from core.capture_profile_policy import (
+    build_capture_config,
+    resolve_profile_values,
+)
+from core.replay_storage import REPLAY_STORAGE_KEY, ReplayStorageSettings
+from core.running_apps import encode_application_audio_exclusions
+from core.native_audio_capabilities import (
+    native_audio_exclusions_supported, native_audio_backup_control_supported,
+    native_audio_policy_arguments,
+)
+from core.engine_discovery import isolated_source_engines
+from core.capture_session import (
+    CameraSnapshot,
+    CaptureSessionSnapshot,
+    ResolvedCaptureRequest,
+    SourceSnapshot,
+    build_resolved_capture_request,
+    bind_capture_session,
+)
 from core.encoder_capabilities import (
     EncoderCapability,
+    GpuProbeContext,
     available_codecs,
     load_cached_encoder_capabilities,
     probe_encoder_capabilities,
@@ -152,6 +168,7 @@ from core.capture_health import (
     evaluate_save_admission,
 )
 from core.error_recovery import RecoveryTracker
+from core.file_recovery import next_available_output_path, OutputPathTooLongError, retry_file_operation
 from core.error_codes import APP_FAILURE_CODE_BY_TITLE, format_error_title
 from core.diagnostics import get_logger
 from core.field_diagnostics import (
@@ -178,11 +195,22 @@ from core.clip_grouping import (
     clip_group_for_source,
     sanitize_clip_folder_name,
 )
+from core.game_profiles import canonical_exe_path
 from core.audio_manifest import (
     manifest_path_for, read_manifest_for_media, rebind_manifest_after_media_replace,
 )
+from core.mp4_timing import normalize_mp4_presentation_in_place
 from core.clip_readiness import ClipReadinessState, get_clip_readiness_registry
 from core.save_state import (SaveStateMachine, EngineEvent, OutcomeKind)
+from core.capture_admission import (
+    AdmissionDataError,
+    AdmissionDecision,
+    AdmissionValidationError,
+    AdmissionPolicy,
+    empty_policy,
+    evaluate_admission,
+    policy_from_raw,
+)
 from core.hotkey_manager import (
     CONTROLLER_BUTTON_ORDER,
     HotkeyManager,
@@ -195,14 +223,19 @@ from core.game_detector import (
     ForegroundGameDetector,
     GameWindow,
     crop_profile_for_window,
+    get_window_info,
+    is_fthr_application_executable,
     is_capture_window_valid,
+    is_capture_window_renderable,
     matching_custom_game_rule,
     normalise_custom_game_rules,
 )
+from core.source_authority import identity_matches, window_identity
 from core.focus_monitor import FocusMonitor
 from core.presets_manager import PresetsManager, PRESET_KEYS
 from core.settings_manager import (
     SettingsManager, StoragePathError, clips_directory_from,
+    clips_directory_lexical_from,
     default_clips_directory, ensure_storage_directory,
     prepare_clips_storage, recording_directory_from,
 )
@@ -212,6 +245,7 @@ from core.windows_monitor import (
     MonitorSelectionResult,
     MonitorSelectionState,
     enumerate_windows_monitors,
+    format_monitor_choice_label,
     is_monitor_capture_identity,
     is_monitor_selection_sentinel,
     resolve_monitor_selection,
@@ -228,10 +262,6 @@ from core.screenshot_save import (
 )
 from core.library_ownership import add_import_root, remove_import_root
 from core.mic_recorder import MicRecorder, write_wav
-from core.gary_mode import (
-    DEFAULT_MAX_LEVEL, DEFAULT_MIN_LEVEL, MIN_THRESHOLD_GAP,
-    clamp_thresholds, intensity_for_level, step_intensity,
-)
 from core.camera_overlay import (
     DEFAULT_IMAGE_OVERLAY_RECT, DEFAULT_OVERLAY_RECT,
     clamp_overlay_rect, image_overlay_layers, legacy_overlay_rect,
@@ -268,10 +298,14 @@ from core.ffmpeg_tools import (
     get_ffmpeg_exe, get_ffprobe_exe, postprocess_video_args,
     software_video_args, FFmpegUnavailable)
 from core.export_profiles import probe_media
+from core.hdr_color import sdr_command, probe_hdr
+from core.export_encoding import choose_hdr_video_args
 from core.media_metadata import (
     probe_video_cfr_evidence,
     probe_video_metadata,
+    probe_video_presentation_duration,
 )
+from core.save_outcome import classify_saved_clip_duration
 from core.x11_monitor import (
     X11MonitorError,
     is_native_x11_session,
@@ -293,9 +327,18 @@ from core.window_geometry import (
     save_window_geometry,
 )
 from core.windows_dpi import dpi_awareness_snapshot
-from ui.smooth_scroll_area import SmoothScrollArea
+from core.library_index import canonical_media_path
+from core.clip_file_operations import ClipFileOperations
+from core.clip_metadata_types import MutationResult, FileOperationState
+from core.library_storage import (
+    StoragePolicy, canonical_root, quota_admission,
+)
 from ui.clip_grid import ClipGrid, _show_in_file_manager
-from ui.gary_overlay import GaryOverlay
+from ui.library_album_sidebar import AlbumSidebar
+from core.plugin_runtime import PluginRuntime
+from core.capture_compatibility import (
+    apply_capture_policy, border_free_capture_enabled, capture_policy_is_current,
+)
 from ui.camera_overlay_editor import (
     CameraOverlayEditor, OverlayPlacementEditor, UnifiedOverlayPreview,
 )
@@ -316,6 +359,9 @@ from ui.style import (
 )
 from ui.app_style import apply_app_style, configure_qt_style
 from ui.dialogs import FthrDialog, FthrInputDialog, FthrMessageDialog
+from ui.library_storage import LibraryStorageController
+from ui.library_backup import LibraryBackupController
+from ui.ultra_performance import UltraPerformancePage
 
 try:
     import numpy as _np
@@ -365,7 +411,7 @@ def _load_icon(name: str, size: int = 20) -> QIcon:
 
 
 def _register_icon_widget(widget, name: str, size: int):
-    """Register a widget so its icon refreshes on Apply Theme."""
+    """Register a widget so its icon refreshes on theme changes."""
     _icon_registry.append((widget, name, size))
 
 
@@ -431,15 +477,6 @@ def _sanitize_foldername(name: str) -> str:
 FTHR_TEAL     = Colors.ACCENT
 FTHR_TEAL_DIM = Colors.ACCENT_DIM
 
-# Animation timing — kept module-level so popups, the settings page, and the
-# clip viewer all converge on the same fade duration. 180 ms is brisk enough
-# that the user perceives the panel as "snappy" but slow enough that opening
-# / closing doesn't read as a jump-cut.
-PANEL_FADE_MS = 180
-
-
-
-
 # Canonical QSS / label fragments come from style.py; aliased so call-sites stay short.
 _saved_fonts = ThemeManager().get_fonts()
 Fonts.configure(_saved_fonts.get('display'), _saved_fonts.get('body'))
@@ -476,7 +513,7 @@ class _DropdownCombo(WheelSafeComboBox):
         pal.setColor(QPalette.ColorRole.Base,            QColor(Colors.SURFACE_2))
         pal.setColor(QPalette.ColorRole.Text,            QColor(Colors.TEXT))
         pal.setColor(QPalette.ColorRole.Highlight,       QColor(Colors.SURFACE_3))
-        pal.setColor(QPalette.ColorRole.HighlightedText, QColor(Colors.ACCENT))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor(Colors.TEXT))
         pal.setColor(QPalette.ColorRole.Window,          QColor(Colors.SURFACE_2))
         pal.setColor(QPalette.ColorRole.WindowText,      QColor(Colors.TEXT))
         self.setPalette(pal)
@@ -495,7 +532,7 @@ class _DropdownCombo(WheelSafeComboBox):
     def paintEvent(self, event):
         super().paintEvent(event)
         # Resolve through the theme loader so imported arrows and tint changes
-        # are reflected immediately after Apply Theme.
+        # are reflected immediately after theme changes.
         p = QPainter(self)
         paint_dropdown_arrow(p, self.rect(), self._popup_open)
         p.end()
@@ -503,101 +540,7 @@ class _DropdownCombo(WheelSafeComboBox):
 
 # Compact numeric control — editable value with the original FTHR stepper.
 
-class _NumberSpinBox(QSpinBox):
-    """Keyboard-editable value with square minus/plus controls at the right."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName('fthrNumberSpin')
-        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.setFixedHeight(34)
-        self.lineEdit().setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-        self._minus = IconButton('decrease.png', self, label='Decrease')
-        self._minus.setObjectName('fthrStepDown')
-        self._minus.setToolTip('Decrease')
-        self._minus.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._minus.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._minus.clicked.connect(self.stepDown)
-
-        self._plus = IconButton('increase.png', self, label='Increase')
-        self._plus.setObjectName('fthrStepUp')
-        self._plus.setToolTip('Increase')
-        self._plus.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._plus.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._plus.clicked.connect(self.stepUp)
-
-        self.valueChanged.connect(self._sync_step_buttons)
-        self._sync_step_buttons()
-        self._apply_style()
-
-    def resizeEvent(self, event):  # noqa: N802
-        super().resizeEvent(event)
-        button_w = 28
-        button_h = max(0, self.height() - 2)
-        self._minus.setGeometry(
-            self.width() - button_w * 2 - 1, 1, button_w, button_h)
-        self._plus.setGeometry(
-            self.width() - button_w - 1, 1, button_w, button_h)
-
-    def _sync_step_buttons(self, *_args):
-        enabled = self.isEnabled()
-        self._minus.setEnabled(enabled and self.value() > self.minimum())
-        self._plus.setEnabled(enabled and self.value() < self.maximum())
-
-    def _apply_style(self):
-        set_theme_style(self, lambda: (f'''
-            QSpinBox#fthrNumberSpin {{
-                background-color: {Colors.SURFACE_2};
-                border: 1px solid {Colors.BORDER};
-                border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.TEXT};
-                font-family: {Fonts.DISPLAY};
-                font-size: {Fonts.SIZE_BODY}px;
-                font-weight: 600;
-                letter-spacing: 0.8px;
-                padding: 6px 64px 6px 10px;
-                selection-background-color: {Colors.ACCENT};
-                selection-color: {Colors.BG};
-            }}
-            QSpinBox#fthrNumberSpin:hover,
-            QSpinBox#fthrNumberSpin:focus {{
-                border-color: {Colors.ACCENT};
-            }}
-            QSpinBox#fthrNumberSpin:disabled {{
-                color: {Colors.TEXT_MUTED};
-                background-color: {Colors.SURFACE_1};
-                border-color: {Colors.BORDER};
-            }}
-            QPushButton#fthrStepDown,
-            QPushButton#fthrStepUp {{
-                background-color: {Colors.SURFACE_1};
-                border: none;
-                border-left: 1px solid {Colors.BORDER};
-                border-radius: {Sizes.RADIUS_SM}px;
-                color: {Colors.ACCENT};
-                font-family: {Fonts.DISPLAY};
-                font-size: 14px;
-                font-weight: 600;
-                padding: 0px;
-            }}
-            QPushButton#fthrStepDown:hover,
-            QPushButton#fthrStepUp:hover {{
-                background-color: {Colors.ACCENT};
-                color: {Colors.BG};
-            }}
-            QPushButton#fthrStepDown:pressed,
-            QPushButton#fthrStepUp:pressed {{
-                background-color: {Colors.TEXT};
-                color: {Colors.BG};
-            }}
-            QPushButton#fthrStepDown:disabled,
-            QPushButton#fthrStepUp:disabled {{
-                color: {Colors.TEXT_MUTED};
-                background-color: {Colors.SURFACE_1};
-            }}
-        '''))
+from ui.number_spinbox import NumberSpinBox as _NumberSpinBox
 
 
 # Mic level meter — paints a horizontal RMS bar driven by a sounddevice stream
@@ -606,7 +549,6 @@ class _MicLevelMeter(QWidget):
     """Live mic-loudness bar. Updates at ~30Hz from an InputStream callback."""
 
     _level_changed = Signal(float)
-    gary_thresholds_changed = Signal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -617,14 +559,7 @@ class _MicLevelMeter(QWidget):
         self._stream   = None
         self._gain     = 1.0
         self._shared_recorder = None
-        self._gary_min = DEFAULT_MIN_LEVEL
-        self._gary_max = DEFAULT_MAX_LEVEL
-        self._gary_enabled = False
-        self._dragging_gary_handle: str | None = None
-        self._drag_start_thresholds = (self._gary_min, self._gary_max)
-        self.setMouseTracking(True)
         self._level_changed.connect(self._on_level)
-        self._update_tooltip()
 
         self._peak_decay = QTimer(self)
         self._peak_decay.setInterval(60)
@@ -632,82 +567,6 @@ class _MicLevelMeter(QWidget):
 
     def set_gain(self, g: float):
         self._gain = max(0.0, g)
-
-    def set_gary_thresholds(self, min_level: int, max_level: int):
-        self._gary_min, self._gary_max = clamp_thresholds(min_level, max_level)
-        self.update()
-
-    def set_gary_enabled(self, enabled: bool):
-        self._gary_enabled = bool(enabled)
-        if not self._gary_enabled:
-            self._dragging_gary_handle = None
-            self.unsetCursor()
-        self._update_tooltip()
-        self.update()
-
-    def _update_tooltip(self):
-        suffix = '' if self._gary_enabled else ' Gary is currently off.'
-        self.setToolTip(
-            'Drag the amber MIN and white MAX handles to set Gary Mode.'
-            + suffix)
-
-    def _threshold_x(self, value: int) -> int:
-        return 1 + int((self.width() - 2) * value / 100.0)
-
-    def _set_threshold_from_x(self, x: float):
-        if self.width() <= 2 or self._dragging_gary_handle is None:
-            return
-        value = round(max(0.0, min(float(x) - 1, self.width() - 2))
-                      * 100.0 / (self.width() - 2))
-        if self._dragging_gary_handle == 'min':
-            self._gary_min = max(
-                1, min(value, self._gary_max - MIN_THRESHOLD_GAP))
-        else:
-            self._gary_max = min(
-                100, max(value, self._gary_min + MIN_THRESHOLD_GAP))
-        self.update()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            x = event.position().x()
-            min_distance = abs(x - self._threshold_x(self._gary_min))
-            max_distance = abs(x - self._threshold_x(self._gary_max))
-            self._dragging_gary_handle = (
-                'min' if min_distance <= max_distance else 'max')
-            self._drag_start_thresholds = (self._gary_min, self._gary_max)
-            self.setCursor(QCursor(Qt.CursorShape.SizeHorCursor))
-            self._set_threshold_from_x(x)
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._dragging_gary_handle is not None:
-            self._set_threshold_from_x(event.position().x())
-            event.accept()
-            return
-        x = event.position().x()
-        near_handle = min(
-            abs(x - self._threshold_x(self._gary_min)),
-            abs(x - self._threshold_x(self._gary_max)),
-        ) <= 12
-        self.setCursor(QCursor(
-            Qt.CursorShape.SizeHorCursor if near_handle
-            else Qt.CursorShape.ArrowCursor))
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if (event.button() == Qt.MouseButton.LeftButton
-                and self._dragging_gary_handle is not None):
-            self._set_threshold_from_x(event.position().x())
-            self._dragging_gary_handle = None
-            self.unsetCursor()
-            thresholds = (self._gary_min, self._gary_max)
-            if thresholds != self._drag_start_thresholds:
-                self.gary_thresholds_changed.emit(*thresholds)
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
 
     def start(self, device_index):
         self.stop()
@@ -803,28 +662,6 @@ class _MicLevelMeter(QWidget):
         if peak_x > 0:
             p.fillRect(1 + peak_x, bar_y + 1, 2, bar_h - 2, QColor(Colors.TEXT))
 
-        marker_specs = (
-            (self._gary_min, 'MIN', QColor(Colors.WARNING)),
-            (self._gary_max, 'MAX', QColor(Colors.TEXT)),
-        )
-        font = QFont(Fonts.BODY_FAMILY, 7)
-        font.setBold(True)
-        p.setFont(font)
-        for value, label, color in marker_specs:
-            x = self._threshold_x(value)
-            p.fillRect(x - 3, bar_y - 4, 8, 5, color)
-            p.fillRect(x, bar_y - 4, 2, bar_h + 7, color)
-            p.setPen(color)
-            if label == 'MIN':
-                text_x = max(0, x - 48)
-                alignment = (Qt.AlignmentFlag.AlignRight
-                             | Qt.AlignmentFlag.AlignTop)
-            else:
-                text_x = min(w - 48, x + 5)
-                alignment = (Qt.AlignmentFlag.AlignLeft
-                             | Qt.AlignmentFlag.AlignTop)
-            p.drawText(QRect(text_x, 0, 44, 10), alignment,
-                       f'{label} {value}')
         p.end()
 
 
@@ -842,7 +679,6 @@ class _PopupPanel(QFrame):
         # Do not dispatch to a subclass override before that subclass has
         # created its child widgets.
         self._apply_popup_style()
-        self._show_anim: QPropertyAnimation | None = None
 
     def _apply_popup_style(self):
         set_theme_style(self, lambda: (f'''
@@ -855,10 +691,14 @@ class _PopupPanel(QFrame):
                 color: {Colors.TEXT};
                 background-color: transparent;
             }}
+            QFrame#popupPanel[attached="true"] {{
+                border-top-left-radius: 0px;
+                border-top-right-radius: 0px;
+            }}
         '''))
 
     def refresh_theme(self):
-        """Refresh the shared popup shell after an Apply Theme action."""
+        """Refresh the shared popup shell after a theme change."""
         self._apply_popup_style()
 
     def hideEvent(self, event):  # noqa: N802 - Qt API name
@@ -869,9 +709,32 @@ class _PopupPanel(QFrame):
         trigger arrow needs the popup's actual visibility transition.
         """
         super().hideEvent(event)
+        button = getattr(self, '_attached_button', None)
+        if button is not None:
+            button.setExpanded(False) if hasattr(button, 'setExpanded') else None
         self.popup_hidden.emit()
 
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        button = getattr(self, '_attached_button', None)
+        if button is None or not self.isVisible():
+            return
+        anchor = button.mapToGlobal(QPoint(0, button.height()))
+        if abs(self.y() - anchor.y()) > 2:
+            return  # A screen-edge fallback may place the panel above its button.
+        left = max(1, anchor.x() - self.x() + 1)
+        right = min(self.width() - 1, anchor.x() - self.x() + button.width() - 1)
+        if right > left:
+            painter = QPainter(self)
+            painter.fillRect(QRect(left, 0, right - left, 1), QColor(Colors.SURFACE_2))
+
     def show_below(self, button: QWidget):
+        self._attached_button = button
+        self.setProperty('attached', True)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        if hasattr(button, 'setExpanded'):
+            button.setExpanded(True)
         self.adjustSize()
         anchor_pos = button.mapToGlobal(QPoint(0, 0))
         pos = button.mapToGlobal(QPoint(0, button.height()))
@@ -903,11 +766,10 @@ class _PopupPanel(QFrame):
 
         self.move(QPoint(x, y))
 
-        app = QApplication.instance()
-        animate = bool(app and app.platformName() != 'wayland' and not reduce_motion(self))
-        if animate:
-            self.setWindowOpacity(0.0)
         self.show()
+        # Apply the anchor again once the native popup exists; some platforms
+        # offset the first show by the host window's frame margins.
+        self.move(QPoint(x, y))
 
         # Qt may add a one-pixel native popup frame after show(). Clamp the
         # realized frame as well so the visible border respects the margin.
@@ -927,17 +789,6 @@ class _PopupPanel(QFrame):
                 self.move(self.pos() + QPoint(delta_x, delta_y))
 
         self.raise_()
-        # setWindowOpacity on Popup windows is not supported on Wayland —
-        # the compositor just ignores it and spams a warning every frame.
-        # Skip the fade on Wayland; just show instantly. Looks fine.
-        if animate:
-            anim = QPropertyAnimation(self, b'windowOpacity', self)
-            anim.setDuration(PANEL_FADE_MS)
-            anim.setStartValue(0.0)
-            anim.setEndValue(1.0)
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            self._show_anim = anim
-            anim.start()
 
 
 class _ToggleSwitch(QCheckBox):
@@ -1034,6 +885,20 @@ class CustomClipLengthDialog(FthrDialog):
         self.accept()
 
 
+def _persist_setting_changes(settings, values):
+    previous = {key: settings.get(key) for key in values}
+    changed = {key: value for key, value in values.items() if value != previous[key]}
+    if not changed:
+        return True
+    for key, value in changed.items():
+        settings.set(key, value)
+    if settings.save_settings() is not False:
+        return True
+    for key in changed:
+        settings.set(key, previous[key])
+    return False
+
+
 class CaptureSettingsPopup(_PopupPanel):
     """Dropdown panel for independent replay-clip and recording profiles."""
 
@@ -1059,7 +924,6 @@ class CaptureSettingsPopup(_PopupPanel):
     def __init__(self, settings_manager: SettingsManager, parent=None):
         super().__init__(parent)
         self.sm = settings_manager
-        self._restart_pending = False
         self.setMinimumWidth(460)
 
         self.cur_clip   = self.sm.get('clip_length',    30)
@@ -1085,6 +949,14 @@ class CaptureSettingsPopup(_PopupPanel):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(12)
+
+        self.defaults_label = QLabel('Global defaults')
+        self.defaults_label.setToolTip(
+            'These values are the next capture defaults. An accepted profile '
+            'keeps its own immutable settings until the next admission.')
+        set_theme_style(self.defaults_label, lambda: label_uppercase(
+            Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL))
+        layout.addWidget(self.defaults_label)
 
         def _row(label_text, combo):
             row = QHBoxLayout()
@@ -1272,16 +1144,18 @@ class CaptureSettingsPopup(_PopupPanel):
         self._sync_recording_custom_bitrate_control()
         layout.addWidget(self.recording_fields)
 
-        # The capture state lives once in the always-visible top bar. Keep this
-        # row focused on the action that belongs to this popup.
-        apply_row = QHBoxLayout()
-        apply_row.addStretch(1)
-        self.restart_btn = QPushButton('Apply')
-        set_theme_style(self.restart_btn, lambda: (button_primary_qss()))
-        self.restart_btn.setVisible(False)
-        self.restart_btn.clicked.connect(self._on_restart)
-        apply_row.addWidget(self.restart_btn)
-        layout.addLayout(apply_row)
+        self._save_error = QLabel('Capture settings could not be saved. Try again.')
+        self._save_error.setWordWrap(True)
+        set_theme_style(self._save_error, lambda: label_body(Colors.ERROR, Fonts.SIZE_BODY))
+        self._save_error.hide()
+        layout.addWidget(self._save_error)
+
+    def _save_preferences(self, **values):
+        saved = _persist_setting_changes(self.sm, values)
+        if not saved:
+            self.reload_from_settings()
+        self._save_error.setVisible(not saved)
+        return saved
 
     def _make_combo(self, items, idx, callback):
         c = _DropdownCombo()
@@ -1297,13 +1171,13 @@ class CaptureSettingsPopup(_PopupPanel):
             set_theme_style(combo, lambda: (_COMBO_STYLE))
         for label in self.findChildren(QLabel):
             if label.text() in {
+                    'Global defaults',
                     'Clip length', 'Framerate', 'Resolution',
                     'Quality', 'Custom bitrate'}:
                 set_theme_style(label, lambda: (_LABEL_STYLE))
         for button in (self.clips_profile_btn, self.recording_profile_btn):
             set_theme_style(button, lambda: (self._profile_button_qss()))
         set_theme_style(self.clip_memory_warning, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_MICRO)))
-        set_theme_style(self.restart_btn, lambda: (button_primary_qss()))
 
     @staticmethod
     def _profile_button_qss() -> str:
@@ -1334,6 +1208,7 @@ class CaptureSettingsPopup(_PopupPanel):
         button = QToolButton()
         button.setText(text)
         button.setCheckable(True)
+        button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         button.setFixedHeight(30)
         button.setSizePolicy(
@@ -1349,7 +1224,6 @@ class CaptureSettingsPopup(_PopupPanel):
         self.recording_profile_btn.setChecked(not is_clips)
         self.clip_fields.setVisible(is_clips)
         self.recording_fields.setVisible(not is_clips)
-        self.restart_btn.setVisible(is_clips and self._restart_pending)
         self.adjustSize()
 
     def _on_clip_changed(self, idx):
@@ -1357,8 +1231,8 @@ class CaptureSettingsPopup(_PopupPanel):
             return
         seconds = self.clip_combo.itemData(idx)
         self.cur_clip = validate_normal_clip_length(seconds)
-        self.sm.set('clip_length', self.cur_clip)
-        self.sm.save_settings()
+        if not self._save_preferences(clip_length=self.cur_clip):
+            return
         self._reload_clip_choices()
         self.clip_memory_warning.setVisible(self.cur_clip >= 120)
         self.adjustSize()
@@ -1374,8 +1248,8 @@ class CaptureSettingsPopup(_PopupPanel):
         custom = sorted(set(self._custom_clip_lengths() + [seconds]))
         if custom == self._custom_clip_lengths():
             return
-        self.sm.set('custom_clip_lengths', custom)
-        self.sm.save_settings()
+        if not self._save_preferences(custom_clip_lengths=custom):
+            return
         self._reload_custom_lengths()
         self._mark_restart()
         self.custom_lengths_changed.emit()
@@ -1407,9 +1281,9 @@ class CaptureSettingsPopup(_PopupPanel):
             row.addWidget(remove)
             self.custom_lengths_layout.addWidget(widget)
     def _remove_custom_length(self, seconds):
-        self.sm.set('custom_clip_lengths', [value for value in
-                    self._custom_clip_lengths() if value != seconds])
-        self.sm.save_settings()
+        custom = [value for value in self._custom_clip_lengths() if value != seconds]
+        if not self._save_preferences(custom_clip_lengths=custom):
+            return
         self._reload_custom_lengths()
         self._mark_restart()
         self.custom_lengths_changed.emit()
@@ -1497,16 +1371,16 @@ class CaptureSettingsPopup(_PopupPanel):
 
     def _on_fps_changed(self, idx):
         self.cur_fps = self._FPS_VALUES[idx]
-        self.sm.set('framerate', self.cur_fps)
-        self.sm.save_settings()
+        if not self._save_preferences(framerate=self.cur_fps):
+            return
         self._mark_restart()
         self.framerate_changed.emit(self.cur_fps)
         self._update_summary()
 
     def _on_res_changed(self, idx):
         self.cur_res = self._RES_KEYS[idx]
-        self.sm.set('resolution', self.cur_res)
-        self.sm.save_settings()
+        if not self._save_preferences(resolution=self.cur_res):
+            return
         self._mark_restart()
         dims = _resolution_to_dims(self.cur_res)
         self.resolution_changed.emit(dims[0], dims[1])
@@ -1515,10 +1389,11 @@ class CaptureSettingsPopup(_PopupPanel):
 
     def _on_qual_changed(self, idx):
         self.cur_qual = self._QUAL_KEYS[idx]
-        self.sm.set('bitrate_level', self.cur_qual)
+        values = {'bitrate_level': self.cur_qual}
         if self.cur_qual == 'custom':
-            self.sm.set('custom_bitrate_kbps', self.cur_custom_bitrate)
-        self.sm.save_settings()
+            values['custom_bitrate_kbps'] = self.cur_custom_bitrate
+        if not self._save_preferences(**values):
+            return
         self._mark_restart()
         self._sync_custom_bitrate_controls()
         self.bitrate_changed.emit(self.get_bitrate())
@@ -1526,22 +1401,21 @@ class CaptureSettingsPopup(_PopupPanel):
 
     def _on_recording_fps_changed(self, idx):
         self.recording_fps = self._FPS_VALUES[idx]
-        self.sm.set('recording_framerate', self.recording_fps)
-        self.sm.save_settings()
+        if not self._save_preferences(recording_framerate=self.recording_fps):
+            return
 
     def _on_recording_res_changed(self, idx):
         self.recording_res = self._RES_KEYS[idx]
-        self.sm.set('recording_resolution', self.recording_res)
-        self.sm.save_settings()
+        if not self._save_preferences(recording_resolution=self.recording_res):
+            return
 
     def _on_recording_qual_changed(self, idx):
         self.recording_qual = self._QUAL_KEYS[idx]
-        self.sm.set('recording_bitrate_level', self.recording_qual)
+        values = {'recording_bitrate_level': self.recording_qual}
         if self.recording_qual == 'custom':
-            self.sm.set(
-                'recording_custom_bitrate_kbps',
-                self.recording_custom_bitrate)
-        self.sm.save_settings()
+            values['recording_custom_bitrate_kbps'] = self.recording_custom_bitrate
+        if not self._save_preferences(**values):
+            return
         self._sync_recording_custom_bitrate_control()
 
     def _valid_custom_bitrate(self, value, fallback: int) -> int:
@@ -1579,8 +1453,8 @@ class CaptureSettingsPopup(_PopupPanel):
         self.custom_bitrate_spin.blockSignals(True)
         self.custom_bitrate_spin.setValue(bitrate)
         self.custom_bitrate_spin.blockSignals(False)
-        self.sm.set('custom_bitrate_kbps', bitrate)
-        self.sm.save_settings()
+        if not self._save_preferences(custom_bitrate_kbps=bitrate):
+            return
         self._sync_custom_bitrate_controls()
         if self.cur_qual == 'custom':
             self._mark_restart()
@@ -1603,22 +1477,10 @@ class CaptureSettingsPopup(_PopupPanel):
         self.recording_custom_bitrate_spin.blockSignals(True)
         self.recording_custom_bitrate_spin.setValue(bitrate)
         self.recording_custom_bitrate_spin.blockSignals(False)
-        self.sm.set('recording_custom_bitrate_kbps', bitrate)
-        self.sm.save_settings()
+        self._save_preferences(recording_custom_bitrate_kbps=bitrate)
 
     def _mark_restart(self):
-        self._restart_pending = True
-        self.restart_btn.setVisible(self._settings_profile == 'clips')
-
-    def _on_restart(self):
-        self._restart_pending = False
-        self.restart_btn.setEnabled(False)
         self.restart_needed.emit()
-
-    def set_apply_state(self, applying: bool):
-        self.restart_btn.setEnabled(not applying)
-        if not applying and not self._restart_pending:
-            self.restart_btn.setVisible(False)
 
     def _update_summary(self):
         self.summary_changed.emit(self.get_summary())
@@ -1648,6 +1510,7 @@ class SourcePopup(_PopupPanel):
     """Dropdown panel: desktop / window selector."""
 
     source_changed = Signal(str, int)   # (mode, hwnd)
+    source_authority_changed = Signal(str)
     restart_needed = Signal()
     summary_changed = Signal(str)
 
@@ -1658,15 +1521,14 @@ class SourcePopup(_PopupPanel):
         self.cur_hwnd    = self.sm.get('target_hwnd',     0)
         self.cur_monitor = self.sm.get('capture_monitor', '')
         self._window_list: list = []
-        self._restart_pending = False
         self._setup_ui()
+        self.setFixedWidth(320)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        # This popup swaps monitor/window rows and reveals APPLY in place. Keep
-        # the layout's minimum current while an explicit fit helper preserves
-        # the standard 300px panel width and removes stale vertical geometry.
-        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        # The fit helper owns sizing as monitor/window rows change. A layout
+        # minimum constraint would overwrite the explicit panel width on show.
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(Sizes.ROW_GAP)
 
@@ -1680,6 +1542,7 @@ class SourcePopup(_PopupPanel):
         if self.cur_mode == 'window':
             self.mode_combo.setCurrentIndex(1)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        self.mode_combo.activated.connect(self._claim_manual_on_same_choice)
         layout.addWidget(self.mode_combo)
 
         # Window list row
@@ -1687,8 +1550,9 @@ class SourcePopup(_PopupPanel):
         win_row.setSpacing(Sizes.SPACE_3)
         self.window_combo = _DropdownCombo()
         set_theme_style(self.window_combo, lambda: (_COMBO_STYLE))
-        self.window_combo.setMinimumWidth(240)
+        self.window_combo.setMinimumWidth(180)
         self.window_combo.currentIndexChanged.connect(self._on_window_selected)
+        self.window_combo.activated.connect(self._claim_manual_on_same_choice)
         win_row.addWidget(self.window_combo)
 
         self.refresh_btn = QPushButton()
@@ -1716,9 +1580,6 @@ class SourcePopup(_PopupPanel):
         win_row.addWidget(self.refresh_btn)
         layout.addLayout(win_row)
 
-        self.window_preview = WindowPreview(self)
-        self.window_preview.setVisible(self.cur_mode == 'window')
-        layout.addWidget(self.window_preview)
 
         # Monitor selector (desktop mode only)
         self.monitor_combo = _DropdownCombo()
@@ -1728,18 +1589,18 @@ class SourcePopup(_PopupPanel):
             screens_by_name = {
                 screen.name().lower(): screen for screen in QApplication.screens()
             }
-            for choice in monitor_choices:
+            for display_number, choice in enumerate(monitor_choices, 1):
                 screen = screens_by_name.get(choice.gdi_name.lower())
-                details = ''
-                if screen is not None:
-                    geometry = screen.availableGeometry()
-                    details = (
-                        f'  ({geometry.width()}×{geometry.height()} '
-                        f'@ {int(screen.refreshRate())}Hz)'
-                    )
-                primary = ' · Primary' if choice.primary else ''
+                details = format_monitor_choice_label(
+                    choice, display_number,
+                    fallback_width=(screen.geometry().width()
+                                    if screen is not None else 0),
+                    fallback_height=(screen.geometry().height()
+                                     if screen is not None else 0),
+                    fallback_refresh_rate=(screen.refreshRate()
+                                           if screen is not None else 0.0))
                 self.monitor_combo.addItem(
-                    f'{choice.friendly_name}{details}{primary}',
+                    details,
                     userData=choice.device_path,
                 )
 
@@ -1801,16 +1662,14 @@ class SourcePopup(_PopupPanel):
         if idx >= 0:
             self.monitor_combo.setCurrentIndex(idx)
         self.monitor_combo.currentIndexChanged.connect(self._on_monitor_changed)
+        self.monitor_combo.activated.connect(self._claim_manual_on_same_choice)
         layout.addWidget(self.monitor_combo)
 
-        apply_row = QHBoxLayout()
-        apply_row.addStretch(1)
-        self.restart_btn = QPushButton('Apply')
-        set_theme_style(self.restart_btn, lambda: (button_primary_qss()))
-        self.restart_btn.setVisible(False)
-        self.restart_btn.clicked.connect(self._on_restart)
-        apply_row.addWidget(self.restart_btn)
-        layout.addLayout(apply_row)
+        self._save_error = QLabel('Capture source could not be saved. Try again.')
+        self._save_error.setWordWrap(True)
+        set_theme_style(self._save_error, lambda: label_body(Colors.ERROR, Fonts.SIZE_BODY))
+        self._save_error.hide()
+        layout.addWidget(self._save_error)
 
         self._update_window_visibility()
         if self.cur_mode == 'window':
@@ -1820,7 +1679,6 @@ class SourcePopup(_PopupPanel):
         show = (self.cur_mode == 'window')
         self.window_combo.setVisible(show)
         self.refresh_btn.setVisible(show)
-        self.window_preview.setVisible(show)
         self.monitor_combo.setVisible(not show)
         self._fit_to_visible_content()
 
@@ -1828,29 +1686,10 @@ class SourcePopup(_PopupPanel):
         layout = self.layout()
         if layout is None:
             return
-        if self.cur_mode == 'window':
-            self.window_preview.set_compact_for_short_screen(False)
-            self.window_preview.set_preferred_height(180)
         layout.invalidate()
         layout.activate()
-        hint = self.sizeHint()
-        screen = (QApplication.screenAt(self.frameGeometry().center())
-                  or QApplication.primaryScreen())
-        if screen is not None and self.cur_mode == 'window':
-            available_height = max(120, screen.availableGeometry().height() - 16)
-            if hint.height() > available_height:
-                self.window_preview.set_compact_for_short_screen(True)
-                layout.invalidate()
-                layout.activate()
-                hint = self.sizeHint()
-                natural_preview = self.window_preview.maximumHeight()
-                self.window_preview.set_preferred_height(
-                    max(88, natural_preview - (hint.height() - available_height) - 4))
-                layout.invalidate()
-                layout.activate()
-                hint = self.sizeHint()
-        self.setMinimumWidth(300)
-        self.resize(max(300, hint.width()), hint.height())
+        self.setFixedWidth(320)
+        self.resize(320, self.sizeHint().height())
 
     def refresh_theme(self):
         super().refresh_theme()
@@ -1869,41 +1708,61 @@ class SourcePopup(_PopupPanel):
                 border-color: {Colors.ACCENT}; color: {Colors.ACCENT};
             }}
         '''))
-        set_theme_style(self.restart_btn, lambda: (button_primary_qss()))
-        self.window_preview.refresh_theme()
 
     def show_below(self, button: QWidget):
         self._fit_to_visible_content()
         super().show_below(button)
 
+    def _save_source(self, **values):
+        saved = _persist_setting_changes(self.sm, values)
+        self._save_error.setVisible(not saved)
+        self._fit_to_visible_content()
+        return saved
+
     def _on_monitor_changed(self, _idx: int):
-        self.cur_monitor = self.monitor_combo.currentData()
-        self.sm.set('capture_monitor', self.cur_monitor)
-        self.sm.save_settings()
-        self._mark_dirty()
+        monitor = self.monitor_combo.currentData()
+        if not self._save_source(capture_source_authority='manual',
+                                 capture_monitor=monitor):
+            self.monitor_combo.blockSignals(True)
+            self.monitor_combo.setCurrentIndex(self.monitor_combo.findData(self.cur_monitor))
+            self.monitor_combo.blockSignals(False)
+            return
+        self.cur_monitor = monitor
+        self.source_authority_changed.emit('manual')
+        self.restart_needed.emit()
         self._emit_summary()
 
+    def _claim_manual_on_same_choice(self, _idx: int) -> None:
+        """Treat activation of the already-current item as explicit manual intent."""
+        if str(self.sm.get('capture_source_authority', 'manual')).lower() == 'automatic':
+            if self._save_source(capture_source_authority='manual'):
+                self.source_authority_changed.emit('manual')
+
     def _on_mode_changed(self, idx):
-        self.cur_mode = 'window' if idx == 1 else 'desktop'
-        self.sm.set('capture_mode', self.cur_mode)
-        if self.cur_mode == 'desktop':
-            self.cur_hwnd = 0
-            self.sm.set('target_hwnd', 0)
-            self.sm.set('target_clip_group', '')
-        self._update_window_visibility()
-        if self.cur_mode == 'window':
+        if idx == 1:
+            if not self._save_source(capture_source_authority='manual'):
+                self.mode_combo.blockSignals(True)
+                self.mode_combo.setCurrentIndex(0)
+                self.mode_combo.blockSignals(False)
+                return
+            self.source_authority_changed.emit('manual')
+            self.cur_mode = 'window'
+            self._update_window_visibility()
             self._refresh_windows()
-        self.sm.save_settings()
-        self._mark_dirty()
-        self._emit_summary()
+            return
+        if not self.set_capture_desktop():
+            self.mode_combo.blockSignals(True)
+            self.mode_combo.setCurrentIndex(1)
+            self.mode_combo.blockSignals(False)
 
     def _refresh_windows(self):
         self._window_list = _enumerate_capturable_windows()
         self.window_combo.blockSignals(True)
         self.window_combo.clear()
-        select_idx = 0
+        select_idx = -1
+        saved_identity = self.sm.get('target_window_identity', None)
         for i, w in enumerate(self._window_list):
-            label = ('★ ' if w['is_game'] else '') + w['display_name']
+            label = ('★ ' if w.get('is_game') else '') + w.get('display_name', w.get('title', 'Window'))
             if w.get('icon'):
                 self.window_combo.addItem(w['icon'], label)
             else:
@@ -1911,34 +1770,29 @@ class SourcePopup(_PopupPanel):
             self.window_combo.setItemData(
                 i, escape(str(w.get('title', '') or '')),
                 Qt.ItemDataRole.ToolTipRole)
-            if w['hwnd'] == self.cur_hwnd:
-                select_idx = i
-        if self._window_list:
+            if int(w.get('hwnd', 0) or 0) != int(self.cur_hwnd or 0):
+                continue
+            if sys.platform == 'win32':
+                live = get_window_info(int(self.cur_hwnd), own_pid=os.getpid())
+                if not identity_matches(saved_identity, live):
+                    continue
+            select_idx = i
+        if self.cur_mode == 'window' and self.cur_hwnd and select_idx < 0:
+            self.window_combo.addItem('Unavailable — saved window not found')
+            self.window_combo.setCurrentIndex(self.window_combo.count() - 1)
+        elif self._window_list and select_idx >= 0:
             self.window_combo.setCurrentIndex(select_idx)
-            self.cur_hwnd = self._window_list[select_idx]['hwnd']
-            self.sm.set('target_hwnd', self.cur_hwnd)
-            self.sm.set('target_clip_group',
-                        clip_group_for_source(self._window_list[select_idx]))
-            self.window_preview.set_window(
-                self._window_list[select_idx], force_refresh=True)
         else:
-            self.window_preview.set_window(None)
+            self.window_combo.setCurrentIndex(-1)
         self.window_combo.blockSignals(False)
 
     def _on_window_selected(self, idx):
-        if 0 <= idx < len(self._window_list):
-            self.cur_hwnd = self._window_list[idx]['hwnd']
-            self.window_preview.set_window(self._window_list[idx])
-            self.sm.set('target_window_name',
-                        self._window_list[idx].get('display_name', ''))
-            self.sm.set('target_clip_group',
-                        clip_group_for_source(self._window_list[idx]))
-            self.sm.set('target_hwnd', self.cur_hwnd)
-            self.sm.save_settings()
-            self._mark_dirty()
-            self._emit_summary()
+        if not 0 <= idx < len(self._window_list):
+            return
+        if not self.set_capture_window(self._window_list[idx]):
+            self._refresh_windows()
 
-    def set_capture_window(self, window: dict) -> bool:
+    def set_capture_window(self, window: dict, *, automatic: bool = False) -> bool:
         """Select a detected window and persist it as the capture source."""
         if not isinstance(window, dict):
             return False
@@ -1947,6 +1801,29 @@ class SourcePopup(_PopupPanel):
         except (TypeError, ValueError):
             hwnd = 0
         if not hwnd:
+            return False
+        if sys.platform == 'win32':
+            live = get_window_info(hwnd, own_pid=os.getpid())
+            if live is None:
+                return False
+            supplied_identity = window_identity(window)
+            if (supplied_identity is not None
+                    and not identity_matches(supplied_identity, live)):
+                return False
+            was_game = bool(window.get('is_game', live.is_known_game))
+            window = {**window, **live.as_capture_window()}
+            window['is_game'] = was_game
+
+        identity = window_identity(window)
+        changed = (self.sm.get('capture_mode') != 'window'
+                   or self.sm.get('target_hwnd') != hwnd
+                   or self.sm.get('target_window_identity') != identity)
+        if not self._save_source(
+                capture_mode='window', target_hwnd=hwnd,
+                target_window_identity=identity,
+                capture_source_authority='automatic' if automatic else 'manual',
+                target_window_name=window.get('display_name', ''),
+                target_clip_group=clip_group_for_source(window)):
             return False
 
         existing = next(
@@ -1967,6 +1844,8 @@ class SourcePopup(_PopupPanel):
             self.window_combo.setItemData(
                 existing, escape(str(window.get('title', '') or '')),
                 Qt.ItemDataRole.ToolTipRole)
+        else:
+            self._window_list[existing] = window
 
         self.cur_mode = 'window'
         self.cur_hwnd = hwnd
@@ -1980,50 +1859,34 @@ class SourcePopup(_PopupPanel):
         self.window_combo.setItemData(
             existing, escape(str(self._window_list[existing].get('title', '') or '')),
             Qt.ItemDataRole.ToolTipRole)
-        self.window_preview.set_window(self._window_list[existing])
 
-        self.sm.set('capture_mode', 'window')
-        self.sm.set('target_hwnd', hwnd)
-        self.sm.set('target_window_name', window.get('display_name', ''))
-        self.sm.set('target_clip_group', clip_group_for_source(window))
-        self.sm.save_settings()
-        self._mark_dirty()
         self._emit_summary()
+        if not automatic:
+            self.source_authority_changed.emit('manual')
+            if changed:
+                self.restart_needed.emit()
         return True
 
-    def set_capture_desktop(self) -> bool:
+    def set_capture_desktop(self, *, automatic: bool = False) -> bool:
         """Switch the persisted capture source back to the desktop."""
+        changed = self.sm.get('capture_mode', 'desktop') != 'desktop'
+        if not self._save_source(
+                capture_mode='desktop', target_hwnd=0, target_window_identity=None,
+                capture_source_authority='automatic' if automatic else 'manual',
+                target_window_name='', target_clip_group=''):
+            return False
         self.cur_mode = 'desktop'
         self.cur_hwnd = 0
-        self.window_preview.set_window(None)
         self.mode_combo.blockSignals(True)
         self.mode_combo.setCurrentIndex(0)
         self.mode_combo.blockSignals(False)
         self._update_window_visibility()
-        self.sm.set('capture_mode', 'desktop')
-        self.sm.set('target_hwnd', 0)
-        self.sm.set('target_window_name', '')
-        self.sm.set('target_clip_group', '')
-        self.sm.save_settings()
-        self._mark_dirty()
         self._emit_summary()
+        if not automatic:
+            self.source_authority_changed.emit('manual')
+            if changed:
+                self.restart_needed.emit()
         return True
-
-    def _mark_dirty(self):
-        self._restart_pending = True
-        self.restart_btn.setVisible(True)
-        self._fit_to_visible_content()
-
-    def _on_restart(self):
-        self._restart_pending = False
-        self.restart_btn.setEnabled(False)
-        self.restart_needed.emit()
-
-    def set_apply_state(self, applying: bool):
-        self.restart_btn.setEnabled(not applying)
-        if not applying and not self._restart_pending:
-            self.restart_btn.setVisible(False)
-        self._fit_to_visible_content()
 
     def _emit_summary(self):
         if self.cur_mode == 'desktop':
@@ -2053,9 +1916,10 @@ class SourcePopup(_PopupPanel):
 class GameDetectionPopup(_PopupPanel):
     """Controls for foreground game detection and capture handoff."""
 
-    configuration_changed = Signal(bool, str)
+    configuration_changed = Signal(str)
     custom_games_changed = Signal(object)
     summary_changed = Signal(str)
+    manage_allowed_games = Signal()
 
     def __init__(self, settings_manager: SettingsManager,
                  hotkey_manager: HotkeyManager, parent=None):
@@ -2065,6 +1929,7 @@ class GameDetectionPopup(_PopupPanel):
         self.setMinimumWidth(420)
         mode = str(self.sm.get('game_detection_mode', 'auto')).lower()
         self._mode = mode if mode in ('auto', 'prompt') else 'auto'
+        self._enabled = self.sm.get('game_detection_enabled', True) is not False
         self._custom_rules = list(normalise_custom_game_rules(
             self.sm.get('game_detection_custom_games', [])))
         self._build_ui()
@@ -2080,12 +1945,11 @@ class GameDetectionPopup(_PopupPanel):
         set_theme_style(title, lambda: (_LABEL_STYLE))
         header.addWidget(title)
         header.addStretch()
-        self.detection_switch = _ToggleSwitch(
-            bool(self.sm.get('game_detection_enabled', False)))
-        self.detection_switch.setAccessibleName('Enable game detection')
-        self.detection_switch.toggled.connect(self._on_enabled_changed)
-        self.enabled_check = self.detection_switch
-        header.addWidget(self.detection_switch)
+        self.enabled_switch = _ToggleSwitch(self._enabled)
+        self.enabled_switch.setAccessibleName('Enable game detection')
+        self.enabled_switch.setToolTip('Detect games and switch capture automatically or prompt first.')
+        self.enabled_switch.toggled.connect(self._on_enabled_changed)
+        header.addWidget(self.enabled_switch)
         layout.addLayout(header)
 
         layout.addWidget(self._section_divider())
@@ -2098,6 +1962,8 @@ class GameDetectionPopup(_PopupPanel):
         mode_row.setSpacing(8)
         self.auto_switch_btn = self._make_mode_button('AUTO-SWITCH')
         self.prompt_switch_btn = self._make_mode_button('PROMPT FIRST')
+        self.auto_switch_btn.setAccessibleName('Auto-Switch')
+        self.prompt_switch_btn.setAccessibleName('Prompt First')
         self.auto_switch_btn.setChecked(self._mode == 'auto')
         self.prompt_switch_btn.setChecked(self._mode == 'prompt')
         self.auto_switch_btn.clicked.connect(lambda: self._set_mode('auto'))
@@ -2126,13 +1992,34 @@ class GameDetectionPopup(_PopupPanel):
         fallback_row.addWidget(self.fallback_switch)
         layout.addLayout(fallback_row)
 
+        allowed_games_button = QPushButton('Manage allowed games')
+        allowed_games_button.setAccessibleName('Manage allowed games')
+        set_theme_style(allowed_games_button, lambda: (button_outline_qss()))
+        allowed_games_button.clicked.connect(self.manage_allowed_games.emit)
+        admission_row = QHBoxLayout()
+        admission_row.setSpacing(10)
+        admission_row.addWidget(allowed_games_button)
+        self.capture_admission_policy_label = QLabel(
+            'Capture admission unavailable.')
+        self.capture_admission_policy_label.setObjectName(
+            'captureAdmissionPolicyLabel')
+        self.capture_admission_policy_label.setWordWrap(True)
+        self.capture_admission_policy_label.setAccessibleName(
+            'Capture admission policy')
+        set_theme_style(
+            self.capture_admission_policy_label,
+            lambda: label_body(Colors.TEXT_DIM, Fonts.SIZE_MICRO))
+        admission_row.addWidget(
+            self.capture_admission_policy_label, 1)
+        layout.addLayout(admission_row)
+
         layout.addWidget(self._section_divider())
 
         manual_label = QLabel('Manual games')
         set_theme_style(manual_label, lambda: (_LABEL_STYLE))
         layout.addWidget(manual_label)
 
-        self.running_window_combo = QComboBox()
+        self.running_window_combo = WheelSafeComboBox()
         set_theme_style(self.running_window_combo, combo_qss)
         layout.addWidget(self.running_window_combo)
         buttons = QHBoxLayout()
@@ -2162,6 +2049,14 @@ class GameDetectionPopup(_PopupPanel):
         self._rebuild_rules()
 
         self._sync_state()
+
+    def set_capture_admission_policy_summary(self, message: str = ''):
+        """Update the passive policy hint beside Manage allowed games."""
+        text = str(message or 'Capture admission unavailable.')
+        self._capture_admission_policy_summary = text
+        label = getattr(self, 'capture_admission_policy_label', None)
+        if label is not None:
+            label.setText(text)
 
     @staticmethod
     def _section_divider() -> QFrame:
@@ -2312,7 +2207,7 @@ class GameDetectionPopup(_PopupPanel):
         from ui.capture_settings_widget import _enumerate_capturable_windows
         selected = self.running_window_combo.currentData()
         self.running_window_combo.clear()
-        windows = _enumerate_capturable_windows()
+        windows = _enumerate_capturable_windows(include_icons=False)
         for window in windows:
             self.running_window_combo.addItem(
                 f"{window['display_name']} · {window['title']}", window['hwnd'])
@@ -2344,9 +2239,10 @@ class GameDetectionPopup(_PopupPanel):
             self._rebuild_rules()
             self.custom_games_changed.emit(list(self._custom_rules))
         else:
-            if rules[0] not in self._custom_rules:
+            added = rules[0] not in self._custom_rules
+            if added:
                 self._custom_rules.append(rules[0])
-            self._save_rules()
+            self._save_rules(added=added)
         self._set_browser_status('Detection blocked.' if blacklist else 'Manual game added.')
 
     def _remove_blacklist_rule(self, index):
@@ -2414,7 +2310,7 @@ class GameDetectionPopup(_PopupPanel):
                 self._set_browser_status('That game is already in the list.')
                 return
             self._custom_rules.append(normalized[0])
-            self._save_rules()
+            self._save_rules(added=True)
             self._set_browser_status(
                 f'Added {Path(selected).name}.' + (' An exact crop override can be set below.'
                                                   if sys.platform != 'win32' else ''))
@@ -2473,7 +2369,7 @@ class GameDetectionPopup(_PopupPanel):
         rule = rules[0]
         if rule not in self._custom_rules:
             self._custom_rules.append(rule)
-            self._save_rules()
+            self._save_rules(added=True)
             self._set_browser_status('Manual game added.')
         else:
             self._set_browser_status('That game is already in the list.')
@@ -2509,9 +2405,12 @@ class GameDetectionPopup(_PopupPanel):
                     or 'Game')
         dialog = GameCropDialog(
             label, preview, rule.get('crop_profile'), app_window)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        rule['crop_profile'] = dialog.profile()
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            rule['crop_profile'] = dialog.profile()
+        finally:
+            dialog.deleteLater()
         self._save_rules()
         enabled = rule['crop_profile'].get('enabled', True)
         self._set_browser_status(
@@ -2523,60 +2422,61 @@ class GameDetectionPopup(_PopupPanel):
             del self._custom_rules[index]
             self._save_rules()
 
-    def _save_rules(self):
+    def _save_rules(self, *, added: bool = False):
         self._custom_rules = list(normalise_custom_game_rules(self._custom_rules))
         self.sm.set('game_detection_custom_games', self._custom_rules)
-        self.sm.save_settings()
+        saved = self.sm.save_settings()
         self._rebuild_rules()
         self.custom_games_changed.emit(list(self._custom_rules))
-
-    def _on_enabled_changed(self, checked: bool):
-        self.sm.set('game_detection_enabled', bool(checked))
-        self.sm.save_settings()
-        self._sync_state()
-        self._emit_summary()
-        self.configuration_changed.emit(bool(checked), self._mode)
+        if added and saved is not False:
+            # Update matching rules before invalidating old/suppressed
+            # foreground observations and requiring a fresh stable candidate.
+            self.configuration_changed.emit(self._mode)
 
     def _set_mode(self, mode: str):
         if mode not in ('auto', 'prompt'):
             return
-        self._mode = mode
-        self.auto_switch_btn.setChecked(mode == 'auto')
-        self.prompt_switch_btn.setChecked(mode == 'prompt')
-        self.sm.set('game_detection_mode', mode)
-        self.sm.save_settings()
+        if _persist_setting_changes(self.sm, {'game_detection_mode': mode}):
+            self._mode = mode
+            self._sync_state()
+            self._emit_summary()
+            self.configuration_changed.emit(mode)
+        else:
+            self._sync_state()
+
+    def cycle_mode(self):
+        self._set_mode('prompt' if self._mode == 'auto' else 'auto')
+
+    def _on_enabled_changed(self, checked: bool):
+        if _persist_setting_changes(self.sm, {'game_detection_enabled': bool(checked)}):
+            self._enabled = bool(checked)
+            self._emit_summary()
+            self.configuration_changed.emit(self._mode)
         self._sync_state()
-        self.configuration_changed.emit(
-            self.detection_switch.isChecked(), self._mode)
 
     def _on_fallback_changed(self, checked: bool):
         self.sm.set('game_detection_fallback_desktop', bool(checked))
         self.sm.save_settings()
 
-    def set_enabled_state(self, checked: bool):
-        self.detection_switch.blockSignals(True)
-        self.detection_switch.setChecked(bool(checked))
-        self.detection_switch.blockSignals(False)
-        self._sync_state()
-        self._emit_summary()
-
     def _sync_state(self):
-        enabled = self.detection_switch.isChecked()
-        for button in (self.auto_switch_btn, self.prompt_switch_btn):
-            button.setEnabled(enabled)
-        self.fallback_switch.setEnabled(enabled)
+        self.enabled_switch.blockSignals(True)
+        self.enabled_switch.setChecked(self._enabled)
+        self.enabled_switch.blockSignals(False)
+        self.auto_switch_btn.setEnabled(self._enabled)
+        self.prompt_switch_btn.setEnabled(self._enabled)
+        self.fallback_switch.setEnabled(self._enabled)
+        self.auto_switch_btn.setChecked(self._mode == 'auto')
+        self.prompt_switch_btn.setChecked(self._mode == 'prompt')
 
     def _emit_summary(self):
-        self.summary_changed.emit(
-            'Game detection: On' if self.detection_switch.isChecked()
-            else 'Game detection: Off')
+        self.summary_changed.emit(self.get_summary())
 
     def get_summary(self) -> str:
-        return (
-            'Game detection: On'
-            if self.detection_switch.isChecked()
-            else 'Game detection: Off'
-        )
+        if not self._enabled:
+            return 'Game detection: Off'
+        return ('Game detection: Prompt First' if self._mode == 'prompt'
+                else 'Game detection: Auto-Switch')
+
 
 def _record_button_qss(recording: bool = False, muted: bool = False) -> str:
     border = Colors.ACCENT if recording else Colors.BORDER
@@ -2620,12 +2520,11 @@ def _clear_button_qss() -> str:
 
 
 def _hotkey_action_frame_qss() -> str:
-    return f'''
-        QFrame#hotkeyActionRow {{
-            background-color: {Colors.SURFACE_1};
-            border: {Sizes.BORDER_W}px solid {Colors.BORDER};
-            border-radius: {Sizes.RADIUS_MD}px;
-        }}
+    return '''
+        QFrame#hotkeyActionRow {
+            background-color: transparent;
+            border: none;
+        }
     '''
 
 
@@ -2811,7 +2710,7 @@ class HotkeyPopup(_PopupPanel):
     def __init__(self, hotkey_manager: HotkeyManager, parent=None):
         super().__init__(parent)
         self.hotkey_manager = hotkey_manager
-        self.setMinimumWidth(550)
+        self.setMinimumWidth(340)
         self._binding_buttons = []
         self._keyboard_buttons = {}
         self._keyboard_clear_buttons = {}
@@ -2821,19 +2720,29 @@ class HotkeyPopup(_PopupPanel):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
 
-        label = QLabel('HOTKEYS')
+        label = QLabel('Hotkeys')
         set_theme_style(label, lambda: (_LABEL_STYLE))
         layout.addWidget(label)
+        self.device_combo = WheelSafeComboBox()
+        self.device_combo.addItems(['Keyboard', 'Controller'])
+        self.device_combo.setAccessibleName('Shortcut device')
+        set_theme_style(self.device_combo, combo_qss)
+        self.device_combo.currentIndexChanged.connect(self._set_binding_device)
+        layout.addWidget(self.device_combo)
         self.actions_scroll = QScrollArea()
         self.actions_scroll.setWidgetResizable(True)
         self.actions_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.actions_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        set_theme_style(self.actions_scroll, lambda: (
+            'QScrollArea { background: transparent; border: none; }'
+            'QScrollArea > QWidget > QWidget { background: transparent; }'))
         self.actions_widget = QWidget()
         self.actions_layout = QVBoxLayout(self.actions_widget)
         self.actions_layout.setContentsMargins(0, 0, 0, 0)
-        self.actions_layout.setSpacing(10)
+        self.actions_layout.setSpacing(6)
         self.actions_scroll.setWidget(self.actions_widget)
         layout.addWidget(self.actions_scroll)
         self.reload_actions()
@@ -2852,6 +2761,7 @@ class HotkeyPopup(_PopupPanel):
         self._controller_clear_buttons.clear()
         actions = [
             ('CAPTURE CLIP', 'save_clip'),
+            ('HIGHLIGHT', 'mark_highlight'),
             ('SCREENSHOT', 'save_screenshot'),
             ('CONFIRM GAME', 'confirm_game_detection'),
             ('DISMISS GAME', 'dismiss_game_detection'),
@@ -2867,7 +2777,8 @@ class HotkeyPopup(_PopupPanel):
                         for seconds, action in custom_actions]
         for label_text, action_key in actions:
             self.actions_layout.addWidget(self._create_action_row(label_text, action_key))
-        self.actions_scroll.setFixedHeight(min(540, len(actions) * 86))
+        self.actions_scroll.setFixedHeight(min(360, len(actions) * 36 - 6))
+        self._set_binding_device(self.device_combo.currentIndex())
         self.adjustSize()
 
     def _create_action_row(self, label_text: str, action_key: str) -> QFrame:
@@ -2875,23 +2786,15 @@ class HotkeyPopup(_PopupPanel):
         frame.setObjectName('hotkeyActionRow')
         set_theme_style(frame, lambda: (_hotkey_action_frame_qss()))
         grid = QGridLayout(frame)
-        grid.setContentsMargins(12, 10, 12, 10)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(6)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
 
-        action_label = QLabel(label_text)
+        action_label = QLabel(label_text.capitalize())
         set_theme_style(action_label, lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL)))
-        action_label.setFixedWidth(108)
-        grid.addWidget(action_label, 0, 0, 2, 1)
-
-        keyboard_label = QLabel('Keyboard')
-        set_theme_style(keyboard_label, lambda: (label_uppercase(Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
-        grid.addWidget(keyboard_label, 0, 1, 1, 2)
-        controller_label = QLabel('Controller')
-        set_theme_style(controller_label, lambda: (label_uppercase(Colors.TEXT_DIM, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
-        grid.addWidget(controller_label, 0, 3, 1, 2)
+        action_label.setFixedWidth(106)
+        grid.addWidget(action_label, 0, 0)
 
         keyboard_btn = _KeyboardBindingButton(self.hotkey_manager, action_key)
         controller_btn = _ControllerBindingButton(self.hotkey_manager, action_key)
@@ -2919,13 +2822,22 @@ class HotkeyPopup(_PopupPanel):
         self._keyboard_clear_buttons[action_key] = keyboard_clear
         self._controller_buttons[action_key] = controller_btn
         self._controller_clear_buttons[action_key] = clear_btn
-        grid.addWidget(keyboard_btn, 1, 1)
-        grid.addWidget(keyboard_clear, 1, 2)
-        grid.addWidget(controller_btn, 1, 3)
-        grid.addWidget(clear_btn, 1, 4)
+        grid.addWidget(keyboard_btn, 0, 1)
+        grid.addWidget(keyboard_clear, 0, 2)
+        grid.addWidget(controller_btn, 0, 1)
+        grid.addWidget(clear_btn, 0, 2)
         self._sync_keyboard_clear(action_key)
         self._sync_controller_clear(action_key)
         return frame
+
+    def _set_binding_device(self, index):
+        for button in self._binding_buttons:
+            button.cancel_recording()
+        controller = index == 1
+        for button in (*self._keyboard_buttons.values(), *self._keyboard_clear_buttons.values()):
+            button.setVisible(not controller)
+        for button in (*self._controller_buttons.values(), *self._controller_clear_buttons.values()):
+            button.setVisible(controller)
 
     def _clear_controller_bind(self, action_key: str):
         self._controller_buttons[action_key].cancel_recording()
@@ -2987,15 +2899,32 @@ class TopBarButton(ThemedDropdownButton):
         self.refresh_theme()
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
+    def bindPopup(self, popup):
+        """Keep each trigger and its panel the same width."""
+        preferred_width = popup.minimumWidth()
+        popup.ensurePolished()
+        popup.layout().activate()
+        width = max(preferred_width, popup.minimumWidth(), popup.sizeHint().width(),
+                    popup.minimumSizeHint().width())
+        popup.setFixedWidth(width)
+        self.setFixedWidth(width)
+
     def setText(self, text):
         super().setText(text)
         self.setToolTip(str(text))
 
+    def setExpanded(self, expanded):
+        super().setExpanded(expanded)
+        self.setProperty('popupOpen', bool(expanded))
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
     def refresh_theme(self):
         set_theme_style(self, lambda: (f'''
             QPushButton {{
-                background-color: {Colors.SURFACE_3};
-                border: none;
+                background-color: {Colors.SURFACE_1};
+                border: 1px solid {Colors.BORDER};
                 border-radius: {Sizes.RADIUS_MD}px;
                 color: {Colors.TEXT}; font-size: {Fonts.SIZE_TOOLBAR}px;
                 font-family: {Fonts.DISPLAY};
@@ -3003,9 +2932,16 @@ class TopBarButton(ThemedDropdownButton):
                 padding: 0px 30px 0px 14px;
                 text-align: left;
             }}
-            QPushButton:hover {{ color: {Colors.ACCENT}; background-color: {Colors.SURFACE_2}; }}
+            QPushButton:hover {{ color: {Colors.TEXT}; background-color: {Colors.CARD_BG_HI}; }}
             QPushButton:pressed {{
-                color: {Colors.BG}; background-color: {Colors.ACCENT};
+                color: {Colors.TEXT}; background-color: {Colors.SURFACE_1};
+            }}
+            QPushButton[popupOpen="true"] {{
+                background-color: {Colors.SURFACE_2};
+                border-color: {Colors.BORDER_HI};
+                border-bottom-color: {Colors.SURFACE_2};
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
             }}
         '''))
         self.ensurePolished()
@@ -3145,6 +3081,9 @@ class MainWindow(QMainWindow):
         self._background_services_started = False
         self._shutdown_requested = False
         self._shutdown_complete = False
+        self._shutdown_pending_exit = False
+        self._shutdown_forced = False
+        self._shutdown_uncertain_owner = False
         self._shutdown_timer_started = None
         self._tray_icon = None
         self._background_ui_paused = False
@@ -3158,6 +3097,11 @@ class MainWindow(QMainWindow):
         self._capture_apply_timer.setSingleShot(True)
         self._capture_apply_timer.setInterval(30_000)
         self._capture_apply_timer.timeout.connect(self._capture_apply_timed_out)
+        self._capture_settings_timer = QTimer(self)
+        self._capture_settings_timer.setSingleShot(True)
+        self._capture_settings_timer.setInterval(400)
+        self._capture_settings_timer.timeout.connect(
+            self._on_capture_settings_restart_requested)
         self._screenshot_inflight = False
         self._screenshot_pending_requests = 0
         self._screenshot_capture_process = None
@@ -3169,35 +3113,82 @@ class MainWindow(QMainWindow):
         self._last_capture_health_error = None
         self._save_diagnostic_started_at = 0.0
         self._clip_diagnostic_started_by_path: dict[str, float] = {}
+        self._save_duration_reports: dict[str, dict] = {}
+        self._save_duration_probe_inflight: set[str] = set()
         self._diagnostic_engine_start_count = 0
         self._active_clip_viewer = None
         self._active_editor_session = None
         self._editor_sessions = []
+        self._backup_admission_snapshot = ((), ())
 
         # Frameless window --
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
 
         self.settings_manager = SettingsManager()
-        set_reduce_motion(self.settings_manager.get('reduce_ui_animations', False))
+        from ui.app_updates import AppUpdateController
+        self.app_update_controller = AppUpdateController(
+            self.settings_manager, self, launcher=self._request_update_installation)
+        self.app_update_controller.update_available.connect(self._show_update_available)
+        self.app_update_controller.start()
+        self._ultra_performance = self.settings_manager.get(
+            'ultra_performance_mode', False) is True
+        self._ultra_effects_pending = self._ultra_performance
+        # Capture admission is an early, authoritative boundary.  Keep the
+        # validated policy and its raw settings owner separate so ordinary
+        # heartbeat work does not repeatedly parse settings, while a durable
+        # policy replacement invalidates the cache by object identity.
+        self._admission_policy = empty_policy()
+        self._admission_policy_error = None
+        self._admission_policy_raw_owner = _ADMISSION_MISSING
+        self._admission_epoch = 0
+        self._admission_transition_latch = None
+        self._admission_discovery_generation = 0
+        self._admission_discovery_thread = None
+        self._capture_admission_status_text = ''
+        self._capture_admission_windows_cache: list[dict] = []
+        self._capture_admission_windows_generation = 0
+        self._reload_admission_policy(authoritative=True)
+        self._capture_admission_status_text = (
+            self._capture_admission_policy_summary(self._admission_policy))
         # Fail early and visibly if the selected library root cannot be
         # created. Never switch to another location behind the user's back.
-        clips_root = prepare_clips_storage(
+        prepare_clips_storage(
             clips_directory_from(self.settings_manager), probe_writable=True)
         # Windows keyboard visualizers are sampled independently from the
         # native replay engine.  Keeping this service alive with MainWindow
         # means the timestamped source ring continues while the settings page
         # is hidden or the app is sitting in the tray.
         self._keyboard_overlay_capture = ThirdPartyKeyboardCapture()
-        self._keyboard_overlay_capture.apply_settings(self.settings_manager)
 
         from core.clip_metadata_manager import ClipMetadataManager
-        self.clip_metadata_manager = ClipMetadataManager()
+        self._file_operations_ready = False
+        self._library_recovery_started = False
+        self._library_recovery_error = None
+        self._file_worker_stop = threading.Event()
+        self._file_worker_lock = threading.Lock()
+        self._file_workers = set()
+        self._waiting_file_admissions = {}
+        self._metadata_startup_error = None
+        try:
+            self.clip_metadata_manager = ClipMetadataManager()
+        except Exception as error:
+            # Preserve a corrupt/unsupported store and keep all library gates shut.
+            self.clip_metadata_manager = None
+            self._metadata_startup_error = str(error)
+        self._file_operations = (ClipFileOperations(
+            self.clip_metadata_manager, settings_provider=self._rename_settings)
+            if self.clip_metadata_manager is not None else None)
 
         from core.upload_manager import UploadManager
         self._clip_readiness = get_clip_readiness_registry()
+        self._clip_readiness.set_initializing(True)
+        from core.export_queue import set_initializing
+        set_initializing(True)
         self.upload_manager = UploadManager(
-            self.settings_manager, self._clip_readiness)
+            self.settings_manager, self._clip_readiness, initializing=True,
+            metadata_manager=self.clip_metadata_manager)
+        self.upload_manager.set_suspended(self._ultra_performance)
         # Give the settings widget a back-reference so its Save button can call
         # refresh_settings() without needing a direct signal connection.
         self.settings_manager._upload_manager_ref = self.upload_manager
@@ -3212,7 +3203,10 @@ class MainWindow(QMainWindow):
         # settings.json is user-editable. Invalid values are rejected and
         # replaced with the documented default, with a diagnostic, rather than
         # silently clamped to a value the user did not select.
+        repaired_settings = False
+
         def _validated_setting(key, default, validator):
+            nonlocal repaired_settings
             try:
                 value = int(self.settings_manager.get(key, default))
                 return validator(value)
@@ -3220,6 +3214,7 @@ class MainWindow(QMainWindow):
                 bad = self.settings_manager.get(key, default)
                 print(f'[Settings] Rejected invalid {key}={bad!r}; using {default}')
                 self.settings_manager.set(key, default)
+                repaired_settings = True
                 return default
 
         self.clip_duration = _validated_setting(
@@ -3231,7 +3226,9 @@ class MainWindow(QMainWindow):
                 and self.settings_manager.get('anticheat_detection_enabled', False)):
             print('[Settings] Focus pause is unavailable on Windows alpha')
             self.settings_manager.set('anticheat_detection_enabled', False)
-        self.settings_manager.save_settings()
+            repaired_settings = True
+        if repaired_settings:
+            self.settings_manager.save_settings()
 
         saved_res  = self.settings_manager.get('resolution',   'source')
         saved_qual = self.settings_manager.get('bitrate_level', 'medium')
@@ -3253,39 +3250,118 @@ class MainWindow(QMainWindow):
         self.buffer_seconds = compute_buffer_seconds(
             self.clip_duration, self.settings_manager.get('custom_clip_lengths', []))
         self._capture_config = CaptureConfigTracker()
+        self._capture_request_token = 0
+        self._source_intent_revision = 0
+        self._desired_capture_request = None
+        # The latest intent is independent from the last request that happened
+        # to resolve.  This lets an invalid C intent supersede a queued B
+        # without disturbing an accepted A session.
+        self._capture_intent_revision = 0
+        self._latest_capture_intent_id = 0
+        self._latest_capture_intent_state = 'none'
+        self._latest_capture_intent_consumed = True
+        self._desired_capture_intent_id = None
+        self._pending_launch_intent_id = None
+        self._capture_request_intents = {}
+        self._pending_launch_request = None
+        self._accepted_capture_session: CaptureSessionSnapshot | None = None
+        self._accepted_camera_runtime_receipt = None
+        self._camera_apply_generation = 0
+        self._camera_pending_request = None
+        self._camera_runtime_receipt = None
+        # Camera ownership is deliberately kept separate from portable
+        # CaptureSession/CaptureConfig receipts.  These opaque objects are
+        # never copied into a save job or emitted as JSON.
+        self._camera_owner_token = object()
+        self._camera_provider = None
+        self._camera_pending_operation = None
+        self._camera_retired_operations = []
+        self._camera_active_physical = None
+        self._camera_retired_physical = []
+        self._camera_disabled_request = None
+        self._camera_disabled_generation = None
+        self._camera_stop_receipts = []
+        self._camera_stop_sequence = 0
+        self._camera_inventory_cache: list[dict] = []
+        self._camera_inventory_generation = 0
+        self._camera_inventory_admission_epoch = 0
+        self._pending_capture_reason = ''
 
         self.engine_process = None
         self._engine_gen = 0
         self._engine_process_generation = None
+        self._pending_launch_config = None
+        self._pending_launch_generation = None
+        self._pending_launch_token = None
+        self._pending_launch_admission_epoch = None
         self._recoverable_error_incidents = {}
         self._error_recovery_tracker = RecoveryTracker()
         self._engine_startup_output = None
         self.bridge         = CaptureBridge()
+        self._engine_bridge_owner = None
+        # One private retained mapping owner bridges a positive heartbeat and
+        # a later process-exit observation.  Its opaque token never enters a
+        # portable receipt, session snapshot, or UI payload.
+        self._terminal_response_owner_cache = None
+        self._retained_admission_teardown_receipt = None
         self._engine_profile = 'clips'
         self._manual_record_state = 'idle'
         self._pending_game_geometry_restart = False
         self._pending_manual_record_path: Path | None = None
+        self._pending_manual_record_request = None
+        self._pending_manual_record_session = None
+        self._pending_manual_record_process_generation = None
+        self._pending_manual_record_native_generation = None
+        self._manual_prepare_deadline = None
+        self._manual_prepare_wait_reason = ''
+        self._manual_unclosed_outputs = {}
+        self._manual_record_request = None
         self._manual_record_requested_at = 0.0
         self._manual_record_started_at = 0.0
         self._manual_record_path: Path | None = None
+        self._manual_record_session: CaptureSessionSnapshot | None = None
+        self._manual_record_process_generation = None
+        self._manual_record_native_generation = None
         self._manual_record_finalize_thread: threading.Thread | None = None
+        self._manual_stop_pending = False
+        self._manual_stop_deadline = 0.0
+        self._manual_stop_engine = None
+        self._manual_stop_bridge = None
+        self._manual_stop_engine_generation = None
+        self._manual_stop_path: Path | None = None
         self._manual_record_timer = QTimer(self)
         self._manual_record_timer.setInterval(200)
         self._manual_record_timer.timeout.connect(
             self._pump_manual_recording_responses)
+        self._focus_action = None
+        self._focus_action_generation = 0
+        self._focus_action_deadline = 0.0
+        self._focus_action_engine = None
+        self._focus_action_bridge = None
+        self._focus_action_engine_generation = None
+        self._focus_action_timer = QTimer(self)
+        self._focus_action_timer.setInterval(100)
+        self._focus_action_timer.timeout.connect(self._pump_focus_action)
         self._capture_health = CaptureHealthMonitor()
         self._capture_health_snapshot = None
         self._capture_health_log = get_logger('capture.health')
+
+        self._admission_transition_timer = QTimer(self)
+        self._admission_transition_timer.setInterval(50)
+        self._admission_transition_timer.timeout.connect(
+            self._pump_admission_transition)
 
         if getattr(sys, 'frozen', False):
             possible_paths = [Path(sys._MEIPASS) / 'engine' / 'FTHRClips.exe']
         else:
             project_root   = Path(__file__).parent.parent / 'FTHRcapture'
             possible_paths = [
+                *isolated_source_engines(project_root.parent),
                 # Direct project builds are useful while the running
                 # solution-level engine is locked. Prefer the freshly
                 # compiled source-checkout artifact; frozen releases still
                 # use only their bundled _MEIPASS engine above.
+                project_root / 'FTHRclips' / 'x64' / 'HDRRelease' / 'FTHRclips.exe',
                 project_root / 'FTHRclips' / 'x64' / 'CFRReleasePause' / 'FTHRclips.exe',
                 project_root / 'FTHRclips' / 'x64' / 'CFRReleaseFinal' / 'FTHRclips.exe',
                 project_root / 'FTHRclips' / 'x64' / 'CFRRelease' / 'FTHRclips.exe',
@@ -3311,34 +3387,24 @@ class MainWindow(QMainWindow):
         # A hard kill can leave the engine's same-directory transaction file.
         # Only old, FTHR-named partials are removed; fresh files may belong to a
         # still-running save and unrelated *.mp4.partial files are user-owned.
-        # Recovery walks can cover an entire user-selected drive, so they must
-        # not block construction of the Qt window.
-        def _report_partial_recovery(result):
-            if result.removed:
-                print(f'[Startup] Removed {len(result.removed)} stale partial clip(s)')
-            for partial_path, error in result.failures:
-                print(f'[Startup] Could not remove stale partial '
-                      f'{partial_path.name}: {error}')
-
-        (self._partial_cleanup_thread,
-         self._partial_cleanup_cancel) = start_stale_partial_cleanup(
-             clips_root, on_complete=_report_partial_recovery)
+        self._partial_cleanup_thread = None
+        self._partial_cleanup_cancel = None
 
         self.hotkey_manager = HotkeyManager()
         self.hotkey_manager.configure_custom_clips(
             self.settings_manager.get('custom_clip_lengths', []), register=False)
 
         self._pending_game_window: GameWindow | dict | None = None
+        self._pending_game_candidate_revision = None
         self._active_game_window: GameWindow | None = None
         self._active_game_hwnd:    int  | None = None
         self._auto_capture_hwnd = 0
-        self._startup_game_detection = bool(
-            self.settings_manager.get('game_detection_enabled', False))
-        if self._startup_game_detection:
-            # Never let a window target persisted by a previous automatic
-            # handoff decide the first capture generation. Start on the
-            # desktop, then let a stable real-game candidate take over.
-            self._prepare_startup_capture_source()
+        self._auto_capture_identity = None
+        self._active_game_hwnd = None
+        self._active_game_window = None
+        self._source_authority_revision = 0
+        # Revalidate automatic targets through fresh foreground detection.
+        self._prepare_startup_capture_source()
         self._game_dismiss_timer = QTimer(self)
         self._game_dismiss_timer.setSingleShot(True)
         self._game_dismiss_timer.timeout.connect(self._on_game_prompt_timeout)
@@ -3366,18 +3432,16 @@ class MainWindow(QMainWindow):
             self._focus_monitor.set_target(target)
             self._focus_monitor.start()
 
-        from core.camera_recorder import CameraRecorder
-        if (CameraRecorder.is_available()
-                and self.settings_manager.get('camera_enabled', False)):
-            device_idx = self.settings_manager.get('camera_device_index', 0)
-            # Async: opening a camera blocks for seconds on Windows/MSMF —
-            # doing it inline froze the whole UI during startup.
-            def _on_cam_result(ok):
-                if not ok:
-                    self._ui_call.emit(lambda: self._show_camera_unavailable(
-                        'Could not open the selected camera. Confirm it is '
-                        'connected and not in use by another app.'))
-            CameraRecorder().start_async(device_idx, on_result=_on_cam_result)
+        startup_camera = CameraSnapshot(
+            enabled=bool(self.settings_manager.get('camera_enabled', False)),
+            device_index=int(self.settings_manager.get('camera_device_index', 0) or 0),
+            overlay_rect=self.settings_manager.get(
+                'camera_overlay_rect', DEFAULT_OVERLAY_RECT),
+        )
+        if not startup_camera.enabled:
+            # An enabled provider start must carry the first immutable capture
+            # request; start_engine supplies it at the actual capture boundary.
+            self._request_camera_apply(startup_camera, origin='startup')
 
         self.is_capturing    = True
         self.capture_card    = CaptureCardClient(self.settings_manager)
@@ -3392,25 +3456,19 @@ class MainWindow(QMainWindow):
 
         if not self._background_start:
             self.ensure_main_ui()
+        else:
+            # Capture plugins must own the very first hidden-start request,
+            # before a WGC process can launch from the stored window setting.
+            self._ensure_plugin_runtime()
         self._setup_hotkeys()
         self._start_background_services()
         self._create_system_tray()
         if not self._background_start:
             QTimer.singleShot(800, self.capture_card.play_startup)
 
-        # Start Python microphone capture where needed; Windows uses native WASAPI.
-        if self.settings_manager.get('audio_capture_enabled', True):
-            self._start_mic_recorder()
-
-        # Launch the capture engine once the event loop is running. Deferring
-        # past __init__ keeps the window responsive while the engine boots and
-        # the bridge polls for its shared memory. Once running, the status timer
-        # below handles transparent reconnection if the engine ever dies.
-        QTimer.singleShot(0, self.start_engine)
-        if self._startup_game_detection:
-            # Register after start_engine so the first capture generation is
-            # always desktop capture, even when a stale window target existed.
-            QTimer.singleShot(0, self._start_game_detection)
+        # Recovery owns the startup admission gate. The window remains usable
+        # while SQLite migration and filesystem recovery run off the Qt thread.
+        QTimer.singleShot(0, self._start_library_recovery)
 
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._update_status)
@@ -3424,6 +3482,8 @@ class MainWindow(QMainWindow):
         self._save_poll_timer.setInterval(50)
         self._save_poll_timer.timeout.connect(self._on_save_poll_tick)
         self._published_final_clips: set[str] = set()
+        self._finalized_clip_identities: dict[str, dict] = {}
+        self._failed_final_clips: set[str] = set()
 
         app = QApplication.instance()
         if app is not None:
@@ -3502,6 +3562,17 @@ class MainWindow(QMainWindow):
             # handle; the first later show retries the normal setup path.
             pass
 
+    def _ensure_plugin_runtime(self):
+        runtime = getattr(self, '_plugin_runtime', None)
+        if runtime is None:
+            runtime = PluginRuntime(self)
+            self._plugin_runtime = runtime
+            if not self._ultra_performance:
+                runtime.refresh()
+        else:
+            runtime.attach_surfaces()
+        return runtime
+
     def ensure_main_ui(self) -> None:
         """Build library and settings widgets on first window use.
 
@@ -3511,9 +3582,12 @@ class MainWindow(QMainWindow):
         if self._ui_ready:
             return
         self._setup_ui()
-        self._settings_page_widget.gary_settings_changed.connect(
-            self._sync_gary_settings)
-        self._init_gary_mode()
+        self._ensure_plugin_runtime()
+        self._settings_page_widget.plugin_runtime = self._plugin_runtime
+        plugin_page = self._settings_page_widget.__dict__.get('plugin_settings_widget')
+        if plugin_page is not None:
+            plugin_page.runtime = self._plugin_runtime
+            plugin_page.refresh()
         self._load_saved_theme()
         self._apply_styles()
         self._ui_ready = True
@@ -3523,29 +3597,17 @@ class MainWindow(QMainWindow):
         self._apply_background_ui_paused(
             self._background_ui_paused, force=True)
         is_connected = getattr(self.bridge, 'is_connected', lambda: False)
-        if self.bridge and is_connected():
+        if not self._ultra_performance and self.bridge and is_connected():
             QTimer.singleShot(
                 0, self._settings_page_widget._populate_mic_devices)
 
-    def _init_gary_mode(self):
-        default_image = Path(__file__).parent / 'assets' / 'gary.png'
-        self._gary_overlay = GaryOverlay(default_image, anchor=self)
-        self._gary_current_intensity = 0.0
-        self._gary_enabled = False
-        self._gary_min_level = DEFAULT_MIN_LEVEL
-        self._gary_max_level = DEFAULT_MAX_LEVEL
-        self._gary_recorder_active = False
-        self._sync_gary_settings()
-        self._gary_timer = QTimer(self)
-        self._gary_timer.setInterval(33)
-        self._gary_timer.timeout.connect(self._update_gary_mode)
-        self._gary_timer.start()
-
     def _start_background_services(self) -> None:
         """Start services that must survive hiding or deferred UI creation."""
-        if self._background_services_started:
+        if self._background_services_started or not self._file_operations_ready:
             return
         self.upload_manager.upload_finished.connect(self._on_upload_finished)
+        self.upload_manager.automatic_trash_requested.connect(
+            self._on_automatic_trash_requested, Qt.ConnectionType.QueuedConnection)
         self.upload_manager.upload_error.connect(self._on_upload_error)
         self.upload_manager.compression_required.connect(
             self._on_upload_compression_required)
@@ -3604,6 +3666,8 @@ class MainWindow(QMainWindow):
 
     def restore_main_window(self) -> None:
         """Restore the existing UI without restarting the capture generation."""
+        if getattr(self, '_shutdown_requested', False):
+            return
         self.capture_card.hide_background_capture()
         self.ensure_main_ui()
         self.setWindowState(
@@ -3665,6 +3729,11 @@ class MainWindow(QMainWindow):
         DiagnosticReportDialog(exported, self).exec()
 
     def _current_capture_source_label(self) -> str:
+        request = getattr(getattr(self, '_accepted_capture_session', None), 'request', None)
+        if request is not None:
+            return request.source.display_name or request.source.source_mode.title()
+        if border_free_capture_enabled(self):
+            return 'Desktop (Border-free capture)'
         if self.settings_manager.get('capture_mode', 'desktop') != 'window':
             return 'Desktop'
         name = str(self.settings_manager.get('target_window_name', '')).strip()
@@ -3679,9 +3748,138 @@ class MainWindow(QMainWindow):
         print(f'[Lifecycle] WindowHiddenToTray source={source!r}')
         self._lifecycle_log.info('WindowHiddenToTray source=%r', source)
 
-    def _open_clip_library(self) -> None:
+    def _sync_album_sidebar(self):
+        """Project the grid's already-published RAM state into the rail."""
+        sidebar = getattr(self, 'album_sidebar', None)
+        grid = getattr(self, 'clip_grid', None)
+        getter = getattr(grid, 'album_navigation_state', None)
+        if sidebar is None or not callable(getter):
+            return False
+        main_stack = getattr(self, 'main_stack', None)
+        active = bool(
+            main_stack is not None
+            and main_stack.currentIndex() == 0
+            and getattr(self, '_active_clip_viewer', None) is None)
+        state = getter()
+        sidebar.set_state(state, active=active)
+        group = getattr(self, '_navigation_group', None)
+        if group is not None:
+            target = None
+            if getattr(self, '_active_clip_viewer', None) is not None:
+                target = getattr(getattr(self, '_active_editor_session', None),
+                                 'button', None)
+            elif main_stack is not None and main_stack.currentIndex() == 1:
+                target = getattr(self, 'settings_gear_btn', None)
+            elif main_stack is not None and main_stack.currentIndex() == 2:
+                target = getattr(self, 'trash_sidebar_btn', None)
+            elif active:
+                selected_id = state.get('selected_id')
+                target = (sidebar.button_for_album(selected_id)
+                          if selected_id is not None else
+                          getattr(self, 'close_settings_btn', None))
+            was_exclusive = group.exclusive()
+            group.setExclusive(False)
+            try:
+                buttons = tuple(group.buttons())
+                for button in buttons:
+                    blocked = button.blockSignals(True)
+                    button.setChecked(button is target)
+                    button.blockSignals(blocked)
+            finally:
+                group.setExclusive(bool(was_exclusive))
+        return True
+
+    def _on_album_catalog_changed(self, catalog):
+        self._sync_album_sidebar()
+
+    def _can_drop_album_clips(self, album_id, mime, source):
+        grid = getattr(self, 'clip_grid', None)
+        stack = getattr(self, 'main_stack', None)
+        return bool(grid is not None and stack is not None
+                    and stack.currentIndex() == 0
+                    and getattr(self, '_active_clip_viewer', None) is None
+                    and grid.can_drop_album_records(album_id, mime, source))
+
+    def _drop_album_clips(self, album_id, mime, source):
+        if not self._can_drop_album_clips(album_id, mime, source):
+            return False
+        return self.clip_grid.drop_album_records(album_id, mime, source)
+
+    def _on_album_view_changed(self, state):
+        self._sync_album_sidebar()
+
+    def _open_album_folder(self, album_id=None):
+        grid = getattr(self, 'clip_grid', None)
+        if (grid is None or getattr(grid, '_bulk_job', None) is not None
+                or getattr(grid, '_shutdown_started', False)):
+            self._sync_album_sidebar()
+            return False
+        if not self._set_main_page(0):
+            self._sync_album_sidebar()
+            return False
+        selector = getattr(grid, 'select_album_view', None)
+        if not callable(selector):
+            return album_id is None
+        if not selector(album_id):
+            self._sync_album_sidebar()
+            return False
+        self._sync_album_sidebar()
+        sidebar = getattr(self, 'album_sidebar', None)
+        button = (sidebar.button_for_album(album_id)
+                  if sidebar is not None and album_id is not None
+                  else getattr(self, 'close_settings_btn', None))
+        self._ensure_sidebar_widget_visible(button)
+        if button is not None:
+            button.setFocus()
+        return True
+
+    def _create_album_folder(self):
+        grid = getattr(self, 'clip_grid', None)
+        if (grid is None or getattr(grid, '_bulk_job', None) is not None
+                or getattr(grid, '_shutdown_started', False)):
+            self._sync_album_sidebar()
+            return False
+        if not self._set_main_page(0):
+            self._sync_album_sidebar()
+            return False
+        creator = getattr(grid, '_new_album', None)
+        if not callable(creator):
+            return False
+        creator()
+        self._sync_album_sidebar()
+        return True
+
+    def _rename_album_folder(self, album_id):
+        grid = getattr(self, 'clip_grid', None)
+        if (grid is None or getattr(grid, '_bulk_job', None) is not None
+                or getattr(grid, '_shutdown_started', False)):
+            self._sync_album_sidebar()
+            return False
+        if not self._set_main_page(0):
+            self._sync_album_sidebar()
+            return False
+        renamer = getattr(grid, 'rename_album_view', None)
+        result = bool(callable(renamer) and renamer(album_id))
+        self._sync_album_sidebar()
+        return result
+
+    def _delete_album_folder(self, album_id):
+        grid = getattr(self, 'clip_grid', None)
+        if (grid is None or getattr(grid, '_bulk_job', None) is not None
+                or getattr(grid, '_shutdown_started', False)):
+            self._sync_album_sidebar()
+            return False
+        if not self._set_main_page(0):
+            self._sync_album_sidebar()
+            return False
+        deleter = getattr(grid, 'delete_album_view', None)
+        result = bool(callable(deleter) and deleter(album_id))
+        self._sync_album_sidebar()
+        return result
+
+    def _open_clip_library(self) -> bool:
         self.restore_main_window()
-        self.main_stack.setCurrentIndex(0)
+        return self._open_album_folder(None)
 
     # UI layout
 
@@ -3726,7 +3924,7 @@ class MainWindow(QMainWindow):
         self.main_mode_cluster = QFrame()
         self.main_mode_cluster.setObjectName('topClusterMain')
         mc = QHBoxLayout(self.main_mode_cluster)
-        mc.setContentsMargins(14, 6, 14, 6)
+        mc.setContentsMargins(0, 6, 14, 6)
         mc.setSpacing(8)
 
         self.cap_settings_popup = CaptureSettingsPopup(self.settings_manager, self)
@@ -3735,29 +3933,44 @@ class MainWindow(QMainWindow):
         self.cap_settings_popup.framerate_changed.connect(self._on_framerate_changed)
         self.cap_settings_popup.resolution_changed.connect(self._on_resolution_changed)
         self.cap_settings_popup.bitrate_changed.connect(self._on_bitrate_changed)
-        self.cap_settings_popup.restart_needed.connect(self._restart_capture_engine)
+        self.cap_settings_popup.restart_needed.connect(
+            self._queue_capture_settings_restart)
         self.cap_settings_popup.summary_changed.connect(self._on_cap_summary_changed)
 
         self.cap_btn = TopBarButton(self.cap_settings_popup.get_summary())
+        self.cap_btn.bindPopup(self.cap_settings_popup)
         self.cap_btn.clicked.connect(self._toggle_cap_settings)
         mc.addWidget(self.cap_btn, 3)
+        self._refresh_capture_summary()
 
         self.source_popup = SourcePopup(self.settings_manager, self)
-        self.source_popup.restart_needed.connect(self._restart_capture_engine)
+        self.source_popup.restart_needed.connect(
+            self._queue_capture_settings_restart)
+        self.source_popup.source_authority_changed.connect(
+            self._on_manual_capture_source_intent)
         self.source_btn = TopBarButton('Source')
+        self.source_btn.bindPopup(self.source_popup)
         self.source_btn.clicked.connect(self._toggle_source)
         mc.addWidget(self.source_btn, 2)
 
         self.game_detection_popup = GameDetectionPopup(
             self.settings_manager, self.hotkey_manager, self)
+        self.game_detection_popup.set_capture_admission_policy_summary(
+            self._capture_admission_policy_summary(
+                getattr(self, '_admission_policy', None)))
         self.game_detection_popup.configuration_changed.connect(
             self._on_game_detection_configuration_changed)
         self.game_detection_popup.custom_games_changed.connect(
             self._on_custom_game_rules_changed)
         self.game_detection_popup.summary_changed.connect(
             self._on_game_detection_summary_changed)
+        self.game_detection_popup.manage_allowed_games.connect(
+            lambda: self._open_settings_category(8))
         self.game_detection_btn = TopBarButton(
             self.game_detection_popup.get_summary())
+        self._on_game_detection_summary_changed(
+            self.game_detection_popup.get_summary())
+        self.game_detection_btn.bindPopup(self.game_detection_popup)
         self.game_detection_btn.clicked.connect(self._toggle_game_detection)
         mc.addWidget(self.game_detection_btn, 2)
 
@@ -3770,11 +3983,10 @@ class MainWindow(QMainWindow):
             'Start a manual recording while replay capture stays active')
         set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(False)))
         self.record_btn.clicked.connect(self._toggle_manual_recording)
-        pass
-        mc.insertWidget(0, self.record_btn, 1)
 
         self.hotkey_popup = HotkeyPopup(self.hotkey_manager, self)
         self.hotkey_btn = TopBarButton('Hotkeys')
+        self.hotkey_btn.bindPopup(self.hotkey_popup)
         self.hotkey_btn.clicked.connect(self._toggle_hotkeys)
         mc.addWidget(self.hotkey_btn, 1)
 
@@ -3823,7 +4035,7 @@ class MainWindow(QMainWindow):
             self.close_settings_btn.setText('Home')
         self.close_settings_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.close_settings_btn.setToolTip('Back to clips')
-        self.close_settings_btn.clicked.connect(lambda: self._set_main_page(0))
+        self.close_settings_btn.clicked.connect(self._open_clip_library)
 
         # Window controls (always visible) --
         self.kofi_widget = QPushButton('Help us keep the app free and open for everyone')
@@ -3902,8 +4114,14 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.close_btn)
 
         root.addWidget(top_bar)
-        # Small windows scroll the toolbar horizontally instead of clipping
-        # labels or shrinking their type. Large windows retain the single row.
+        # Keep the recording action in view while the secondary controls scroll.
+        self.capture_toolbar = QFrame()
+        self.capture_toolbar.setObjectName('captureToolbar')
+        self.capture_toolbar.setFixedHeight(Sizes.CAPTURE_BAR_H)
+        capture_row = QHBoxLayout(self.capture_toolbar)
+        capture_row.setContentsMargins(14, 0, 0, 0)
+        capture_row.setSpacing(8)
+        capture_row.addWidget(self.record_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         self.capture_toolbar_scroll = QScrollArea()
         self.capture_toolbar_scroll.setObjectName('captureToolbarScroll')
         self.capture_toolbar_scroll.setWidgetResizable(True)
@@ -3911,7 +4129,8 @@ class MainWindow(QMainWindow):
         self.capture_toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.capture_toolbar_scroll.setFixedHeight(Sizes.CAPTURE_BAR_H)
         self.capture_toolbar_scroll.setWidget(self.main_mode_cluster)
-        root.addWidget(self.capture_toolbar_scroll)
+        capture_row.addWidget(self.capture_toolbar_scroll, 1)
+        root.addWidget(self.capture_toolbar)
 
         # Drag/double-click on the bar background (the buttons absorb their own clicks)
         top_bar.mousePressEvent       = self._bar_mouse_press
@@ -3921,7 +4140,7 @@ class MainWindow(QMainWindow):
         self._top_bar = top_bar
 
         # Main content stack --
-        self.main_stack = ShellPageStack()
+        self.main_stack = QStackedWidget()
         self.main_stack.setObjectName('mainStack')
 
         # Page 0: clip grid
@@ -3931,35 +4150,65 @@ class MainWindow(QMainWindow):
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
-        scroll = SmoothScrollArea()
+        scroll = QScrollArea()
         self.clip_scroll_area = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.clip_grid = ClipGrid(settings_manager=self.settings_manager,
-                                  metadata_manager=self.clip_metadata_manager)
+                                  metadata_manager=self.clip_metadata_manager, autostart=False)
         self.clip_grid.set_readiness_checker(self._clip_readiness.can_access)
         self.clip_grid.clip_opened.connect(self._on_clip_opened)
+        self.clip_grid.overlap_merge_requested.connect(self._on_overlap_merge_requested)
         self.clip_grid.screenshot_clicked.connect(_show_in_file_manager)
+        self.clip_grid.bulk_export_requested.connect(self._export_library_originals)
+        self.clip_grid.set_bulk_export_enabled(True)
         scroll.setWidget(self.clip_grid)
         body_layout.addWidget(scroll, stretch=1)
 
         self.main_stack.addWidget(body_page)
 
+        # Storage accounting is owned by MainWindow and is created before the
+        # lazy Settings category so scans never belong to a dialog lifetime.
+        self.library_storage_controller = LibraryStorageController(self)
+        self.library_storage_controller.set_scan_suspended(self._ultra_performance)
+        self.library_backup_controller = LibraryBackupController(self)
+
         # Page 1: full-screen settings
         self._settings_page_widget = _SettingsPage(
             self.settings_manager,
             keyboard_capture=self._keyboard_overlay_capture,
+            storage_controller=self.library_storage_controller,
+            backup_controller=self.library_backup_controller,
+            update_controller=self.app_update_controller,
         )
+        # The Settings shell may exist before lazy category 8 is materialized;
+        # carry the authoritative Main cache into that shell immediately.
+        self._settings_page_widget.set_capture_admission_status(
+            getattr(self, '_capture_admission_status_text', ''))
+        self._settings_page_widget.set_capture_admission_windows(
+            getattr(self, '_capture_admission_windows_cache', ()))
         self._settings_page_widget.camera_unavailable.connect(
             self._show_camera_unavailable)
+        self._settings_page_widget.camera_settings_requested.connect(
+            self._on_camera_settings_requested)
+        effects_changed = getattr(
+            self._settings_page_widget, 'capture_effects_changed', None)
+        if effects_changed is not None:
+            effects_changed.connect(self._on_capture_effects_changed)
+        self._settings_page_widget.profile_apply_requested.connect(
+            self._on_profile_apply_requested)
+        self._settings_page_widget.profile_refresh_devices_requested.connect(
+            self._on_profile_refresh_devices_requested)
         self._settings_page_widget.close_requested.connect(
             self._toggle_settings_page)
         self._settings_page_widget.clips_directory_changed.connect(
-            lambda path: self.clip_grid.set_clips_directory(
-                path, prepared=True))
+            lambda path: (self.clip_grid.set_clips_directory(path, prepared=True),
+                          self.library_storage_controller.root_changed(path),
+                          self.library_backup_controller.root_changed(path)))
         self._settings_page_widget.imported_folders_changed.connect(
-            self.clip_grid.force_refresh)
+            lambda: (self.clip_grid.force_refresh(),
+                     self.library_backup_controller.root_changed()))
         self._settings_page_widget.notification_monitor_changed.connect(
             self.capture_card.restart)
         self._settings_page_widget.error_notifications_changed.connect(
@@ -3972,6 +4221,12 @@ class MainWindow(QMainWindow):
             self._export_diagnostic_report)
         self._settings_page_widget.encoder_config_changed.connect(
             self._on_encoder_config_changed)
+        self._settings_page_widget.replay_storage_changed.connect(
+            self._queue_capture_settings_restart)
+        self._settings_page_widget.replay_gap_policy_changed.connect(
+            self._queue_capture_settings_restart)
+        self._settings_page_widget.capture_cursor_changed.connect(
+            self._queue_capture_settings_restart)
         self._settings_page_widget.audio_capture_changed.connect(
             self._on_audio_capture_changed)
         self._settings_page_widget.audio_capture_mode_changed.connect(
@@ -3980,7 +4235,24 @@ class MainWindow(QMainWindow):
             self._on_capture_card_changed)
         self._settings_page_widget.background_ui_pause_changed.connect(
             self._on_background_ui_pause_changed)
+        self._settings_page_widget.ultra_performance_mode_changed.connect(
+            self._set_ultra_performance_mode)
+        self._settings_page_widget.capture_admission_policy_changed.connect(
+            self._on_capture_admission_policy_changed)
+        self._settings_page_widget.capture_admission_refresh_windows_requested.connect(
+            self._request_capture_admission_windows)
         self.main_stack.addWidget(self._settings_page_widget)
+
+        # Trash is a persistent shell page, rather than a top-level dialog.
+        # Keeping it instantiated avoids losing an in-flight recovery result
+        # when the user switches to Clips or an editor.
+        from ui.library_trash import LibraryTrashPage
+        self._library_trash_page = LibraryTrashPage(
+            self, load=self._request_trash_list,
+            restore=self._request_trash_restore,
+            purge=self._request_trash_purge)
+        self._library_trash_page.library_changed.connect(self.clip_grid.force_refresh)
+        self.main_stack.addWidget(self._library_trash_page)
 
         # The manager itself starts before the optional UI exists, so background
         # replay and uploads do not depend on this screen.  These bindings are
@@ -3991,13 +4263,12 @@ class MainWindow(QMainWindow):
         self.clip_grid.set_upload_checker(self.upload_manager.is_uploaded)
         self.clip_grid.set_upload_info_checker(self.upload_manager.get_upload_info)
         self.clip_grid.set_upload_enabled_checker(
-            self.upload_manager.is_enabled)
+            self.upload_manager.is_enabled_for_display)
         self.upload_manager.plugin_state_changed.connect(
             lambda _installed, _enabled:
-            self.clip_grid.set_upload_enabled_checker(self.upload_manager.is_enabled))
+            self.clip_grid.set_upload_enabled_checker(self.upload_manager.is_enabled_for_display))
 
-        # Both destinations stay instantiated. Navigation only changes the
-        # visible page; transitions paint snapshots without moving live trees.
+        # Both destinations stay instantiated. Navigation switches the visible page.
         shell = QWidget()
         shell_layout = QHBoxLayout(shell)
         shell_layout.setContentsMargins(0, 0, 0, 0)
@@ -4006,27 +4277,273 @@ class MainWindow(QMainWindow):
         self.nav_panel.setObjectName('navigationPanel')
         self.nav_panel.setFixedWidth(94)
         nav = QVBoxLayout(self.nav_panel)
-        nav.setContentsMargins(8, 16, 8, 12)
-        nav.setSpacing(12)
-        nav.addWidget(self.close_settings_btn)
-        nav.addWidget(self.settings_gear_btn)
-        self._sidebar_layout = nav
-        nav.addStretch(1)
-        self._settings_page_widget.kofi_widget_changed.connect(self.kofi_widget.setVisible)
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(0)
         self._navigation_group = QButtonGroup(self)
         self._navigation_group.setExclusive(True)
+
+        top_content = QWidget(self.nav_panel)
+        top_layout = QVBoxLayout(top_content)
+        top_layout.setContentsMargins(0, 8, 0, 8)
+        top_layout.setSpacing(8)
+        top_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        top_layout.addWidget(
+            self.close_settings_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._navigation_group.addButton(self.close_settings_btn, 0)
+        top_layout.addWidget(
+            self.settings_gear_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._navigation_group.addButton(self.settings_gear_btn, 1)
+
+        self.album_sidebar = AlbumSidebar(
+            top_content, navigation_group=self._navigation_group)
+        self.album_sidebar.album_activated.connect(self._open_album_folder)
+        self.album_sidebar.create_requested.connect(self._create_album_folder)
+        self.album_sidebar.rename_requested.connect(self._rename_album_folder)
+        self.album_sidebar.delete_requested.connect(self._delete_album_folder)
+        self.album_sidebar.set_drop_handlers(
+            self._can_drop_album_clips, self._drop_album_clips)
+        top_layout.addWidget(self.album_sidebar)
+
+        editor_content = QWidget(top_content)
+        self._sidebar_layout = QVBoxLayout(editor_content)
+        self._sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        self._sidebar_layout.setSpacing(8)
+        self._sidebar_layout.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        top_layout.addWidget(editor_content)
+        top_layout.addStretch(1)
+
+        self._sidebar_scroll_area = QScrollArea(self.nav_panel)
+        self._sidebar_scroll_area.setObjectName('albumSidebarScroll')
+        self._sidebar_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._sidebar_scroll_area.setWidgetResizable(True)
+        self._sidebar_scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._sidebar_scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._sidebar_scroll_area.setMinimumHeight(0)
+        self._sidebar_scroll_area.setWidget(top_content)
+        nav.addWidget(self._sidebar_scroll_area, 1)
+
+        bottom_content = QWidget(self.nav_panel)
+        bottom_layout = QVBoxLayout(bottom_content)
+        bottom_layout.setContentsMargins(0, 0, 0, 8)
+        bottom_layout.setSpacing(8)
+        bottom_layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+        self.trash_sidebar_btn = QToolButton()
+        self.trash_sidebar_btn.setObjectName('trashSidebarBtn')
+        self.trash_sidebar_btn.setText('Trash')
+        self.trash_sidebar_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.trash_sidebar_btn.setCheckable(True)
+        self.trash_sidebar_btn.setFixedSize(78, 78)
+        self.trash_sidebar_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        trash_icon = _load_icon('delete.png', 18)
+        if trash_icon.isNull():
+            trash_icon = _load_icon('delete.svg', 18)
+        self.trash_sidebar_btn.setIcon(trash_icon)
+        self.trash_sidebar_btn.setIconSize(QSize(18, 18))
+        _register_icon_widget(self.trash_sidebar_btn, 'delete.png', 18)
+        self.trash_sidebar_btn.setToolTip('Open library Trash')
+        self.trash_sidebar_btn.clicked.connect(self._show_library_trash)
+        bottom_layout.addWidget(
+            self.trash_sidebar_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self._navigation_group.addButton(self.trash_sidebar_btn, 2)
+        nav.addWidget(bottom_content)
+        self._settings_page_widget.kofi_widget_changed.connect(self.kofi_widget.setVisible)
         shell_layout.addWidget(self.nav_panel)
         shell_layout.addWidget(self.main_stack, 1)
+        self._full_app_shell = shell
         root.addWidget(shell, stretch=1)
+        self._ultra_page = UltraPerformancePage(self)
+        self._ultra_page.capture_requested.connect(self._toggle_cap_settings)
+        self._ultra_page.source_requested.connect(self._toggle_source)
+        self._ultra_page.hotkeys_requested.connect(self._toggle_hotkeys)
+        self._ultra_page.audio_changed.connect(self._set_ultra_audio)
+        self._ultra_page.audio_devices_requested.connect(self._open_ultra_audio_devices)
+        self._ultra_page.save_requested.connect(self._on_hotkey_save_clip)
+        self._ultra_page.open_folder_requested.connect(self._open_clips_folder)
+        self._ultra_page.exit_requested.connect(
+            lambda: self._set_ultra_performance_mode(False))
+        root.addWidget(self._ultra_page, stretch=1)
+        self._apply_ultra_presentation()
         self.clip_grid.set_mutation_callbacks(
-            self._prepare_clip_mutation, self.upload_manager.end_local_mutation)
+            self._prepare_clip_mutation, self._finish_clip_mutation)
+        self.clip_grid.set_rename_handler(self._request_clip_rename)
+        self.clip_grid.set_trash_handler(self._request_clip_trash)
+        self.clip_grid.trash_view_requested.connect(self._show_library_trash)
         self.clip_grid.clip_renamed.connect(self._on_clip_renamed)
+        self.clip_grid.library_flags_changed.connect(
+            lambda path: self._on_library_flags_changed(path, refresh_grid=False))
+        details_signal = getattr(self.clip_grid, 'library_details_changed', None)
+        if details_signal is not None:
+            details_signal.connect(
+                lambda path: self._on_library_details_changed(
+                    path, refresh_grid=False))
+        catalog_signal = getattr(self.clip_grid, 'album_catalog_changed', None)
+        if catalog_signal is not None:
+            catalog_signal.connect(self._on_album_catalog_changed)
+        view_signal = getattr(self.clip_grid, 'album_view_changed', None)
+        if view_signal is not None:
+            view_signal.connect(self._on_album_view_changed)
+        self.clip_grid.album_drag_finished.connect(self.album_sidebar.clear_drop_targets)
+        self._sync_album_sidebar()
+        if self._file_operations_ready:
+            self.clip_grid.start_scanning()
 
         # Error bar (shown at bottom of app for warnings/errors)
         self.error_bar = ErrorBar()
         root.addWidget(self.error_bar)
+
+    def _apply_ultra_presentation(self) -> None:
+        enabled = self._ultra_performance
+        self._full_app_shell.setVisible(not enabled)
+        self.capture_toolbar.setVisible(not enabled)
+        self.capture_toolbar_scroll.setVisible(not enabled)
+        self._ultra_page.setVisible(enabled)
+        self.clip_grid.set_scan_suspended(enabled)
+        self._settings_page_widget.set_background_ui_paused(
+            enabled or self._background_ui_paused
+            or self.main_stack.currentIndex() != 1)
+        self._refresh_ultra_details()
+        if self._pending_status_display is not None:
+            self._set_status(*self._pending_status_display)
+
+    def _set_ultra_performance_mode(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._ultra_performance or self._shutdown_requested:
+            self._settings_page_widget.set_ultra_performance_mode(
+                self._ultra_performance)
+            return
+        from core.export_queue import tasks
+        if enabled and (self.library_backup_controller.busy
+                        or any(not task.done for task in tasks())
+                        or not self._set_main_page(self.main_stack.currentIndex())):
+            self._settings_page_widget.set_ultra_performance_mode(False)
+            FthrMessageDialog.warning(
+                self, 'Library work in progress',
+                'Finish the current library operation before enabling Ultra Performance Mode.')
+            return
+        self.settings_manager.set('ultra_performance_mode', enabled)
+        if self.settings_manager.save_settings() is False:
+            self.settings_manager.set('ultra_performance_mode', not enabled)
+            self._settings_page_widget.set_ultra_performance_mode(not enabled)
+            FthrMessageDialog.warning(
+                self, 'Could not change performance mode',
+                'The performance mode preference could not be saved.')
+            return
+
+        for popup in (self.cap_settings_popup, self.source_popup,
+                      self.hotkey_popup, self.game_detection_popup):
+            popup.hide()
+        self._ultra_performance = enabled
+        self._ultra_effects_pending = True
+        if not enabled:
+            self.main_stack.setCurrentIndex(0)
+        self.upload_manager.set_suspended(enabled)
+        self.capture_card.set_visuals_suspended(enabled)
+        self.library_storage_controller.set_scan_suspended(enabled)
+        self._settings_page_widget.set_ultra_performance_mode(enabled)
+        self._apply_ultra_presentation()
+        if enabled:
+            self._plugin_runtime.close()
+            self._ultra_page.save.setFocus()
+        else:
+            self._plugin_runtime.refresh()
+            if self._file_operations_ready:
+                self.clip_grid.start_scanning()
+            self._set_main_page(0)
+        self._sync_ultra_effect_providers()
+
+    def _sync_ultra_effect_providers(self) -> None:
+        """Wait for a prior save to finish before releasing its source rings."""
+        if (not getattr(self, '_ultra_effects_pending', False)
+                or getattr(self, '_shutdown_requested', False)
+                or not self._file_operations_ready
+                or self._capture_resources_busy()
+                or _admission_call(self, '_admission_transition_active')):
+            return
+        save = getattr(getattr(self, '_save_state', None), 'current', None)
+        if save is not None and not save.result_emitted:
+            return
+        enabled = self._ultra_performance
+        session = self._accepted_capture_session
+        request = getattr(session, 'request', None)
+        if enabled:
+            self._configure_keyboard_capture_for_request(request)
+            if self._camera_provider is not None:
+                if not self._request_camera_apply(
+                        CameraSnapshot(enabled=False), origin='ultra-performance'):
+                    return
+        else:
+            if self._camera_disabled_request is not None:
+                return
+            if request is None or self._pending_launch_request is not None:
+                return  # the next normal capture launch owns both providers
+            self._configure_keyboard_capture_for_request(request)
+            if request.camera.enabled and self._camera_provider is None:
+                self._request_camera_apply(
+                    request.camera, origin='ultra-performance',
+                    request_token=request.request_token, capture_request=request)
+        self._ultra_effects_pending = False
+
+    def _refresh_ultra_details(self) -> None:
+        if not getattr(self, '_ultra_performance', False):
+            return
+        page = getattr(self, '_ultra_page', None)
+        if page is None:
+            return
+        session = getattr(self, '_accepted_capture_session', None)
+        request = getattr(session, 'request', None)
+        monitor = self.source_popup.monitor_combo.currentText()
+        source = self.source_popup.get_summary()
+        if request is not None:
+            source = request.source.display_name or request.source.source_mode.title()
+            capture = self._capture_quality_summary(request)
+        else:
+            capture = self.cap_settings_popup.get_summary()
+        key = self.hotkey_manager.hotkeys.get('save_clip', '')
+        controller = self.hotkey_manager.controller_hotkeys.get('save_clip', '')
+        bindings = ' / '.join(value for value in (key, controller) if value)
+        page.set_capture_details(
+            f'{source} · {monitor}' if monitor else source,
+            capture, bindings or 'Assign shortcut',
+            bool(self.settings_manager.get('audio_capture_enabled', True)))
+
+    def _set_ultra_audio(self, enabled: bool) -> None:
+        if not self._ultra_performance:
+            return
+        self._save_ultra_audio_settings({'audio_capture_enabled': enabled})
+
+    def _open_ultra_audio_devices(self) -> None:
+        from ui.ultra_performance import UltraAudioDialog
+        dialog = UltraAudioDialog(self.settings_manager, self.engine_path, self)
+        def save(values):
+            if self._ultra_performance and self._save_ultra_audio_settings(values):
+                dialog.mark_saved()
+
+        dialog.settings_changed.connect(save)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
+    def _save_ultra_audio_settings(self, values) -> bool:
+        previous = {key: self.settings_manager.get(key) for key in values}
+        if values == previous:
+            return True
+        for key, value in values.items():
+            self.settings_manager.set(key, value)
+        if self.settings_manager.save_settings() is False:
+            for key, value in previous.items():
+                self.settings_manager.set(key, value)
+            self._refresh_ultra_details()
+            FthrMessageDialog.warning(
+                self, 'Could not change audio capture',
+                'The audio capture preferences could not be saved.')
+            return False
+        self._on_audio_capture_changed(
+            bool(self.settings_manager.get('audio_capture_enabled', True)))
+        return True
 
     # Drag support --
 
@@ -4120,10 +4637,13 @@ class MainWindow(QMainWindow):
                 import ctypes, ctypes.wintypes
                 ptr = int(message)
                 if ptr:
-                    msg_type = ctypes.cast(
-                        ptr, ctypes.POINTER(ctypes.c_uint32))[2]
+                    msg = ctypes.wintypes.MSG.from_address(ptr)
+                    msg_type = msg.message
+                    from core.uninstall_shutdown import is_shutdown_message
+                    if is_shutdown_message(msg_type):
+                        QTimer.singleShot(0, self.request_full_exit)
+                        return True, 0
                     if msg_type == 0x0084:  # WM_NCHITTEST
-                        msg = ctypes.wintypes.MSG.from_address(ptr)
                         cx, cy = decode_nchittest_point(msg.lParam)
                         hit = native_hit_test(
                             self, cx, cy,
@@ -4169,7 +4689,8 @@ class MainWindow(QMainWindow):
             self.source_popup.hide()
             self.hotkey_popup.hide()
             self.game_detection_popup.hide()
-            self.cap_settings_popup.show_below(self.cap_btn)
+            self.cap_settings_popup.show_below(
+                self._ultra_page.capture if self._ultra_performance else self.cap_btn)
         self._sync_topbar_dropdown_arrows()
 
     def _toggle_source(self):
@@ -4179,10 +4700,13 @@ class MainWindow(QMainWindow):
             self.cap_settings_popup.hide()
             self.hotkey_popup.hide()
             self.game_detection_popup.hide()
-            self.source_popup.show_below(self.source_btn)
+            self.source_popup.show_below(
+                self._ultra_page.source if self._ultra_performance else self.source_btn)
         self._sync_topbar_dropdown_arrows()
 
     def _toggle_game_detection(self):
+        self.game_detection_popup._sync_state()
+        self.game_detection_popup._emit_summary()
         if self.game_detection_popup.isVisible():
             self.game_detection_popup.hide()
         else:
@@ -4199,7 +4723,8 @@ class MainWindow(QMainWindow):
             self.cap_settings_popup.hide()
             self.source_popup.hide()
             self.game_detection_popup.hide()
-            self.hotkey_popup.show_below(self.hotkey_btn)
+            self.hotkey_popup.show_below(
+                self._ultra_page.hotkeys if self._ultra_performance else self.hotkey_btn)
         self._sync_topbar_dropdown_arrows()
 
     def _sync_topbar_dropdown_arrows(self):
@@ -4208,36 +4733,86 @@ class MainWindow(QMainWindow):
         self.source_btn.setExpanded(self.source_popup.isVisible())
         self.game_detection_btn.setExpanded(
             self.game_detection_popup.isVisible())
+        self._refresh_ultra_details()
         self.hotkey_btn.setExpanded(self.hotkey_popup.isVisible())
 
     def _on_cap_summary_changed(self, text: str):
-        self.cap_btn.setText(text)
+        # Global popup edits must not relabel an accepted immutable A. They
+        # still refresh the defaults view and become visible when no session
+        # is accepted.
+        self._refresh_capture_summary()
 
     def _on_game_detection_summary_changed(self, text: str):
         self.game_detection_btn.setText(text)
 
     def _toggle_settings_page(self):
+        current = self.main_stack.currentIndex()
         self._set_main_page(1 if self._active_clip_viewer is not None
-                            else 1 - self.main_stack.currentIndex())
+                            else (0 if current == 1 else 1))
+
+    def _show_update_available(self, release):
+        # Informational updates do not enter capture-failure diagnostics.
+        if not self.isVisible() or self.isMinimized():
+            return
+        if getattr(self, "_update_notice_version", None) == release.version:
+            return
+        self._update_notice_version = release.version
+        page = getattr(self, '_settings_page_widget', None)
+        updates = getattr(page, 'app_updates_widget', None)
+        if updates is not None and updates.isVisible():
+            return
+        from ui.app_updates import UpdateDialog
+        notice = UpdateDialog('Update available',
+            f'FTHRClips {release.version} is ready to download.\n\n'
+            'Review the update in Settings. Downloading and installing are up to you.',
+            self, action='View update', dismiss='Not now')
+        def open_updates():
+            self._open_settings_category(0)
+            page = getattr(self, '_settings_page_widget', None)
+            if page is not None:
+                from ui.settings_search import search_settings
+                page._open_setting_result(search_settings("App updates")[0])
+        notice.accepted.connect(open_updates)
+        self._update_notice = notice
+        notice.setModal(False)
+        notice.show()
+
+    def _open_settings_category(self, index: int):
+        if not self._set_main_page(1):
+            return
+        page = getattr(self, '_settings_page_widget', None)
+        if page is not None and hasattr(page, 'navigate_category_to'):
+            page.navigate_category_to(index)
 
     def _setup_keyboard_navigation(self):
         from core.navigation_bindings import navigation_bindings_for
         from ui.keyboard_navigation import KeyboardNavigation
         bindings = navigation_bindings_for(self.settings_manager)
+
+        def navigation_contexts():
+            if getattr(self, '_ultra_performance', False):
+                return set()
+            index = self.main_stack.currentIndex()
+            if index == 1:
+                return {'application', 'main', 'settings'}
+            if index == 2:
+                # Trash owns the tree's native arrow-key selection.  Do not
+                # install the Clips scrolling actions over that interaction.
+                return {'application', 'main'}
+            return {'application', 'main', 'library'}
+
         self._keyboard_navigation = KeyboardNavigation(
             self, bindings, {
                 'switch_panel': self._toggle_settings_page,
                 'sidebar_next': lambda: self._navigate_sidebar(1),
                 'sidebar_previous': lambda: self._navigate_sidebar(-1),
-                'toggle_detection': lambda: self.game_detection_popup.detection_switch.toggle(),
+                'toggle_detection': lambda: self.game_detection_popup.cycle_mode(),
                 'restart_capture': self._restart_engine_shortcut,
                 'library_scroll_up': lambda: self._scroll_clip_library(-1),
                 'library_scroll_down': lambda: self._scroll_clip_library(1),
                 'category_next': lambda: self._settings_page_widget.navigate_category(1),
                 'category_previous': lambda: self._settings_page_widget.navigate_category(-1),
-            }, lambda: {'application', 'main', 'settings'}
-            if self.main_stack.currentIndex() == 1
-            else {'application', 'main', 'library'},
+            }, navigation_contexts,
             repeat_actions=('library_scroll_up', 'library_scroll_down'))
 
     def _scroll_clip_library(self, direction):
@@ -4246,14 +4821,48 @@ class MainWindow(QMainWindow):
         bar = self.clip_scroll_area.verticalScrollBar()
         bar.setValue(bar.value() + direction * max(40, bar.singleStep() * 3))
 
-    def _set_main_page(self, index: int) -> None:
-        if self._active_clip_viewer is not None and not self._park_active_editor():
-            return
+    def _set_main_page(self, index: int) -> bool:
+        if getattr(self, '_ultra_performance', False):
+            return False
+        if (getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)):
+            self._refresh_editor_sidebar()
+            return False
+        grid = getattr(self, 'clip_grid', None)
+        if getattr(grid, '_bulk_job', None) is not None:
+            self._refresh_editor_sidebar()
+            return False
+        if self._editor_trash_pending():
+            self._refresh_editor_sidebar()
+            return False
+        if self._active_clip_viewer is not None:
+            try:
+                parked = self._park_active_editor()
+            except (OSError, TypeError, ValueError) as error:
+                page = getattr(
+                    self._active_clip_viewer,
+                    'clip_page',
+                    self._active_clip_viewer)
+                warn = getattr(page, '_warn_clip_details_error', None)
+                if callable(warn):
+                    warn(error)
+                self._refresh_editor_sidebar()
+                return False
+            if not parked:
+                self._refresh_editor_sidebar()
+                return False
+        if index < 0 or index >= self.main_stack.count():
+            self._refresh_editor_sidebar()
+            return False
+        previous_index = self.main_stack.currentIndex()
         for popup in (self.cap_settings_popup, self.source_popup,
                       self.hotkey_popup, self.game_detection_popup):
             popup.hide()
         self.main_stack.setCurrentIndex(index)
         if index == 1:
+            settings_page = self._settings_page_widget
+            if 'mic_combo' in settings_page.__dict__:
+                settings_page._load_audio_settings()
             for key in ('timeline_preview_strip_enabled', 'hide_deleted_timeline_segments',
                         'grid_show_edited_duration'):
                 check = self._settings_page_widget.__dict__.get(key + '_check')
@@ -4264,10 +4873,16 @@ class MainWindow(QMainWindow):
                     check.blockSignals(False)
         self.close_settings_btn.setChecked(index == 0)
         self.settings_gear_btn.setChecked(index == 1)
+        trash_button = getattr(self, 'trash_sidebar_btn', None)
+        if trash_button is not None:
+            trash_button.setChecked(index == 2)
         self._settings_page_widget.set_background_ui_paused(
             self._background_ui_paused or index != 1)
         self.clip_grid.set_background_paused(
             self._background_ui_paused or index != 0)
+        if (index == 2 and previous_index != 2
+                and hasattr(self, '_library_trash_page')):
+            self._library_trash_page.refresh()
         if index == 0 and hasattr(self.clip_grid, 'refresh_duration_labels'):
             self.clip_grid.refresh_duration_labels()
         camera_timer = self._settings_page_widget.__dict__.get('_camera_preview_timer')
@@ -4278,22 +4893,78 @@ class MainWindow(QMainWindow):
                 camera_timer.start()
             else:
                 camera_timer.stop()
+        sync_sidebar = getattr(self, '_sync_album_sidebar', None)
+        if callable(sync_sidebar):
+            sync_sidebar()
         if hasattr(self, '_keyboard_navigation'):
-            (self.close_settings_btn if index == 0 else self.settings_gear_btn).setFocus()
+            focus_target = {
+                0: self.close_settings_btn,
+                1: self.settings_gear_btn,
+                2: getattr(self, 'trash_sidebar_btn', self.close_settings_btn),
+            }.get(index, self.close_settings_btn)
+            focus_target.setFocus()
         if self.isVisible():
             self.raise_()
             self.activateWindow()
+        return True
+
+    def _ensure_sidebar_widget_visible(self, widget):
+        area = getattr(self, '_sidebar_scroll_area', None)
+        if area is not None and widget is not None:
+            area.ensureWidgetVisible(widget)
 
     def _navigate_sidebar(self, step):
-        destinations = [0, 1] + list(self._editor_sessions)
-        current = (self._active_editor_session if self._active_clip_viewer is not None
-                   else self.main_stack.currentIndex())
+        if self._editor_trash_pending():
+            return
+        grid = getattr(self, 'clip_grid', None)
+        state = (grid.album_navigation_state()
+                 if callable(getattr(grid, 'album_navigation_state', None))
+                 else {'albums': (), 'selected_id': None})
+        destinations = [('clips', None)]
+        destinations.extend(
+            ('album', str(album_id)) for album_id, _name in state.get('albums', ()))
+        destinations.extend(('editor', session) for session in self._editor_sessions)
+        destinations.append(('page', 1))
+        if self.main_stack.count() > 2 and hasattr(self, 'trash_sidebar_btn'):
+            destinations.append(('page', 2))
+        if self._active_clip_viewer is not None:
+            current = ('editor', self._active_editor_session)
+        elif self.main_stack.currentIndex() == 0 and state.get('selected_id') is not None:
+            current = ('album', str(state['selected_id']))
+        elif self.main_stack.currentIndex() == 0:
+            current = ('clips', None)
+        else:
+            current = ('page', self.main_stack.currentIndex())
         index = destinations.index(current) if current in destinations else 0
         destination = destinations[(index + step) % len(destinations)]
-        if isinstance(destination, int):
-            self._set_main_page(destination)
+        kind, value = destination
+        open_folder = getattr(self, '_open_album_folder', None)
+        ensure_visible = getattr(self, '_ensure_sidebar_widget_visible', None)
+        if kind == 'clips':
+            if callable(open_folder):
+                open_folder(None)
+            else:
+                self._set_main_page(0)
+            if callable(ensure_visible):
+                ensure_visible(self.close_settings_btn)
+        elif kind == 'album':
+            if callable(open_folder):
+                open_folder(value)
+            else:
+                self._set_main_page(0)
+            sidebar = getattr(self, 'album_sidebar', None)
+            button = (sidebar.button_for_album(value)
+                      if sidebar is not None else None)
+            if callable(ensure_visible):
+                ensure_visible(button)
+            if button is not None:
+                button.setFocus()
+        elif kind == 'editor':
+            self._restore_editor_session(value)
+            if callable(ensure_visible):
+                ensure_visible(getattr(value, 'button', None))
         else:
-            self._restore_editor_session(destination)
+            self._set_main_page(value)
 
     def _refresh_editor_sidebar(self):
         for index, session in enumerate(self._editor_sessions, 1):
@@ -4312,8 +4983,16 @@ class MainWindow(QMainWindow):
         if active is not None:
             active.button.setChecked(True)
         else:
-            (self.close_settings_btn if self.main_stack.currentIndex() == 0
-             else self.settings_gear_btn).setChecked(True)
+            current = self.main_stack.currentIndex()
+            if current == 0:
+                self.close_settings_btn.setChecked(True)
+            elif current == 1:
+                self.settings_gear_btn.setChecked(True)
+            elif current == 2 and hasattr(self, 'trash_sidebar_btn'):
+                self.trash_sidebar_btn.setChecked(True)
+        sync_sidebar = getattr(self, '_sync_album_sidebar', None)
+        if callable(sync_sidebar):
+            sync_sidebar()
 
     def _add_editor_session(self, clip_path):
         from ui.editor_sessions import EditorSession
@@ -4329,7 +5008,15 @@ class MainWindow(QMainWindow):
         button.customContextMenuRequested.connect(
             lambda pos: self._editor_session_menu(session, pos))
         self._navigation_group.addButton(button)
-        self._sidebar_layout.insertWidget(self._sidebar_layout.count() - 1, button)
+        layout = self._sidebar_layout
+        stretch_index = next(
+            (index for index in range(layout.count())
+             if layout.itemAt(index).spacerItem() is not None), -1)
+        if stretch_index >= 0:
+            layout.insertWidget(
+                stretch_index, button, 0, Qt.AlignmentFlag.AlignHCenter)
+        else:
+            layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._editor_sessions.append(session)
         self._refresh_editor_sidebar()
         return session
@@ -4352,12 +5039,16 @@ class MainWindow(QMainWindow):
         menu.exec(session.button.mapToGlobal(pos))
 
     def _close_editor_session(self, session):
+        if self._editor_trash_pending():
+            return
         if session is self._active_editor_session and self._active_clip_viewer is not None:
             self._active_clip_viewer._close()
         else:
             self._remove_editor_session(session)
 
     def _park_active_editor(self):
+        if self._editor_trash_pending():
+            return False
         viewer = self._active_clip_viewer
         if viewer is None:
             return True
@@ -4366,16 +5057,18 @@ class MainWindow(QMainWindow):
             QMessageBox.information(viewer, 'Export in progress',
                                     'Finish or cancel the export before minimizing this editor.')
             return False
-        self._cancel_editor_transition()
         session = self._active_editor_session
-        session.window_geometry = QRect(viewer.mapToGlobal(QPoint(0, 0)), viewer.size())
-        session.window_maximized = viewer.isMaximized()
-        session.state = viewer.capture_session_state()
-        self._active_clip_viewer = None
-        self._active_editor_session = None
+        window_geometry = QRect(viewer.mapToGlobal(QPoint(0, 0)), viewer.size())
+        window_maximized = viewer.isMaximized()
+        state = viewer.capture_session_state()
         # One reusable shell, no active media or timers. Dormant sessions
         # continue to own only edit data; they never each retain a decoder.
         viewer._teardown_player(wait_for_workers=False)
+        session.window_geometry = window_geometry
+        session.window_maximized = window_maximized
+        session.state = state
+        self._active_clip_viewer = None
+        self._active_editor_session = None
         viewer.hide()
         self._parked_editor_shell = viewer
         self._refresh_editor_sidebar()
@@ -4384,40 +5077,20 @@ class MainWindow(QMainWindow):
     def _minimize_active_editor(self, viewer):
         if viewer is not self._active_clip_viewer:
             return
-        worker = getattr(viewer, '_export_thread', None)
-        animate = (self.isVisible() and viewer.isVisible() and not reduce_motion(self)
-                   and not (worker is not None and worker.is_alive()))
-        session = self._active_editor_session
-        start = QRect(viewer.mapToGlobal(QPoint(0, 0)), viewer.size())
-        frame = compact_snapshot(viewer) if animate else QPixmap()
-        if self._park_active_editor():
-            if not animate or frame.isNull():
-                self._set_main_page(self.main_stack.currentIndex())
-                return
-            flight = SnapshotFlight(self, frame, start, sidebar_rect(session.button), compact=True)
-            self._editor_flight = flight
-            # Resume library previews after the flight, so thumbnail loading
-            # does not compete with animation frames on the UI thread.
-            def finish_minimize():
-                self._editor_transition_finished()
-                if not self._shutdown_requested:
-                    self._set_main_page(self.main_stack.currentIndex())
-
-            flight._animation.finished.connect(finish_minimize)
-            flight.start()
-
-    def _editor_transition_finished(self):
-        self._editor_flight = None
-
-    def _cancel_editor_transition(self):
-        flight = getattr(self, '_editor_flight', None)
-        if flight is not None:
-            flight._animation.stop()
-            flight.hide()
-            flight.deleteLater()
-            self._editor_flight = None
+        try:
+            parked = self._park_active_editor()
+        except (OSError, TypeError, ValueError) as error:
+            page = getattr(viewer, 'clip_page', viewer)
+            warn = getattr(page, '_warn_clip_details_error', None)
+            if callable(warn):
+                warn(error)
+            return
+        if parked:
+            self._set_main_page(self.main_stack.currentIndex())
 
     def _restore_editor_session(self, session):
+        if self._editor_trash_pending():
+            return
         if session not in self._editor_sessions:
             return
         if session is self._active_editor_session and self._active_clip_viewer is not None:
@@ -4428,40 +5101,1038 @@ class MainWindow(QMainWindow):
             self.push_error('CLIP NOT FOUND', 'The editor clip is no longer available.', level='warning')
             self._remove_editor_session(session)
             return
-        if self._park_active_editor():
-            self._show_editor_session(session, QPixmap(), animate_restore=True)
+        try:
+            parked = self._park_active_editor()
+        except (OSError, TypeError, ValueError) as error:
+            page = getattr(self._active_clip_viewer, 'clip_page', self._active_clip_viewer)
+            warn = getattr(page, '_warn_clip_details_error', None)
+            if callable(warn):
+                warn(error)
+            return
+        if parked:
+            self._show_editor_session(session, QPixmap(), restore_geometry=True)
 
-    def _prepare_clip_mutation(self, path: str) -> str:
-        if not self._clip_readiness.can_access(path):
-            return 'This clip is still being saved or processed. Try again when it finishes.'
-        from core.ffmpeg_playback import finish_audio_cleanup
-        if not finish_audio_cleanup(path):
-            return 'This clip is still closing in the editor. Try again when it finishes.'
-        viewer = self._active_clip_viewer
-        if viewer is not None and os.path.normcase(viewer.clip_path) == os.path.normcase(path):
+    def _rename_settings(self):
+        return {'owned_root': str(clips_directory_lexical_from(self.settings_manager)),
+                'imported_roots': self.settings_manager.get('imported_clip_folders', [])}
+
+    def _launch_file_worker(self, work):
+        def run():
+            try:
+                work()
+            finally:
+                with self._file_worker_lock:
+                    self._file_workers.discard(threading.current_thread())
+        thread = threading.Thread(target=run, name='FTHR-file-operation', daemon=True)
+        with self._file_worker_lock:
+            if self._file_worker_stop.is_set():
+                raise OSError('Application is shutting down')
+            self._file_workers.add(thread)
+            try:
+                thread.start()
+            except Exception:
+                # An unstarted thread must never be joined during shutdown.
+                self._file_workers.discard(thread)
+                raise
+
+    def _start_library_recovery(self):
+        if self._file_worker_stop.is_set() or self._library_recovery_started:
+            return
+        self._library_recovery_started = True
+
+        def recover():
+            error, blocked = None, ()
+            try:
+                if self._metadata_startup_error:
+                    raise OSError(self._metadata_startup_error)
+                self.clip_metadata_manager.migrate(target_version=6)
+                self._file_operations.recover_pending()
+                blocked = self._file_operations.blocked_paths()
+            except Exception as failure:
+                # No scans, capture, exports or uploads may bypass failed recovery.
+                error = str(failure)
+            if not self._file_worker_stop.is_set():
+                try:
+                    self._ui_call.emit(lambda: self._finish_library_recovery(error, blocked))
+                except RuntimeError:
+                    pass  # Qt teardown already owns the closed startup gate.
+        try:
+            self._launch_file_worker(recover)
+        except Exception as error:
+            # Thread startup failure follows the same visible fail-closed route.
+            self._finish_library_recovery(str(error), ())
+
+    def _finish_library_recovery(self, error, blocked_paths):
+        if self._file_worker_stop.is_set() or getattr(self, '_shutdown_complete', False):
+            return
+        if error:
+            self._library_recovery_error = str(error)
+            backup_controller = getattr(self, 'library_backup_controller', None)
+            if backup_controller is not None:
+                backup_controller.set_available(False)
+            self._set_status('LIBRARY RECOVERY REQUIRED', status_warning_qss())
+            self.push_error('LIBRARY RECOVERY REQUIRED',
+                            f'Library actions and capture remain paused: {error}', level='error')
+            return
+        if getattr(self, '_partial_cleanup_thread', None) is None:
+            def report_partial_recovery(result):
+                if result.removed:
+                    print(f'[Startup] Removed {len(result.removed)} stale partial clip(s)')
+                for partial_path, failure in result.failures:
+                    print(f'[Startup] Kept stale artifact {partial_path.name}: {failure}')
+            (self._partial_cleanup_thread, self._partial_cleanup_cancel) = start_stale_partial_cleanup(
+                clips_directory_from(self.settings_manager), metadata_manager=self.clip_metadata_manager,
+                on_complete=report_partial_recovery)
+        self._clip_readiness.set_recovery_paths(blocked_paths)
+        self._file_operations_ready = True
+        backup_controller = getattr(self, 'library_backup_controller', None)
+        if backup_controller is not None:
+            backup_controller.set_available(True)
+        self._clip_readiness.set_initializing(False)
+        from core.export_queue import set_initializing
+        set_initializing(False)
+        self.upload_manager.set_initializing(False)
+        if hasattr(self, 'clip_grid'):
+            self.clip_grid.start_scanning()
+        self._start_background_services()
+        # Startup has no accepted session yet; use the same Main-owned
+        # provider route with the detached persisted intent as its input.
+        self._configure_keyboard_capture_for_request()
+        if self.settings_manager.get('audio_capture_enabled', True):
+            self._start_mic_recorder()
+        self.start_engine()
+        self._start_game_detection()
+        if blocked_paths:
+            self.push_error('SOME CLIPS REQUIRE RECOVERY',
+                            'Conflicting clip files remain protected. Other clips are available.', level='warning')
+
+    def _clip_mutation_reason(self, paths):
+        if not getattr(self, '_file_operations_ready', True):
+            return 'The library is still recovering. Try again after recovery finishes.'
+        keys = {canonical_media_path(path) for path in paths}
+        for path in MainWindow._active_recording_paths(self):
+            if canonical_media_path(path) in keys:
+                return 'This file belongs to a manual recording that has not finished.'
+        if not self._clip_readiness.can_access(paths[0]):
+            return 'This clip is still being saved, processed or recovered.'
+        from core.clip_readiness import ClipReadinessState
+        for path in paths[1:]:
+            if self._clip_readiness.state(path) in (
+                    ClipReadinessState.INITIALIZING, ClipReadinessState.RECOVERY_REQUIRED,
+                    ClipReadinessState.FINALIZING):
+                return 'The destination is reserved by another clip operation.'
+        viewer = getattr(self, '_active_clip_viewer', None)
+        if viewer is not None and canonical_media_path(viewer.clip_path) in keys:
             worker = getattr(viewer, '_export_thread', None)
             if worker is not None and worker.is_alive():
-                return 'This clip is exporting. Finish or cancel the export before changing its files.'
-        if not self.upload_manager.begin_local_mutation(path):
-            return 'This clip is uploading. Try again when the upload finishes.'
-        viewer = self._active_clip_viewer
-        if viewer is not None and os.path.normcase(viewer.clip_path) == os.path.normcase(path):
-            viewer.close()  # flush draft and detach all multimedia handles
-            self._active_clip_viewer = None
-            if not finish_audio_cleanup(path):
-                self.upload_manager.end_local_mutation(path)
-                return 'This clip is still closing in the editor. Try again when it finishes.'
-        for session in list(self._editor_sessions):
-            if os.path.normcase(session.clip_path) == os.path.normcase(path):
-                self._remove_editor_session(session)
+                return 'This clip is exporting. Finish or cancel the export first.'
         return ''
+
+    @staticmethod
+    def _backup_lexical_key(value):
+        return os.path.normcase(os.path.normpath(
+            os.path.abspath(os.fspath(value))))
+
+    def _capture_backup_admission_snapshot(self):
+        """Publish GUI-owned RAM busy hints without filesystem resolution."""
+        lexical_busy = []
+        canonical_busy = set()
+        for path in MainWindow._active_recording_paths(self):
+            lexical_busy.append(self._backup_lexical_key(path))
+        readiness = getattr(self, '_clip_readiness', None)
+        initializing = False
+        if readiness is not None:
+            lock = getattr(readiness, '_lock', None)
+            if lock is not None:
+                with lock:
+                    initializing = bool(getattr(readiness, '_initializing', False))
+                    canonical_busy.update(getattr(readiness, '_blocked', {}).keys())
+                    for path, handle in getattr(readiness, '_handles', {}).items():
+                        state = getattr(handle, 'state', None)
+                        if state not in {
+                                ClipReadinessState.READY,
+                                ClipReadinessState.READY_WITH_WARNING}:
+                            canonical_busy.add(path)
+        storage = getattr(self, 'library_storage_controller', None)
+        self._backup_admission_snapshot = (
+            tuple(sorted(lexical_busy)), tuple(sorted(canonical_busy)))
+        self._backup_admission_ready = bool(
+            getattr(self, '_file_operations_ready', False)) and not initializing
+        self._backup_admission_shutdown = bool(
+            getattr(self, '_shutdown_requested', False)
+            or getattr(self, '_shutdown_complete', False))
+        self._backup_storage_busy = bool(
+            storage is not None and getattr(storage, '_operation_busy', False))
+        if self._backup_admission_shutdown:
+            return 'Application shutdown is in progress.'
+        if not self._backup_admission_ready:
+            return 'Library recovery has not finished.'
+        return ''
+
+    def _prepare_backup_admission(self):
+        """Flush live editor state before a backup worker captures the library."""
+        root_before = self._backup_lexical_key(
+            clips_directory_lexical_from(self.settings_manager))
+        if (not getattr(self, '_file_operations_ready', False)
+                or getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)):
+            return 'Library recovery or shutdown is still in progress.'
+        editor_refs = (getattr(self, '_active_clip_viewer', None),
+                       getattr(self, '_parked_editor_shell', None))
+        snapshots = []
+        seen = set()
+        for shell in editor_refs:
+            if shell is None:
+                continue
+            page = getattr(shell, 'clip_page', shell)
+            path = getattr(page, 'clip_path', None)
+            if path is None:
+                path = getattr(shell, 'clip_path', None)
+            path_key = (self._backup_lexical_key(path)
+                        if path is not None else None)
+            identity = (id(page), path_key)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            generation = getattr(page, '_library_generation', None)
+            snapshots.append((shell, page, path_key, generation))
+
+        def unchanged():
+            current_refs = (getattr(self, '_active_clip_viewer', None),
+                            getattr(self, '_parked_editor_shell', None))
+            if any(current is not expected
+                   for current, expected in zip(
+                           current_refs, editor_refs, strict=True)):
+                return False
+            if self._backup_lexical_key(
+                    clips_directory_lexical_from(self.settings_manager)) != root_before:
+                return False
+            for shell, page, path_key, generation in snapshots:
+                if getattr(shell, 'clip_page', shell) is not page:
+                    return False
+                current_path = getattr(page, 'clip_path', None)
+                if current_path is None:
+                    current_path = getattr(shell, 'clip_path', None)
+                current_key = (self._backup_lexical_key(current_path)
+                               if current_path is not None else None)
+                if current_key != path_key:
+                    return False
+                if getattr(page, '_library_generation', None) != generation:
+                    return False
+            return True
+
+        if not unchanged():
+            return 'The editor or library changed during backup preparation.'
+        for _shell, page, _path_key, _generation in snapshots:
+            for name in ('_finish_trim_edit', '_finish_effect_adjustment'):
+                finish = getattr(page, name, None)
+                if callable(finish):
+                    finish()
+                    if not unchanged():
+                        return 'The editor or library changed during backup preparation.'
+            flush_draft = getattr(page, '_flush_editor_draft', None)
+            if callable(flush_draft) and flush_draft() is False:
+                return 'The current editor draft could not be saved.'
+            if not unchanged():
+                return 'The editor or library changed during backup preparation.'
+            if (getattr(page, '_draft_dirty', False)
+                    and not getattr(page, '_discard_editor_draft', False)):
+                return 'The current editor draft could not be saved.'
+            flush_details = getattr(page, '_flush_clip_details', None)
+            if callable(flush_details) and flush_details() is False:
+                return 'The current clip details could not be saved.'
+            if not unchanged():
+                return 'The editor or library changed during backup preparation.'
+            for name in ('_tag_edit', '_desc_edit'):
+                field = getattr(page, name, None)
+                modified = getattr(field, 'isModified', None)
+                if callable(modified) and modified():
+                    return 'The current clip details could not be saved.'
+        return self._capture_backup_admission_snapshot()
+
+    def _backup_admission_reason(self, paths):
+        """Return a RAM-only reason when a backup source is currently busy."""
+        if getattr(self, '_backup_admission_shutdown', False):
+            return 'Application shutdown is in progress.'
+        if not getattr(self, '_backup_admission_ready', False):
+            return 'Library recovery has not finished.'
+        if getattr(self, '_backup_storage_busy', False):
+            return 'Storage cleanup is using the library.'
+        keys = {canonical_media_path(path) for path in paths}
+        snapshot = getattr(self, '_backup_admission_snapshot', ((), ()))
+        if (isinstance(snapshot, (tuple, list)) and len(snapshot) == 2
+                and all(isinstance(item, (tuple, list)) for item in snapshot)):
+            lexical_busy, canonical_busy = snapshot
+        else:
+            lexical_busy, canonical_busy = (), ()
+        busy_keys = set(canonical_busy)
+        busy_keys.update(canonical_media_path(path) for path in lexical_busy)
+        if keys & busy_keys:
+            return 'A backup source is still being saved or recovered.'
+        return ''
+
+    def _reserve_clip_paths(self, paths):
+        paths = tuple(paths)
+        from core.export_queue import acquire_local_mutations, release_local_mutations
+        upload = self.upload_manager.acquire_local_mutations(paths)
+        if upload is None:
+            return None, 'A clip is uploading or already reserved. Try again when it finishes.'
+        export = None
+        try:
+            export = acquire_local_mutations(paths)
+            if export is None:
+                return None, 'A clip is queued for export or already reserved. Try again when it finishes.'
+            if upload.keys != export.keys:
+                return None, 'A file path changed during admission. Refresh the library and try again.'
+            reservation = {'upload': upload, 'export': export, 'keys': upload.keys}
+            return reservation, ''
+        finally:
+            if export is None or upload.keys != export.keys:
+                self.upload_manager.release_local_mutations(upload)
+                if export is not None:
+                    release_local_mutations(export)
+
+    def _release_clip_paths(self, reservation):
+        if reservation is None:
+            return
+        from core.export_queue import release_local_mutations
+        try:
+            self.upload_manager.release_local_mutations(reservation['upload'])
+        finally:
+            release_local_mutations(reservation['export'])
+
+    def _detach_clip_editors(self, paths):
+        keys = {canonical_media_path(path) for path in paths}
+        viewer = getattr(self, '_active_clip_viewer', None)
+        active_matches = (viewer is not None
+                          and canonical_media_path(viewer.clip_path) in keys)
+        active_session = getattr(self, '_active_editor_session', None) if active_matches else None
+        sessions = [session for session in getattr(self, '_editor_sessions', ())
+                    if canonical_media_path(session.clip_path) in keys]
+        # Do every persistence check before closing anything: viewer flushes
+        # intentionally swallow some save errors, leaving their dirty flags set.
+        if active_matches:
+            flush_draft = getattr(viewer, '_flush_editor_draft', None)
+            if callable(flush_draft) and flush_draft() is False:
+                raise OSError('The current editor draft could not be saved. Keep the editor open and retry.')
+            if (getattr(viewer, '_draft_dirty', False)
+                    and not getattr(viewer, '_discard_editor_draft', False)):
+                raise OSError('The current editor draft could not be saved. Keep the editor open and retry.')
+            flush_details = getattr(viewer, '_flush_clip_details', None)
+            if callable(flush_details) and flush_details() is False:
+                raise OSError('The clip details could not be saved. Keep the editor open and retry.')
+            for name in ('_tag_edit', '_desc_edit'):
+                field = getattr(viewer, name, None)
+                if field is not None and field.isModified():
+                    raise OSError('The clip details could not be saved. Keep the editor open and retry.')
+        for session in sessions:
+            if session is active_session:
+                continue  # A parked snapshot must never overwrite live edits.
+            state = getattr(session, 'state', None)
+            if isinstance(state, dict) and state.get('snapshot') is not None:
+                from ui.clip_viewer import _editor_snapshot_to_draft
+                saved = self.clip_metadata_manager.set_editor_draft(
+                    session.clip_path, _editor_snapshot_to_draft(state['snapshot']))
+                if saved is False:
+                    raise OSError('The paused editor draft could not be saved. Keep its session open and retry.')
+        if active_matches:
+            if viewer.close() is False:
+                raise OSError('The editor did not close. Finish its current action before renaming.')
+            self._active_clip_viewer = None
+        for session in sessions:
+            self._remove_editor_session(session)
+
+    def _prepare_clip_mutation(self, path: str) -> str:
+        paths = (path,)
+        reason = self._clip_mutation_reason(paths)
+        if reason:
+            return reason
+        from core.ffmpeg_playback import finish_audio_cleanup
+        if not finish_audio_cleanup(path):
+            return 'This clip is still closing in the editor. Try again shortly.'
+        reservation, reason = self._reserve_clip_paths(paths)
+        if reason:
+            return reason
+        try:
+            self._detach_clip_editors(paths)
+            if not finish_audio_cleanup(path):
+                self._release_clip_paths(reservation)
+                return 'This clip is still closing in the editor. Try again shortly.'
+        except Exception as error:
+            # No filesystem mutation has started; release both queue barriers.
+            self._release_clip_paths(reservation)
+            return str(error)
+        if not hasattr(self, '_legacy_file_reservations'):
+            self._legacy_file_reservations = {}
+        self._legacy_file_reservations[str(path)] = reservation
+        return ''
+
+    def _finish_clip_mutation(self, path):
+        reservation = getattr(self, '_legacy_file_reservations', {}).pop(str(path), None)
+        self._release_clip_paths(reservation)
+
+    def _cancel_waiting_file_admissions(self):
+        """Qt-thread shutdown: running workers retain their own reservations."""
+        for cancel in tuple(self._waiting_file_admissions.values()):
+            cancel()
+
+    def _export_library_originals(self, records):
+        from core.export_queue import submit_originals
+        from ui.export_jobs import show_export_jobs
+
+        records = tuple(records)
+        if not records or self._file_worker_stop.is_set() or getattr(self, '_shutdown_complete', False):
+            return
+        directory = QFileDialog.getExistingDirectory(
+            self, 'Export full originals (without editor changes)',
+            str(Path(records[0].path).parent), QFileDialog.Option.ShowDirsOnly)
+        if not directory or self._file_worker_stop.is_set() or getattr(self, '_shutdown_complete', False):
+            return
+        readiness = {record.path: bool(self._clip_readiness.can_access(record.path)) for record in records}
+        try:
+            submit_originals(records, directory, metadata_manager=self.clip_metadata_manager,
+                             readiness=readiness)
+        except Exception as error:
+            # Queue/thread admission failures must remain a visible start error.
+            self.push_error('Original export could not start', str(error), level='warning')
+            return
+        show_export_jobs()
+
+    def _editor_trash_pending(self):
+        for shell in (getattr(self, '_active_clip_viewer', None),
+                      getattr(self, '_parked_editor_shell', None)):
+            page = getattr(shell, 'clip_page', shell)
+            if page is not None and getattr(page, '_trash_pending_token', None) is not None:
+                return True
+        return False
+
+    def _show_library_trash(self):
+        page = getattr(self, '_library_trash_page', None)
+        if page is None or self.main_stack.count() <= 2:
+            return
+        previous_index = self.main_stack.currentIndex()
+        self._set_main_page(2)
+        # A repeated click while already on Trash is an explicit refresh;
+        # switching pages refreshes once inside _set_main_page.
+        if self.main_stack.currentIndex() == 2 and previous_index == 2:
+            page.refresh()
+
+    def _request_trash_list(self, completed):
+        def work():
+            try:
+                items, error = self._file_operations.list_trash(), None
+            except Exception as failure:
+                # A failed read must remain visible rather than showing empty trash.
+                items, error = (), str(failure)
+            if not self._file_worker_stop.is_set():
+                try:
+                    self._ui_call.emit(lambda: completed(items, error))
+                except RuntimeError:
+                    pass  # QObject teardown already owns the cancelled request.
+        try:
+            self._launch_file_worker(work)
+        except Exception as error:
+            completed((), str(error))
+
+    def _on_automatic_trash_requested(self, path, expected_identity):
+        expected_identity = dict(expected_identity) if expected_identity is not None else None
+        def completed(result):
+            if result.succeeded:
+                self.clip_grid.remove_trashed_paths(((path, expected_identity),))
+            else:
+                self.push_error('Uploaded file kept', result.error or 'Automatic Trash was refused.', level='warning')
+        self._request_clip_trash(path, expected_identity, completed, automatic=True)
+
+    def _request_clip_trash(self, path, expected_identity, completed, *, editor_page=None,
+                            automatic=False, preserve_favorites=False, detailed=False,
+                            captured_clip_id=None, explicit_review=False,
+                            adopt_legacy=False):
+        self._request_library_trash_operation('trash', completed, path=path,
+                                             expected_identity=expected_identity,
+                                              editor_page=editor_page, automatic=automatic,
+                                              preserve_favorites=preserve_favorites,
+                                              detailed=detailed,
+                                              captured_clip_id=captured_clip_id,
+                                              explicit_review=explicit_review,
+                                              adopt_legacy=adopt_legacy)
+
+    def _request_trash_restore(self, trash_id, completed, *, destination=None):
+        self._request_library_trash_operation('restore', completed, trash_id=trash_id, destination=destination)
+
+    def _request_trash_purge(self, trash_id, completed, *, automatic=False,
+                             preserve_favorites=False, detailed=False):
+        self._request_library_trash_operation(
+            'purge', completed, trash_id=trash_id, automatic=automatic,
+            preserve_favorites=preserve_favorites, detailed=detailed)
+
+    def _suspend_trash_editor(self, path, expected_identity, editor_page, *, publish=None):
+        from core.library_ownership import media_file_identity
+        from ui.clip_viewer import _editor_snapshot_to_draft
+        key = canonical_media_path(path)
+        shell = next((candidate for candidate in (getattr(self, '_active_clip_viewer', None),
+                      getattr(self, '_parked_editor_shell', None)) if candidate is not None
+                      and canonical_media_path(candidate.clip_path) == key), None)
+        page = getattr(shell, 'clip_page', shell) if shell is not None else editor_page
+        sessions = [session for session in getattr(self, '_editor_sessions', ())
+                    if canonical_media_path(session.clip_path) == key]
+        active_session = getattr(self, '_active_editor_session', None) if shell is getattr(self, '_active_clip_viewer', None) else None
+        for session in sessions:
+            if session is active_session:
+                continue
+            state = getattr(session, 'state', None)
+            if isinstance(state, dict) and state.get('snapshot') is not None:
+                if self.clip_metadata_manager.set_editor_draft(path, _editor_snapshot_to_draft(state['snapshot'])) is False:
+                    raise OSError('The paused editor draft could not be saved. Its session was kept.')
+        if page is None:
+            return dict(page=None, sessions=sessions)
+        if canonical_media_path(page.clip_path) != key:
+            raise OSError('The editor now displays another clip')
+        if media_file_identity(path) != expected_identity:
+            raise OSError('The editor source was replaced')
+        token = getattr(page, '_trash_pending_token', None) or object()
+        page._trash_pending_token = token
+        try:
+            state = page._capture_delete_session()
+        except Exception:
+            page._trash_pending_token = None
+            page.setEnabled(True)
+            raise
+        context = dict(page=page, shell=shell, sessions=sessions, state=state, token=token,
+                       generation=page._library_generation, path=path, identity=dict(expected_identity))
+        if publish is not None:
+            publish(context)
+        page._trash_session_snapshot = state
+        page._draft_save_timer.stop()
+        page.setEnabled(False)
+        page._teardown_player(wait_for_workers=False)
+        return context
+
+    def _finish_trash_editor(self, context, result, editor_page=None, *, initiator=None):
+        from shiboken6 import isValid
+        if context is None:
+            if (editor_page is not None and isValid(editor_page) and not editor_page._closing
+                    and initiator is not None and editor_page._trash_pending_token is initiator[0]
+                    and editor_page._library_generation is initiator[1] and editor_page.clip_path == initiator[2]):
+                editor_page._trash_pending_token = None
+                editor_page.setEnabled(True)
+            return
+        page = context['page']
+        if page is not None:
+            if not isValid(page) or page._trash_pending_token is not context['token']:
+                return
+            if page.clip_path != context['path'] or page._library_generation is not context['generation']:
+                return  # Never restore an old snapshot into a recycled page.
+            if result.succeeded:
+                page._discard_editor_draft = True
+                page._draft_save_timer.stop()
+                page._trash_pending_token = None
+                shell = context['shell'] or page
+                shell.close()
+            elif result.status == FileOperationState.ROLLED_BACK:
+                try:
+                    page._restore_delete_session(context['path'], context['identity'], context['state'],
+                                                 trash_restore_token=context['token'],
+                                                 trash_handler=self._request_clip_trash)
+                    page.refresh_library_flags()
+                    page._trash_pending_token = None
+                    page._trash_session_snapshot = None
+                    page.setEnabled(True)
+                except Exception as error:
+                    # Keep the full snapshot and lock when exact restoration is uncertain.
+                    self.push_error('Editor snapshot retained', str(error), level='warning')
+        if result.succeeded:
+            for session in context['sessions']:
+                self._remove_editor_session(session)
+
+    def _request_library_trash_operation(self, kind, completed, *, path=None, trash_id=None,
+                                         destination=None, expected_identity=None, editor_page=None,
+                                         automatic=False, preserve_favorites=False,
+                                         detailed=False, captured_clip_id=None,
+                                         explicit_review=False, adopt_legacy=False):
+        from core.library_ownership import MediaOwnership, classify_media_path, media_file_identity
+        from core.clip_metadata_types import BindingState, TrashStatus
+        from core.clip_readiness import ClipReadinessState
+        expected_identity = dict(expected_identity) if expected_identity is not None else None
+        storage_operation = bool(preserve_favorites)
+        captured_clip_id = (None if captured_clip_id is None
+                            else str(captured_clip_id))
+        admission = {**self._rename_settings(), 'allow_linked': False}
+        storage_context = None
+        if storage_operation:
+            try:
+                storage_root = clips_directory_lexical_from(self.settings_manager)
+                storage_context = (
+                    canonical_root(storage_root),
+                    self.settings_manager.storage_policy_for(storage_root, strict=False),
+                    tuple(self.settings_manager.get('imported_clip_folders', ()) or ()),
+                )
+            except (OSError, TypeError, ValueError):
+                storage_context = None
+        token = f'trash-{time.monotonic_ns()}'
+        claims, context = [], None
+        claim_lock = threading.Lock()
+        closed = False
+        finished = False
+        source = str(path or '')
+        initiator = ((getattr(editor_page, '_trash_pending_token', None),
+                      editor_page._library_generation, editor_page.clip_path) if editor_page is not None else None)
+
+        def publish_context(value):
+            nonlocal context
+            context = value
+
+        def done(result, item=None, cleanup_done=False):
+            nonlocal finished
+            if finished or self._file_worker_stop.is_set() or getattr(self, '_shutdown_complete', False):
+                return
+            finished = True
+            if kind == 'trash':
+                from shiboken6 import isValid
+                try:
+                    self._finish_trash_editor(context, result, editor_page, initiator=initiator)
+                    if result.succeeded and (editor_page is not None or preserve_favorites):
+                        self.clip_grid.remove_trashed_paths(((source, expected_identity),))
+                except Exception as error:
+                    # Persistence already chose a durable direction; a UI failure
+                    # must not suppress its once-only completion or undo files.
+                    self.push_error('Trash editor follow-up', str(error), level='warning')
+                finally:
+                    try:
+                        if detailed:
+                            completed(result, item, cleanup_done)
+                        else:
+                            completed(result)
+                    finally:
+                        if (editor_page is not None and isValid(editor_page) and initiator is not None
+                                and getattr(editor_page, '_trash_completion_token', None) is initiator[0]):
+                            editor_page._trash_completion_token = None
+            else:
+                completed(result, item, cleanup_done)
+
+        def release():
+            nonlocal closed
+            with claim_lock:
+                closed = True
+                acquired = tuple(claims)
+                claims.clear()
+            for reservation in acquired:
+                try:
+                    self._clip_readiness.unblock_keys(reservation['keys'], reason=token)
+                finally:
+                    self._release_clip_paths(reservation)
+
+        def admit_qt(paths, initial, recovery_retry, event, outcome, expired):
+            nonlocal context
+            if expired.is_set() or self._file_worker_stop.is_set():
+                outcome['error'] = 'Application is shutting down or admission expired'
+                event.set()
+                return
+            waiter = token + str(id(event))
+            try:
+                if not self._file_operations_ready:
+                    raise OSError('Library recovery has not finished')
+                keys = {canonical_media_path(candidate) for candidate in paths}
+                for manual in MainWindow._active_recording_paths(self):
+                    if canonical_media_path(manual) in keys:
+                        raise OSError('A manual recording still owns this path')
+                for candidate in paths:
+                    state = self._clip_readiness.state(candidate)
+                    primary_unready = (initial and candidate == source and not recovery_retry
+                                       and not self._clip_readiness.can_access(candidate))
+                    failed_existing = (state is ClipReadinessState.FINALIZATION_FAILED and os.path.exists(candidate))
+                    if primary_unready or failed_existing or state in (
+                            ClipReadinessState.INITIALIZING, ClipReadinessState.FINALIZING) or (
+                            state is ClipReadinessState.RECOVERY_REQUIRED and not recovery_retry):
+                        raise OSError('A source or destination is not ready for a file operation')
+                matching_sessions = [session for session in getattr(self, '_editor_sessions', ())
+                                     if canonical_media_path(session.clip_path) in keys]
+                if not initial and matching_sessions:
+                    raise OSError('The actual restore destination belongs to a paused editor session')
+                if automatic and matching_sessions:
+                    raise OSError('An active or paused editor owns this uploaded clip')
+                for shell in (getattr(self, '_active_clip_viewer', None), getattr(self, '_parked_editor_shell', None)):
+                    if shell is None or canonical_media_path(shell.clip_path) not in keys:
+                        continue
+                    worker = getattr(shell, '_export_thread', None)
+                    if automatic or worker is not None and worker.is_alive():
+                        raise OSError('An editor or share export still owns this clip')
+                    if not initial:
+                        raise OSError('The actual restore destination belongs to an editor session')
+                if automatic:
+                    cover_dialog_type = None
+                    try:
+                        from ui.clip_cover_dialog import ClipCoverDialog as cover_dialog_type
+                    except (ImportError, AttributeError):
+                        cover_dialog_type = None
+                    grid = getattr(self, 'clip_grid', None)
+                    dialogs = (grid.findChildren(cover_dialog_type)
+                               if grid is not None and cover_dialog_type is not None
+                               else ())
+                    for dialog in dialogs:
+                        dialog_path = getattr(dialog, '_source_path', None)
+                        if dialog_path is not None and canonical_media_path(dialog_path) in keys:
+                            raise OSError('A cover preview or save still owns this clip')
+                with claim_lock:
+                    if closed or expired.is_set():
+                        raise OSError('File admission expired')
+                    reservation, reason = self._reserve_clip_paths(paths)
+                    if reason:
+                        raise OSError(reason)
+                    claims.append(reservation)
+                    self._clip_readiness.block_keys(reservation['keys'], reason=token)
+                if kind == 'trash' and initial and not automatic:
+                    context = self._suspend_trash_editor(source, expected_identity, editor_page, publish=publish_context)
+            except Exception as error:
+                outcome['error'] = str(error)
+                event.set()
+                return
+
+            def cancel_waiter():
+                expired.set()
+                self._waiting_file_admissions.pop(waiter, None)
+                outcome['error'] = 'Application is shutting down'
+                event.set()
+
+            self._waiting_file_admissions[waiter] = cancel_waiter
+
+            def readers(attempt=0):
+                if expired.is_set() or self._file_worker_stop.is_set():
+                    cancel_waiter()
+                    return
+                try:
+                    from core.ffmpeg_playback import finish_audio_cleanup
+                    grid = getattr(self, 'clip_grid', None)
+                    ready = all((grid is None or grid._release_thumbnail_reader(candidate))
+                                and finish_audio_cleanup(candidate) for candidate in paths)
+                    if not ready and attempt < 29:
+                        QTimer.singleShot(100, lambda: readers(attempt + 1))
+                        return
+                    if not ready:
+                        raise OSError('Clip readers are still closing; no files were moved')
+                except Exception as error:
+                    outcome['error'] = str(error)
+                self._waiting_file_admissions.pop(waiter, None)
+                event.set()
+            readers()
+
+        def request_admission(paths, *, initial=False, recovery_retry=False):
+            with claim_lock:
+                occupied = {key for reservation in claims for key in reservation['keys']}
+            paths = tuple(dict.fromkeys(str(candidate) for candidate in paths
+                                        if canonical_media_path(candidate) not in occupied))
+            if not paths:
+                return
+            event, expired, outcome = threading.Event(), threading.Event(), {}
+            self._ui_call.emit(lambda: admit_qt(paths, initial, recovery_retry, event, outcome, expired))
+            deadline = time.monotonic() + 6
+            while not event.wait(.1):
+                if self._file_worker_stop.is_set() or time.monotonic() >= deadline:
+                    expired.set()
+                    raise OSError('File admission was cancelled before execution')
+            expired.set()
+            if outcome.get('error'):
+                raise OSError(outcome['error'])
+
+        def work():
+            nonlocal source
+            operation, item, result, cleanup_done = None, None, None, False
+            try:
+                if storage_operation:
+                    current_root = clips_directory_lexical_from(self.settings_manager)
+                    current_context = (
+                        canonical_root(current_root),
+                        self.settings_manager.storage_policy_for(current_root, strict=False),
+                        tuple(self.settings_manager.get('imported_clip_folders', ()) or ()),
+                    )
+                    if storage_context is None or current_context != storage_context:
+                        raise OSError('Storage policy or ownership changed before cleanup')
+                if kind != 'trash':
+                    item = self._file_operations.get_trash_item(trash_id)
+                    if item is None:
+                        raise OSError('The trash item no longer exists')
+                    source = item.stored_path
+                pending = None
+                if kind == 'purge' and item.status == TrashStatus.PURGING:
+                    pending = next((op for op in self.clip_metadata_manager.pending_operations()
+                                    if op.kind == 'purge' and op.plan.get('trash_id') == trash_id
+                                    and op.state == FileOperationState.COMMITTED and not op.cleanup_done), None)
+                    if pending is None:
+                        raise OSError('The pending purge journal is unavailable')
+                    if (storage_operation
+                            and (pending.version != 2
+                                 or pending.plan.get('preserve_favorites') is not True)):
+                        raise OSError('The pending storage purge lacks favorite protection')
+                initial_paths = [source, str(manifest_path_for(source))]
+                binding = self.clip_metadata_manager.resolve_media(source) if kind == 'trash' else None
+                clip_id = binding.clip_id if binding is not None else item.clip_id if item else None
+                if kind == 'trash':
+                    if storage_operation and automatic and captured_clip_id is None:
+                        if binding is not None:
+                            raise OSError('The selected clip binding changed before cleanup')
+                        if not explicit_review:
+                            raise OSError('Automatic storage cleanup cannot adopt an unregistered clip')
+                    if (captured_clip_id is not None
+                            and (binding is None or str(binding.clip_id) != captured_clip_id)):
+                        raise OSError('The selected clip binding changed before cleanup')
+                if clip_id:
+                    initial_paths += [file.path for file in self.clip_metadata_manager.files_for_clip(clip_id)
+                                      if file.binding_state != BindingState.DETACHED]
+                request_admission(initial_paths, initial=True, recovery_retry=pending is not None)
+                if kind == 'trash':
+                    if (classify_media_path(source, admission['owned_root'], admission['imported_roots'])
+                            is not MediaOwnership.FTHR_OWNED):
+                        raise OSError('Linked and external originals are retained; only owned clips can enter Trash')
+                    if expected_identity is None or media_file_identity(source) != dict(expected_identity):
+                        raise OSError('The selected file identity changed; nothing was moved')
+                    with self.clip_metadata_manager.delete_guard(source, expected_identity=expected_identity):
+                        pass  # Fresh protection is checked before deliberate, exact-file adoption.
+                    evidence = self.clip_metadata_manager.inspect_media(source)
+                    if dict(evidence.stat) != dict(expected_identity):
+                        raise OSError('The selected file changed before registration')
+                    binding = self.clip_metadata_manager.register_media(
+                        evidence,
+                        adopt_legacy=(bool(adopt_legacy and explicit_review)
+                                      if storage_operation else True),
+                    )
+                    if binding.clip_id is None or binding.state == BindingState.CONFLICT:
+                        raise OSError('Conflicting clip bindings cannot be moved to Trash')
+                    operation = self._file_operations.prepare_trash(
+                        binding.clip_id, admission=admission,
+                        expected_identity=expected_identity,
+                        preserve_favorites=preserve_favorites)
+                elif pending is not None:
+                    operation = pending
+                elif kind == 'restore':
+                    operation = self._file_operations.prepare_restore(trash_id, destination=destination, admission=admission)
+                else:
+                    operation = self._file_operations.prepare_purge(
+                        trash_id, admission=admission,
+                        preserve_favorites=preserve_favorites)
+                request_admission(operation.plan['reserved_paths'], recovery_retry=pending is not None)
+                if self._file_worker_stop.is_set():
+                    raise OSError('Application shutdown cancelled the prepared operation')
+                result = (self._file_operations.recover_operation(operation.op_id) if pending is not None
+                          else self._file_operations.execute(operation.op_id))
+            except Exception as error:
+                # A denial after preparation recovers only this operation. Main
+                # never undoes files or runs global recovery on unrelated work.
+                if operation is not None:
+                    try:
+                        result = self._file_operations.recover_operation(operation.op_id)
+                        result = MutationResult(result.op_id, result.status, result.old_path, result.new_path,
+                                                result.error or str(error))
+                    except Exception:
+                        # Unknown durable direction keeps its recovery barrier.
+                        result = MutationResult(operation.op_id, FileOperationState.RECOVERY_REQUIRED,
+                                                source, operation.plan['destination'], str(error))
+                else:
+                    result = MutationResult('', FileOperationState.ROLLED_BACK, source, source, str(error))
+            finally:
+                try:
+                    if operation is not None:
+                        durable = self.clip_metadata_manager.get_operation(operation.op_id)
+                        cleanup_done = bool(durable and durable.cleanup_done)
+                    if kind != 'trash':
+                        item = self._file_operations.get_trash_item(trash_id)
+                    elif operation is not None:
+                        durable = self.clip_metadata_manager.get_operation(operation.op_id)
+                        if durable is not None:
+                            item = self._file_operations.get_trash_item(
+                                durable.plan.get('trash_id'))
+                    self._clip_readiness.set_recovery_paths(self._file_operations.blocked_paths())
+                    if (result is not None and result.succeeded and kind in ('trash', 'restore')):
+                        self._clip_readiness.rename_committed(result.old_path, result.new_path)
+                        self._clip_readiness.complete(result.new_path)
+                    if (result is not None and result.succeeded and kind == 'purge'
+                            and cleanup_done and not os.path.lexists(result.old_path)):
+                        self._clip_readiness.forget(result.old_path)
+                    if result is not None and result.status == FileOperationState.RECOVERY_REQUIRED:
+                        self._clip_readiness.block_paths((source,), reason='recovery')
+                except Exception:
+                    # A failed journal refresh cannot make uncertain paths ready.
+                    self._clip_readiness.block_paths((source,), reason='recovery')
+                finally:
+                    release()
+            if not self._file_worker_stop.is_set():
+                try:
+                    self._ui_call.emit(lambda: done(result, item, cleanup_done))
+                except RuntimeError:
+                    pass  # Worker claims are released before late Qt teardown.
+
+        try:
+            self._launch_file_worker(work)
+        except Exception as error:
+            release()
+            done(MutationResult('', FileOperationState.ROLLED_BACK, source, source, str(error)))
+
+    def _request_clip_rename(self, old_path, new_path, allow_linked, completed):
+        paths = (old_path, new_path)
+        finished = False
+        reserved = False
+        token = f'rename-{time.monotonic_ns()}'
+
+        def done(result):
+            nonlocal finished
+            if finished:
+                return
+            finished = True
+            if self._file_worker_stop.is_set():
+                return
+            try:
+                if result.succeeded and result.error:
+                    self.push_error('Clip renamed',
+                                    f'The rename committed; follow-up needs attention: {result.error}', level='warning')
+            finally:
+                completed(result)
+
+        def rejected(error):
+            done(MutationResult('', FileOperationState.ROLLED_BACK, old_path, new_path, str(error)))
+
+        reason = self._clip_mutation_reason(paths)
+        if reason:
+            rejected(reason)
+            return
+        reservation, reason = self._reserve_clip_paths(paths)
+        if reason:
+            rejected(reason)
+            return
+        reserved = True
+        self._clip_readiness.block_keys(reservation['keys'], reason=token)
+
+        def release():
+            nonlocal reserved
+            if reserved:
+                reserved = False
+                try:
+                    self._clip_readiness.unblock_keys(reservation['keys'], reason=token)
+                finally:
+                    self._release_clip_paths(reservation)
+
+        def leave_waiting():
+            self._waiting_file_admissions.pop(token, None)
+
+        def cancel_waiting():
+            nonlocal finished
+            finished = True
+            leave_waiting()
+            release()
+
+        self._waiting_file_admissions[token] = cancel_waiting
+        try:
+            self._detach_clip_editors(paths)
+            admission = {**self._rename_settings(), 'allow_linked': bool(allow_linked)}
+        except Exception as error:
+            # Editor flush failures occur before PREPARED; no file was moved.
+            leave_waiting()
+            release()
+            rejected(error)
+            return
+
+        def work():
+            operation = None
+            result = None
+            uncertain = False
+            try:
+                binding = self.clip_metadata_manager.resolve_media(old_path)
+                if binding is None:
+                    binding = self.clip_metadata_manager.register_media(
+                        self.clip_metadata_manager.inspect_media(old_path))
+                operation = self._file_operations.prepare_rename(binding.clip_id, new_path, admission=admission)
+                result = self._file_operations.execute(operation.op_id)
+            except Exception as error:
+                # SQLite truth, never a late service exception, decides whether
+                # the UI publishes a rename. Main never performs filesystem undo.
+                state = FileOperationState.ROLLED_BACK
+                if operation is not None:
+                    state = FileOperationState.RECOVERY_REQUIRED
+                    try:
+                        durable = self.clip_metadata_manager.get_operation(operation.op_id)
+                        if durable is not None and durable.state == FileOperationState.COMMITTED:
+                            state = FileOperationState.COMMITTED
+                            try:
+                                self.clip_metadata_manager.reload()
+                            except Exception:
+                                pass  # Durable success still wins; report original follow-up warning.
+                        elif durable is not None and durable.state == FileOperationState.ROLLED_BACK:
+                            state = FileOperationState.ROLLED_BACK
+                        else:
+                            uncertain = True
+                    except Exception:
+                        # Unknown durable state retains both admission barriers.
+                        uncertain = True
+                result = MutationResult(operation.op_id if operation else '', state,
+                                        old_path, new_path, str(error))
+            try:
+                try:
+                    blocked = self._file_operations.blocked_paths()
+                    self._clip_readiness.set_recovery_paths(blocked)
+                except Exception:
+                    # Unknown durable journal truth must retain readiness bars.
+                    uncertain = True
+                if uncertain:
+                    self._clip_readiness.block_keys(reservation['keys'], reason='recovery')
+                if result.succeeded:
+                    self._clip_readiness.rename_committed(old_path, new_path)
+            finally:
+                release()
+            if not self._file_worker_stop.is_set():
+                try:
+                    self._ui_call.emit(lambda: done(result))
+                except RuntimeError:
+                    pass  # Reservations already ended even if the card/window died.
+
+        def wait_for_readers(attempt=0):
+            if finished:
+                return
+            from core.ffmpeg_playback import finish_audio_cleanup
+            if self._file_worker_stop.is_set():
+                cancel_waiting()
+                return
+            try:
+                grid = getattr(self, 'clip_grid', None)
+                reader_closed = grid is None or grid._release_thumbnail_reader(old_path)
+                audio_closed = finish_audio_cleanup(old_path)
+            except Exception as error:
+                # Reader teardown failed before journal admission, including retries.
+                leave_waiting()
+                release()
+                rejected(error)
+                return
+            if not reader_closed or not audio_closed:
+                if attempt < 29:
+                    QTimer.singleShot(100, lambda: wait_for_readers(attempt + 1))
+                    return
+                leave_waiting()
+                release()
+                rejected('The clip reader is still closing. Try again shortly.')
+                return
+            leave_waiting()  # From thread.start onward only worker finally releases.
+            try:
+                self._launch_file_worker(work)
+            except Exception as error:
+                # Thread startup failed before any journal/file changes.
+                release()
+                rejected(error)
+        wait_for_readers()
+
+    def _on_library_flags_changed(self, path, *, refresh_grid=True):
+        grid = getattr(self, 'clip_grid', None)
+        if grid is not None and refresh_grid:
+            grid.refresh_library_flags(path)
+        key = canonical_media_path(path)
+        for viewer in (getattr(self, '_active_clip_viewer', None),
+                       getattr(self, '_parked_editor_shell', None)):
+            if viewer is not None and canonical_media_path(viewer.clip_path) == key:
+                refresh = getattr(viewer, 'refresh_library_flags', None)
+                if callable(refresh):
+                    refresh()
 
     def _on_clip_renamed(self, old_path: str, new_path: str) -> None:
         try:
-            self.clip_metadata_manager.rename_path(old_path, new_path)
             self.upload_manager.rename_history_path(old_path, new_path)
         except (OSError, ValueError) as error:
-            self.push_error('Clip renamed', f'The file was renamed, but its saved metadata could not be updated: {error}', level='warning')
+            self.push_error('Clip renamed',
+                            f'The file was renamed, but upload history could not be updated: {error}', level='warning')
 
     # Hotkeys
 
@@ -4493,6 +6164,8 @@ class MainWindow(QMainWindow):
 
     def _setup_hotkeys(self):
         self.hotkey_manager.save_clip_triggered.connect(self._on_hotkey_save_clip)
+        self.hotkey_manager.mark_highlight_triggered.connect(
+            self._on_hotkey_mark_highlight)
         self.hotkey_manager.custom_clip_triggered.connect(self._save_clip)
         self.hotkey_manager.save_screenshot_triggered.connect(
             self._on_hotkey_save_screenshot)
@@ -4510,10 +6183,1827 @@ class MainWindow(QMainWindow):
         self.hotkey_manager.register_all()
         print("Hotkeys registered.")
 
+    def _storage_path_is_owned(self, path) -> bool:
+        """Return whether a save target is inside the current owned root."""
+        try:
+            root = canonical_root(clips_directory_lexical_from(self.settings_manager))
+            target = canonical_root(path)
+            if os.path.commonpath((root, target)) != root:
+                return False
+            # Imported roots nested below the selected library remain
+            # read-only; lexical checks keep this GUI admission path free of
+            # filesystem resolution and the worker rechecks real ownership.
+            imported = self.settings_manager.get('imported_clip_folders', ()) or ()
+            return not any(
+                os.path.commonpath((canonical_root(imported_root), target))
+                == canonical_root(imported_root)
+                for imported_root in imported
+            )
+        except (OSError, TypeError, ValueError):
+            # An unrepresentable target cannot be proven to belong to Clips.
+            return False
+
+    def _storage_admission(self, target, incoming_bytes=0) -> tuple[bool, str]:
+        """Use the last off-GUI inventory only for an explicitly owned target."""
+        if not self._storage_path_is_owned(target):
+            # A separate manual recording/import folder is view-only and must
+            # never be blocked by the library quota.
+            return True, ''
+        try:
+            root = clips_directory_lexical_from(self.settings_manager)
+            policy = self.settings_manager.storage_policy_for(root, strict=False)
+        except (OSError, TypeError, ValueError):
+            return True, ''
+        if not isinstance(policy, StoragePolicy) or not policy.max_library_bytes:
+            return True, ''
+        controller = getattr(self, 'library_storage_controller', None)
+        inventory = getattr(controller, 'inventory', None)
+
+        def refresh_quota():
+            request = getattr(controller, 'request_quota_refresh', None)
+            if callable(request):
+                request()
+            elif controller is not None:
+                controller.request_refresh(force=True)
+
+        if inventory is None or time.time() - inventory.scanned_at > 60:
+            refresh_quota()
+            return False, 'Storage usage is being checked. Try saving again shortly.'
+        if canonical_root(inventory.root) != canonical_root(root):
+            refresh_quota()
+            return False, 'The Clips folder changed. Try saving again shortly.'
+        return quota_admission(inventory, policy, int(max(0, incoming_bytes)))
+
+    # Capture admission -------------------------------------------------
+    # These helpers deliberately sit at the Main boundary.  The policy module
+    # remains pure; Main supplies the current source snapshot and, for an
+    # enabled policy, the fresh Windows identity proof immediately before a
+    # native side effect.
+
+    def _admission_raw_owner(self):
+        settings = getattr(self, 'settings_manager', None)
+        raw_settings = getattr(settings, 'settings', None)
+        if isinstance(raw_settings, dict):
+            return raw_settings.get('capture_admission_policy',
+                                    _ADMISSION_MISSING)
+        getter = getattr(settings, 'get', None)
+        if callable(getter):
+            try:
+                return getter('capture_admission_policy', _ADMISSION_MISSING)
+            except Exception:
+                return _ADMISSION_UNAVAILABLE
+        return _ADMISSION_UNAVAILABLE
+
+    def _reload_admission_policy(self, *, authoritative=False,
+                                 trigger_transition=True):
+        owner_reader = getattr(self, '_admission_raw_owner', None)
+        if not callable(owner_reader):
+            owner_reader = MainWindow._admission_raw_owner.__get__(self)
+        owner = owner_reader()
+        if (not authoritative and owner is getattr(
+                self, '_admission_policy_raw_owner', _ADMISSION_MISSING)):
+            return getattr(self, '_admission_policy', None)
+        previous = getattr(self, '_admission_policy', None)
+        previous_owner = getattr(
+            self, '_admission_policy_raw_owner', _ADMISSION_MISSING)
+        try:
+            reader = getattr(self.settings_manager,
+                             'read_capture_admission_policy', None)
+            if callable(reader):
+                policy = reader()
+            else:
+                raw_settings = getattr(self.settings_manager, 'settings', None)
+                if (not isinstance(raw_settings, dict)
+                        and not callable(getattr(
+                            self.settings_manager, 'get', None))):
+                    raise AdmissionDataError(
+                        'capture admission settings are unavailable')
+                raw = owner
+                if raw is _ADMISSION_UNAVAILABLE:
+                    raise AdmissionDataError(
+                        'capture admission settings could not be read')
+                if raw is _ADMISSION_MISSING:
+                    policy = empty_policy()
+                else:
+                    policy = policy_from_raw(raw)
+            if not isinstance(policy, AdmissionPolicy):
+                raise AdmissionDataError('capture admission policy is unavailable')
+            error = None
+        except (AdmissionDataError, AdmissionValidationError, OSError,
+                RuntimeError, TypeError, ValueError, AttributeError) as exc:
+            # Invalid/future/null raw data remains in SettingsManager.  Main
+            # records it as unavailable and fails all enabled side effects
+            # closed without writing a repair value.
+            policy = None
+            error = exc
+        self._admission_policy = policy
+        self._admission_policy_error = error
+        self._admission_policy_raw_owner = owner
+        changed = (owner is not previous_owner
+                   or (previous is None) != (policy is None)
+                   or (previous is not None and policy is not None
+                       and previous.to_dict() != policy.to_dict()))
+        if changed:
+            self._admission_epoch = int(getattr(self, '_admission_epoch', 0)) + 1
+            if trigger_transition and previous is not None:
+                if (policy is None
+                        and getattr(self, '_accepted_capture_session', None)
+                        is not None):
+                    self._begin_admission_transition(
+                        reason='The capture admission policy is unavailable.')
+                elif policy is not None:
+                    self._admission_revoke_if_needed(previous, policy)
+            publish_summary = getattr(
+                self, '_publish_capture_admission_policy_summary', None)
+            if callable(publish_summary):
+                publish_summary(policy)
+        return policy
+
+    @staticmethod
+    def _admission_positive_int(value) -> bool:
+        return type(value) is int and value > 0
+
+    def _admission_live_identity(self, source) -> tuple[bool, object | None]:
+        """Return a complete saved/fresh identity pair for an enabled policy."""
+        identity = getattr(source, 'live_identity', None)
+        if not isinstance(identity, dict):
+            try:
+                identity = dict(identity or {})
+            except (TypeError, ValueError):
+                return False, None
+        required = ('hwnd', 'pid', 'process_created')
+        if any(not self._admission_positive_int(identity.get(key))
+               for key in required):
+            return False, None
+        saved_exe = str(identity.get('exe_path', '') or '').strip()
+        saved_class = str(identity.get('class_name', '') or '').strip()
+        requested_exe = str(getattr(source, 'exe_path', '') or '').strip()
+        if not saved_exe or not saved_class or not requested_exe:
+            return False, None
+        if sys.platform != 'win32':
+            return False, None
+        try:
+            saved_canonical = canonical_exe_path(saved_exe)
+            requested_canonical = canonical_exe_path(requested_exe)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False, None
+        try:
+            live = get_window_info(identity['hwnd'], own_pid=os.getpid())
+            live_identity = window_identity(live)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False, None
+        if not isinstance(live_identity, dict):
+            return False, None
+        if any(not self._admission_positive_int(live_identity.get(key))
+               for key in required):
+            return False, None
+        live_class = str(live_identity.get('class_name', '') or '').strip()
+        if not live_class:
+            return False, None
+        try:
+            live_canonical = canonical_exe_path(
+                str(live_identity.get('exe_path', '') or ''))
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False, None
+        if (saved_canonical != requested_canonical
+                or requested_canonical != live_canonical
+                or not identity_matches(identity, live)):
+            return False, None
+        return True, live_identity
+
+    @staticmethod
+    def _admission_policy_snapshot(policy):
+        if not isinstance(policy, AdmissionPolicy):
+            return None
+        try:
+            return policy.to_dict()
+        except (TypeError, ValueError):
+            # A malformed policy cannot produce a trustworthy stable proof;
+            # callers fail closed and retain the persisted value unchanged.
+            return None
+
+    def _admission_decision_for_source(self, source, policy):
+        if not isinstance(policy, AdmissionPolicy):
+            return None
+        mode = getattr(source, 'source_mode', 'unknown')
+        exe_path = getattr(source, 'exe_path', None)
+        if not policy.enabled:
+            # Disabled admission deliberately performs no process lookup.
+            return evaluate_admission(policy, mode, exe_path, True)
+        if not isinstance(mode, str) or mode not in {'window', 'desktop', 'unknown'}:
+            return evaluate_admission(policy, mode, exe_path, False)
+        if mode != 'window':
+            # Source-mode rejection is pure and must precede any OS lookup.
+            return evaluate_admission(policy, mode, exe_path, False)
+        identity_valid, _live = self._admission_live_identity(source)
+        return evaluate_admission(policy, mode, exe_path, identity_valid)
+
+    def _admission_decision_for_policy(self, request, policy):
+        return self._admission_decision_for_source(
+            getattr(request, 'source', None), policy)
+
+    def _admission_stable_request_decision(self, request):
+        reload_policy = getattr(self, '_reload_admission_policy', None)
+        if not callable(reload_policy):
+            reload_policy = MainWindow._reload_admission_policy.__get__(self)
+        for attempt in range(2):
+            policy = reload_policy(authoritative=True)
+            before = self._admission_policy_snapshot(policy)
+            before_epoch = int(getattr(self, '_admission_epoch', 0))
+            if before is None:
+                return None
+            decision = self._admission_decision_for_policy(request, policy)
+            if decision is None:
+                return None
+            if not policy.enabled:
+                if (not _admission_call(self, '_admission_transition_active')
+                        and before_epoch == int(
+                            getattr(self, '_admission_epoch', 0))):
+                    return decision
+                return None
+            after = reload_policy(authoritative=True)
+            after_snapshot = self._admission_policy_snapshot(after)
+            if (after_snapshot == before
+                    and before_epoch == int(
+                        getattr(self, '_admission_epoch', 0))
+                    and decision.policy_revision == after.revision
+                    and not _admission_call(
+                        self, '_admission_transition_active')):
+                return decision
+            if (_admission_call(self, '_admission_transition_active')
+                    or attempt):
+                return None
+        return None
+
+    def _admission_decision_for_request(self, request, *, authoritative=True):
+        if authoritative:
+            return self._admission_stable_request_decision(request)
+        reload_policy = getattr(self, '_reload_admission_policy', None)
+        if not callable(reload_policy):
+            reload_policy = MainWindow._reload_admission_policy.__get__(self)
+        return self._admission_decision_for_policy(
+            request, reload_policy(authoritative=False))
+
+    def _admission_decision_for_settings_once(
+            self, capture_window=None, *, source_mode_override=None,
+            policy=None):
+        if border_free_capture_enabled(self):
+            capture_window = None
+            source_mode_override = 'desktop'
+        settings = getattr(self, 'settings_manager', None)
+        if not (callable(getattr(settings, 'get', None))
+                or isinstance(getattr(settings, 'settings', None), dict)):
+            return None
+        get_setting = getattr(settings, 'get', None)
+        if not callable(get_setting):
+            raw_settings = settings.settings
+
+            def get_setting(key, default=None):
+                return raw_settings.get(key, default)
+        if policy is None:
+            reload_policy = getattr(self, '_reload_admission_policy', None)
+            if not callable(reload_policy):
+                reload_policy = MainWindow._reload_admission_policy.__get__(self)
+            policy = reload_policy(authoritative=True)
+        if not isinstance(policy, AdmissionPolicy):
+            return None
+        if capture_window is not None:
+            mode = 'window'
+            source_map = (capture_window if isinstance(capture_window, dict)
+                          else getattr(capture_window, 'as_capture_window',
+                                       lambda: {})())
+            if not isinstance(source_map, dict):
+                try:
+                    source_map = dict(source_map or {})
+                except (TypeError, ValueError):
+                    source_map = {}
+            exe_path = source_map.get('exe_path', '')
+            if not policy.enabled:
+                # The legacy disabled path is deliberately pure: do not ask
+                # Windows to refresh or launder the supplied identity.
+                candidate_identity = window_identity(source_map)
+                candidate_exe = (exe_path or (candidate_identity or {}).get(
+                    'exe_path', ''))
+                source = type('_AdmissionSource', (), {
+                    'live_identity': candidate_identity,
+                    'exe_path': candidate_exe,
+                    'source_mode': mode,
+                })()
+                return self._admission_decision_for_source(source, policy)
+            required = ('hwnd', 'pid', 'process_created')
+            if (any(not self._admission_positive_int(source_map.get(key))
+                    for key in required)
+                    or not str(source_map.get('exe_path', '') or '').strip()
+                    or not str(source_map.get('class_name', '') or '').strip()):
+                # Validate the caller's complete identity before any live
+                # lookup.  Enabled admission never replaces PID, creation
+                # time, or class with a fresh HWND result.
+                return evaluate_admission(policy, mode, exe_path, False)
+        else:
+            try:
+                raw_capture_mode = get_setting('capture_mode', 'desktop')
+                raw_target_identity = get_setting(
+                    'target_window_identity', {})
+            except Exception:
+                # Settings getters are an external authority boundary. A
+                # broken read denies this operation instead of inventing
+                # default source data.
+                return None
+            mode = (source_mode_override or ('window' if raw_capture_mode
+                                              == 'window' else 'desktop'))
+            exe_path = raw_target_identity
+            if isinstance(exe_path, dict):
+                exe_path = exe_path.get('exe_path', '')
+        if capture_window is None:
+            source = type('_AdmissionSource', (), {
+                'live_identity': raw_target_identity,
+                'exe_path': exe_path,
+                'source_mode': mode,
+            })()
+        else:
+            candidate_identity = dict(source_map)
+            candidate_exe = exe_path
+            source = type('_AdmissionSource', (), {
+                'live_identity': candidate_identity,
+                'exe_path': candidate_exe,
+                'source_mode': mode,
+            })()
+        return self._admission_decision_for_source(source, policy)
+
+    def _admission_stable_settings_decision(
+            self, capture_window=None, *, source_mode_override=None):
+        reload_policy = getattr(self, '_reload_admission_policy', None)
+        if not callable(reload_policy):
+            reload_policy = MainWindow._reload_admission_policy.__get__(self)
+        for attempt in range(2):
+            policy = reload_policy(authoritative=True)
+            before = self._admission_policy_snapshot(policy)
+            before_epoch = int(getattr(self, '_admission_epoch', 0))
+            if before is None:
+                return None
+            decision = self._admission_decision_for_settings_once(
+                capture_window, source_mode_override=source_mode_override,
+                policy=policy)
+            if decision is None:
+                return None
+            after = reload_policy(authoritative=True)
+            after_snapshot = self._admission_policy_snapshot(after)
+            if (after_snapshot == before
+                    and before_epoch == int(
+                        getattr(self, '_admission_epoch', 0))
+                    and decision.policy_revision == after.revision
+                    and not _admission_call(
+                        self, '_admission_transition_active')):
+                return decision
+            if (_admission_call(self, '_admission_transition_active')
+                    or attempt):
+                return None
+        return None
+
+    def _admission_decision_for_settings(self, capture_window=None,
+                                         *, source_mode_override=None):
+        return self._admission_stable_settings_decision(
+            capture_window, source_mode_override=source_mode_override)
+
+    def _admission_deny(self, decision, *, message=None):
+        reason = str(message or getattr(decision, 'reason', '')
+                      or 'Capture is not admitted by the current policy.')
+        self._latest_capture_intent_state = 'invalid'
+        self._latest_capture_intent_consumed = False
+        active = getattr(self, '_accepted_capture_session', None)
+        if active is not None:
+            self._desired_capture_request = active.request
+            self._desired_capture_intent_id = None
+        self._pending_capture_reason = reason
+        if callable(getattr(self, '_set_status', None)):
+            self._set_status('CAPTURE BLOCKED', status_warning_qss())
+        if callable(getattr(self, 'push_error', None)):
+            self.push_error('CAPTURE NOT ALLOWED', reason, level='warning')
+        return False
+
+    def _admission_guard_request(self, request, *, message=None) -> bool:
+        checker = getattr(self, '_admission_decision_for_request', None)
+        if not callable(checker):
+            checker = MainWindow._admission_decision_for_request.__get__(self)
+        decision = checker(request)
+        if decision is None or not decision.allowed:
+            return self._admission_deny(decision, message=message)
+        return True
+
+    def _admission_guard_current_session(self) -> bool:
+        if _admission_call(self, '_admission_transition_active'):
+            return False
+        session = getattr(self, '_accepted_capture_session', None)
+        request = getattr(session, 'request', None)
+        return request is not None and _admission_call(self, '_admission_guard_request', request)
+
+    def _admission_stable_proof(self, request):
+        decision = _admission_call(
+            self, '_admission_decision_for_request', request)
+        return self._admission_proof_from_decision(decision)
+
+    def _admission_proof_from_decision(self, decision):
+        if (not isinstance(decision, AdmissionDecision)
+                or not decision.allowed
+                or _admission_call(self, '_admission_transition_active')):
+            return None
+        return {
+            'epoch': int(getattr(self, '_admission_epoch', 0)),
+            'policy_revision': decision.policy_revision,
+            'decision': decision,
+        }
+
+    def _admission_pure_proof_current(self, proof) -> bool:
+        return (
+            isinstance(proof, dict)
+            and isinstance(proof.get('decision'), AdmissionDecision)
+            and proof['decision'].allowed
+            and not _admission_call(self, '_admission_transition_active')
+            and int(getattr(self, '_admission_epoch', 0)) == proof.get('epoch')
+        )
+
+    def _admission_revision(self):
+        # Metadata consumers must never hide a revocation by performing a
+        # trigger-free authoritative reload. Critical callers bind the
+        # revision from their stable AdmissionDecision instead.
+        policy = getattr(self, '_admission_policy', None)
+        return getattr(policy, 'revision', None)
+
+    def _admission_reauthorize_pending_launch(self) -> bool:
+        """Revalidate a still-owned launch after a policy epoch change."""
+        request = getattr(self, '_pending_launch_request', None)
+        pending_epoch = getattr(self, '_pending_launch_admission_epoch', None)
+        if request is None or pending_epoch is None:
+            return True
+        current_epoch = int(getattr(self, '_admission_epoch', 0))
+        if pending_epoch == current_epoch:
+            return True
+        decision = self._admission_decision_for_request(
+            request, authoritative=True)
+        if decision is not None and decision.allowed:
+            self._pending_launch_admission_epoch = current_epoch
+            return True
+        # The pending launch owns no accepted A yet.  Clear only its exact
+        # receipt and stop that Main-owned process; an unrelated owner is not
+        # touched by this policy callback.
+        self._admission_deny(decision)
+        token = getattr(self, '_pending_launch_token', None)
+        tracker = getattr(self, '_capture_config', None)
+        if (token is not None and tracker is not None
+                and getattr(tracker, 'applying_token', None) == token):
+            try:
+                tracker.fail('Capture admission changed before activation.', token)
+            except (TypeError, ValueError):
+                # A stale receipt may have been replaced by a successor
+                # apply; never overwrite that newer tracker state.
+                pass
+        self._pending_launch_config = None
+        self._pending_launch_generation = None
+        self._pending_launch_token = None
+        self._pending_launch_admission_epoch = None
+        self._pending_launch_request = None
+        self._pending_launch_intent_id = None
+        self._restart_pending = False
+        self._set_capture_apply_state(False)
+        self.stop_engine()
+        return False
+
+    def _admission_transition_active(self) -> bool:
+        return getattr(self, '_admission_transition_latch', None) is not None
+
+    def _admission_revoke_if_needed(self, previous, current):
+        session = getattr(self, '_accepted_capture_session', None)
+        request = getattr(session, 'request', None)
+        if request is None:
+            return
+        owner_snapshot = self._capture_owner_snapshot(session)
+        decision = self._admission_decision_for_policy(request, current)
+        if not self._capture_owner_snapshot_is_current(owner_snapshot):
+            # A policy read may re-enter Main and install successor B.  The
+            # old A revocation must never replace or stop that successor.
+            return
+        if decision is not None and decision.allowed:
+            # A still-approved native owner may carry only future metadata.
+            try:
+                bound_session = bind_capture_session(
+                    request, process_generation=session.process_generation,
+                    native_capture_generation=session.native_capture_generation,
+                    accepted_config_token=session.accepted_config_token,
+                    manual_consent_nonce=session.manual_consent_nonce,
+                    allowlist_revision=decision.policy_revision)
+            except (TypeError, ValueError):
+                # Invalid replacement metadata leaves the existing accepted
+                # owner intact; the next authoritative boundary can retry it.
+                pass
+                return
+            if not self._capture_owner_snapshot_is_current(owner_snapshot):
+                return
+            self._accepted_capture_session = bound_session
+            return
+        if not self._capture_owner_snapshot_is_current(owner_snapshot):
+            return
+        self._begin_admission_transition(
+            reason='The active capture executable is no longer approved.')
+
+    def _cached_terminal_response_owner(self, process, bridge,
+                                        process_generation,
+                                        native_generation):
+        cache = getattr(self, '_terminal_response_owner_cache', None)
+        if not isinstance(cache, dict):
+            return None
+        if (cache.get('process') is not process
+                or cache.get('bridge') is not bridge
+                or cache.get('process_generation') != process_generation
+                or cache.get('native_generation') != native_generation):
+            return None
+        return cache.get('owner')
+
+    def _cached_terminal_response_owner_lineage(
+            self, process, bridge, process_generation):
+        """Return a cached native generation for one exact live lineage."""
+        cache = getattr(self, '_terminal_response_owner_cache', None)
+        if not isinstance(cache, dict):
+            return None
+        if (cache.get('process') is not process
+                or cache.get('bridge') is not bridge
+                or cache.get('process_generation') != process_generation
+                or type(cache.get('native_generation')) is not int
+                or cache.get('native_generation') <= 0
+                or cache.get('owner') is None):
+            return None
+        return cache
+
+    def _retain_terminal_response_owner_cache(
+            self, process, bridge, process_generation, native_generation):
+        """Retain one exact mapping owner after a positive alive/status proof."""
+        if (process is None or bridge is None
+                or type(process_generation) is not int
+                or type(native_generation) is not int
+                or native_generation <= 0):
+            return None
+        cache = getattr(self, '_terminal_response_owner_cache', None)
+        if isinstance(cache, dict):
+            if (cache.get('process') is process
+                    and cache.get('bridge') is bridge
+                    and cache.get('process_generation') == process_generation
+                    and cache.get('native_generation') == native_generation):
+                return cache.get('owner')
+            # A genuine same-process recovery generation may replace the
+            # private owner after a positive new-lineage proof.  Never release
+            # the old weak token first: a live recovery can still be using it
+            # between two status observations.
+            if (cache.get('process') is process
+                    and cache.get('bridge') is bridge
+                    and cache.get('process_generation') == process_generation):
+                pass
+            else:
+                # A foreign process/bridge or a stale process generation must
+                # never overwrite a still-retained exact owner.
+                return None
+        try:
+            if process.poll() is not None:
+                return None
+        except (AttributeError, OSError, RuntimeError):
+            # Unknown process state cannot prove a live mapping; fail closed.
+            return None
+        retain = getattr(bridge, 'retain_terminal_response_owner', None)
+        if not callable(retain):
+            return None
+        try:
+            owner = retain(expected_capture_generation=native_generation)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            # A failed retain never authorizes terminal ownership or cleanup.
+            return None
+        if owner is None:
+            return None
+        # Retain may synchronously re-enter Main.  Publish only when the
+        # original native identity is still current; a successor must never
+        # inherit A's private mapping token.
+        if (getattr(self, 'engine_process', process) is not process
+                or getattr(self, 'bridge', bridge) is not bridge
+                or getattr(self, '_engine_process_generation',
+                           process_generation) != process_generation):
+            return None
+        self._terminal_response_owner_cache = {
+            'process': process,
+            'bridge': bridge,
+            'process_generation': process_generation,
+            'native_generation': native_generation,
+            'owner': owner,
+        }
+        return owner
+
+    def _release_terminal_response_owner_cache(self, latch):
+        cache = getattr(self, '_terminal_response_owner_cache', None)
+        if not isinstance(cache, dict) or not isinstance(latch, dict):
+            return
+        if (cache.get('process') is latch.get('process')
+                and cache.get('bridge') is latch.get('bridge')
+                and cache.get('process_generation')
+                == latch.get('process_generation')
+                and cache.get('native_generation')
+                == latch.get('native_generation')
+                and cache.get('owner') is latch.get('terminal_owner')):
+            self._terminal_response_owner_cache = None
+
+    def _invalidate_terminal_response_owner_cache(
+            self, process, bridge, process_generation, native_generation):
+        """Drop only an exact weak cache slot; never release its live owner."""
+        cache = getattr(self, '_terminal_response_owner_cache', None)
+        if (isinstance(cache, dict)
+                and cache.get('process') is process
+                and cache.get('bridge') is bridge
+                and cache.get('process_generation') == process_generation
+                and cache.get('native_generation') == native_generation):
+            self._terminal_response_owner_cache = None
+
+    def _admission_original_latch_is_current(self, latch, *, require_slot=True):
+        """Pure identity check for the A snapshot after every external hook."""
+        if not isinstance(latch, dict):
+            return False
+        # The transition slot is part of A's ownership proof.  A synchronous
+        # poll/status/retain callback may install successor B without changing
+        # the process fields yet; in that case A must stop before publishing a
+        # generation, mapping owner, receipt, or teardown state.
+        if (require_slot
+                and getattr(self, '_admission_transition_latch', None)
+                is not latch):
+            return False
+        process = latch.get('process')
+        source_process = latch.get('source_process')
+        if getattr(self, 'engine_process', None) is not source_process:
+            return False
+        if getattr(self, 'bridge', None) is not latch.get('source_bridge'):
+            return False
+        if getattr(self, '_engine_bridge_owner', None) is not latch.get(
+                'source_owned_bridge'):
+            return False
+        if getattr(self, '_engine_process_generation', None) != latch.get(
+                'process_generation'):
+            return False
+        if getattr(self, '_accepted_capture_session', None) is not latch.get(
+                'session'):
+            return False
+        save_state = latch.get('save_state')
+        if getattr(self, '_save_state', None) is not save_state:
+            return False
+        if (save_state is not None
+                and getattr(save_state, 'current', None)
+                is not latch.get('save_operation')):
+            return False
+        for name, expected in (
+                ('_manual_record_state', latch.get('manual_state', 'idle')),
+                ('_manual_record_path', latch.get('manual_path')),
+                ('_manual_record_request', latch.get('manual_request')),
+                ('_manual_record_session', latch.get('manual_session')),
+                ('_pending_manual_record_path', latch.get(
+                    'pending_manual_path')),
+                ('_pending_manual_record_request', latch.get(
+                    'pending_manual_request')),
+                ('_pending_manual_record_session', latch.get(
+                    'pending_manual_session'))):
+            if getattr(self, name, None) is not expected:
+                return False
+        if getattr(self, '_engine_gen', None) != latch.get('engine_generation'):
+            return False
+        if (getattr(self, '_engine_handshake_generation', None)
+                != latch.get('handshake_generation')):
+            return False
+        if (getattr(self, '_accepted_camera_runtime_receipt', None)
+                is not latch.get('accepted_camera_receipt')):
+            return False
+        if (getattr(self, '_camera_provider', None)
+                is not latch.get('camera_provider')
+                or getattr(self, '_camera_owner_token', None)
+                is not latch.get('camera_owner_token')
+                or getattr(self, '_camera_pending_operation', None)
+                is not latch.get('camera_pending_operation')
+                or getattr(self, '_camera_active_physical', None)
+                is not latch.get('camera_active_physical')):
+            return False
+        # The observed source slot above also retains unowned processes as
+        # barriers. A missing controllable process grants no native authority;
+        # the pump still requires positive exit or absence before completion.
+        return process is None or process is source_process
+
+    def _admission_receipt_matches_current(self, receipt, resource=None):
+        """Match one retained A resource by exact identity.
+
+        A teardown receipt can outlive the transition callback that created it.
+        Each resource therefore gets its own protection decision; an old
+        manual receipt cannot protect a new camera owner, and a finalizing A
+        recording remains protected even though its state has advanced.
+        """
+        if not isinstance(receipt, dict):
+            return False
+
+        def native_matches():
+            current_bridge = getattr(self, 'bridge', None)
+            bridge = getattr(self, '_engine_bridge_owner', None)
+            receipt_bridge = receipt.get('bridge')
+            if (not receipt.get('native_exit_proven')
+                    or not receipt.get('terminal_released')
+                    or current_bridge is not receipt_bridge
+                    or bridge not in (None, receipt_bridge)):
+                return False
+            process = getattr(self, 'engine_process', None)
+            if process is None:
+                # A completed A transition clears Main's process/owner slots.
+                # The bridge identity and an empty owner slot prove that no B
+                # native owner replaced the released A lineage.
+                return getattr(self, '_engine_process_generation', None) is None
+            return bool(
+                process is receipt.get('process')
+                and bridge is receipt_bridge
+                and getattr(self, '_engine_process_generation', None)
+                == receipt.get('process_generation'))
+
+        def save_matches():
+            save_state = getattr(self, '_save_state', None)
+            return bool(
+                save_state is not None
+                and getattr(save_state, 'current', None)
+                is receipt.get('save_operation')
+                and receipt.get('save_operation') is not None)
+
+        def manual_matches():
+            path = receipt.get('manual_path')
+            request = receipt.get('manual_request')
+            session = receipt.get('manual_session')
+            pending_path = receipt.get('pending_manual_path')
+            pending_request = receipt.get('pending_manual_request')
+            pending_session = receipt.get('pending_manual_session')
+            active_match = (
+                path is not None
+                and request is not None
+                and session is not None
+                and getattr(self, '_manual_record_path', None) is path
+                and getattr(self, '_manual_record_request', None) is request
+                and getattr(self, '_manual_record_session', None) is session)
+            pending_match = (
+                pending_path is not None
+                and pending_request is not None
+                and pending_session is not None
+                and getattr(self, '_pending_manual_record_path', None)
+                is pending_path
+                and getattr(self, '_pending_manual_record_request', None)
+                is pending_request
+                and getattr(self, '_pending_manual_record_session', None)
+                is pending_session)
+            return active_match or pending_match
+
+        def camera_matches():
+            group = receipt.get('camera_group')
+            if (not receipt.get('camera_cleanup_proven')
+                    or not isinstance(group, dict)):
+                return False
+            targets = tuple(group.get('targets', ()) or ())
+            receipts = tuple(group.get('receipts', ()) or ())
+            current_targets = tuple(item for item in (
+                getattr(self, '_camera_pending_operation', None),
+                getattr(self, '_camera_active_physical', None),
+                *tuple(getattr(self, '_camera_retired_operations', ()) or ()),
+                *tuple(getattr(self, '_camera_retired_physical', ()) or ()))
+                if item is not None)
+            current_receipts = tuple(getattr(self, '_camera_stop_receipts', ()) or ())
+            current_provider = getattr(self, '_camera_provider', None)
+            current_owner = getattr(self, '_camera_owner_token', None)
+            if not current_targets and not current_receipts:
+                return current_provider is None and current_owner is None
+            if (current_provider is not group.get('provider')
+                    or current_owner is not group.get('owner_token')):
+                return False
+            return (all(any(item is target for target in targets)
+                        for item in current_targets)
+                    and all(any(item is retained for retained in receipts)
+                            for item in current_receipts))
+
+        matches = {
+            'native': native_matches,
+            'save': save_matches,
+            'manual': manual_matches,
+            'camera': camera_matches,
+        }
+        if resource is not None:
+            checker = matches.get(str(resource))
+            return bool(checker and checker())
+        return any(checker() for checker in matches.values())
+
+    def _log_forced_admission_facts(self, receipt):
+        """Log retained native facts once without touching Qt/UI objects."""
+        if getattr(self, '_forced_admission_facts_logged', False):
+            return
+        self._forced_admission_facts_logged = True
+        snapshot = (receipt.get('terminal_snapshot')
+                    if isinstance(receipt, dict) else None)
+        save_response = getattr(snapshot, 'save_response', None)
+        manual_response = getattr(snapshot, 'manual_response', None)
+        operation = (receipt.get('save_operation')
+                     if isinstance(receipt, dict) else None)
+        output_path = getattr(operation, 'output_path', None)
+        if output_path is None and isinstance(getattr(operation, 'context', None), dict):
+            output_path = operation.context.get('output_path')
+        manual_path = (receipt.get('manual_path')
+                       if isinstance(receipt, dict) else None)
+        if manual_path is None and isinstance(receipt, dict):
+            manual_path = receipt.get('pending_manual_path')
+        detail = {
+            'save_response': save_response,
+            'manual_response': manual_response,
+            'output_path': str(output_path) if output_path is not None else None,
+            'manual_recovery_path': str(manual_path)
+            if manual_path is not None else None,
+            'process_generation': (receipt.get('process_generation')
+                                   if isinstance(receipt, dict) else None),
+            'native_capture_generation': (receipt.get('native_generation')
+                                          if isinstance(receipt, dict) else None),
+        }
+        logger = getattr(self, '_lifecycle_log', None)
+        log_info = getattr(logger, 'info', None)
+        if callable(log_info):
+            log_info('ForcedAdmissionFacts: %s', detail)
+        else:
+            print(f'[Lifecycle] ForcedAdmissionFacts: {detail}')
+
+    def _admission_has_transition_obligation(self):
+        """Identify owners requiring retained cleanup, excluding weak cache/session."""
+        process_owned = (getattr(self, 'engine_process', None) is not None
+                         and getattr(self, '_engine_bridge_owner', None)
+                         is getattr(self, 'bridge', None)
+                         and getattr(self, '_engine_bridge_owner', None)
+                         is not None)
+        save_state = getattr(self, '_save_state', None)
+        save_operation = (getattr(save_state, 'current', None)
+                          if save_state is not None else None)
+        save_owned = (save_operation is not None
+                      and not getattr(save_operation, 'result_emitted', False))
+        manual_owned = getattr(self, '_manual_record_state', 'idle') != 'idle'
+        camera_owned = bool(
+            getattr(self, '_camera_provider', None) is not None
+            or getattr(self, '_camera_pending_operation', None) is not None
+            or getattr(self, '_camera_active_physical', None) is not None
+            or getattr(self, '_camera_stop_receipts', ()))
+        pending_manual = (
+            getattr(self, '_pending_manual_record_request', None) is not None)
+        pending_camera = getattr(self, '_camera_pending_operation', None)
+        pending_native = isinstance(
+            getattr(self, '_pending_launch_request', None),
+            ResolvedCaptureRequest)
+        return bool(process_owned or save_owned or manual_owned or camera_owned
+                    or pending_manual or pending_camera is not None
+                    or pending_native)
+
+    def _begin_admission_transition(self, *, reason, _forced=False):
+        if _admission_call(self, '_admission_transition_active'):
+            self._pending_capture_reason = str(reason)
+            return False
+        # Capture every A owner before crossing any external hook.  In
+        # particular, request_stop_async and request_engine_shutdown may
+        # synchronously re-enter Main and install B.
+        camera_group = None
+        retain_camera = getattr(self, '_camera_retained_group', None)
+        if callable(retain_camera):
+            camera_group = retain_camera()
+        process_candidate = getattr(self, 'engine_process', None)
+        bridge = getattr(self, 'bridge', None)
+        owned_bridge = getattr(self, '_engine_bridge_owner', None)
+        process = (process_candidate
+                   if (process_candidate is not None
+                       and bridge is owned_bridge
+                       and owned_bridge is not None)
+                   else None)
+        native_owner = owned_bridge if process is not None else None
+        # Freeze every original A reference before the first process/status
+        # poll.  Polling and bridge status are external hooks and may install
+        # successor B synchronously.
+        process_generation = getattr(self, '_engine_process_generation', None)
+        session = getattr(self, '_accepted_capture_session', None)
+        save_state = getattr(self, '_save_state', None)
+        save_operation = (getattr(save_state, 'current', None)
+                          if save_state is not None else None)
+        manual_state = getattr(self, '_manual_record_state', 'idle')
+        manual_path = getattr(self, '_manual_record_path', None)
+        manual_request = getattr(self, '_manual_record_request', None)
+        manual_session = getattr(self, '_manual_record_session', None)
+        pending_manual_path = getattr(
+            self, '_pending_manual_record_path', None)
+        pending_manual_request = getattr(
+            self, '_pending_manual_record_request', None)
+        capture_tracker = getattr(self, '_capture_config', None)
+        engine_generation = getattr(self, '_engine_gen', None)
+        handshake_generation = getattr(self, '_engine_handshake_generation', None)
+        accepted_camera_receipt = getattr(
+            self, '_accepted_camera_runtime_receipt', None)
+        camera_provider = getattr(self, '_camera_provider', None)
+        camera_owner_token = getattr(self, '_camera_owner_token', None)
+        camera_pending_operation = getattr(
+            self, '_camera_pending_operation', None)
+        camera_active_physical = getattr(self, '_camera_active_physical', None)
+        native_generation = getattr(session, 'native_capture_generation', None)
+        original_request = getattr(session, 'request', None)
+        if original_request is None:
+            original_request = manual_request
+        if original_request is None:
+            original_request = pending_manual_request
+        if original_request is None:
+            original_request = getattr(
+                camera_pending_operation, 'capture_request', None)
+        if (original_request is None
+                and isinstance(camera_pending_operation, dict)):
+            original_request = camera_pending_operation.get('capture_request')
+        if original_request is None:
+            original_request = getattr(self, '_desired_capture_request', None)
+        cached_lineage_before_poll = self._cached_terminal_response_owner_lineage(
+            process, native_owner, process_generation)
+        if (type(native_generation) is not int
+                and cached_lineage_before_poll is not None):
+            native_generation = cached_lineage_before_poll.get(
+                'native_generation')
+        process_alive_proven = False
+        process_exit_observed = False
+        process_exit_code = None
+        if process is not None:
+            try:
+                process_exit_code = process.poll()
+                process_alive_proven = process_exit_code is None
+                process_exit_observed = not process_alive_proven
+            except (AttributeError, OSError, RuntimeError):
+                # An unknown poll is never an exit proof.  The timer may retry
+                # the same original process while its owner remains latched.
+                process_exit_code = None
+        retained_native_operation = bool(
+            process_candidate is not None or session is not None
+            or save_operation is not None or manual_state != 'idle')
+        latch = {
+            'reason': str(reason), 'process': process, 'bridge': native_owner,
+            'source_process': process_candidate, 'source_bridge': bridge,
+            'source_owned_bridge': owned_bridge,
+            'foreign_bridge': (bridge if process_candidate is not None
+                               and process is None and bridge is not None
+                               and retained_native_operation else None),
+            'absence_bridge': (bridge if process_candidate is None
+                               and process is None and bridge is not None
+                               else None),
+            'process_generation': process_generation,
+            'native_generation': native_generation,
+            'original_request': original_request,
+            'original_process': process,
+            'original_bridge': native_owner,
+            'capture_tracker': capture_tracker,
+            'engine_generation': engine_generation,
+            'handshake_generation': handshake_generation,
+            'accepted_camera_receipt': accepted_camera_receipt,
+            'camera_provider': camera_provider,
+            'camera_owner_token': camera_owner_token,
+            'camera_pending_operation': camera_pending_operation,
+            'camera_active_physical': camera_active_physical,
+            'session': session, 'started_at': time.monotonic(),
+            'process_alive_proven': process_alive_proven,
+            'process_exit_observed': process_exit_observed,
+            'terminate_at': None, 'killed_at': None,
+            'shutdown_requested': False, 'terminated': False, 'killed': False,
+            'exit_code': process_exit_code if process_exit_observed else None,
+            'native_exit_proven': process_exit_observed,
+            'native_absence_proven': (not retained_native_operation
+                                      and process is None
+                                      and native_owner is None),
+            'terminal_classified': False, 'terminal_read': False,
+            'terminal_owner': None, 'terminal_released': False,
+            # A process already observed exited can never acquire a fresh
+            # terminal mapping. A live/unknown process may retry retain once
+            # it is positively observed alive, before shutdown acceptance.
+            'terminal_read_attempted': process_exit_observed,
+            'terminal_owner_attempted': False,
+            'camera_group': camera_group,
+            'save_state': save_state, 'save_operation': save_operation,
+            'manual_state': manual_state,
+            'manual_path': manual_path,
+            'manual_request': manual_request,
+            'manual_session': manual_session,
+            'manual_process_generation': getattr(
+                self, '_manual_record_process_generation',
+                getattr(manual_session, 'process_generation', None)),
+            'manual_native_generation': getattr(
+                self, '_manual_record_native_generation',
+                getattr(manual_session, 'native_capture_generation', None)),
+            'pending_manual_path': pending_manual_path,
+            'pending_manual_request': pending_manual_request,
+            'pending_manual_session': getattr(
+                self, '_pending_manual_record_session', None),
+            'pending_manual_process_generation': getattr(
+                self, '_pending_manual_record_process_generation', None),
+            'pending_manual_native_generation': getattr(
+                self, '_pending_manual_record_native_generation', None),
+            'pending_manual_timer': getattr(
+                self, '_manual_record_timer', None),
+            'pending_manual_future': getattr(
+                self, '_manual_record_finalize_thread', None),
+            'native_shutdown_submitted': False,
+            'forced': bool(_forced),
+            'crash_recovery_pending': False,
+        }
+        # ``process.poll`` above is external and may synchronously install B.
+        # Publish A only when the original owner is still pure and no latch
+        # slot was installed during that hook.  This check must happen before
+        # assigning the slot itself.
+        if (getattr(self, '_admission_transition_latch', None) is not None
+                or not self._admission_original_latch_is_current(
+                    latch, require_slot=False)):
+            return True
+        self._admission_transition_latch = latch
+        # Focus resume/recovery can advance the backend generation within the
+        # same owned process. Teardown owns its current mapping, even if the
+        # accepted save session still describes the previous generation.
+        if (process is not None and native_owner is not None
+                and process_alive_proven):
+            cached_lineage = self._cached_terminal_response_owner_lineage(
+                process, native_owner, process_generation)
+            if cached_lineage is not None:
+                latch['native_generation'] = cached_lineage.get(
+                    'native_generation')
+            get_status = getattr(native_owner, 'get_status', None)
+            if callable(get_status):
+                try:
+                    status = get_status()
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    status = None
+                candidate_generation = (
+                    status.get('capture_generation')
+                    if isinstance(status, dict) else None)
+                if (type(candidate_generation) is int
+                        and candidate_generation > 0
+                        and getattr(self, 'engine_process', process)
+                        is process
+                        and getattr(self, 'bridge', native_owner)
+                        is native_owner
+                        and getattr(self, '_engine_process_generation',
+                                   process_generation)
+                        == process_generation):
+                    if self._admission_original_latch_is_current(latch):
+                        latch['native_generation'] = candidate_generation
+                    else:
+                        if self._admission_transition_latch is latch:
+                            self._admission_transition_latch = None
+                        return True
+        if not self._admission_original_latch_is_current(latch):
+            return True
+        # Retain the exact mapping capability while the original process is
+        # alive, before camera/provider or native shutdown effects.
+        if process is not None and native_owner is not None:
+            process_generation = latch.get('process_generation')
+            generation = latch.get('native_generation')
+            cached_owner = self._cached_terminal_response_owner(
+                process, native_owner, process_generation, generation)
+            if cached_owner is not None:
+                latch['terminal_owner'] = cached_owner
+                latch['terminal_owner_attempted'] = True
+            elif process_alive_proven:
+                latch['terminal_owner_attempted'] = True
+                retained_owner = self._retain_terminal_response_owner_cache(
+                    process, native_owner, process_generation, generation)
+                if self._admission_original_latch_is_current(latch):
+                    latch['terminal_owner'] = retained_owner
+                else:
+                    return True
+        # Poll/status/retain are external hooks.  Re-check every original A
+        # identity before any intent or camera mutation can publish a result.
+        if not self._admission_original_latch_is_current(latch):
+            if self._admission_transition_latch is latch:
+                self._admission_transition_latch = None
+            return True
+        self._capture_intent_revision = int(
+            getattr(self, '_capture_intent_revision', 0)) + 1
+        self._latest_capture_intent_consumed = True
+        self._pending_capture_reason = str(reason)
+        # Stop camera A only after the shallow group is retained.  This route
+        # never waits on the save/manual busy gate and never touches successor
+        # globals installed by a re-entrant provider callback.
+        cancel_camera = getattr(self, '_camera_cancel_owned_contexts', None)
+        if callable(cancel_camera) and camera_group is not None:
+            cancel_camera(camera_group)
+        if self._admission_transition_latch is not latch:
+            return True
+        if not self._admission_original_latch_is_current(latch):
+            if self._admission_transition_latch is latch:
+                self._admission_transition_latch = None
+            return True
+        if process is not None and native_owner is not None:
+            request_shutdown = getattr(native_owner, 'request_engine_shutdown', None)
+            mapping_ready = (type(latch.get('native_generation')) is int
+                             and latch.get('terminal_owner') is not None)
+            cache_owner = self._cached_terminal_response_owner(
+                process, native_owner, process_generation,
+                latch.get('native_generation'))
+            if (process_alive_proven and mapping_ready
+                    and cache_owner is latch.get('terminal_owner')
+                    and callable(request_shutdown)
+                    and getattr(self, 'engine_process', process) is process
+                    and native_owner is getattr(self, 'bridge', None)
+                    and getattr(self, '_engine_process_generation',
+                               process_generation) == process_generation
+                    and owned_bridge is not None
+                    and native_owner is owned_bridge):
+                try:
+                    accepted = bool(request_shutdown())
+                    if self._admission_transition_latch is latch:
+                        latch['shutdown_requested'] = accepted
+                        latch['native_shutdown_submitted'] = accepted
+                except (OSError, RuntimeError, TypeError):
+                    # Keep the latch pending when native shutdown cannot be
+                    # confirmed; the bounded poller remains authoritative.
+                    pass
+        if (self._admission_transition_latch is latch
+                and not _forced
+                and callable(getattr(self, '_set_status', None))):
+            self._set_status('STOPPING CAPTURE', status_warning_qss())
+        if self._admission_transition_latch is latch and not _forced:
+            timer = getattr(self, '_admission_transition_timer', None)
+            if timer is not None:
+                timer.start()
+        return True
+
+    def _pump_admission_transition(self):
+        latch = getattr(self, '_admission_transition_latch', None)
+        if not isinstance(latch, dict):
+            timer = getattr(self, '_admission_transition_timer', None)
+            if timer is not None and not getattr(self, '_shutdown_forced', False):
+                timer.stop()
+            return
+        process = latch.get('process')
+        bridge = latch.get('bridge')
+        now = time.monotonic()
+        if process is not None:
+            poll_unknown = False
+            try:
+                exit_code = process.poll()
+            except (AttributeError, OSError, RuntimeError):
+                # A poll exception is unknown/alive.  It is never an exit
+                # proof and must keep the original owner latched.
+                exit_code = None
+                poll_unknown = True
+            if exit_code is None:
+                if not poll_unknown:
+                    latch['process_alive_proven'] = True
+                # Mapping ownership must be retained while the original
+                # process is positively alive, before accepting shutdown.
+                generation = latch.get('native_generation')
+                if (bridge is not None and not poll_unknown
+                        and not latch.get('shutdown_requested')
+                        and not latch.get('terminated')
+                        and not latch.get('killed')):
+                    try:
+                        live_status = bridge.get_status()
+                        live_generation = live_status.get('capture_generation')
+                    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+                        live_generation = None
+                    if not self._admission_original_latch_is_current(latch):
+                        return
+                    if (type(live_generation) is int and live_generation > 0
+                            and live_generation != generation):
+                        generation = live_generation
+                        latch['native_generation'] = generation
+                        latch['terminal_owner'] = None
+                mapping_ready = not (bridge is not None
+                                     and type(generation) is int)
+                if (bridge is not None and type(generation) is int
+                        and latch.get('terminal_owner') is None
+                        and not latch.get('shutdown_requested')
+                        and not latch.get('terminated')
+                        and not latch.get('killed')
+                        and not poll_unknown):
+                    latch['terminal_owner_attempted'] = True
+                    latch['terminal_owner'] = (
+                        self._retain_terminal_response_owner_cache(
+                            process, bridge, latch.get('process_generation'),
+                            generation))
+                if getattr(self, '_admission_transition_latch', None) is not latch:
+                    return
+                if not self._admission_original_latch_is_current(latch):
+                    if getattr(self, '_admission_transition_latch', None) is latch:
+                        self._admission_transition_latch = None
+                    return
+                if bridge is not None and type(generation) is int:
+                    mapping_ready = latch.get('terminal_owner') is not None
+                request_shutdown = getattr(bridge, 'request_engine_shutdown', None)
+                current_owner = (self._cached_terminal_response_owner(
+                    process, bridge, latch.get('process_generation'),
+                    generation) if bridge is not None
+                    and type(generation) is int else None)
+                exact_native_lineage = (
+                    current_owner is latch.get('terminal_owner')
+                    if latch.get('terminal_owner') is not None else False)
+                if (mapping_ready and not poll_unknown
+                        and exact_native_lineage
+                        and getattr(self, 'engine_process', process) is process
+                        and getattr(self, 'bridge', bridge) is bridge
+                        and getattr(self, '_engine_process_generation',
+                                   latch.get('process_generation'))
+                        == latch.get('process_generation')
+                        and callable(request_shutdown)
+                        and not latch.get('shutdown_requested')
+                        and not latch.get('terminated')
+                        and not latch.get('killed')):
+                    try:
+                        accepted = bool(request_shutdown())
+                        if getattr(self, '_admission_transition_latch', None) is latch:
+                            latch['shutdown_requested'] = accepted
+                            latch['native_shutdown_submitted'] = accepted
+                    except (OSError, RuntimeError, TypeError):
+                        # A rejected shutdown remains pending until polling proves exit.
+                        pass
+                elapsed = now - latch.get('started_at', now)
+                if elapsed >= 2.0 and not latch.get('terminated'):
+                    try:
+                        process.terminate()
+                        latch['terminated'] = True
+                        latch['terminate_at'] = now
+                    except (AttributeError, OSError, RuntimeError):
+                        latch['terminated'] = True
+                        latch['terminate_at'] = now
+                elif (latch.get('terminated') and not latch.get('killed')
+                      and now - (latch.get('terminate_at') or now) >= 1.0):
+                    try:
+                        process.kill()
+                        latch['killed'] = True
+                        latch['killed_at'] = now
+                    except (AttributeError, OSError, RuntimeError):
+                        latch['killed'] = True
+                        latch['killed_at'] = now
+                elif (latch.get('killed')
+                      and now - (latch.get('killed_at') or now) < 0.5):
+                    return
+                return
+            latch['exit_code'] = exit_code
+            latch['native_exit_proven'] = True
+            latch['process_exit_observed'] = True
+            # No retain is legal after this boundary, even when an earlier
+            # alive poll could not obtain a mapping token.
+            latch['terminal_read_attempted'] = True
+        elif not latch.get('native_absence_proven'):
+            # A missing Popen is not an exit proof while any retained native
+            # save/manual/session owner remains unresolved.
+            return
+
+        # A foreign mapping or a process-less owner can never justify a
+        # terminal read/close.  Only an explicitly proven absence can finish
+        # a process-less transition without touching that foreign bridge.
+        if latch.get('foreign_bridge') is not None:
+            return
+        absence_bridge = latch.get('absence_bridge')
+        if (absence_bridge is not None
+                and not latch.get('terminal_classified')):
+            release_absence = getattr(
+                absence_bridge, 'release_terminal_response_owner', None)
+            if not callable(release_absence):
+                return
+            try:
+                latch['terminal_released'] = bool(release_absence(None))
+            except (OSError, RuntimeError, TypeError, ValueError):
+                latch['terminal_released'] = False
+            if not latch['terminal_released']:
+                return
+            self._release_terminal_response_owner_cache(latch)
+            latch['terminal_classified'] = True
+            latch['terminal_snapshot'] = None
+            self._admission_handle_terminal_snapshot(None, latch)
+        if not latch.get('terminal_classified'):
+            snapshot = None
+            owner = None
+            terminal_ready = bridge is None
+            generation = latch.get('native_generation')
+            if bridge is not None and type(generation) is int:
+                retain = getattr(bridge, 'retain_terminal_response_owner', None)
+                read = getattr(bridge, 'read_terminal_response_snapshot', None)
+                release = getattr(bridge, 'release_terminal_response_owner', None)
+                if callable(retain) and callable(read) and callable(release):
+                    # A retain is legal only while the original process was
+                    # positively observed alive.  Once exit is observed the
+                    # latch may only read/release the already retained owner.
+                    try:
+                        owner = latch.get('terminal_owner')
+                        if owner is not None:
+                            snapshot = read(owner, process_exited=True)
+                            latch['terminal_read'] = snapshot is not None
+                            latch['terminal_owner'] = owner
+                            # Keep the exact retained capability alive while
+                            # the terminal snapshot is interpreted.  Release
+                            # happens only after classification and owner
+                            # specific save/manual handling below.
+                            terminal_ready = True
+                        else:
+                            # None is only a positive physical-absence proof;
+                            # it is never an instruction to close a bridge.
+                            latch['terminal_released'] = bool(release(None))
+                            terminal_ready = latch['terminal_released']
+                    except (OSError, RuntimeError, TypeError, ValueError):
+                        terminal_ready = False
+                else:
+                    terminal_ready = False
+            if not terminal_ready:
+                # A missing mapping is not an exit/cleanup proof, but the
+                # retained original save still needs one explicit failure
+                # classification.  Keep the latch for the blocked physical
+                # release and never manufacture a success/read.
+                if not latch.get('native_exit_proven'):
+                    return
+                latch['terminal_classified'] = True
+                latch['terminal_snapshot'] = None
+                self._admission_handle_terminal_snapshot(None, latch)
+            else:
+                latch['terminal_classified'] = True
+                latch['terminal_snapshot'] = snapshot
+                self._admission_handle_terminal_snapshot(snapshot, latch)
+
+        if (latch.get('terminal_owner') is None
+                and bridge is not None
+                and not latch.get('terminal_released')):
+            # No mapping owner means no safe release/close.  Preserve all
+            # original A owners for a later positive physical absence proof.
+            return
+
+        # Classification is one-shot even if callbacks install successor B or
+        # the exact A owner release temporarily fails.  Retry only the release
+        # and retained cleanup; never replay A's save/manual/UI effects.
+        owner = latch.get('terminal_owner')
+        if owner is not None and not latch.get('terminal_released'):
+            release = getattr(bridge, 'release_terminal_response_owner', None)
+            try:
+                latch['terminal_released'] = bool(release(owner))
+            except (OSError, RuntimeError, TypeError, ValueError):
+                latch['terminal_released'] = False
+            if not latch['terminal_released']:
+                return
+            self._release_terminal_response_owner_cache(latch)
+
+        camera_group = latch.get('camera_group')
+        if isinstance(camera_group, dict):
+            if not self._camera_cleanup_complete(camera_group):
+                return
+            if not self._admission_original_latch_is_current(latch):
+                return
+            if not self._camera_release_retained_group(
+                    camera_group, latch=latch):
+                return
+            # The provider's lock-only cleanup proof and exact A-field release
+            # are now durable evidence for the teardown receipt.  The receipt
+            # may outlive the cleared Main camera fields during full shutdown.
+            latch['camera_cleanup_proven'] = bool(
+                camera_group.get('providers')
+                or camera_group.get('targets')
+                or camera_group.get('receipts'))
+        # Camera A may finish its physical release after a callback installs
+        # B, but no A receipt may replace B's current teardown receipt.
+        if getattr(self, '_admission_transition_latch', None) is not latch:
+            return
+        if (latch.get('crash_recovery_pending')
+                and not getattr(self, '_shutdown_forced', False)
+                and not latch.get('crash_recovery_published')
+                and getattr(self, '_admission_transition_latch', None)
+                is latch
+                and getattr(self, 'engine_process', None) is process
+                and getattr(self, 'bridge', None) is bridge):
+            if self._publish_engine_crash_recovery(
+                    process, bridge, exit_code=latch.get('exit_code'),
+                    process_generation=latch.get('process_generation'),
+                    native_generation=latch.get('native_generation'),
+                    owner_already_drained=True):
+                latch['crash_recovery_published'] = True
+            if getattr(self, '_admission_transition_latch', None) is not latch:
+                return
+        # Keep an owner-specific teardown receipt even when terminal handling
+        # re-entered Main and installed successor B.  The A receipt is
+        # diagnostic/teardown state only and never authorizes B.
+        self._retained_admission_teardown_receipt = {
+            'process': process,
+            'bridge': bridge,
+            'process_generation': latch.get('process_generation'),
+            'native_generation': latch.get('native_generation'),
+            'terminal_owner': owner,
+            'terminal_snapshot': latch.get('terminal_snapshot'),
+            'terminal_released': latch.get('terminal_released') is True,
+            'native_exit_proven': latch.get('native_exit_proven') is True,
+            'camera_cleanup_proven': (
+                latch.get('camera_cleanup_proven') is True),
+            'session': latch.get('session'),
+            'manual_path': latch.get('manual_path'),
+            'manual_request': latch.get('manual_request'),
+            'manual_session': latch.get('manual_session'),
+            'manual_state': latch.get('manual_state', 'idle'),
+            'pending_manual_path': latch.get('pending_manual_path'),
+            'pending_manual_request': latch.get('pending_manual_request'),
+            'pending_manual_session': latch.get('pending_manual_session'),
+            'save_operation': latch.get('save_operation'),
+            'camera_group': latch.get('camera_group'),
+        }
+        # Terminal handling can synchronously queue a successor transition
+        # (for example after a policy edit or a retained manual/save receipt).
+        # The old owner still finishes its own exact cleanup below; only the
+        # final Main field clearing is identity guarded.
+        if process is getattr(self, 'engine_process', None):
+            self.engine_process = None
+            self._engine_process_generation = None
+            if getattr(self, '_engine_bridge_owner', None) is bridge:
+                self._engine_bridge_owner = None
+        if getattr(self, '_accepted_capture_session', None) is latch.get('session'):
+            self._accepted_capture_session = None
+            self._accepted_camera_runtime_receipt = None
+        self._admission_transition_latch = None
+        timer = getattr(self, '_admission_transition_timer', None)
+        if timer is not None and not getattr(self, '_shutdown_forced', False):
+            timer.stop()
+        self._pending_capture_reason = ''
+        if (not latch.get('crash_recovery_published')
+                and not getattr(self, '_shutdown_requested', False)
+                and not getattr(self, '_shutdown_forced', False)
+                and callable(getattr(self, '_set_status', None))):
+            self._set_status('CAPTURE BLOCKED', status_warning_qss())
+        if getattr(self, '_shutdown_pending_exit', False):
+            self._shutdown_pending_exit = False
+            if not getattr(self, '_shutdown_forced', False):
+                QTimer.singleShot(0, self._perform_full_shutdown)
+
+    def _forced_non_qt_shutdown_tail(self):
+        """Finish after the Qt loop without invoking any Qt/UI tail."""
+        receipt = getattr(self, '_retained_admission_teardown_receipt', None)
+        if receipt is not None:
+            self._log_forced_admission_facts(receipt)
+        stop = getattr(self, '_file_worker_stop', None)
+        if stop is not None:
+            stop.set()
+        workers = tuple(getattr(self, '_file_workers', ()))
+        deadline = time.monotonic() + 2.0
+        for worker in workers:
+            join = getattr(worker, 'join', None)
+            if callable(join):
+                join(timeout=max(0.0, deadline - time.monotonic()))
+        logger = getattr(self, '_lifecycle_log', None)
+        log_info = getattr(logger, 'info', None)
+        if callable(log_info):
+            log_info('ForcedAdmissionNonQtTailComplete')
+
+    def _force_admission_transition_for_exit(self) -> None:
+        """Drain an admission latch after the Qt event loop has stopped.
+
+        The ordinary transition is timer-driven and never blocks the UI.  The
+        ``finally`` path after ``app.exec`` has no event loop left, so it gets
+        one bounded owner-only emergency drain before the normal teardown is
+        allowed to run.  No save or manual completion is synthesized when the
+        original process cannot be observed as exited.
+        """
+        deadline = time.monotonic() + 3.5
+        self._shutdown_forced = True
+        while getattr(self, '_admission_transition_latch', None) is not None:
+            latch = self._admission_transition_latch
+            if isinstance(latch, dict) and latch.get('foreign_bridge') is not None:
+                self._log_forced_admission_facts({
+                    'terminal_snapshot': latch.get('terminal_snapshot'),
+                    'save_operation': latch.get('save_operation'),
+                    'manual_path': latch.get('manual_path'),
+                    'pending_manual_path': latch.get('pending_manual_path'),
+                    'process_generation': latch.get('process_generation'),
+                    'native_generation': latch.get('native_generation'),
+                })
+                self._shutdown_uncertain_owner = True
+                return
+            self._pump_admission_transition()
+            if getattr(self, '_admission_transition_latch', None) is None:
+                return
+            if time.monotonic() >= deadline:
+                latch = self._admission_transition_latch
+                process = latch.get('process') if isinstance(latch, dict) else None
+                if process is not None:
+                    try:
+                        current = time.monotonic()
+                        if (process.poll() is None
+                                and not latch.get('terminated')):
+                            process.terminate()
+                            latch['terminated'] = True
+                            latch['terminate_at'] = current
+                        elif (process.poll() is None
+                              and latch.get('terminated')
+                              and not latch.get('killed')
+                              and current - (latch.get('terminate_at') or current)
+                              >= 1.0):
+                            process.kill()
+                            latch['killed'] = True
+                            latch['killed_at'] = current
+                    except (AttributeError, OSError, RuntimeError):
+                        # A failed escalation is intentionally reported as
+                        # uncertain below; it is never treated as clean exit.
+                        pass
+                logger = getattr(self, '_lifecycle_log', None)
+                self._log_forced_admission_facts({
+                    'terminal_snapshot': latch.get('terminal_snapshot')
+                    if isinstance(latch, dict) else None,
+                    'save_operation': latch.get('save_operation')
+                    if isinstance(latch, dict) else None,
+                    'manual_path': latch.get('manual_path')
+                    if isinstance(latch, dict) else None,
+                    'pending_manual_path': latch.get('pending_manual_path')
+                    if isinstance(latch, dict) else None,
+                    'process_generation': latch.get('process_generation')
+                    if isinstance(latch, dict) else None,
+                    'native_generation': latch.get('native_generation')
+                    if isinstance(latch, dict) else None,
+                })
+                log_error = getattr(logger, 'error', None)
+                detail = ('original process exit or owned camera cleanup was '
+                          'not fully proven; retained owners and fragments kept')
+                if callable(log_error):
+                    log_error('AdmissionTransitionUncertain: %s', detail)
+                else:
+                    print(f'[Lifecycle] AdmissionTransitionUncertain: {detail}')
+                # Preserve the latch and all exact owners.  Full shutdown
+                # will skip generic stop/cancel/finalizer tails while this
+                # uncertain owner remains retained.
+                self._shutdown_uncertain_owner = True
+                return
+            time.sleep(0.05)
+
+    def _defer_full_exit_for_admission(self) -> bool:
+        """Hide the UI and defer destructive teardown until latch completion."""
+        if getattr(self, '_admission_transition_latch', None) is None:
+            return False
+        self._shutdown_pending_exit = True
+        self._shutdown_requested = True
+        self._shutdown_timer_started = time.monotonic()
+        MainWindow._arm_full_exit_deadline(self)
+        print('[Lifecycle] ShutdownDeferredForAdmission')
+        self._lifecycle_log.info('ShutdownDeferredForAdmission')
+        self.hide()
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
+        mark = getattr(self, '_shutdown_mark', None)
+        if callable(mark):
+            mark('UIHidden')
+        return True
+
+    def _admission_handle_terminal_snapshot(self, snapshot, latch):
+        save_state = latch.get('save_state')
+        retained_op = latch.get('save_operation')
+        def save_owner_current(*, require_unemitted=True):
+            return (save_state is not None
+                    and save_state is getattr(self, '_save_state', None)
+                    and retained_op is not None
+                    and getattr(save_state, 'current', None) is retained_op
+                    and (not require_unemitted
+                         or not getattr(retained_op, 'result_emitted', False))
+                    and getattr(self, '_admission_transition_latch', latch)
+                    is latch)
+
+        save_valid = save_owner_current()
+        session_snapshot = (retained_op.context.get('session_snapshot')
+                            if save_valid and isinstance(
+                                getattr(retained_op, 'context', None), dict)
+                            else None)
+        retained_session = latch.get('session')
+        context_process_generation = (
+            retained_op.context.get('process_generation')
+            if save_valid else None)
+        context_native_generation = (
+            retained_op.context.get('native_capture_generation')
+            if save_valid else None)
+        native_generation = getattr(snapshot, 'capture_generation', None)
+        session_match = (
+            isinstance(session_snapshot, CaptureSessionSnapshot)
+            and retained_session is not None
+            and getattr(retained_session, 'request', None) is not None
+            and getattr(retained_op, 'output_path', None) is not None
+            and session_snapshot.process_generation
+            == latch.get('process_generation')
+            and session_snapshot.native_capture_generation
+            == latch.get('native_generation')
+            and session_snapshot.process_generation
+            == getattr(retained_session, 'process_generation', None)
+            and session_snapshot.native_capture_generation
+            == getattr(retained_session, 'native_capture_generation', None)
+            and context_process_generation
+            == latch.get('process_generation')
+            and context_native_generation
+            == latch.get('native_generation')
+            and type(native_generation) is int
+            and native_generation == latch.get('native_generation'))
+        save_response = getattr(snapshot, 'save_response', None)
+        event_map = {'saved': EngineEvent.CLIP_SAVED,
+                     'error': EngineEvent.ERROR_OCCURRED,
+                     'started': EngineEvent.SAVE_STARTED}
+        if save_valid:
+            kind = None
+            detail = 'Capture stopped before the accepted clip was confirmed.'
+            if (session_match and isinstance(save_response, (tuple, list))
+                    and len(save_response) == 2
+                    and isinstance(save_response[0], str)):
+                kind, detail = save_response
+            event = event_map.get(kind)
+            if not session_match or event is None:
+                event = EngineEvent.ERROR_OCCURRED
+            outcome = save_state.on_event(event, detail, time.monotonic())
+            if (outcome is not None
+                    and save_owner_current(require_unemitted=False)
+                    and not getattr(self, '_shutdown_forced', False)):
+                self._on_save_outcome(outcome)
+            # SAVE_STARTED is only an acknowledgement.  Re-check exact A
+            # ownership after its callback before issuing the failure event;
+            # the callback may synchronously install successor B.
+            if (event is EngineEvent.SAVE_STARTED
+                    and save_owner_current()):
+                outcome = save_state.on_event(
+                    EngineEvent.ERROR_OCCURRED,
+                    'Capture stopped before the accepted clip was confirmed.',
+                    time.monotonic())
+                if (outcome is not None
+                        and save_owner_current(require_unemitted=False)
+                        and not getattr(self, '_shutdown_forced', False)):
+                    self._on_save_outcome(outcome)
+
+        # Save callbacks may synchronously install successor B.  Manual A
+        # fields, timers, and finalizers are owner-specific and must not run.
+        if getattr(self, '_admission_transition_latch', latch) is not latch:
+            return
+        manual_state = latch.get('manual_state', 'idle')
+        manual_path = latch.get('manual_path')
+        manual_session = latch.get('manual_session')
+        manual_request = latch.get('manual_request')
+        if manual_state == 'preparing':
+            pending_owner_matches = (
+                    getattr(self, '_manual_record_state', None) == 'preparing'
+                    and getattr(self, '_pending_manual_record_path', None)
+                    is latch.get('pending_manual_path')
+                    and getattr(self, '_pending_manual_record_request', None)
+                    is latch.get('pending_manual_request')
+                    and getattr(self, '_pending_manual_record_session', None)
+                    is latch.get('pending_manual_session')
+                    and getattr(self, '_pending_manual_record_process_generation',
+                                None)
+                    == latch.get('pending_manual_process_generation')
+                    and getattr(self, '_pending_manual_record_native_generation',
+                                None)
+                    == latch.get('pending_manual_native_generation')
+                    and getattr(self, '_manual_record_timer', None)
+                    is latch.get('pending_manual_timer')
+                    and getattr(self, '_manual_record_finalize_thread', None)
+                    is latch.get('pending_manual_future'))
+            if pending_owner_matches:
+                timer = latch.get('pending_manual_timer')
+                if (timer is not None
+                        and not getattr(self, '_shutdown_forced', False)):
+                    try:
+                        timer.stop()
+                    except (AttributeError, RuntimeError):
+                        # An unavailable timer cannot prove cancellation of A.
+                        return
+                # Stopping the pending timer is an external callback boundary
+                # in Qt harnesses. Recheck the exact pending owner before
+                # clearing A fields so successor B stays intact.
+                pending_owner_matches = (
+                    getattr(self, '_admission_transition_latch', None)
+                    is latch
+                    and getattr(self, '_manual_record_state', None)
+                    == 'preparing'
+                    and getattr(self, '_pending_manual_record_path', None)
+                    is latch.get('pending_manual_path')
+                    and getattr(self, '_pending_manual_record_request', None)
+                    is latch.get('pending_manual_request')
+                    and getattr(self, '_pending_manual_record_session', None)
+                    is latch.get('pending_manual_session')
+                    and getattr(self,
+                                '_pending_manual_record_process_generation',
+                                None)
+                    == latch.get('pending_manual_process_generation')
+                    and getattr(self,
+                                '_pending_manual_record_native_generation',
+                                None)
+                    == latch.get('pending_manual_native_generation')
+                    and getattr(self, '_manual_record_timer', None)
+                    is latch.get('pending_manual_timer')
+                    and getattr(self, '_manual_record_finalize_thread', None)
+                    is latch.get('pending_manual_future'))
+            if pending_owner_matches:
+                self._manual_record_state = 'idle'
+                self._engine_profile = 'clips'
+                MainWindow._clear_pending_manual_preparation(self)
+                if not getattr(self, '_shutdown_forced', False):
+                    MainWindow._sync_active_recording_library_paths(self)
+                    MainWindow._reset_manual_record_button(self)
+            return
+        if (manual_state == 'finalizing'
+                or getattr(self, '_manual_record_state', 'idle') == 'finalizing'):
+            return
+        manual_current = (
+            isinstance(manual_session, CaptureSessionSnapshot)
+            and manual_path is not None
+            and manual_request is not None
+            and manual_session is not None
+            and manual_request is getattr(manual_session, 'request', None)
+            and getattr(self, '_manual_record_path', None) is manual_path
+            and getattr(self, '_manual_record_session', None) is manual_session
+            and getattr(self, '_manual_record_request', None) is manual_request
+            and latch.get('manual_process_generation')
+            == latch.get('process_generation')
+            and latch.get('manual_native_generation')
+            == latch.get('native_generation')
+            and getattr(manual_session, 'process_generation', None)
+            == latch.get('process_generation')
+            and getattr(manual_session, 'native_capture_generation', None)
+            == latch.get('native_generation'))
+        if manual_state in ('starting', 'recording', 'stopping') and manual_current:
+            manual_response = getattr(snapshot, 'manual_response', None)
+            clean_exit = bool(
+                latch.get('native_shutdown_submitted')
+                and latch.get('native_exit_proven')
+                and latch.get('exit_code') == 0
+                and not latch.get('terminated') and not latch.get('killed')
+                and not latch.get('error'))
+            positive_original_exit = bool(
+                latch.get('native_exit_proven')
+                and latch.get('exit_code') is not None
+                and not latch.get('error'))
+            snapshot_generation = getattr(snapshot, 'capture_generation', None)
+            exact_snapshot = (type(snapshot_generation) is int
+                              and snapshot_generation
+                              == latch.get('native_generation'))
+            stopped = bool(
+                isinstance(manual_response, (tuple, list))
+                and len(manual_response) >= 1
+                and manual_response[0] == 'stopped'
+                and exact_snapshot
+                and (clean_exit or positive_original_exit))
+            if ((clean_exit and exact_snapshot
+                     and (not manual_response or stopped))
+                    or stopped):
+                if not getattr(self, '_shutdown_forced', False):
+                    self._finalize_manual_recording_file(
+                        publish_ui=not getattr(self, '_shutdown_requested', False))
+            elif getattr(self, '_shutdown_forced', False):
+                return
+            else:
+                self._fail_manual_recording(
+                    'Capture stopped before the recording was closed; fragments were kept.',
+                    keep_recording=True, _defer_restore=True,
+                    _recover_fragments=True,
+                    _writer_closed=bool(latch.get('native_exit_proven')),
+                    expected_recording=manual_path, expected_session=manual_session)
+
 
     def _on_hotkey_save_clip(self):
-        config = self._capture_config.active
-        self._save_clip(config.normal_clip_seconds if config else self.clip_duration)
+        session = getattr(self, '_accepted_capture_session', None)
+        config = getattr(session, 'request', None)
+        if config is not None:
+            self._save_clip(config.capture_config.normal_clip_seconds)
+            return
+        active = self._capture_config.active
+        self._save_clip(active.normal_clip_seconds if active else self.clip_duration)
+
+    def _on_hotkey_mark_highlight(self):
+        """Request a native ring mark without consuming save responses."""
+
+        if _admission_call(self, '_admission_transition_active'):
+            return
+        if not self._accepted_session_owner_is_current():
+            self.push_error(
+                'HIGHLIGHT UNAVAILABLE',
+                'The accepted capture session no longer owns the live native '
+                'process or capture generation.',
+                level='warning')
+            return
+        process = getattr(self, 'engine_process', None)
+        if process is not None:
+            try:
+                if process.poll() is not None:
+                    self.push_error(
+                        'HIGHLIGHT UNAVAILABLE',
+                        'The capture engine has exited; restart capture before '
+                        'requesting a highlight.', level='warning')
+                    return
+            except (AttributeError, OSError, RuntimeError):
+                self.push_error(
+                    'HIGHLIGHT UNAVAILABLE',
+                    'The capture engine state could not be verified.',
+                    level='warning')
+                return
+        session = getattr(self, '_accepted_capture_session', None)
+        request = getattr(session, 'request', None)
+        owner_bridge = self.bridge
+        proof = _admission_call(self, '_admission_stable_proof', request)
+        if (proof is None
+                or not _admission_call(
+                    self, '_admission_pure_proof_current', proof)
+                or not _admission_call(
+                    self, '_accepted_session_owner_pure_is_current', session)
+                or self.bridge is not owner_bridge):
+            return
+        marker_id = str(uuid4())
+        bridge = owner_bridge
+        if bridge is not None and bridge.mark_highlight(marker_id):
+            self._set_status('HIGHLIGHT REQUESTED', status_idle_qss())
+            return
+        status = bridge.get_status() if bridge is not None else {'connected': False}
+        flags = int(status.get('capture_health_flags', 0) or 0)
+        if not status.get('connected') or not flags & (1 << 16):
+            detail = 'The current capture engine does not support highlights.'
+        else:
+            detail = 'Capture is busy or not ready for a highlight request.'
+        self.push_error('HIGHLIGHT UNAVAILABLE', detail, level='warning')
 
 
     def _on_hotkey_start_recording(self):
@@ -4719,6 +8209,14 @@ class MainWindow(QMainWindow):
         self._screenshot_save_worker = None
         try:
             publish_staged_png(paths.staged, paths.final)
+            manager = getattr(self, 'clip_metadata_manager', None)
+            marker = getattr(manager, 'mark_recorded', None)
+            if callable(marker):
+                try:
+                    from core.capture_highlights import media_identity
+                    marker(str(paths.final), expected_identity=media_identity(paths.final))
+                except (OSError, RuntimeError, TypeError, ValueError) as error:
+                    print(f'[Screenshot] Capture provenance could not be saved: {error}')
             self.capture_card.show_screenshot()
             if hasattr(self, 'clip_grid'):
                 self.clip_grid.force_refresh()
@@ -4780,11 +8278,7 @@ class MainWindow(QMainWindow):
 
 
     def _prepare_startup_capture_source(self) -> None:
-        """Start game detection from desktop capture.
-
-        A persisted HWND may be closed, recycled, or misclassified. Wait for live
-        foreground detection before selecting a game source.
-        """
+        """Preserve manual startup intent; reset only stale automatic targets."""
         current = (
             self.settings_manager.get('capture_mode', 'desktop'),
             self.settings_manager.get('target_hwnd', 0),
@@ -4792,29 +8286,80 @@ class MainWindow(QMainWindow):
             self.settings_manager.get('target_clip_group', ''),
         )
         desktop = ('desktop', 0, '', '')
-        if current == desktop:
+        authority = str(self.settings_manager.get(
+            'capture_source_authority', 'manual')).lower()
+        if current[:3] == desktop[:3]:
+            if self.settings_manager.get('target_clip_group', ''):
+                self.settings_manager.update({'target_clip_group': ''})
+                self.settings_manager.save_settings()
+            return
+        if sys.platform == 'win32' and authority != 'automatic':
+            # The picker owns manual intent. A missing/recycled HWND remains
+            # visible as unavailable; startup never substitutes another source.
             return
         self.settings_manager.update({
             'capture_mode': desktop[0],
             'target_hwnd': desktop[1],
             'target_window_name': desktop[2],
             'target_clip_group': '',
+            'target_window_identity': None,
         })
         self.settings_manager.save_settings()
         print('[GameDetection] Startup source reset to Desktop; '
               'waiting for a stable game candidate')
 
     def _start_game_detection(self) -> None:
-        """Start detection after the initial desktop engine launch is queued."""
-        if not bool(self.settings_manager.get('game_detection_enabled', False)):
+        """Start detection after the initial engine launch is queued."""
+        if not getattr(self, '_file_operations_ready', True):
             return
-        self._game_detector.start()
+        if self.settings_manager.get('game_detection_enabled', True) is False:
+            return
+        if not self._game_detector.start():
+            button = getattr(self, 'game_detection_btn', None)
+            if button is not None:
+                button.setToolTip('Game detection is unavailable on this platform.')
 
-    def _set_capture_window_source(self, capture_window: dict) -> bool:
+    def _on_manual_capture_source_intent(self, _authority: str = 'manual') -> None:
+        """Invalidate queued automatic switches after any direct source choice."""
+        if self.settings_manager.get('capture_source_authority') != 'manual':
+            self.settings_manager.set('capture_source_authority', 'manual')
+            self.settings_manager.save_settings()
+        self._source_authority_revision = (
+            int(getattr(self, '_source_authority_revision', 0)) + 1)
+        self._source_intent_revision = int(
+            getattr(self, '_source_intent_revision', 0)) + 1
+        self._pending_game_window = None
+        self._pending_game_candidate_revision = None
+        timer = getattr(self, '_game_dismiss_timer', None)
+        if timer is not None:
+            timer.stop()
+        self._auto_capture_hwnd = 0
+        self._auto_capture_identity = None
+        self._active_game_hwnd = None
+        self._active_game_window = None
+        detector = getattr(self, '_game_detector', None)
+        if detector is not None and MainWindow._game_candidate_authorized(self):
+            detector.reconsider_current_game()
+
+    def _set_capture_window_source(
+            self, capture_window: dict, *, automatic: bool = True) -> bool:
         """Apply a detected window source with or without the deferred UI."""
+        decision = _admission_call(
+            self, '_admission_decision_for_settings', capture_window)
+        if decision is None or not decision.allowed:
+            return _admission_call(self, '_admission_deny', decision)
+        proof = _admission_call(self, '_admission_proof_from_decision', decision)
+        if proof is None or not _admission_call(
+                self, '_admission_pure_proof_current', proof):
+            return False
         source_popup = getattr(self, 'source_popup', None)
         if source_popup is not None:
-            return bool(source_popup.set_capture_window(capture_window))
+            applied = bool(source_popup.set_capture_window(
+                capture_window, automatic=automatic))
+            if applied and automatic:
+                self._source_intent_revision = int(
+                    getattr(self, '_source_intent_revision', 0)) + 1
+            return applied
 
         try:
             hwnd = int(capture_window.get('hwnd', 0) or 0)
@@ -4827,23 +8372,46 @@ class MainWindow(QMainWindow):
             'target_hwnd': hwnd,
             'target_window_name': capture_window.get('display_name', ''),
             'target_clip_group': clip_group_for_source(capture_window),
+            'target_window_identity': window_identity(capture_window),
+            'capture_source_authority': (
+                'automatic' if automatic else 'manual'),
         })
         self.settings_manager.save_settings()
+        self._source_intent_revision = int(
+            getattr(self, '_source_intent_revision', 0)) + 1
         return True
 
-    def _set_capture_desktop_source(self) -> bool:
+    def _set_capture_desktop_source(self, *, automatic: bool = True) -> bool:
         """Apply the desktop source with or without the deferred UI."""
+        decision = _admission_call(
+            self, '_admission_decision_for_settings',
+            source_mode_override='desktop')
+        if decision is None or not decision.allowed:
+            return _admission_call(self, '_admission_deny', decision)
+        proof = _admission_call(self, '_admission_proof_from_decision', decision)
+        if proof is None or not _admission_call(
+                self, '_admission_pure_proof_current', proof):
+            return False
         source_popup = getattr(self, 'source_popup', None)
         if source_popup is not None:
-            return bool(source_popup.set_capture_desktop())
+            applied = bool(source_popup.set_capture_desktop(automatic=automatic))
+            if applied and automatic:
+                self._source_intent_revision = int(
+                    getattr(self, '_source_intent_revision', 0)) + 1
+            return applied
 
         self.settings_manager.update({
             'capture_mode': 'desktop',
             'target_hwnd': 0,
             'target_window_name': '',
             'target_clip_group': '',
+            'target_window_identity': None,
+            'capture_source_authority': (
+                'automatic' if automatic else 'manual'),
         })
         self.settings_manager.save_settings()
+        self._source_intent_revision = int(
+            getattr(self, '_source_intent_revision', 0)) + 1
         return True
 
     def _game_window_name(self, window) -> str:
@@ -4865,6 +8433,99 @@ class MainWindow(QMainWindow):
         if isinstance(window, GameWindow) and hasattr(self._game_detector, 'suppress'):
             self._game_detector.suppress(window)
 
+    def _game_candidate_authorized(self) -> bool:
+        return (self.settings_manager.get('game_detection_enabled', True) is not False
+                and not border_free_capture_enabled(self))
+
+    def _game_candidate_is_live(self, window) -> bool:
+        hwnd = MainWindow._game_window_hwnd(self, window)
+        if sys.platform != 'win32':
+            return bool(hwnd)
+        if not hwnd or not is_capture_window_valid(hwnd):
+            return False
+        exe_path = (window.exe_path if isinstance(window, GameWindow)
+                    else window.get('exe_path', '') if isinstance(window, dict)
+                    else '')
+        exe_name = (window.exe_name if isinstance(window, GameWindow)
+                    else window.get('exe_name', '') if isinstance(window, dict)
+                    else '')
+        candidate_pid = (window.pid if isinstance(window, GameWindow)
+                         else window.get('pid') if isinstance(window, dict)
+                         else None)
+        if is_fthr_application_executable(exe_path or exe_name, candidate_pid):
+            return False
+        live = get_window_info(hwnd, own_pid=os.getpid())
+        if live is None:
+            return False
+        if isinstance(window, GameWindow):
+            return identity_matches(window_identity(window), live)
+        if isinstance(window, dict):
+            # The legacy detector enumerates plain dictionaries without PID,
+            # class, or process-start token. Revalidate the HWND now and match
+            # every identity field the enumeration did provide; source handoff
+            # below uses this fresh live identity, never the stale dict.
+            if int(live.hwnd) != int(hwnd):
+                return False
+            expected_path = str(window.get('exe_path', '') or '').strip()
+            if expected_path and os.path.normcase(os.path.abspath(
+                    expected_path)).casefold() != os.path.normcase(
+                    os.path.abspath(live.exe_path)).casefold():
+                return False
+            expected_pid = window.get('pid')
+            if expected_pid is not None and int(expected_pid) != int(live.pid):
+                return False
+            expected_class = window.get('class_name')
+            if expected_class and str(expected_class).casefold() != str(
+                    live.class_name).casefold():
+                return False
+            expected_created = window.get('process_created')
+            if expected_created is not None and expected_created != live.process_created:
+                return False
+            return True
+        return True
+
+    def _automatic_switch_still_current(self, hwnd: int, identity, revision: int) -> bool:
+        try:
+            current_hwnd = int(self.settings_manager.get('target_hwnd', 0) or 0)
+        except (TypeError, ValueError):
+            # A corrupt saved handle invalidates the queued restart safely.
+            return False
+        if sys.platform != 'win32':
+            return (
+                revision == int(getattr(self, '_source_authority_revision', 0))
+                and self._game_candidate_authorized()
+                and self.settings_manager.get('capture_mode', 'desktop') == 'window'
+                and current_hwnd == int(hwnd))
+        return (
+            revision == int(getattr(self, '_source_authority_revision', 0))
+            and self._game_candidate_authorized()
+            and self.settings_manager.get('capture_source_authority') == 'automatic'
+            and self.settings_manager.get('capture_mode', 'desktop') == 'window'
+            and current_hwnd == int(hwnd)
+            and identity_matches(
+                self.settings_manager.get('target_window_identity'), identity)
+            and identity_matches(identity, get_window_info(hwnd, own_pid=os.getpid()))
+        )
+
+    def _restart_automatic_capture_if_current(
+            self, hwnd: int, identity, revision: int) -> None:
+        if MainWindow._automatic_switch_still_current(self, hwnd, identity, revision):
+            self._restart_capture_engine()
+
+    def _notify_accepted_automatic_game_capture(self, request) -> None:
+        source = request.source
+        if (sys.platform == 'win32'
+                and source.source_mode == 'window'
+                and source.authority == 'automatic'
+                and source.live_identity
+                and identity_matches(
+                    getattr(self, '_auto_capture_identity', None),
+                    source.live_identity)
+                and request.source_intent_revision
+                == getattr(self, '_source_intent_revision', 0)
+                and MainWindow._game_candidate_authorized(self)):
+            self.capture_card.show_capturing(source.display_name)
+
     def _on_game_appeared(self, window: dict):
         self._handle_game_candidate(window)
 
@@ -4877,11 +8538,20 @@ class MainWindow(QMainWindow):
                         'game_detection_blacklist', [])))
 
     def _handle_game_candidate(self, window) -> None:
+        if not MainWindow._game_candidate_authorized(self):
+            return
         if MainWindow._game_candidate_blocked(self, window):
             return
-        if not bool(self.settings_manager.get('game_detection_enabled', False)):
+        if not MainWindow._game_candidate_is_live(self, window):
             return
-        if isinstance(window, GameWindow) and not is_capture_window_valid(window.hwnd):
+
+        # Approval is checked before same-HWND metadata refreshes as well as
+        # before a new automatic source handoff. Detection rules are not an
+        # admission grant.
+        decision = _admission_call(
+            self, '_admission_decision_for_settings', window)
+        if decision is None or not decision.allowed:
+            _admission_call(self, '_admission_deny', decision)
             return
 
         hwnd = self._game_window_hwnd(window)
@@ -4891,18 +8561,28 @@ class MainWindow(QMainWindow):
             current_hwnd = int(self.settings_manager.get('target_hwnd', 0) or 0)
         except (TypeError, ValueError):
             current_hwnd = 0
+        same_selected_identity = (
+            sys.platform != 'win32'
+            or identity_matches(
+                self.settings_manager.get('target_window_identity', None), window))
         if (self.settings_manager.get('capture_mode', 'desktop') == 'window'
-                and current_hwnd == hwnd):
+                and current_hwnd == hwnd and same_selected_identity):
             active_game = getattr(self, '_active_game_window', None)
             if (isinstance(window, GameWindow)
                     and isinstance(active_game, GameWindow)
+                    and MainWindow._game_candidate_authorized(self)
                     and window.capture_signature != active_game.capture_signature):
                 # WGC frame pools and the hardware encoder are initialized for
                 # one source geometry. A fullscreen game can keep the same
                 # HWND while changing the monitor/display mode, so refresh the
                 # snapshot and recreate the capture generation automatically.
                 self._active_game_window = window
-                self._on_game_capture_geometry_changed(active_game, window)
+                if sys.platform != 'win32':
+                    # X11/Wayland capture needs a new source geometry. On
+                    # Windows, native WGC handles compatible resizes in place
+                    # and reports RECONFIGURE_REQUIRED for true reinit cases;
+                    # bypassing that signal would restart on every resize.
+                    self._on_game_capture_geometry_changed(active_game, window)
             if isinstance(window, GameWindow):
                 capture_window = window.as_capture_window()
                 target_name = window.display_name
@@ -4917,6 +8597,45 @@ class MainWindow(QMainWindow):
                         'target_clip_group': target_group,
                     })
                     self.settings_manager.save_settings()
+            # A persisted selection is not proof of a running capture owner.
+            # In particular, restoring a game after failed minimized startup
+            # must recover even though its HWND/process identity is unchanged.
+            # Submit through the normal coordinator so admission, save gates,
+            # window readiness and source supersession remain authoritative.
+            auto_switch_selected = (
+                sys.platform == 'win32'
+                and MainWindow._game_candidate_authorized(self)
+                and self.settings_manager.get('capture_source_authority') == 'automatic'
+                and self.settings_manager.get('game_detection_mode', 'auto') == 'auto')
+            if auto_switch_selected:
+                # Retain the automatically selected identity for game-close
+                # fallback and subsequent handoffs.
+                self._active_game_hwnd = hwnd
+                self._active_game_window = window if isinstance(window, GameWindow) else None
+                self._auto_capture_hwnd = hwnd
+                self._auto_capture_identity = window_identity(window)
+            if (auto_switch_selected
+                    and not getattr(self, '_restart_pending', False)
+                    and not getattr(self, '_capture_settings_applying', False)
+                    and getattr(self, '_pending_launch_config', None) is None
+                    and getattr(self, '_engine_handshake_generation', None) is None
+                    and getattr(self, '_latest_capture_intent_consumed', True)):
+                process = getattr(self, 'engine_process', None)
+                session = getattr(self, '_accepted_capture_session', None)
+                accepted_source = getattr(getattr(session, 'request', None), 'source', None)
+                source_mismatch = (
+                    accepted_source is not None
+                    and (accepted_source.source_mode != 'window'
+                         or not identity_matches(
+                             self._auto_capture_identity, accepted_source.live_identity)))
+                if (process is None or process.poll() is not None
+                        or (source_mismatch and getattr(
+                            self, '_latest_capture_intent_state', None)
+                            not in {'invalid', 'terminal'})):
+                    self._restart_capture_engine()
+            return
+
+        if not MainWindow._game_candidate_authorized(self):
             return
 
         mode = str(self.settings_manager.get(
@@ -4929,6 +8648,8 @@ class MainWindow(QMainWindow):
     def _on_game_capture_geometry_changed(
             self, previous: GameWindow, current: GameWindow) -> None:
         """Recreate capture after a stable game/monitor size change."""
+        if not MainWindow._game_candidate_authorized(self):
+            return
         print(
             '[GameDetection] Capture geometry changed for '
             f'{current.display_name}: '
@@ -4961,6 +8682,8 @@ class MainWindow(QMainWindow):
         if self._pending_game_window is not None:
             self._suppress_game_candidate(self._pending_game_window)
         self._pending_game_window = window
+        self._pending_game_candidate_revision = int(
+            getattr(self, '_source_authority_revision', 0))
         game_name = self._game_window_name(window)
         hotkey = self.hotkey_manager.hotkeys.get('confirm_game_detection', 'F8')
         dismiss = self.hotkey_manager.hotkeys.get('dismiss_game_detection', 'F7')
@@ -4977,21 +8700,33 @@ class MainWindow(QMainWindow):
         hwnd = self._game_window_hwnd(window)
         if not hwnd:
             return False
-        if isinstance(window, GameWindow):
-            if not is_capture_window_valid(hwnd):
+        decision = _admission_call(
+            self, '_admission_decision_for_settings', window)
+        if decision is None or not decision.allowed:
+            _admission_call(self, '_admission_deny', decision)
+            return False
+        if sys.platform == 'win32':
+            if (not MainWindow._game_candidate_authorized(self)
+                    or not MainWindow._game_candidate_is_live(self, window)):
                 print(f'Detected game window closed before capture handoff: '
-                      f'{window.title}')
+                      f'{MainWindow._game_window_name(window)}')
                 return False
+            live_window = get_window_info(hwnd, own_pid=os.getpid())
+            if live_window is None:
+                return False
+            capture_window = live_window.as_capture_window()
+        elif isinstance(window, GameWindow):
             capture_window = window.as_capture_window()
         else:
             capture_window = window
 
-        if not self._set_capture_window_source(capture_window):
+        if not self._set_capture_window_source(capture_window, automatic=True):
             return False
         game_name = self._game_window_name(window)
         self._active_game_hwnd = hwnd
         self._active_game_window = window if isinstance(window, GameWindow) else None
         self._auto_capture_hwnd = hwnd
+        self._auto_capture_identity = window_identity(capture_window)
         if hasattr(self, 'source_btn'):
             self.source_btn.setText(game_name.upper())
         if (focus_pause_supported(sys.platform)
@@ -4999,8 +8734,15 @@ class MainWindow(QMainWindow):
             self._focus_monitor.set_target(game_name)
             self._focus_monitor.start()
         print(f'Game detection switching capture to: {game_name} ({hwnd})')
-        self.capture_card.show_capturing(game_name)
-        QTimer.singleShot(0, self._restart_capture_engine)
+        revision = int(getattr(self, '_source_authority_revision', 0))
+        if sys.platform == 'win32':
+            MainWindow._restart_automatic_capture_if_current(
+                self, hwnd, self._auto_capture_identity, revision)
+        else:
+            self.capture_card.show_capturing(game_name)
+            QTimer.singleShot(
+                0, lambda h=hwnd, i=self._auto_capture_identity, r=revision:
+                MainWindow._restart_automatic_capture_if_current(self, h, i, r))
         return True
 
     def _on_confirm_game_detection(self):
@@ -5009,20 +8751,30 @@ class MainWindow(QMainWindow):
             return
         self._pending_game_window = None
         self._game_dismiss_timer.stop()
-        if MainWindow._game_candidate_blocked(self, window):
+        revision = getattr(self, '_pending_game_candidate_revision', None)
+        if (revision != int(getattr(self, '_source_authority_revision', 0))
+                or not MainWindow._game_candidate_authorized(self)
+                or not MainWindow._game_candidate_is_live(self, window)
+                or MainWindow._game_candidate_blocked(self, window)):
             return
         self._switch_capture_to_game(window)
 
     def _on_dismiss_game_detection(self):
         self._suppress_game_candidate(self._pending_game_window)
         self._pending_game_window = None
+        self._pending_game_candidate_revision = None
         self._game_dismiss_timer.stop()
 
     def _on_game_prompt_timeout(self):
         self._suppress_game_candidate(self._pending_game_window)
         self._pending_game_window = None
+        self._pending_game_candidate_revision = None
 
     def _on_game_lost(self):
+        if _admission_call(self, '_admission_transition_active'):
+            return
+        if not MainWindow._game_candidate_authorized(self):
+            return
         if not bool(self.settings_manager.get(
                 'game_detection_fallback_desktop', False)):
             return
@@ -5031,11 +8783,12 @@ class MainWindow(QMainWindow):
 
         # Foreground loss is not a close. Keep the selected target until the
         # window really disappears, then the timer will call this method again.
-        if is_capture_window_valid(
-                self._auto_capture_hwnd):
-            if not self._fallback_watch_timer.isActive():
-                self._fallback_watch_timer.start()
-            return
+        if is_capture_window_valid(self._auto_capture_hwnd):
+            live = get_window_info(self._auto_capture_hwnd, own_pid=os.getpid())
+            if identity_matches(getattr(self, '_auto_capture_identity', None), live):
+                if not self._fallback_watch_timer.isActive():
+                    self._fallback_watch_timer.start()
+                return
 
         self._fallback_watch_timer.stop()
         try:
@@ -5043,7 +8796,10 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             current_hwnd = 0
         if (self.settings_manager.get('capture_mode', 'desktop') != 'window'
-                or current_hwnd != self._auto_capture_hwnd):
+                or current_hwnd != self._auto_capture_hwnd
+                or (sys.platform == 'win32' and not identity_matches(
+                    self.settings_manager.get('target_window_identity', None),
+                    getattr(self, '_auto_capture_identity', None)))):
             self._auto_capture_hwnd = 0
             return
 
@@ -5051,35 +8807,143 @@ class MainWindow(QMainWindow):
         self._active_game_hwnd = None
         self._active_game_window = None
         self._focus_monitor.stop()
-        if focus_pause_supported(sys.platform) and self.bridge.is_connected():
-            self.bridge.resume_recording()
-        if self._set_capture_desktop_source():
+        if (focus_pause_supported(sys.platform)
+                and self.bridge.is_connected()):
+            session = getattr(self, '_accepted_capture_session', None)
+            owner_bridge = self.bridge
+            if (self._accepted_session_owner_is_current(session)):
+                proof = _admission_call(
+                    self, '_admission_stable_proof', session.request)
+                if (proof is not None
+                        and _admission_call(
+                            self, '_admission_pure_proof_current', proof)
+                        and _admission_call(
+                            self, '_accepted_session_owner_pure_is_current',
+                            session)
+                        and self.bridge is owner_bridge):
+                    owner_bridge.resume_recording()
+        if self._set_capture_desktop_source(automatic=True):
             if hasattr(self, 'source_btn'):
                 self.source_btn.setText('DESKTOP')
             print('No detected game active; falling back to desktop capture')
             self._restart_capture_engine()
             self.capture_card.show_prompt('Game closed — switched back to Desktop')
 
-    def _on_game_detection_configuration_changed(self, enabled: bool,
-                                                   mode: str):
-        settings_page = getattr(self, '_settings_page_widget', None)
-        settings_check = getattr(settings_page, 'game_detection_check', None)
-        if settings_check is not None:
-            settings_check.blockSignals(True)
-            settings_check.setChecked(bool(enabled))
-            settings_check.blockSignals(False)
-        started = self._game_detector.set_enabled(bool(enabled))
-        if enabled and not started:
-            self.game_detection_btn.setToolTip(
-                'Game detection is unavailable on this platform.')
-        else:
-            self.game_detection_btn.setToolTip('')
-        if not enabled:
-            self._suppress_game_candidate(self._pending_game_window)
+    def _on_game_detection_configuration_changed(self, mode: str):
+        if self.settings_manager.get('game_detection_enabled', True) is False:
+            self._game_detector.stop()
+            self._source_authority_revision = int(
+                getattr(self, '_source_authority_revision', 0)) + 1
+            had_prompt = self._pending_game_window is not None
             self._pending_game_window = None
-            self._game_dismiss_timer.stop()
-        elif mode == 'auto' and self._pending_game_window is not None:
+            self._pending_game_candidate_revision = None
+            for name in ('_game_dismiss_timer', '_fallback_watch_timer'):
+                timer = getattr(self, name, None)
+                if timer is not None:
+                    timer.stop()
+            if had_prompt:
+                self.capture_card.show_prompt('Game detection off')
+            return
+        if (getattr(self, '_file_operations_ready', True)
+                and MainWindow._game_candidate_authorized(self)):
+            if not getattr(self._game_detector, 'is_running', True):
+                MainWindow._start_game_detection(self)
+            self._game_detector.reconsider_current_game()
+        if mode == 'auto' and self._pending_game_window is not None:
             self._on_confirm_game_detection()
+
+    def _on_capture_admission_policy_changed(self, _revision=None):
+        """Reload durable authority; never trust a widget revision payload."""
+        self._reload_admission_policy(authoritative=True)
+
+    @staticmethod
+    def _capture_admission_policy_summary(policy) -> str:
+        if policy is None:
+            return 'Capture admission unavailable.'
+        if policy.enabled:
+            return 'Approved Windows executables only.'
+        return 'Capture admission disabled.'
+
+    def _publish_capture_admission_policy_summary(self, policy) -> None:
+        """Passively publish a changed policy to already-built UI shells."""
+        summary = self._capture_admission_policy_summary(policy)
+        self._capture_admission_status_text = summary
+        popup = self.__dict__.get('game_detection_popup')
+        setter = getattr(popup, 'set_capture_admission_policy_summary', None)
+        if callable(setter):
+            setter(summary)
+        page = self.__dict__.get('_settings_page_widget')
+        setter = getattr(page, 'set_capture_admission_status', None)
+        if callable(setter):
+            setter(summary)
+
+    def set_capture_admission_status(self, message: str = ''):
+        self._capture_admission_status_text = str(message or '')
+        page = getattr(self, '_settings_page_widget', None)
+        setter = getattr(page, 'set_capture_admission_status', None)
+        if callable(setter):
+            setter(self._capture_admission_status_text)
+
+    def _set_capture_admission_windows_cache(self, records, generation=0):
+        generation = int(generation or 0)
+        if generation and generation < int(
+                getattr(self, '_capture_admission_windows_generation', 0) or 0):
+            return False
+        self._capture_admission_windows_generation = generation
+        self._capture_admission_windows_cache = [
+            dict(item) for item in (records or ()) if isinstance(item, dict)]
+        page = getattr(self, '_settings_page_widget', None)
+        setter = getattr(page, 'set_capture_admission_windows', None)
+        if callable(setter):
+            setter(self._capture_admission_windows_cache)
+        return True
+
+    def _request_capture_admission_windows(self):
+        """Enumerate windows only after an explicit Settings action."""
+        self._admission_discovery_generation = int(
+            getattr(self, '_admission_discovery_generation', 0)) + 1
+        generation = self._admission_discovery_generation
+        epoch = int(getattr(self, '_admission_epoch', 0))
+        self.set_capture_admission_status('Refreshing running windows…')
+
+        def discover():
+            try:
+                raw = _enumerate_capturable_windows()
+                records = []
+                for item in raw or ():
+                    if not isinstance(item, dict):
+                        continue
+                    path = str(item.get('exe_path', '') or '').strip()
+                    if not path:
+                        continue
+                    display = str(item.get('display_name', '')
+                                  or item.get('title', '') or Path(path).name)
+                    records.append({'exe_path': path, 'display_name': display,
+                                    'icon': item.get('icon')})
+                error = ''
+            except Exception as exc:
+                records = []
+                error = str(exc).strip() or 'Window discovery failed.'
+
+            def publish():
+                if (generation != getattr(self, '_admission_discovery_generation', 0)
+                        or epoch != getattr(self, '_admission_epoch', 0)
+                        or getattr(self, '_shutdown_requested', False)):
+                    return
+                if error:
+                    self.set_capture_admission_status(error)
+                else:
+                    if not self._set_capture_admission_windows_cache(
+                            records, generation):
+                        return
+                    self.set_capture_admission_status(
+                        f'{len(records)} running window(s) available.')
+
+            self._ui_call.emit(publish)
+
+        self._admission_discovery_thread = threading.Thread(
+            target=discover, daemon=True, name='fthr-admission-windows')
+        self._admission_discovery_thread.start()
 
     def _on_custom_game_rules_changed(self, rules: object):
         if hasattr(self._game_detector, 'set_custom_game_rules'):
@@ -5089,15 +8953,108 @@ class MainWindow(QMainWindow):
                 self.settings_manager.get('game_detection_blacklist', []))
 
     def _on_focus_lost(self):
-        if focus_pause_supported(sys.platform) and self.bridge.is_connected():
-            self.bridge.pause_recording()
-            self._set_status('PAUSED — GAME UNFOCUSED', status_warning_qss())
+        if not focus_pause_supported(sys.platform):
+            return
+        self._focus_action_generation += 1
+        self._focus_action = 'pause'
+        self._focus_action_deadline = time.monotonic() + 2.0
+        self._focus_action_engine = self.engine_process
+        self._focus_action_bridge = self.bridge
+        self._focus_action_engine_generation = self._engine_process_generation
+        self._pump_focus_action()
 
     def _on_focus_regained(self):
-        if focus_pause_supported(sys.platform) and self.bridge.is_connected():
-            self.bridge.resume_recording()
-            # Resume is a request, not proof that fresh frames have returned.
-            self._set_status('STARTING CAPTURE', status_idle_qss())
+        if not focus_pause_supported(sys.platform):
+            return
+        self._focus_action_generation += 1
+        self._focus_action = 'resume'
+        self._focus_action_deadline = time.monotonic() + 2.0
+        self._focus_action_engine = self.engine_process
+        self._focus_action_bridge = self.bridge
+        self._focus_action_engine_generation = self._engine_process_generation
+        self._pump_focus_action()
+
+    def _clear_focus_action(self):
+        self._focus_action_generation = getattr(
+            self, '_focus_action_generation', 0) + 1
+        self._focus_action = None
+        self._focus_action_deadline = 0.0
+        self._focus_action_engine = None
+        self._focus_action_bridge = None
+        self._focus_action_engine_generation = None
+        timer = getattr(self, '_focus_action_timer', None)
+        if timer is not None:
+            timer.stop()
+
+    def _pump_focus_action(self):
+        action = self._focus_action
+        if action is None:
+            self._focus_action_timer.stop()
+            return
+        if (getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)):
+            self._clear_focus_action()
+            return
+        if (action == 'resume'
+                and _admission_call(self, '_admission_transition_active')):
+            self._clear_focus_action()
+            return
+        intent_generation = getattr(self, '_focus_action_generation', 0)
+        engine = getattr(self, '_focus_action_engine', None)
+        bridge = getattr(self, '_focus_action_bridge', None)
+        engine_generation = getattr(self, '_focus_action_engine_generation', None)
+        if (engine is None or bridge is None
+                or engine is not self.engine_process
+                or bridge is not self.bridge
+                or engine_generation != self._engine_process_generation):
+            self._clear_focus_action()
+            return
+        # Check the deadline before every retry, including the first one.
+        if time.monotonic() >= self._focus_action_deadline:
+            self._clear_focus_action()
+            return
+        if not bridge.is_connected():
+            self._clear_focus_action()
+            return
+        if action == 'resume':
+            session = getattr(self, '_accepted_capture_session', None)
+            if not self._accepted_session_owner_is_current(session):
+                self._clear_focus_action()
+                return
+            owner_bridge = bridge
+            proof = _admission_call(
+                self, '_admission_stable_proof', session.request)
+            if (proof is None
+                    or not _admission_call(
+                        self, '_admission_pure_proof_current', proof)
+                    or not _admission_call(
+                        self, '_accepted_session_owner_pure_is_current',
+                        session)
+                    or self.bridge is not owner_bridge):
+                self._clear_focus_action()
+                return
+            submitted = owner_bridge.resume_recording()
+        else:
+            submitted = bridge.pause_recording()
+        if (intent_generation != self._focus_action_generation
+                or action != self._focus_action
+                or engine is not self.engine_process
+                or bridge is not self.bridge
+                or engine_generation != self._engine_process_generation):
+            return
+        if submitted:
+            self._clear_focus_action()
+            if action == 'pause':
+                self._set_status('PAUSED — GAME UNFOCUSED', status_warning_qss())
+            else:
+                # Resume is a request, not proof that fresh frames have returned.
+                self._set_status('STARTING CAPTURE', status_idle_qss())
+            return
+        if time.monotonic() >= self._focus_action_deadline:
+            self._clear_focus_action()
+            return
+        if not self._focus_action_timer.isActive():
+            self._focus_action_timer.start()
 
     # Settings handlers
 
@@ -5117,16 +9074,70 @@ class MainWindow(QMainWindow):
     def _on_resolution_changed(self, w: int, h: int): self.capture_width, self.capture_height = w, h
     def _on_bitrate_changed(self, kbps: int):         self.capture_bitrate = kbps
 
+    def _on_border_free_capture_changed(self):
+        """Apply plugin capture policy through the normal owned restart path."""
+        if (getattr(self, '_shutdown_requested', False)
+                or not getattr(self, '_file_operations_ready', True)):
+            return
+        # Initial startup will resolve the registration itself. Do not start a
+        # second native process from UI/plugin construction.
+        if (getattr(self, 'engine_process', None) is not None
+                or getattr(self, '_restart_pending', False)
+                or getattr(self, '_pending_launch_request', None) is not None):
+            self._on_capture_settings_restart_requested()
+
+    def _on_wgc_capture_changed(self):
+        """Apply a backend change when the existing capture owner is idle."""
+        if (getattr(self, '_shutdown_requested', False)
+                or not getattr(self, '_file_operations_ready', True)):
+            return
+        if (getattr(self, 'engine_process', None) is not None
+                or getattr(self, '_restart_pending', False)
+                or getattr(self, '_pending_launch_request', None) is not None):
+            self._wgc_capture_change_pending = True
+            self._apply_latest_desired_request_if_idle()
+
+    def _queue_capture_settings_restart(self):
+        if (not getattr(self, '_shutdown_requested', False)
+                and getattr(self, '_file_operations_ready', True)):
+            self._capture_settings_timer.start()
+
+    def _on_capture_settings_restart_requested(self):
+        """Admit one settings/source intent through the real Main owner.
+
+        Popups only emit their detached signal. Keeping the re-entry guard at
+        this boundary prevents a synchronous settings callback from launching a
+        second restart before the first request has recorded its ownership.
+        """
+        timer = getattr(self, '_capture_settings_timer', None)
+        if timer is not None:
+            timer.stop()
+        if getattr(self, '_shutdown_requested', False):
+            return False
+        if getattr(self, '_capture_restart_hook_active', False):
+            # A synchronous popup callback can arrive while A is dispatching.
+            # Resolve the new settings as B and leave it for the one bounded
+            # idle flush; silently returning here would lose its authority.
+            request = self._prepare_next_capture_request(
+                getattr(self, '_engine_profile', 'clips'))
+            if request is not None:
+                self._queue_latest_desired_request(
+                    request, reason='Capture change queued during apply')
+            return False
+        self._capture_restart_hook_active = True
+        try:
+            return self._restart_capture_engine()
+        finally:
+            self._capture_restart_hook_active = False
+
     def _on_audio_capture_changed(self, _enabled: bool):
-        self._restart_capture_engine()
-        if hasattr(self, '_gary_overlay'):
-            self._sync_gary_settings()
+        self._queue_capture_settings_restart()
 
     def _on_audio_capture_mode_changed(self, _mode: str):
         # The mode is part of the capture generation contract. Restarting here
         # also makes the first clip after a toggle unambiguous if a save and a
         # settings change happen close together.
-        self._restart_capture_engine()
+        self._queue_capture_settings_restart()
 
     def _on_capture_card_changed(self, enabled: bool):
         setter = getattr(self.capture_card, 'set_visuals_enabled', None)
@@ -5145,10 +9156,6 @@ class MainWindow(QMainWindow):
                 timer.stop()
         if not applying:
             self._engine_restart_requested = False
-        for popup_name in ('cap_settings_popup', 'source_popup'):
-            popup = getattr(self, popup_name, None)
-            if popup is not None:
-                popup.set_apply_state(applying)
         if applying:
             self._set_status(self._capture_pending_text(), status_idle_qss())
 
@@ -5159,17 +9166,23 @@ class MainWindow(QMainWindow):
         detail = 'Capture did not confirm the new settings within 30 seconds.'
         # This is a UI confirmation deadline, not proof of an engine failure.
         # Keep capture alive, and prevent a late handshake from reopening Apply.
+        apply_token = getattr(self._capture_config, 'applying_token', None)
         self._engine_handshake_generation = None
         self._pending_launch_config = None
         self._pending_launch_generation = None
+        self._pending_launch_token = None
+        self._pending_launch_admission_epoch = None
         self._restart_pending = False
         self._restart_deferred_for_save = False
-        self._capture_config.fail(detail)
+        if apply_token is None:
+            self._capture_config.fail(detail)
+        else:
+            self._capture_config.fail(detail, apply_token)
         self._set_capture_apply_state(False)
         self._set_status('SETTINGS APPLY FAILED', status_warning_qss())
         self.push_error(
             'SETTINGS APPLY TIMED OUT',
-            detail + ' Adjust the settings and apply again, or restart the engine.',
+            detail + ' Change a capture setting to retry, or restart the engine.',
             level='error',
             actions=[('RESTART ENGINE', self._restart_capture_engine)],
             key='capture-apply-timeout',
@@ -5222,6 +9235,2112 @@ class MainWindow(QMainWindow):
             self.capture_bitrate = BITRATE_PRESETS[resolution][quality]
         self.buffer_seconds = compute_buffer_seconds(clip, self.settings_manager.get('custom_clip_lengths', []))
         return True
+
+    def _capture_global_defaults_snapshot(self) -> dict[str, object]:
+        """Read only the capture inputs needed for one detached request."""
+        defaults = {
+            'clip_length': 30, 'framerate': 60, 'resolution': 'source',
+            'bitrate_level': 'medium', 'custom_bitrate_kbps': 25_000,
+            'recording_framerate': 60, 'recording_resolution': 'source',
+            'recording_bitrate_level': 'medium',
+            'recording_custom_bitrate_kbps': 25_000,
+            'audio_capture_enabled': True,
+            'audio_capture_mode': AUDIO_CAPTURE_MODE_COMBINED,
+            'audio_source_mode': None, 'audio_device_tracks': [],
+            'per_app_audio_tracks': None, 'mic_device_id': None,
+            'playback_device_id': None, 'mic_downmix_mono': False,
+            'mic_volume': 100, 'camera_enabled': False,
+            'camera_device_index': 0, 'camera_overlay_rect': DEFAULT_OVERLAY_RECT,
+            'capture_card_enabled': True, 'image_overlay_enabled': False,
+            'image_overlay_path': '', 'image_overlay_opacity': 100,
+            'image_overlay_fit': 'fit',
+            'image_overlay_rect': DEFAULT_IMAGE_OVERLAY_RECT,
+            'keyboard_overlay_enabled': False,
+            'keyboard_overlay_rect': DEFAULT_KEYBOARD_OVERLAY_RECT,
+            'watermark_enabled': False,
+            'game_detection_custom_games': [],
+        }
+        values = {
+            key: copy.deepcopy(self.settings_manager.get(key, default))
+            for key, default in defaults.items()
+        }
+        # Global-only values are explicit inputs and are never mixed into the
+        # profile catalog.  Keep these detached too because the source request
+        # may outlive this UI object while a native callback is pending.
+        for key, default in {
+                'capture_monitor': '', 'codec_pref': 'auto',
+                'encoder_pref': 'auto', 'encoder_preset': 4,
+                'scaling_mode': 'stretch', 'capture_mode': 'desktop',
+                'target_hwnd': 0, 'target_window_name': '',
+                'target_clip_group': '', 'target_window_identity': None,
+                'capture_source_authority': 'manual',
+                'custom_clip_lengths': [], 'platform': sys.platform,
+                REPLAY_STORAGE_KEY: None,
+                'allow_replay_gaps': True,
+                'allow_low_fps_clips': True,
+                'capture_cursor': True,
+                'application_audio_exclusions': [],
+                'keep_system_audio_backup': True,
+        }.items():
+            values[key] = copy.deepcopy(
+                self.settings_manager.get(key, default)
+                if key != 'platform' else default)
+        return values
+
+    def _capture_source_snapshot(self, values: dict[str, object] | None = None,
+                                 *, source_snapshot=None) -> SourceSnapshot:
+        if border_free_capture_enabled(self):
+            values = values or self._capture_global_defaults_snapshot()
+            # This happens before profile resolution and admission: a saved
+            # window grant must never authorize this full-monitor request.
+            return SourceSnapshot(
+                source_mode='desktop', authority='manual',
+                display_name='Desktop (Border-free capture)', clip_group='Desktop',
+                monitor_identity=str(values.get('capture_monitor', '') or ''))
+        if isinstance(source_snapshot, SourceSnapshot):
+            return source_snapshot
+        values = values or self._capture_global_defaults_snapshot()
+        mode = str(values.get('capture_mode', 'desktop') or 'desktop')
+        authority = str(values.get(
+            'capture_source_authority', 'manual') or 'manual').lower()
+        if authority not in {'manual', 'automatic'}:
+            authority = 'manual'
+        if mode != 'window':
+            return SourceSnapshot(
+                source_mode='desktop', authority=authority,
+                display_name='Desktop', clip_group='Desktop',
+                monitor_identity=str(values.get('capture_monitor', '') or ''),
+            )
+        try:
+            hwnd = int(values.get('target_hwnd', 0) or 0)
+        except (TypeError, ValueError):
+            hwnd = 0
+        saved_identity = values.get('target_window_identity')
+        live_window = (get_window_info(hwnd, own_pid=os.getpid())
+                       if hwnd and sys.platform == 'win32' else None)
+        if sys.platform == 'win32' and (
+                not hwnd or not identity_matches(saved_identity, live_window)):
+            raise ValueError(
+                'The selected window is missing or no longer matches its saved identity')
+        source = live_window or getattr(self, '_active_game_window', None)
+        if source is None and hasattr(self, 'source_popup'):
+            popup = self.source_popup
+            index = popup.window_combo.currentIndex()
+            candidates = getattr(popup, '_window_list', ())
+            if 0 <= index < len(candidates):
+                source = candidates[index]
+        source_map = source.as_capture_window() if isinstance(
+            source, GameWindow) else source if isinstance(source, dict) else {}
+        exe_path = str(source_map.get('exe_path', '') or '')
+        if not exe_path and isinstance(saved_identity, dict):
+            exe_path = str(saved_identity.get('exe_path', '') or '')
+        if sys.platform != 'win32':
+            # Windows profile matching is intentionally not fed POSIX paths.
+            exe_path = ''
+        live_identity = saved_identity if isinstance(saved_identity, dict) else None
+        if sys.platform != 'win32':
+            # Keep the established POSIX native window/XID in the detached
+            # request even though executable matching is Windows-only.
+            linux_hwnd = source_map.get('hwnd', hwnd) if source_map else hwnd
+            try:
+                linux_hwnd = int(linux_hwnd or 0)
+            except (TypeError, ValueError):
+                linux_hwnd = 0
+            live_identity = {'hwnd': linux_hwnd} if linux_hwnd > 0 else None
+        display_name = str(values.get('target_window_name', '') or '')
+        if source_map:
+            display_name = str(source_map.get(
+                'display_name', source_map.get('title', display_name)) or display_name)
+        clip_group = str(values.get('target_clip_group', '') or '')
+        if not clip_group and source_map:
+            clip_group = clip_group_for_source(source_map)
+        return SourceSnapshot(
+            source_mode='window', exe_path=exe_path or None,
+            live_identity=live_identity, authority=authority,
+            display_name=display_name or 'Game', clip_group=clip_group or 'Game',
+            monitor_identity=str(values.get('capture_monitor', '') or ''),
+        )
+
+    def _begin_capture_intent(self) -> int:
+        """Replace the latest pending intent before resolving its inputs."""
+        intent_id = int(getattr(self, '_capture_intent_revision', 0)) + 1
+        self._capture_intent_revision = intent_id
+        self._latest_capture_intent_id = intent_id
+        self._latest_capture_intent_state = 'resolving'
+        self._latest_capture_intent_consumed = False
+        self._desired_capture_intent_id = intent_id
+        return intent_id
+
+    def _capture_request_intent_id(self, request) -> int | None:
+        if request is None:
+            return None
+        return getattr(self, '_capture_request_intents', {}).get(
+            getattr(request, 'request_token', None))
+
+    def _latest_intent_owns_request(self, request) -> bool:
+        return (
+            self._capture_request_intent_id(request)
+            == getattr(self, '_latest_capture_intent_id', None)
+        )
+
+    def _consume_capture_intent(self, request=None, *, state='accepted') -> None:
+        if request is not None and not self._latest_intent_owns_request(request):
+            return
+        self._latest_capture_intent_state = state
+        self._latest_capture_intent_consumed = True
+        if (request is None
+                and state == 'invalid'
+                and getattr(self, '_desired_capture_request', None)
+                is getattr(getattr(self, '_accepted_capture_session', None),
+                           'request', None)):
+            return
+        if request is None or self._latest_intent_owns_request(request):
+            self._desired_capture_request = None
+            self._desired_capture_intent_id = None
+
+    def _capture_requests_equivalent(self, left, right) -> bool:
+        """Compare native/resource inputs while ignoring volatile metadata.
+
+        Request tokens, profile labels/revisions, source-intent bookkeeping and
+        postprocess metadata describe an immutable future job. They do not by
+        themselves require a native process restart. Native config, source
+        identity, microphone gain and the camera resource remain authoritative.
+        """
+        if left is None or right is None:
+            return left is right
+        return (
+            MainWindow._capture_native_inputs_equivalent(left, right)
+            and (
+                left.camera.enabled,
+                left.camera.device_index,
+            ) == (
+                right.camera.enabled,
+                right.camera.device_index,
+            )
+        )
+
+    @staticmethod
+    def _capture_native_inputs_equivalent(left, right) -> bool:
+        """Compare only inputs that alter the running native capture engine."""
+        if left is None or right is None:
+            return left is right
+        return (
+            (
+                left.source.source_mode,
+                left.source.exe_path,
+                left.source.live_identity,
+                left.source.authority,
+                left.source.monitor_identity,
+            ) == (
+                right.source.source_mode,
+                right.source.exe_path,
+                right.source.live_identity,
+                right.source.authority,
+                right.source.monitor_identity,
+            )
+            and left.capture_config == right.capture_config
+            and left.mic_gain_percent == right.mic_gain_percent
+        )
+
+    def _capture_backend_requires_restart(self) -> bool:
+        bridge = getattr(self, 'bridge', None)
+        if bridge is None:
+            return False
+        try:
+            return bool(
+                int(bridge.get_status().get('capture_health_flags', 0) or 0)
+                & int(CaptureHealthFlag.BACKEND_FAILED
+                      | CaptureHealthFlag.RECONFIGURE_REQUIRED))
+        except (AttributeError, OSError, RuntimeError):
+            return True
+
+    def _rebind_equivalent_capture_request(self, request, active=None) -> bool:
+        """Admit metadata-only B without stopping a healthy native A."""
+        active = active or getattr(self, '_accepted_capture_session', None)
+        owner_snapshot = self._capture_owner_snapshot(active)
+        equivalent = getattr(self, '_capture_requests_equivalent', None)
+        equivalent = (equivalent if callable(equivalent)
+                      else MainWindow._capture_requests_equivalent.__get__(
+                          self, MainWindow))
+        if (active is None
+                or MainWindow._capture_backend_requires_restart(self)
+                or not equivalent(request, active.request)
+                or not MainWindow._accepted_session_owner_is_current(
+                    self, active)
+                or not self._capture_owner_snapshot_is_current(
+                    owner_snapshot)):
+            return False
+        proof = _admission_call(self, '_admission_stable_proof', request)
+        if proof is None or not _admission_call(
+                self, '_admission_pure_proof_current', proof):
+            return False
+        if not self._capture_owner_snapshot_is_current(owner_snapshot):
+            return False
+        self._retain_terminal_response_owner_cache(
+            getattr(self, 'engine_process', None),
+            getattr(self, 'bridge', None),
+            getattr(self, '_engine_process_generation', None),
+            getattr(active, 'native_capture_generation', None))
+        camera_receipt = self._camera_runtime_receipt_for_request(request)
+        if not self._capture_owner_snapshot_is_current(owner_snapshot):
+            return False
+        try:
+            bound_session = bind_capture_session(
+                request,
+                process_generation=active.process_generation,
+                native_capture_generation=active.native_capture_generation,
+                accepted_config_token=active.accepted_config_token,
+                manual_consent_nonce=active.manual_consent_nonce,
+                allowlist_revision=proof['decision'].policy_revision,
+            )
+        except (TypeError, ValueError):
+            # A malformed metadata-only bind cannot replace accepted A.
+            return False
+        self._accepted_capture_session = bound_session
+        self._accepted_camera_runtime_receipt = camera_receipt
+        if not self._capture_owner_snapshot_is_current(
+                owner_snapshot, expected_session=bound_session):
+            return False
+        self._configure_keyboard_capture_for_request(request)
+        if not self._capture_owner_snapshot_is_current(
+                owner_snapshot, expected_session=bound_session):
+            return False
+        self._consume_capture_intent(request, state='accepted')
+        self._pending_capture_reason = ''
+        if not self._capture_owner_snapshot_is_current(
+                owner_snapshot, expected_session=bound_session):
+            return False
+        self._publish_capture_profile_status(pending=False, message='')
+        return True
+
+    def _bind_same_native_capture_request(self, request, active=None) -> bool:
+        """Bind future metadata to A while a provider resource changes idle."""
+        active = active or getattr(self, '_accepted_capture_session', None)
+        owner_snapshot = self._capture_owner_snapshot(active)
+        if (active is None
+                or MainWindow._capture_backend_requires_restart(self)
+                or not MainWindow._capture_native_inputs_equivalent(
+                    request, active.request)
+                or not MainWindow._accepted_session_owner_is_current(
+                    self, active)
+                or not self._capture_owner_snapshot_is_current(
+                    owner_snapshot)):
+            return False
+        proof = _admission_call(self, '_admission_stable_proof', request)
+        if proof is None or not _admission_call(
+                self, '_admission_pure_proof_current', proof):
+            return False
+        if not self._capture_owner_snapshot_is_current(owner_snapshot):
+            return False
+        self._retain_terminal_response_owner_cache(
+            getattr(self, 'engine_process', None),
+            getattr(self, 'bridge', None),
+            getattr(self, '_engine_process_generation', None),
+            getattr(active, 'native_capture_generation', None))
+        try:
+            bound_session = bind_capture_session(
+                request,
+                process_generation=active.process_generation,
+                native_capture_generation=active.native_capture_generation,
+                accepted_config_token=active.accepted_config_token,
+                manual_consent_nonce=active.manual_consent_nonce,
+                allowlist_revision=proof['decision'].policy_revision,
+            )
+        except (TypeError, ValueError):
+            # A camera-resource rebind must fail closed and retain A's owner.
+            return False
+        self._accepted_capture_session = bound_session
+        self._accepted_camera_runtime_receipt = None
+        if not self._capture_owner_snapshot_is_current(
+                owner_snapshot, expected_session=bound_session):
+            return False
+        self._configure_keyboard_capture_for_request(request)
+        if not self._capture_owner_snapshot_is_current(
+                owner_snapshot, expected_session=bound_session):
+            return False
+        self._consume_capture_intent(request, state='accepted')
+        self._pending_capture_reason = ''
+        if not self._capture_owner_snapshot_is_current(
+                owner_snapshot, expected_session=bound_session):
+            return False
+        self._publish_capture_profile_status(pending=False, message='')
+        return True
+
+    def _prepared_source_is_live(self, request) -> bool:
+        """Revalidate the detached source immediately before native launch."""
+        source = getattr(request, 'source', None)
+        if source is None or source.source_mode != 'window':
+            return True
+        identity = source.live_identity
+        if not isinstance(identity, dict) and identity is not None:
+            identity = dict(identity)
+        identity = identity or {}
+        raw_hwnd = identity.get('hwnd')
+        if not self._admission_positive_int(raw_hwnd):
+            # Invalid persisted window identity is an intentional admission veto.
+            return False
+        hwnd = raw_hwnd
+        if sys.platform != 'win32':
+            # POSIX capture keeps the legacy native window/XID route. It has no
+            # Windows executable identity matcher or process catalog contract.
+            return True
+        try:
+            live_window = get_window_info(hwnd, own_pid=os.getpid())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            # Window lookup failures invalidate the detached source proof.
+            return False
+        return bool(live_window and identity_matches(identity, live_window))
+
+    def _accepted_session_owner_is_current(self, session=None, *, status=None,
+                                           allow_native_generation=False) -> bool:
+        """Prove that an accepted A still owns the live native resources."""
+        session = session or getattr(self, '_accepted_capture_session', None)
+        if (session is None
+                or getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)):
+            return False
+        tracker = getattr(self, '_capture_config', None)
+        process = getattr(self, 'engine_process', None)
+        bridge = getattr(self, 'bridge', None)
+        if (tracker is None or process is None or bridge is None
+                or getattr(tracker, 'accepted_token', None)
+                != session.accepted_config_token
+                or getattr(tracker, 'active', None)
+                != session.request.capture_config
+                or getattr(self, '_engine_gen', None)
+                != session.process_generation
+                or getattr(self, '_engine_process_generation', None)
+                != session.process_generation):
+            return False
+        try:
+            if process.poll() is not None or not bridge.is_connected():
+                return False
+        except (AttributeError, OSError, RuntimeError):
+            # A dead process/bridge cannot be treated as an accepted owner.
+            return False
+        if status is None:
+            try:
+                status = bridge.get_status()
+            except (AttributeError, OSError, RuntimeError):
+                # Status lookup failure is a fail-closed owner admission result.
+                return False
+        if not isinstance(status, dict) or not status.get('connected'):
+            return False
+        current_native = int(status.get('capture_generation', 0) or 0)
+        if (not allow_native_generation
+                and current_native != session.native_capture_generation):
+            return False
+        if allow_native_generation and current_native <= 0:
+            return False
+        source_live = getattr(self, '_prepared_source_is_live', None)
+        if callable(source_live):
+            return bool(source_live(session.request))
+        return MainWindow._prepared_source_is_live(self, session.request)
+
+    def _accepted_session_owner_pure_is_current(self, session=None) -> bool:
+        """Check the owner lineage without polling process, bridge, or source."""
+        session = session or getattr(self, '_accepted_capture_session', None)
+        if (session is None
+                or getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)
+                or _admission_call(self, '_admission_transition_active')):
+            return False
+        tracker = getattr(self, '_capture_config', None)
+        process = getattr(self, 'engine_process', None)
+        bridge = getattr(self, 'bridge', None)
+        return bool(
+            tracker is not None
+            and process is not None
+            and bridge is not None
+            and getattr(tracker, 'accepted_token', None)
+            == session.accepted_config_token
+            and getattr(tracker, 'active', None)
+            == session.request.capture_config
+            and getattr(self, '_engine_gen', None)
+            == session.process_generation
+            and getattr(self, '_engine_process_generation', None)
+            == session.process_generation
+            and getattr(self, '_accepted_capture_session', None) is session)
+
+    def _capture_owner_snapshot(self, session=None):
+        """Capture the exact A owner before an external admission hook."""
+        if session is None:
+            session = getattr(self, '_accepted_capture_session', None)
+        tracker = getattr(self, '_capture_config', None)
+        return {
+            'session': session,
+            'session_process_generation': getattr(
+                session, 'process_generation', None),
+            'session_native_generation': getattr(
+                session, 'native_capture_generation', None),
+            'session_config_token': getattr(
+                session, 'accepted_config_token', None),
+            'process': getattr(self, 'engine_process', None),
+            'bridge': getattr(self, 'bridge', None),
+            'bridge_owner': getattr(self, '_engine_bridge_owner', None),
+            'tracker': tracker,
+            'engine_generation': getattr(self, '_engine_gen', None),
+            'process_generation': getattr(
+                self, '_engine_process_generation', None),
+            'active_config': getattr(tracker, 'active', None),
+            'accepted_token': getattr(tracker, 'accepted_token', None),
+            'applying_config': getattr(tracker, 'applying', None),
+            'applying_token': getattr(tracker, 'applying_token', None),
+            'transition_revision': getattr(
+                tracker, 'transition_revision', None),
+        }
+
+    def _capture_owner_snapshot_is_current(
+            self, snapshot, *, expected_session=_ADMISSION_MISSING) -> bool:
+        """Keep an external A continuation from touching a successor B."""
+        if not isinstance(snapshot, dict):
+            return False
+        session = (snapshot.get('session')
+                   if expected_session is _ADMISSION_MISSING
+                   else expected_session)
+        current_session = getattr(self, '_accepted_capture_session', None)
+        if current_session is not session:
+            return False
+        if session is not None and (
+                getattr(session, 'process_generation', None)
+                != snapshot.get('session_process_generation')
+                or getattr(session, 'native_capture_generation', None)
+                != snapshot.get('session_native_generation')
+                or getattr(session, 'accepted_config_token', None)
+                != snapshot.get('session_config_token')):
+            return False
+        tracker = getattr(self, '_capture_config', None)
+        return (
+            not getattr(self, '_shutdown_requested', False)
+            and not getattr(self, '_shutdown_complete', False)
+            and not _admission_call(self, '_admission_transition_active')
+            and getattr(self, 'engine_process', None)
+            is snapshot.get('process')
+            and getattr(self, 'bridge', None) is snapshot.get('bridge')
+            and getattr(self, '_engine_bridge_owner', None)
+            is snapshot.get('bridge_owner')
+            and tracker is snapshot.get('tracker')
+            and getattr(self, '_engine_gen', None)
+            == snapshot.get('engine_generation')
+            and getattr(self, '_engine_process_generation', None)
+            == snapshot.get('process_generation')
+            and getattr(tracker, 'active', None)
+            is snapshot.get('active_config')
+            and getattr(tracker, 'accepted_token', None)
+            == snapshot.get('accepted_token')
+            and getattr(tracker, 'applying', None)
+            is snapshot.get('applying_config')
+            and getattr(tracker, 'applying_token', None)
+            == snapshot.get('applying_token')
+            and getattr(tracker, 'transition_revision', None)
+            == snapshot.get('transition_revision'))
+
+    def _capture_owner_signature(self):
+        """Return the small lineage tuple used around heartbeat side effects."""
+        session = getattr(self, '_accepted_capture_session', None)
+        request = getattr(session, 'request', None)
+        tracker = getattr(self, '_capture_config', None)
+        pending = getattr(self, '_pending_launch_request', None)
+        return (
+            getattr(self, '_engine_gen', None),
+            getattr(self, '_engine_process_generation', None),
+            id(getattr(self, 'engine_process', None)),
+            id(getattr(self, 'bridge', None)),
+            getattr(session, 'process_generation', None),
+            getattr(session, 'native_capture_generation', None),
+            getattr(session, 'accepted_config_token', None),
+            getattr(request, 'request_token', None),
+            getattr(tracker, 'accepted_token', None),
+            getattr(pending, 'request_token', None),
+            getattr(self, '_pending_launch_token', None),
+            getattr(self, '_pending_launch_generation', None),
+            bool(getattr(self, '_restart_pending', False)),
+            bool(getattr(self, '_capture_settings_applying', False)),
+        )
+
+    def _rebind_recovered_session(self, status) -> bool:
+        """Bind original A to a newly observed native generation in-place."""
+        session = getattr(self, '_accepted_capture_session', None)
+        owner_snapshot = MainWindow._capture_owner_snapshot(self, session)
+        if getattr(self, '_engine_bridge_owner', self.bridge) is not self.bridge:
+            return False
+        if session is None or not self._accepted_session_owner_is_current(
+                session, status=status, allow_native_generation=True):
+            return False
+        if not MainWindow._capture_owner_snapshot_is_current(self, owner_snapshot):
+            return False
+        native_generation = int(status.get('capture_generation', 0) or 0)
+        if native_generation == session.native_capture_generation:
+            self._retain_terminal_response_owner_cache(
+                getattr(self, 'engine_process', None),
+                getattr(self, 'bridge', None),
+                getattr(self, '_engine_process_generation', None),
+                native_generation)
+            return True
+        if self._retain_terminal_response_owner_cache(
+                getattr(self, 'engine_process', None),
+                getattr(self, 'bridge', None),
+                getattr(self, '_engine_process_generation', None),
+                native_generation) is None:
+            return False
+        if not MainWindow._capture_owner_snapshot_is_current(self, owner_snapshot):
+            return False
+        try:
+            rebound = bind_capture_session(
+                session.request,
+                process_generation=session.process_generation,
+                native_capture_generation=native_generation,
+                accepted_config_token=session.accepted_config_token,
+                manual_consent_nonce=session.manual_consent_nonce,
+                allowlist_revision=session.allowlist_revision,
+            )
+            camera_receipt = self._camera_runtime_receipt_for_request(session.request)
+            if not MainWindow._capture_owner_snapshot_is_current(self, owner_snapshot):
+                return False
+            self._accepted_capture_session = rebound
+            self._accepted_camera_runtime_receipt = camera_receipt
+            self._refresh_capture_summary()
+            return True
+        except (TypeError, ValueError):
+            # Recovery never relabels A when its immutable session cannot bind.
+            return False
+
+    def _resolve_capture_request(self, purpose='clips', *, source_snapshot=None,
+                                 prepared_request=None):
+        """Resolve and validate the full next request before engine stop."""
+        if prepared_request is not None:
+            if not isinstance(prepared_request, ResolvedCaptureRequest):
+                raise ValueError('prepared capture request has an invalid type')
+            if not capture_policy_is_current(self, prepared_request):
+                raise ValueError('Capture compatibility changed; apply capture again')
+            return prepared_request
+        intent_id = self._begin_capture_intent()
+        values = self._capture_global_defaults_snapshot()
+        source = self._capture_source_snapshot(values, source_snapshot=source_snapshot)
+        catalog_revision = 0
+        profile = None
+        if sys.platform == 'win32':
+            catalog = self.settings_manager.read_game_capture_profiles()
+            catalog_revision = int(getattr(catalog, 'revision', 0) or 0)
+            profile, effective = resolve_profile_values(
+                catalog, source.exe_path if source.source_mode == 'window' else None,
+                values)
+            effective_values = effective.to_dict()
+        else:
+            # Preserve established Linux settings/audio behavior and do not
+            # pass POSIX executable identities into the Windows matcher.
+            effective_values = {
+                key: copy.deepcopy(values[key]) for key in (
+                    'clip_length', 'framerate', 'resolution', 'bitrate_level',
+                    'custom_bitrate_kbps', 'recording_framerate',
+                    'recording_resolution', 'recording_bitrate_level',
+                    'recording_custom_bitrate_kbps', 'audio_capture_enabled',
+                    'audio_capture_mode', 'audio_source_mode',
+                    'audio_device_tracks', 'per_app_audio_tracks',
+                    'mic_device_id', 'playback_device_id',
+                    'mic_downmix_mono', 'mic_volume', 'camera_enabled',
+                    'camera_device_index', 'camera_overlay_rect')}
+        monitor = str(values.get('capture_monitor', '') or '')
+        if sys.platform == 'win32' or monitor.casefold().startswith(
+                (r'\\?\display#', r'\\.\display')):
+            choices = enumerate_windows_monitors()
+            selection = resolve_monitor_selection(monitor, choices)
+            if not selection.path:
+                raise MonitorSelectionError(selection)
+            if selection.persist_required:
+                previous = self.settings_manager.get('capture_monitor', monitor)
+                self.settings_manager.set('capture_monitor', selection.path)
+                if self.settings_manager.save_settings() is False:
+                    self.settings_manager.set('capture_monitor', previous)
+                    raise ValueError('could not persist resolved monitor path')
+            monitor = selection.path
+        active_game = getattr(self, '_active_game_window', None)
+        crop = None
+        if (sys.platform != 'win32' and isinstance(active_game, GameWindow)
+                and int(values.get('target_hwnd', 0) or 0) == int(active_game.hwnd)):
+            crop = crop_profile_for_window(
+                active_game, values.get('game_detection_custom_games', []))
+        config = build_capture_config(
+            values=effective_values, global_values=values, purpose=purpose,
+            bitrate_presets=BITRATE_PRESETS, resolution_to_dims=_resolution_to_dims,
+            monitor=monitor, codec=str(values.get('codec_pref', 'auto')),
+            encoder=str(values.get('encoder_pref', 'auto')),
+            preset=int(values.get('encoder_preset', 4)),
+            scaling=str(values.get('scaling_mode', 'stretch')),
+            crop=crop, custom_clip_lengths=values.get('custom_clip_lengths', []),
+        )
+        config = apply_capture_policy(self, config)
+        camera = CameraSnapshot(
+            enabled=bool(effective_values.get('camera_enabled', False)),
+            device_index=int(effective_values.get('camera_device_index', 0) or 0),
+            overlay_rect=effective_values.get(
+                'camera_overlay_rect', DEFAULT_OVERLAY_RECT),
+        )
+        keyboard = third_party_keyboard_settings(self.settings_manager)
+        effects = {
+            'capture_card_enabled': bool(values.get('capture_card_enabled', True)),
+            'image_overlay_enabled': bool(values.get('image_overlay_enabled', False)),
+            'image_overlay_path': str(values.get('image_overlay_path', '') or ''),
+            'image_overlay_opacity': int(values.get('image_overlay_opacity', 100) or 100),
+            'image_overlay_fit': str(values.get('image_overlay_fit', 'fit') or 'fit'),
+            'image_overlay_rect': values.get('image_overlay_rect', DEFAULT_IMAGE_OVERLAY_RECT),
+            'image_overlays': image_overlay_layers(self.settings_manager),
+            'keyboard_overlay_enabled': bool(values.get('keyboard_overlay_enabled', False)),
+            'keyboard_overlay_rect': values.get('keyboard_overlay_rect', DEFAULT_KEYBOARD_OVERLAY_RECT),
+            'third_party_keyboard': keyboard,
+            'watermark_enabled': bool(values.get('watermark_enabled', False)),
+        }
+        self._capture_request_token += 1
+        raw_mic_volume = effective_values.get('mic_volume', 100)
+        mic_volume = int(100 if raw_mic_volume is None else raw_mic_volume)
+        request = build_resolved_capture_request(
+            request_token=self._capture_request_token, purpose=purpose,
+            source=source, capture_config=config,
+            mic_gain_percent=mic_volume,
+            camera=camera, effects=effects,
+            profile_id=getattr(profile, 'id', None),
+            profile_revision=int(getattr(profile, 'revision', 0) or 0),
+            profile_name=getattr(profile, 'name', None),
+            profile_document_revision=catalog_revision,
+            source_intent_revision=int(getattr(
+                self, '_source_intent_revision', 0)),
+        )
+        request_intents = getattr(self, '_capture_request_intents', None)
+        if request_intents is None:
+            request_intents = {}
+            self._capture_request_intents = request_intents
+        request_intents[request.request_token] = intent_id
+        if len(request_intents) > 64:
+            oldest = sorted(request_intents)[:-64]
+            for token in oldest:
+                request_intents.pop(token, None)
+        self._latest_capture_intent_state = 'valid'
+        self._latest_capture_intent_consumed = False
+        self._desired_capture_intent_id = intent_id
+        self._desired_capture_request = request
+        return request
+
+    def _prepare_next_capture_request(self, purpose='clips', *,
+                                      source_snapshot=None):
+        try:
+            request = self._resolve_capture_request(
+                purpose, source_snapshot=source_snapshot)
+        except Exception as error:
+            self._latest_capture_intent_state = 'invalid'
+            self._latest_capture_intent_consumed = False
+            active_request = getattr(
+                getattr(self, '_accepted_capture_session', None), 'request', None)
+            if getattr(self, '_desired_capture_request', None) is not active_request:
+                self._desired_capture_request = None
+            self._desired_capture_intent_id = getattr(
+                self, '_latest_capture_intent_id', None)
+            self._pending_capture_reason = str(error)
+            self._set_status('CAPTURE REQUEST FAILED', status_warning_qss())
+            self._publish_capture_profile_status(
+                pending=True, message=self._pending_capture_reason)
+            self.push_error('CAPTURE REQUEST FAILED', str(error), level='warning')
+            return None
+        if not _admission_call(self, '_admission_guard_request', request):
+            return None
+        return request
+
+    def _accepted_profile_status(self):
+        session = getattr(self, '_accepted_capture_session', None)
+        request = getattr(session, 'request', None)
+        if request is None:
+            return None
+        return {
+            'name': request.profile_name or 'Global defaults',
+            'exe_path': request.source.exe_path or '',
+        }
+
+    @staticmethod
+    def _bounded_capture_label(value, limit=24):
+        value = str(value or '')
+        return value if len(value) <= limit else value[:max(1, limit - 1)] + '…'
+
+    def _capture_quality_summary(self, request) -> str:
+        config = request.capture_config
+        popup = getattr(self, 'cap_settings_popup', None)
+        clip_label = f'{config.normal_clip_seconds}s'
+        if popup is not None:
+            try:
+                clip_label = popup._clip_length_label(config.normal_clip_seconds)
+            except (AttributeError, TypeError, ValueError):
+                # A partially constructed popup must not block native status.
+                pass
+        resolution = 'Source' if not config.width and not config.height else (
+            f'{config.width}×{config.height}')
+        if popup is not None:
+            try:
+                for key, label in zip(
+                        popup._RES_KEYS, popup._RES_LABELS, strict=True):
+                    if _resolution_to_dims(key) == (config.width, config.height):
+                        resolution = label
+                        break
+            except (AttributeError, TypeError, ValueError):
+                # Keep the detached dimensions when popup labels are unavailable.
+                pass
+        return (f'{clip_label} // {config.fps} fps // {resolution} // '
+                f'{config.bitrate_kbps:,} kbps')
+
+    def _refresh_capture_summary(self):
+        """Keep the top bar bound to accepted A, with explicit defaults text."""
+        button = getattr(self, 'cap_btn', None)
+        if button is None:
+            return
+        def tooltip_text(value) -> str:
+            # Qt treats tooltip strings containing markup as rich text. Escape
+            # every profile/source value while retaining readable line breaks.
+            return escape(str(value or ''), quote=False).replace('\n', '<br>')
+
+        session = getattr(self, '_accepted_capture_session', None)
+        request = getattr(session, 'request', None)
+        if request is None:
+            popup = getattr(self, 'cap_settings_popup', None)
+            summary_getter = getattr(popup, 'get_summary', None)
+            summary = (summary_getter() if callable(summary_getter)
+                       else 'Global defaults')
+            visible = summary
+            tooltip = (
+                '<qt>Global defaults (next capture): '
+                f'{tooltip_text(summary)}</qt>')
+        else:
+            quality = self._capture_quality_summary(request)
+            profile = request.profile_name or 'Global defaults'
+            source = (request.source.display_name
+                      or request.source.clip_group
+                      or request.source.source_mode.title())
+            visible = f'{self._bounded_capture_label(profile, 20)} · {quality}'
+            tooltip = (
+                '<qt>Accepted profile: '
+                f'{tooltip_text(profile)}<br>'
+                f'Source: {tooltip_text(source)}<br>'
+                f'FPS / resolution / bitrate / duration: {tooltip_text(quality)}')
+        desired = getattr(self, '_desired_capture_request', None)
+        state = getattr(self, '_latest_capture_intent_state', 'none')
+        if (desired is not None and desired is not request
+                and state in {'resolving', 'valid', 'queued'}
+                and not getattr(self, '_latest_capture_intent_consumed', True)):
+            pending_quality = self._capture_quality_summary(desired)
+            pending_name = desired.profile_name or 'Global defaults'
+            tooltip += (f'<br>Pending: '
+                        f'{tooltip_text(pending_name)} '
+                        f'({tooltip_text(pending_quality)})')
+        if request is not None:
+            tooltip += '</qt>'
+        # QPushButton uses ampersand mnemonics; doubling keeps profile names
+        # such as “R&D Capture” visible exactly as entered.
+        button.setText(str(visible).replace('&', '&&'))
+        button.setToolTip(tooltip)
+
+    def _publish_capture_profile_status(self, *, pending=False, message=''):
+        page = getattr(self, '_settings_page_widget', None)
+        page_setter = getattr(page, 'set_profile_capture_status', None)
+        active = self._accepted_profile_status()
+        pending_value = (
+            self._desired_capture_request and {
+                'name': self._desired_capture_request.profile_name
+                or 'Global defaults',
+                'exe_path': self._desired_capture_request.source.exe_path or '',
+            } if pending else None)
+        if callable(page_setter):
+            page_setter(active, pending_value, message)
+            self._refresh_capture_summary()
+            return
+        widget = (getattr(page, 'profiles_widget', None)
+                  if page is not None else None)
+        setter = getattr(widget, 'set_capture_status', None)
+        if callable(setter):
+            setter(active, pending_value, str(message))
+        self._refresh_capture_summary()
+
+    def _manual_prepare_owns_capture(self, *, request=None,
+                                      request_token=None, path=None) -> bool:
+        """Return whether the current manual preparation owns this boundary."""
+        if getattr(self, '_manual_record_state', 'idle') != 'preparing':
+            return False
+        pending = getattr(self, '_pending_manual_record_request', None)
+        pending_path = getattr(self, '_pending_manual_record_path', None)
+        if pending is None or pending_path is None:
+            return False
+        if request is not None and pending != request:
+            return False
+        if request_token is not None and getattr(
+                pending, 'request_token', None) != request_token:
+            return False
+        if path is not None and pending_path != path:
+            return False
+        return True
+
+    def _capture_resources_busy(self, *, allow_manual_prepare=False,
+                                manual_request=None, manual_token=None,
+                                manual_path=None) -> bool:
+        manual_owned = bool(
+            allow_manual_prepare
+            and self._manual_prepare_owns_capture(
+                request=manual_request, request_token=manual_token,
+                path=manual_path))
+        if (getattr(self, '_manual_record_state', 'idle') != 'idle'
+                and not manual_owned):
+            return True
+        save_state = getattr(self, '_save_state', None)
+        if save_state is not None and save_state.is_busy():
+            return True
+        finalize = getattr(self, '_manual_record_finalize_thread', None)
+        if finalize is not None and finalize.is_alive():
+            return True
+        for thread in getattr(self, '_mux_threads', ()):
+            try:
+                if thread.is_alive():
+                    return True
+            except (AttributeError, TypeError, RuntimeError):
+                # A resource owner with no trustworthy liveness probe is busy;
+                # silently treating it as idle could mutate its provider.
+                return True
+        return False
+
+    def _configure_keyboard_capture_for_request(self, request=None) -> bool:
+        """Apply only the detached keyboard effects admitted by Main."""
+        capture = getattr(self, '_keyboard_overlay_capture', None)
+        if capture is None:
+            return False
+        if request is None:
+            config = third_party_keyboard_settings(self.settings_manager)
+        else:
+            try:
+                effects = request.to_dict().get('effects', {})
+                config = effects.get('third_party_keyboard', {})
+            except (AttributeError, TypeError, ValueError):
+                # A malformed detached request cannot safely reconfigure the
+                # shared provider; its native admission remains authoritative.
+                return False
+            if not isinstance(config, dict):
+                config = {}
+        if getattr(self, '_ultra_performance', False):
+            if (getattr(self, '_ultra_effects_pending', False)
+                    and self._capture_resources_busy()):
+                return True
+            config = {}
+        try:
+            capture.configure(copy.deepcopy(config))
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            print(f'[Keyboard] Capture configuration failed: {error}')
+            return False
+        return True
+
+    def _queue_latest_desired_request(self, request=None, *, reason=''):
+        if request is not None:
+            self._desired_capture_request = request
+            self._desired_capture_intent_id = self._capture_request_intent_id(request)
+            self._latest_capture_intent_state = 'queued'
+            self._latest_capture_intent_consumed = False
+        self._pending_capture_reason = str(reason or 'Capture changes pending')
+        self._publish_capture_profile_status(
+            pending=True, message=self._pending_capture_reason)
+        self._set_status('CAPTURE CHANGE PENDING', status_idle_qss())
+
+    def _apply_latest_desired_request_if_idle(self):
+        # A restart/apply already owns the pending attempt.  Do not re-enter
+        # it from a queued restore or heartbeat and reset its deadline/status.
+        if (getattr(self, '_restart_pending', False)
+                or getattr(self, '_capture_settings_applying', False)
+                or getattr(self, '_pending_launch_config', None) is not None):
+            return False
+        if self._capture_resources_busy() or getattr(
+                self, '_shutdown_requested', False):
+            return False
+        if getattr(self, '_wgc_capture_change_pending', False):
+            if getattr(self, '_engine_handshake_generation', None) is not None:
+                return False
+            # Resolve this only after a recording has finished. Even resolving
+            # a new intent earlier would supersede recording preparation.
+            self._wgc_capture_change_pending = False
+            active_request = getattr(
+                getattr(self, '_accepted_capture_session', None), 'request', None)
+            desired = getattr(self, '_desired_capture_request', None)
+            if (active_request is None or not capture_policy_is_current(self, active_request)
+                    or (desired is not None and not capture_policy_is_current(self, desired))):
+                return self._on_capture_settings_restart_requested()
+        if (getattr(self, '_latest_capture_intent_state', 'none')
+                in {'invalid', 'terminal'}):
+            if not getattr(self, '_latest_capture_intent_consumed', True):
+                self._consume_capture_intent(
+                    state=getattr(self, '_latest_capture_intent_state', 'invalid'))
+                self._pending_capture_reason = ''
+                self._publish_capture_profile_status(
+                    pending=False, message='')
+            return False
+        request = self._desired_capture_request
+        if request is None:
+            return False
+        active = getattr(self, '_accepted_capture_session', None)
+        if (active is not None
+                and MainWindow._capture_native_inputs_equivalent(
+                    request, active.request)
+                and (request.camera.enabled, request.camera.device_index)
+                != (active.request.camera.enabled, active.request.camera.device_index)):
+            if self._bind_same_native_capture_request(request, active):
+                self._request_camera_apply(
+                    request.camera, origin='settings',
+                    request_token=request.request_token,
+                    capture_request=request)
+                return True
+        if MainWindow._rebind_equivalent_capture_request(self, request, active):
+            return False
+        self._pending_capture_reason = ''
+        return self._restart_capture_engine(_prepared_request=request)
+
+    def _camera_runtime_receipt_for_request(self, request):
+        receipt = getattr(self, '_camera_runtime_receipt', None)
+        if not request.camera.enabled or not isinstance(receipt, dict):
+            return None
+        provider = getattr(self, '_camera_provider', None)
+        active = getattr(self, '_camera_active_physical', None)
+        if provider is None and isinstance(active, dict):
+            provider = active.get('provider')
+        # A missing exact provider cannot prove a live camera receipt.  Never
+        # construct a compatibility recorder or probe an unowned device here.
+        if provider is None:
+            return None
+        try:
+            current = provider.runtime_snapshot()
+        except Exception:
+            # Camera warmup probes fail closed so a stale receipt cannot admit a job.
+            return None
+        if not (current.running and current.ready
+                and current.device_index == request.camera.device_index
+                and current.generation == receipt.get('generation')
+                and receipt.get('device_index') == request.camera.device_index):
+            return None
+        refreshed = copy.deepcopy(receipt)
+        # The provider snapshot is the lock-protected source of truth at this
+        # admission boundary; do not carry a warmup False into a ready job.
+        refreshed['ready'] = bool(current.ready)
+        refreshed['device_index'] = int(current.device_index)
+        refreshed['generation'] = int(current.generation)
+        return refreshed
+
+    def _camera_make_operation(self, camera, *, origin, request_token,
+                               generation, capture_request, provider,
+                               owner_snapshot=None, start_boundary=None):
+        """Create the private identity carried through one provider open."""
+        owner_token = getattr(self, '_camera_owner_token', None)
+        if owner_token is None:
+            return None
+        # Keep the engine owner that authorized this physical open private.
+        # The caller must capture it before any external admission, busy, or
+        # provider availability hook. Re-capturing here would retroactively
+        # bless a successor owner installed by one of those hooks.
+        if not isinstance(owner_snapshot, dict):
+            return None
+        if not isinstance(start_boundary, dict):
+            return None
+        owner_snapshot = dict(owner_snapshot)
+        start_boundary = dict(start_boundary)
+        # A camera open may begin before the first native process exists. Keep
+        # the immutable request and mark this as a pre-launch lineage. Later
+        # tracker/process setup may fill in the same native line, but the
+        # engine generation itself must remain exactly the captured generation.
+        owner_snapshot['capture_request'] = capture_request
+        owner_snapshot['prelaunch'] = (
+            owner_snapshot.get('session') is None
+            and owner_snapshot.get('process') is None
+        )
+        return {
+            'provider': provider,
+            'owner_token': owner_token,
+            'nonce': object(),
+            'camera': camera,
+            'generation': generation,
+            'origin': str(origin),
+            'request_token': request_token,
+            'capture_request': capture_request,
+            'provider_generation': None,
+            'event': threading.Event(),
+            'callback_recorded': False,
+            'result': None,
+            'snapshot': None,
+            'capture_owner_snapshot': owner_snapshot,
+            'camera_start_boundary': start_boundary,
+        }
+
+    def _camera_original_engine_is_current(self, operation) -> bool:
+        """Check an operation's original native owner without its session id."""
+        snapshot = (operation.get('capture_owner_snapshot')
+                    if isinstance(operation, dict) else None)
+        if not isinstance(snapshot, dict):
+            return False
+        tracker = getattr(self, '_capture_config', None)
+        original_request = snapshot.get('capture_request')
+        original_session = snapshot.get('session')
+        current_session = getattr(self, '_accepted_capture_session', None)
+        if snapshot.get('prelaunch'):
+            # Before Popen/Tracker.apply there is no process or accepted token
+            # to compare.  The pending/accepted request must still be the
+            # same native lineage (or an equivalent metadata bind), while
+            # retaining the exact engine generation that authorized A.
+            if (original_request is None
+                    or (getattr(self, '_engine_gen', 0) or 0)
+                    != (snapshot.get('engine_generation', 0) or 0)
+                    or getattr(self, '_shutdown_requested', False)
+                    or getattr(self, '_shutdown_complete', False)
+                    or _admission_call(
+                        self, '_admission_transition_active')):
+                return False
+            current_requests = (
+                getattr(self, '_pending_launch_request', None),
+                getattr(self, '_pending_manual_record_request', None),
+                getattr(self, '_desired_capture_request', None),
+                getattr(current_session, 'request', None),
+            )
+            return any(
+                candidate is original_request
+                or (candidate is not None
+                    and MainWindow._capture_native_inputs_equivalent(
+                        candidate, original_request)
+                    and (candidate.camera.enabled,
+                         candidate.camera.device_index)
+                    == (original_request.camera.enabled,
+                        original_request.camera.device_index))
+                for candidate in current_requests)
+        session_lineage_current = (
+            original_session is None
+            or (current_session is not None
+                and getattr(current_session, 'process_generation', None)
+                == snapshot.get('session_process_generation')
+                and getattr(current_session, 'native_capture_generation', None)
+                == snapshot.get('session_native_generation')
+                and getattr(current_session, 'accepted_config_token', None)
+                == snapshot.get('session_config_token')))
+        return (
+            not getattr(self, '_shutdown_requested', False)
+            and not getattr(self, '_shutdown_complete', False)
+            and not _admission_call(self, '_admission_transition_active')
+            and session_lineage_current
+            and getattr(self, 'engine_process', None)
+            is snapshot.get('process')
+            and getattr(self, 'bridge', None) is snapshot.get('bridge')
+            and getattr(self, '_engine_bridge_owner', None)
+            is snapshot.get('bridge_owner')
+            and tracker is snapshot.get('tracker')
+            and getattr(self, '_engine_gen', None)
+            == snapshot.get('engine_generation')
+            and getattr(self, '_engine_process_generation', None)
+            == snapshot.get('process_generation')
+            and getattr(tracker, 'active', None)
+            is snapshot.get('active_config')
+            and getattr(tracker, 'accepted_token', None)
+            == snapshot.get('accepted_token')
+            and getattr(tracker, 'applying', None)
+            is snapshot.get('applying_config')
+            and getattr(tracker, 'applying_token', None)
+            == snapshot.get('applying_token')
+            and getattr(tracker, 'transition_revision', None)
+            == snapshot.get('transition_revision'))
+
+    def _camera_stable_request_is_current(self, request) -> bool:
+        """Authorize one exact immutable request at the provider boundary."""
+        if request is None:
+            return False
+        proof = _admission_call(self, '_admission_stable_proof', request)
+        return (proof is not None
+                and _admission_call(
+                    self, '_admission_pure_proof_current', proof))
+
+    def _camera_request_is_owned(self, operation):
+        """Check that a callback still belongs to its immutable request."""
+        if not isinstance(operation, dict):
+            return False
+        if (_admission_call(self, '_admission_transition_active')
+                or getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)):
+            return False
+        request = operation.get('capture_request')
+        if request is None:
+            # Production starts always carry the immutable capture request;
+            # an operation without one has no admissible owner boundary.
+            return False
+        camera = operation.get('camera')
+        if (camera is None
+                or getattr(request, 'camera', None) != camera
+                or (operation.get('request_token') is not None
+                    and getattr(request, 'request_token', None)
+                    != operation.get('request_token'))):
+            return False
+        candidates = (
+            getattr(self, '_pending_launch_request', None),
+            getattr(self, '_pending_manual_record_request', None),
+            getattr(self, '_desired_capture_request', None),
+            getattr(getattr(self, '_accepted_capture_session', None),
+                    'request', None),
+        )
+        if not any(candidate is request for candidate in candidates):
+            # Handshake completion can consume pending launch A before a
+            # metadata-only accepted B is installed.  Preserve the same
+            # physical camera operation only when B is an exact native/source
+            # equivalent and the original engine owner is still current.
+            accepted = getattr(self, '_accepted_capture_session', None)
+            accepted_request = getattr(accepted, 'request', None)
+            if (accepted_request is None
+                    or not MainWindow._capture_native_inputs_equivalent(
+                        request, accepted_request)
+                    or (request.camera.enabled,
+                        request.camera.device_index)
+                    != (accepted_request.camera.enabled,
+                        accepted_request.camera.device_index)
+                    or not self._camera_original_engine_is_current(operation)):
+                return False
+        if not self._camera_stable_request_is_current(request):
+            return False
+        # The proof hook may change the desired request without replacing the
+        # pending operation. The original native owner remains mandatory for
+        # every path, including this exact-request branch; otherwise a later
+        # engine generation could publish A merely because A is still desired.
+        if not self._camera_original_engine_is_current(operation):
+            return False
+        if any(candidate is request for candidate in (
+                getattr(self, '_pending_launch_request', None),
+                getattr(self, '_pending_manual_record_request', None),
+                getattr(self, '_desired_capture_request', None),
+                getattr(getattr(self, '_accepted_capture_session', None),
+                        'request', None))):
+            return True
+        accepted = getattr(self, '_accepted_capture_session', None)
+        accepted_request = getattr(accepted, 'request', None)
+        return (
+            accepted_request is not None
+            and MainWindow._capture_native_inputs_equivalent(
+                request, accepted_request)
+            and (request.camera.enabled, request.camera.device_index)
+            == (accepted_request.camera.enabled,
+                accepted_request.camera.device_index)
+            and self._camera_original_engine_is_current(operation))
+
+    def _camera_operation_boundary_current(self, operation, generation, camera):
+        return (
+            getattr(self, '_camera_pending_operation', None) is operation
+            and generation == getattr(self, '_camera_apply_generation', None)
+            and camera is getattr(self, '_camera_pending_request', None))
+
+    def _camera_pre_start_boundary_current(self, operation, generation,
+                                           camera, proof) -> bool:
+        """Purely recheck A after external provider hooks, before start_async."""
+        if not isinstance(operation, dict):
+            return False
+        request = operation.get('capture_request')
+        if (request is None
+                or request.camera != camera
+                or (operation.get('request_token') is not None
+                    and request.request_token != operation.get('request_token'))
+                or generation != int(getattr(
+                    self, '_camera_apply_generation', 0)) + 1):
+            return False
+        # Busy and availability hooks are external boundaries. Rebuild the
+        # stable proof after them so a raw policy revision cannot leave the
+        # earlier proof authoritative, then check the original owner before
+        # any provider mutation.
+        fresh_proof = _admission_call(
+            self, '_admission_stable_proof', request)
+        if (fresh_proof is None
+                or not _admission_call(
+                    self, '_admission_pure_proof_current', fresh_proof)
+                or not self._camera_original_engine_is_current(operation)):
+            return False
+        operation['admission_proof'] = fresh_proof
+        start_boundary = operation.get('camera_start_boundary')
+        if not isinstance(start_boundary, dict):
+            return False
+        if (operation.get('generation') != int(
+                    getattr(self, '_camera_apply_generation', 0)) + 1
+                or start_boundary.get('generation')
+                != getattr(self, '_camera_apply_generation', 0)
+                or getattr(self, '_camera_pending_operation', None)
+                is not start_boundary.get('pending_operation')
+                or getattr(self, '_camera_pending_request', None)
+                is not start_boundary.get('pending_request')
+                or getattr(self, '_camera_provider', None)
+                is not start_boundary.get('provider')
+                or getattr(self, '_desired_capture_request', None)
+                is not start_boundary.get('desired_request')
+                or getattr(self, '_pending_launch_request', None)
+                is not start_boundary.get('pending_launch_request')
+                or getattr(self, '_pending_manual_record_request', None)
+                is not start_boundary.get('pending_manual_request')):
+            return False
+        return any(candidate is request for candidate in (
+            getattr(self, '_pending_launch_request', None),
+            getattr(self, '_pending_manual_record_request', None),
+            getattr(self, '_desired_capture_request', None),
+            getattr(getattr(self, '_accepted_capture_session', None),
+                    'request', None)))
+
+    def _camera_record_operation_result(self, operation, ok, snapshot=None):
+        """Record worker evidence before scheduling any GUI continuation."""
+        if not isinstance(operation, dict):
+            return False
+        if operation.get('callback_recorded'):
+            return False
+        operation['callback_recorded'] = True
+        operation['result'] = bool(ok)
+        operation['snapshot'] = snapshot
+        operation['event'].set()
+        return True
+
+    def _camera_stop_receipt_for(self, target):
+        if not isinstance(target, dict):
+            return None
+        provider = target.get('provider')
+        owner_token = target.get('owner_token')
+        if owner_token is None:
+            return None
+        nonce = target.get('nonce') if isinstance(target, dict) else None
+        if isinstance(target, dict) and 'provider_generation' in target:
+            generation = target.get('provider_generation')
+        else:
+            generation = target.get('generation') if isinstance(target, dict) else None
+        device_index = target.get('device_index') if isinstance(target, dict) else None
+        return {
+            'provider': provider,
+            'owner_token': owner_token,
+            'nonce': nonce,
+            'generation': generation,
+            'device_index': device_index,
+            'event': threading.Event(),
+            'submitted': False,
+            'submission_resolved': False,
+            'submission_error': False,
+            'callback_recorded': False,
+            'result': None,
+        }
+
+    def _camera_retained_group(self):
+        """Take a shallow, identity-preserving snapshot of camera ownership.
+
+        Camera providers and their opaque owner tokens are deliberately kept
+        private.  A shutdown/revocation transition must retain every A
+        target and stop receipt before any provider callback can install B.
+        """
+        targets = []
+        for target in (
+                getattr(self, '_camera_pending_operation', None),
+                getattr(self, '_camera_active_physical', None),
+                *tuple(getattr(self, '_camera_retired_operations', ()) or ()),
+                *tuple(getattr(self, '_camera_retired_physical', ()) or ())):
+            if isinstance(target, dict) and not any(target is item for item in targets):
+                targets.append(target)
+        receipts = list(getattr(self, '_camera_stop_receipts', ()) or ())
+        providers = []
+        for target in targets:
+            pair = (target.get('provider'), target.get('owner_token'))
+            if pair[0] is not None and not any(
+                    pair[0] is existing[0] and pair[1] is existing[1]
+                    for existing in providers):
+                providers.append(pair)
+        for receipt in receipts:
+            pair = (receipt.get('provider'), receipt.get('owner_token'))
+            if pair[0] is not None and not any(
+                    pair[0] is existing[0] and pair[1] is existing[1]
+                    for existing in providers):
+                providers.append(pair)
+        current_pair = (getattr(self, '_camera_provider', None),
+                        getattr(self, '_camera_owner_token', None))
+        if current_pair[0] is not None and not any(
+                current_pair[0] is existing[0]
+                and current_pair[1] is existing[1]
+                for existing in providers):
+            providers.append(current_pair)
+        return {
+            'targets': targets,
+            'receipts': receipts,
+            'providers': providers,
+            'provider': getattr(self, '_camera_provider', None),
+            'owner_token': getattr(self, '_camera_owner_token', None),
+            'runtime_receipt': getattr(self, '_camera_runtime_receipt', None),
+            'active_receipt': getattr(
+                self, '_accepted_camera_runtime_receipt', None),
+        }
+
+    def _camera_submit_owned_stop(self, target, *, receipt_sink=None):
+        """Submit one exact owner stop without waiting for backend cleanup."""
+        if not isinstance(target, dict):
+            return None
+        provider = target.get('provider')
+        owner_token = target.get('owner_token')
+        request_stop = getattr(provider, 'request_stop_async', None)
+        if provider is None or owner_token is None or not callable(request_stop):
+            return None
+        receipts = getattr(self, '_camera_stop_receipts', None)
+        if not isinstance(receipts, list):
+            receipts = []
+            self._camera_stop_receipts = receipts
+        sinks = [receipts]
+        if isinstance(receipt_sink, list) and receipt_sink is not receipts:
+            sinks.append(receipt_sink)
+        for existing in tuple(receipts):
+            if (existing.get('provider') is provider
+                    and existing.get('owner_token') is owner_token
+                    and existing.get('nonce') is target.get('nonce')):
+                if isinstance(receipt_sink, list) and not any(
+                        existing is item for item in receipt_sink):
+                    receipt_sink.append(existing)
+                return existing
+        receipt = self._camera_stop_receipt_for(target)
+        # Register before crossing into the provider.  A fake or a fast real
+        # worker may invoke its callback synchronously.
+        for sink in sinks:
+            sink.append(receipt)
+
+        def on_result(ok):
+            if receipt['callback_recorded']:
+                return
+            receipt['callback_recorded'] = True
+            receipt['result'] = bool(ok)
+            receipt['event'].set()
+            self._camera_queue_stop_continuation()
+
+        try:
+            submitted = request_stop(
+                expected_generation=receipt['generation'],
+                expected_device_index=receipt['device_index'],
+                owner_token=owner_token,
+                request_token=receipt['nonce'],
+                on_result=on_result)
+        except Exception:
+            receipt['submission_error'] = True
+            submitted = False
+        receipt['submitted'] = bool(submitted)
+        receipt['submission_resolved'] = True
+        # A false submission is not a cleanup proof.  A later readonly
+        # owned_cleanup_complete query may still prove clean absence.
+        if not submitted:
+            receipt['event'].set()
+        if not _admission_call(self, '_admission_transition_active'):
+            self._camera_maybe_finish_disable()
+            self._camera_maybe_release_provider()
+        return receipt
+
+    def _camera_cleanup_complete(self, group=None):
+        """Return positive same-owner absence for all retained providers."""
+        if isinstance(group, dict):
+            receipts = group.get('receipts', ())
+            targets = group.get('targets', ())
+            providers = list(group.get('providers', ()) or ())
+            active_target = pending_target = None
+        else:
+            receipts = getattr(self, '_camera_stop_receipts', ())
+            targets = tuple(getattr(self, '_camera_retired_operations', ()) or ())
+            targets += tuple(getattr(self, '_camera_retired_physical', ()) or ())
+            active_target = getattr(self, '_camera_active_physical', None)
+            pending_target = getattr(self, '_camera_pending_operation', None)
+            providers = []
+        if not isinstance(group, dict):
+            for provider, owner_token in (
+                    (getattr(self, '_camera_provider', None),
+                     getattr(self, '_camera_owner_token', None)),
+                    ((active_target or {}).get('provider')
+                     if isinstance(active_target, dict) else None,
+                     (active_target or {}).get('owner_token')
+                     if isinstance(active_target, dict) else None),
+                    ((pending_target or {}).get('provider')
+                     if isinstance(pending_target, dict) else None,
+                     (pending_target or {}).get('owner_token')
+                     if isinstance(pending_target, dict) else None)):
+                if provider is not None and not any(
+                        provider is existing[0] and owner_token is existing[1]
+                        for existing in providers):
+                    providers.append((provider, owner_token))
+        for target in tuple(targets):
+            provider = target.get('provider')
+            owner_token = target.get('owner_token')
+            if provider is not None and not any(
+                    provider is existing[0] and owner_token is existing[1]
+                    for existing in providers):
+                providers.append((provider, owner_token))
+        if not isinstance(group, dict):
+            for target in tuple(getattr(self, '_camera_retired_physical', ())):
+                provider = target.get('provider')
+                owner_token = target.get('owner_token')
+                if provider is not None and not any(
+                        provider is existing[0] and owner_token is existing[1]
+                        for existing in providers):
+                    providers.append((provider, owner_token))
+        for receipt in receipts:
+            provider = receipt.get('provider')
+            owner_token = receipt.get('owner_token')
+            if provider is not None and not any(
+                    provider is existing[0] and owner_token is existing[1]
+                    for existing in providers):
+                providers.append((provider, owner_token))
+            if receipt.get('submission_error'):
+                return False
+            if (receipt.get('callback_recorded')
+                    and receipt.get('result') is not True):
+                return False
+            if (receipt.get('submitted')
+                    and (not receipt.get('callback_recorded')
+                         or receipt.get('result') is not True)):
+                return False
+        if not providers:
+            return not providers
+        for provider, owner_token in providers:
+            if owner_token is None:
+                return False
+            query = getattr(provider, 'owned_cleanup_complete', None)
+            if not callable(query):
+                return False
+            try:
+                if query(owner_token=owner_token) is not True:
+                    return False
+            except Exception:
+                # Cleanup proof is unavailable when the retained provider errors.
+                return False
+        return True
+
+    def _camera_release_retained_group(self, group, *, latch=None) -> bool:
+        """Release only exact A camera fields after owned cleanup proof."""
+        if not isinstance(group, dict):
+            return False
+        if (latch is not None
+                and not self._admission_original_latch_is_current(latch)):
+            return False
+        if not self._camera_cleanup_complete(group):
+            return False
+        # The provider cleanup query is an external boundary.  It may install
+        # successor B, so A must still own the latch before mutating any Main
+        # camera field.
+        if (latch is not None
+                and not self._admission_original_latch_is_current(latch)):
+            return False
+        targets = tuple(group.get('targets', ()) or ())
+        receipts = tuple(group.get('receipts', ()) or ())
+        for name in ('_camera_pending_operation', '_camera_active_physical'):
+            current = getattr(self, name, None)
+            if any(current is target for target in targets):
+                setattr(self, name, None)
+        for name in ('_camera_retired_operations', '_camera_retired_physical'):
+            values = getattr(self, name, None)
+            if isinstance(values, list):
+                values[:] = [item for item in values
+                             if not any(item is target for target in targets)]
+        values = getattr(self, '_camera_stop_receipts', None)
+        if isinstance(values, list):
+            values[:] = [item for item in values
+                         if not any(item is receipt for receipt in receipts)]
+        current_provider = getattr(self, '_camera_provider', None)
+        current_owner = getattr(self, '_camera_owner_token', None)
+        if (current_provider is group.get('provider')
+                and current_owner is group.get('owner_token')
+                and getattr(self, '_camera_pending_operation', None) is None
+                and getattr(self, '_camera_active_physical', None) is None):
+            self._camera_provider = None
+            self._camera_owner_token = None
+            self._camera_runtime_receipt = None
+            self._accepted_camera_runtime_receipt = None
+        return True
+
+    def _camera_queue_stop_continuation(self):
+        """Move cleanup evaluation back to Main/Qt; worker callbacks only record."""
+        # After the Qt loop ends, the callback's Event/result is the only
+        # permitted effect.  The bounded forced drain evaluates receipts on
+        # its owner thread and must never emit into a dead dispatcher.
+        if getattr(self, '_shutdown_forced', False):
+            return
+        dispatcher = getattr(self, '_ui_call', None)
+        emit = getattr(dispatcher, 'emit', None)
+        if callable(emit):
+            try:
+                emit(lambda: (self._camera_maybe_finish_disable(),
+                              self._camera_maybe_release_provider()))
+            except RuntimeError:
+                # The Qt dispatcher may already be gone during shutdown.  The
+                # callback's Event/result remain recorded for a later owner
+                # drain; never run Main/Qt continuation on this worker thread.
+                return
+
+    def _camera_prune_completed_stops(self):
+        receipts = getattr(self, '_camera_stop_receipts', None)
+        if not isinstance(receipts, list) or not receipts:
+            return
+        if self._camera_cleanup_complete():
+            receipts[:] = []
+
+    def _camera_maybe_release_provider(self):
+        if _admission_call(self, '_admission_transition_active'):
+            return False
+        if (getattr(self, '_camera_pending_operation', None) is not None
+                or getattr(self, '_camera_active_physical', None) is not None
+                or getattr(self, '_camera_disabled_request', None) is not None):
+            return False
+        if not self._camera_cleanup_complete():
+            return False
+        self._camera_prune_completed_stops()
+        for name in ('_camera_retired_operations',
+                     '_camera_retired_physical'):
+            values = getattr(self, name, None)
+            if isinstance(values, list):
+                values[:] = []
+        self._camera_provider = None
+        return True
+
+    def _camera_cancel_owned_contexts(self, group=None):
+        """Cancel pending and active Main-owned camera contexts independently."""
+        retained = group if isinstance(group, dict) else None
+        if retained is not None:
+            targets = tuple(retained.get('targets', ()) or ())
+            sink = retained.setdefault('receipts', [])
+        else:
+            targets = tuple(item for item in (
+                getattr(self, '_camera_pending_operation', None),
+                getattr(self, '_camera_active_physical', None),
+                *tuple(getattr(self, '_camera_retired_operations', ()) or ()),
+                *tuple(getattr(self, '_camera_retired_physical', ()) or ()))
+                         if isinstance(item, dict))
+            sink = None
+        for target in targets:
+            self._camera_submit_owned_stop(target, receipt_sink=sink)
+        return self._camera_cleanup_complete(retained)
+
+    def _camera_finish_disabled(self):
+        if _admission_call(self, '_admission_transition_active'):
+            return False
+        camera = getattr(self, '_camera_disabled_request', None)
+        generation = getattr(self, '_camera_disabled_generation', None)
+        if (camera is None
+                or getattr(self, '_camera_pending_request', None) is not camera
+                or generation != getattr(self, '_camera_apply_generation', None)):
+            return False
+        self._camera_disabled_request = None
+        self._camera_disabled_generation = None
+        self._camera_pending_operation = None
+        self._camera_pending_request = None
+        self._camera_active_physical = None
+        for name in ('_camera_retired_operations',
+                     '_camera_retired_physical'):
+            values = getattr(self, name, None)
+            if isinstance(values, list):
+                values[:] = []
+        self._camera_runtime_receipt = None
+        self._accepted_camera_runtime_receipt = None
+        self._camera_prune_completed_stops()
+        self._camera_provider = None
+        completed_generation = generation
+        page = getattr(self, '_settings_page_widget', None)
+        callback = getattr(page, '_on_main_camera_apply', None)
+        if callable(callback) and camera is not None:
+            callback(camera, True, '')
+        # The presentation callback can synchronously install a successor B.
+        # Do not let A's trailing inventory/status publication overwrite it.
+        if (getattr(self, '_camera_apply_generation', None)
+                != completed_generation
+                or getattr(self, '_camera_pending_operation', None) is not None
+                or getattr(self, '_camera_runtime_receipt', None) is not None):
+            return True
+        if (camera is not None
+                and getattr(page, '_camera_inventory_deferred', False)):
+            QTimer.singleShot(0, page._populate_camera_devices)
+        self._publish_capture_profile_status(
+            pending=bool(getattr(self, '_desired_capture_request', None)),
+            message='Camera disabled')
+
+    def _camera_maybe_finish_disable(self):
+        if getattr(self, '_camera_disabled_request', None) is None:
+            return False
+        if not self._camera_cleanup_complete():
+            return False
+        self._camera_finish_disabled()
+        return True
+
+    def _request_camera_apply(self, camera: CameraSnapshot, *, origin='settings',
+                              request_token=None, capture_request=None):
+        """Main-owned camera start/stop route with generation-bound results."""
+        if camera.enabled and getattr(self, '_ultra_performance', False):
+            return True  # the immutable intent remains available for resume
+        if _admission_call(self, '_admission_transition_active'):
+            return False
+        owned = (
+            getattr(self, '_camera_provider', None) is not None
+            or isinstance(getattr(self, '_camera_pending_operation', None), dict)
+            or isinstance(getattr(self, '_camera_active_physical', None), dict)
+            or bool(getattr(self, '_camera_stop_receipts', ())))
+        if not camera.enabled and not owned:
+            # There is no Main-owned provider to stop or probe.  Complete the
+            # local disabled state without constructing a foreign recorder or
+            # performing a new capture-admission lookup.
+            self._camera_apply_generation = int(
+                getattr(self, '_camera_apply_generation', 0)) + 1
+            self._camera_pending_request = camera
+            self._camera_disabled_request = camera
+            self._camera_disabled_generation = self._camera_apply_generation
+            self._camera_runtime_receipt = None
+            self._camera_finish_disabled()
+            return True
+        if not camera.enabled and owned:
+            manual_owned = bool(
+                origin == 'manual'
+                and self._manual_prepare_owns_capture(
+                    request_token=request_token,
+                    path=getattr(self, '_pending_manual_record_path', None)))
+            if self._capture_resources_busy(
+                    allow_manual_prepare=manual_owned,
+                    manual_token=request_token,
+                    manual_path=(getattr(self, '_pending_manual_record_path', None)
+                                 if manual_owned else None)):
+                self._queue_latest_desired_request(
+                    reason='Camera resources are busy; camera change queued')
+                return False
+            self._camera_apply_generation = int(
+                getattr(self, '_camera_apply_generation', 0)) + 1
+            self._camera_pending_request = camera
+            self._camera_disabled_request = camera
+            self._camera_disabled_generation = self._camera_apply_generation
+            self._camera_runtime_receipt = None
+            self._camera_cancel_owned_contexts()
+            self._camera_maybe_finish_disable()
+            return True
+        # An enabled provider start is authorized by the exact immutable
+        # request supplied by its caller.  Looking at accepted Settings or
+        # reconstructing a request here would allow B to bless A (or vice
+        # versa) and would mutate Main before the authority boundary.
+        owner_token = getattr(self, '_camera_owner_token', None)
+        if owner_token is None:
+            return False
+        if capture_request is None:
+            return False
+        if (getattr(capture_request, 'camera', None) != camera
+                or (request_token is not None
+                    and getattr(capture_request, 'request_token', None)
+                    != request_token)):
+            return False
+        # Capture the immutable native A owner before the first external
+        # admission, busy, or availability hook.  Every later boundary uses
+        # this exact snapshot; it must never be reconstructed after a hook
+        # has had an opportunity to install B.
+        original_owner_snapshot = self._capture_owner_snapshot()
+        original_owner_snapshot['capture_request'] = capture_request
+        original_owner_snapshot['prelaunch'] = (
+            original_owner_snapshot.get('session') is None
+            and original_owner_snapshot.get('process') is None
+        )
+        proof = None
+        before_generation = getattr(self, '_camera_apply_generation', 0)
+        before_pending = getattr(self, '_camera_pending_operation', None)
+        before_pending_request = getattr(self, '_camera_pending_request', None)
+        before_provider = getattr(self, '_camera_provider', None)
+        before_desired = getattr(self, '_desired_capture_request', None)
+        before_launch_request = getattr(self, '_pending_launch_request', None)
+        before_manual_request = getattr(
+            self, '_pending_manual_record_request', None)
+        start_boundary = {
+            'generation': before_generation,
+            'pending_operation': before_pending,
+            'pending_request': before_pending_request,
+            'provider': before_provider,
+            'desired_request': before_desired,
+            'pending_launch_request': before_launch_request,
+            'pending_manual_request': before_manual_request,
+        }
+        proof = _admission_call(
+            self, '_admission_stable_proof', capture_request)
+        if (proof is None
+                or not _admission_call(
+                    self, '_admission_pure_proof_current', proof)):
+            return False
+        # The proof hook is allowed to re-enter Main.  If it installed a
+        # successor while authorizing this request, A must not overwrite any
+        # of that state before crossing the provider boundary.
+        if (getattr(self, '_camera_apply_generation', 0)
+                != before_generation
+                or getattr(self, '_camera_pending_operation', None)
+                is not before_pending
+                or getattr(self, '_camera_pending_request', None)
+                is not before_pending_request
+                or getattr(self, '_camera_provider', None)
+                is not before_provider
+                or getattr(self, '_desired_capture_request', None)
+                is not before_desired
+                or getattr(self, '_pending_launch_request', None)
+                is not before_launch_request
+                or getattr(self, '_pending_manual_record_request', None)
+                is not before_manual_request):
+            return False
+        if not any(candidate is capture_request for candidate in (
+                getattr(self, '_pending_launch_request', None),
+                getattr(self, '_pending_manual_record_request', None),
+                getattr(self, '_desired_capture_request', None),
+                getattr(getattr(self, '_accepted_capture_session', None),
+                        'request', None))):
+            return False
+        manual_owned = bool(
+            origin == 'manual'
+            and self._manual_prepare_owns_capture(
+                request_token=request_token,
+                path=getattr(self, '_pending_manual_record_path', None)))
+        next_generation = int(
+            getattr(self, '_camera_apply_generation', 0)) + 1
+        provisional_operation = self._camera_make_operation(
+            camera, origin=origin, request_token=request_token,
+            generation=next_generation, capture_request=capture_request,
+            provider=before_provider, owner_snapshot=original_owner_snapshot,
+            start_boundary=start_boundary)
+        if provisional_operation is None:
+            return False
+        provisional_operation['admission_proof'] = proof
+        busy = self._capture_resources_busy(
+                allow_manual_prepare=manual_owned,
+                manual_token=request_token,
+                manual_path=(getattr(self, '_pending_manual_record_path', None)
+                             if manual_owned else None))
+        if busy:
+            if not self._camera_pre_start_boundary_current(
+                    provisional_operation, next_generation, camera, proof):
+                return False
+            # Provider mutation belongs to the idle coordinator; a save or
+            # finalizer must retain its camera owner until publication ends.
+            self._queue_latest_desired_request(
+                reason='Camera resources are busy; camera change queued')
+            return False
+        from core.camera_recorder import CameraRecorder
+        if (getattr(self, '_camera_apply_generation', 0) != before_generation
+                or getattr(self, '_camera_pending_operation', None)
+                is not before_pending
+                or getattr(self, '_camera_pending_request', None)
+                is not before_pending_request
+                or getattr(self, '_camera_provider', None)
+                is not before_provider
+                or getattr(self, '_desired_capture_request', None)
+                is not before_desired
+                or getattr(self, '_pending_launch_request', None)
+                is not before_launch_request
+                or getattr(self, '_pending_manual_record_request', None)
+                is not before_manual_request):
+            return False
+        recorder = getattr(self, '_camera_provider', None)
+        if recorder is None:
+            recorder = CameraRecorder()
+        operation = self._camera_make_operation(
+            camera, origin=origin, request_token=request_token,
+            generation=next_generation, capture_request=capture_request,
+            provider=recorder, owner_snapshot=original_owner_snapshot,
+            start_boundary=start_boundary)
+        if operation is None:
+            return False
+        operation['admission_proof'] = proof
+        availability = getattr(type(recorder), 'is_available', None)
+        if not callable(availability):
+            availability = getattr(CameraRecorder, 'is_available', None)
+        available = bool(callable(availability) and availability())
+        if (getattr(self, '_camera_apply_generation', 0) != before_generation
+                or getattr(self, '_camera_pending_operation', None)
+                is not before_pending
+                or getattr(self, '_camera_pending_request', None)
+                is not before_pending_request
+                or getattr(self, '_camera_provider', None)
+                is not before_provider
+                or getattr(self, '_desired_capture_request', None)
+                is not before_desired
+                or getattr(self, '_pending_launch_request', None)
+                is not before_launch_request
+                or getattr(self, '_pending_manual_record_request', None)
+                is not before_manual_request):
+            return False
+        if not self._camera_pre_start_boundary_current(
+                operation, next_generation, camera, proof):
+            return False
+        if not available:
+            detail = 'Camera support is unavailable.'
+            page = getattr(self, '_settings_page_widget', None)
+            callback = getattr(page, '_on_main_camera_apply', None)
+            before_unavailable_callback = (
+                getattr(self, '_camera_apply_generation', None),
+                id(getattr(self, '_camera_pending_operation', None)),
+                id(getattr(self, '_camera_pending_request', None)),
+                id(getattr(self, '_camera_provider', None)),
+                id(getattr(self, '_camera_runtime_receipt', None)),
+                id(getattr(self, '_desired_capture_request', None)),
+            )
+            if callable(callback):
+                callback(camera, False, detail)
+            if before_unavailable_callback != (
+                    getattr(self, '_camera_apply_generation', None),
+                    id(getattr(self, '_camera_pending_operation', None)),
+                    id(getattr(self, '_camera_pending_request', None)),
+                    id(getattr(self, '_camera_provider', None)),
+                    id(getattr(self, '_camera_runtime_receipt', None)),
+                    id(getattr(self, '_desired_capture_request', None))):
+                return False
+            self._show_camera_unavailable(detail)
+            return False
+
+        # No external hook runs between this exact pure check and the private
+        # Main-owned latch.  Only now install A's generation/provider fields.
+        generation = next_generation
+        self._camera_apply_generation = generation
+        self._camera_pending_request = camera
+        self._camera_runtime_receipt = None
+        self._camera_provider = recorder
+        old_pending = getattr(self, '_camera_pending_operation', None)
+        if isinstance(old_pending, dict):
+            self._camera_retired_operations.append(old_pending)
+        old_active = getattr(self, '_camera_active_physical', None)
+        if isinstance(old_active, dict):
+            self._camera_retired_physical.append(old_active)
+            self._camera_active_physical = None
+        self._camera_pending_operation = operation
+
+        def on_result(ok):
+            snapshot = None
+            if ok:
+                try:
+                    snapshot = recorder.runtime_snapshot()
+                except Exception:
+                    snapshot = None
+            self._camera_record_operation_result(operation, bool(ok), snapshot)
+            continuation = lambda: self._on_camera_apply_result(
+                generation, camera, bool(ok), snapshot, request_token, origin,
+                operation=operation)
+            dispatcher = getattr(self, '_ui_call', None)
+            if dispatcher is not None and callable(getattr(dispatcher, 'emit', None)):
+                try:
+                    dispatcher.emit(continuation)
+                except RuntimeError:
+                    # No Qt dispatcher means no Main continuation from a
+                    # provider worker.  The operation Event/result above is
+                    # still authoritative for a later owner-only drain.
+                    return
+
+        try:
+            recorder.start_async(
+                camera.device_index, on_result=on_result,
+                owner_token=operation['owner_token'],
+                request_token=operation['nonce'])
+        except Exception as error:
+            self._camera_record_operation_result(operation, False, None)
+            self._on_camera_apply_result(
+                generation, camera, False, None, request_token, origin,
+                detail=str(error), operation=operation)
+            return False
+        return True
+
+    def _on_camera_apply_result(self, generation: int, camera: CameraSnapshot,
+                                ok: bool, snapshot=None,
+                                request_token=None, origin='settings',
+                                detail='', operation=None):
+        if not isinstance(operation, dict):
+            return
+        if _admission_call(self, '_admission_transition_active'):
+            self._camera_submit_owned_stop(operation)
+            return
+        if getattr(self, '_camera_pending_operation', None) is not operation:
+            # A stale A callback may only cancel A's exact opaque nonce.
+            self._camera_submit_owned_stop(operation)
+            return
+        if not self._camera_operation_boundary_current(
+                operation, generation, camera):
+            self._camera_submit_owned_stop(operation)
+            return
+        if (generation != getattr(self, '_camera_apply_generation', None)
+                or camera != getattr(self, '_camera_pending_request', None)
+                or getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)):
+            self._camera_submit_owned_stop(operation)
+            return
+        if not ok or snapshot is None or not snapshot.running:
+            # Failure is still an A continuation.  Before clearing any Main
+            # fields, retain A's exact request/native owner boundary; a
+            # successor engine may have replaced the native owner while this
+            # opaque camera operation remained pending.
+            request = operation.get('capture_request')
+            current_requests = (
+                getattr(self, '_pending_launch_request', None),
+                getattr(self, '_pending_manual_record_request', None),
+                getattr(self, '_desired_capture_request', None),
+                getattr(getattr(self, '_accepted_capture_session', None),
+                        'request', None),
+            )
+            request_current = bool(
+                request is not None
+                and getattr(request, 'camera', None) == camera
+                and (operation.get('request_token') is None
+                     or getattr(request, 'request_token', None)
+                     == operation.get('request_token'))
+                and any(candidate is request for candidate in current_requests))
+            if not request_current:
+                accepted = getattr(self, '_accepted_capture_session', None)
+                accepted_request = getattr(accepted, 'request', None)
+                request_current = bool(
+                    request is not None
+                    and getattr(request, 'camera', None) == camera
+                    and (operation.get('request_token') is None
+                         or getattr(request, 'request_token', None)
+                         == operation.get('request_token'))
+                    and accepted_request is not None
+                    and MainWindow._capture_native_inputs_equivalent(
+                        request, accepted_request)
+                    and (request.camera.enabled, request.camera.device_index)
+                    == (accepted_request.camera.enabled,
+                        accepted_request.camera.device_index))
+            if (not request_current
+                    or not self._camera_original_engine_is_current(operation)):
+                self._camera_submit_owned_stop(operation)
+                return
+            self._camera_pending_operation = None
+            self._camera_submit_owned_stop(operation)
+            self._camera_maybe_release_provider()
+            self._camera_pending_request = None
+            self._camera_runtime_receipt = None
+            completed_generation = generation
+            completed_provider = getattr(self, '_camera_provider', None)
+            completed_desired = getattr(self, '_desired_capture_request', None)
+            completed_active = getattr(self, '_camera_active_physical', None)
+            page = getattr(self, '_settings_page_widget', None)
+            callback = getattr(page, '_on_main_camera_apply', None)
+            if callable(callback):
+                callback(camera, False, detail)
+            if (
+                    getattr(self, '_camera_apply_generation', None)
+                    != completed_generation
+                    or getattr(self, '_camera_pending_operation', None)
+                    is not None
+                    or getattr(self, '_camera_pending_request', None)
+                    is not None
+                    or getattr(self, '_camera_runtime_receipt', None)
+                    is not None
+                    or getattr(self, '_camera_provider', None)
+                    is not completed_provider
+                    or getattr(self, '_desired_capture_request', None)
+                    is not completed_desired
+                    or getattr(self, '_camera_active_physical', None)
+                    is not completed_active
+                    or not self._camera_original_engine_is_current(operation)):
+                return
+            self._show_camera_unavailable(
+                detail or 'Could not open the selected camera. Confirm it is connected '
+                'and not in use by another app.')
+            return
+        # The authoritative proof may re-enter Main and install B.  Recheck
+        # both the exact operation and the fresh proof immediately before A
+        # can publish a runtime receipt or clear pending state.
+        if (not self._camera_request_is_owned(operation)
+                or not self._camera_operation_boundary_current(
+                    operation, generation, camera)):
+            self._camera_submit_owned_stop(operation)
+            return
+        self._camera_pending_operation = None
+        operation['provider_generation'] = int(snapshot.generation)
+        self._camera_pending_request = None
+        self._camera_runtime_receipt = {
+            'device_index': int(snapshot.device_index),
+            'generation': int(snapshot.generation),
+            'ready': bool(snapshot.ready),
+            'origin': str(origin),
+            'request_token': request_token,
+        }
+        self._camera_active_physical = {
+            'provider': operation['provider'],
+            'owner_token': operation['owner_token'],
+            'nonce': operation['nonce'],
+            'generation': int(snapshot.generation),
+            'device_index': int(snapshot.device_index),
+            'request': operation.get('capture_request'),
+        }
+        accepted = getattr(self, '_accepted_capture_session', None)
+        accepted_request = getattr(accepted, 'request', None)
+        if (accepted_request is not None
+                and request_token == accepted_request.request_token
+                and accepted_request.camera.enabled == camera.enabled
+                and accepted_request.camera.device_index == camera.device_index):
+            self._accepted_camera_runtime_receipt = copy.deepcopy(
+                self._camera_runtime_receipt)
+        completed_generation = generation
+        completed_receipt = self._camera_runtime_receipt
+        completed_provider = getattr(self, '_camera_provider', None)
+        completed_desired = getattr(self, '_desired_capture_request', None)
+        completed_active = getattr(self, '_camera_active_physical', None)
+        completed_accepted_receipt = getattr(
+            self, '_accepted_camera_runtime_receipt', None)
+        page = getattr(self, '_settings_page_widget', None)
+        callback = getattr(page, '_on_main_camera_apply', None)
+        if callable(callback):
+            callback(camera, True, '')
+        if (
+                getattr(self, '_camera_apply_generation', None)
+                != completed_generation
+                or getattr(self, '_camera_pending_operation', None)
+                is not None
+                or getattr(self, '_camera_pending_request', None)
+                is not None
+                or getattr(self, '_camera_runtime_receipt', None)
+                is not completed_receipt
+                or getattr(self, '_camera_provider', None)
+                is not completed_provider
+                or getattr(self, '_desired_capture_request', None)
+                is not completed_desired
+                or getattr(self, '_camera_active_physical', None)
+                is not completed_active
+                or getattr(self, '_accepted_camera_runtime_receipt', None)
+                is not completed_accepted_receipt):
+            return
+        if not snapshot.ready:
+            self._set_status('CAMERA WARMING UP', status_idle_qss())
+        self._publish_capture_profile_status(pending=False, message='')
+
+    def _on_camera_settings_requested(self, payload) -> None:
+        if not isinstance(payload, dict):
+            return
+        try:
+            CameraSnapshot(
+                enabled=bool(payload.get('enabled', False)),
+                device_index=int(payload.get('device_index', 0) or 0),
+                overlay_rect=payload.get(
+                    'overlay_rect', DEFAULT_OVERLAY_RECT),
+            )
+        except (TypeError, ValueError) as error:
+            self._show_camera_unavailable(str(error))
+            return
+        # Camera intent is part of the next accepted capture request.  The
+        # restart path preflights it and coalesces edits while saves or
+        # finalization still own the previous session.
+        self._restart_capture_engine()
+
+    def _on_camera_inventory_ready(self, records, generation=0) -> None:
+        """Forward detached, generation-bound camera inventory to Profiles."""
+        generation = int(generation or 0)
+        if generation and generation < getattr(
+                self, '_camera_inventory_generation', 0):
+            return
+        self._camera_inventory_generation = generation
+        self._camera_inventory_admission_epoch = int(
+            getattr(self, '_admission_epoch', 0) or 0)
+        self._camera_inventory_cache = [dict(record) for record in (records or [])
+                                        if isinstance(record, dict)]
+        page = getattr(self, '_settings_page_widget', None)
+        setter = getattr(page, 'set_profile_camera_devices', None)
+        if callable(setter):
+            setter(self._camera_inventory_cache)
+
+    def _on_capture_effects_changed(self) -> None:
+        """Route committed visual/keyboard edits through the capture intent gate."""
+        self._restart_capture_engine()
+
+    def _on_profile_apply_requested(self) -> None:
+        """An explicit profile Save requests capture with the committed settings."""
+        page = getattr(self, '_settings_page_widget', None)
+        widget = getattr(page, 'profiles_widget', None)
+        if widget is not None and hasattr(widget, 'refresh_global_values'):
+            widget.refresh_global_values()
+        self._restart_capture_engine()
+
+    def _on_profile_refresh_devices_requested(self) -> None:
+        page = getattr(self, '_settings_page_widget', None)
+        if page is None:
+            return
+        for name in ('_populate_profile_mic_devices', '_populate_playback_devices',
+                     '_populate_camera_devices'):
+            callback = getattr(page, name, None)
+            if callable(callback):
+                callback()
+
 
     def _requested_capture_config(self, profile: str | None = None) -> CaptureConfig:
         profile = profile or getattr(self, '_engine_profile', 'clips')
@@ -5304,6 +11423,18 @@ class MainWindow(QMainWindow):
                 self.settings_manager.get('game_detection_custom_games', []),
             )
         crop_enabled = bool(crop and crop.get('enabled', True))
+        if sys.platform == 'win32':
+            separate_audio, application_audio, audio_device_tracks = (
+                audio_plan_from_settings(self.settings_manager))
+        else:
+            # Keep Linux on its established combined/separated route.  The
+            # Windows endpoint and per-program ABI is not available there.
+            separate_audio = (normalize_audio_capture_mode(
+                self.settings_manager.get('audio_capture_mode',
+                                          AUDIO_CAPTURE_MODE_COMBINED))
+                              == AUDIO_CAPTURE_MODE_SEPARATED)
+            application_audio = False
+            audio_device_tracks = []
         return CaptureConfig(
             fps=fps,
             buffer_seconds=compute_buffer_seconds(
@@ -5321,10 +11452,17 @@ class MainWindow(QMainWindow):
             # Kept in the engine launch ABI, permanently disabled. The new
             # audio capture mode is carried in its own argument below.
             multiband_enabled=False,
-            separate_audio_enabled=(normalize_audio_capture_mode(
-                self.settings_manager.get('audio_capture_mode',
-                                          AUDIO_CAPTURE_MODE_COMBINED))
-                                    == AUDIO_CAPTURE_MODE_SEPARATED),
+            separate_audio_enabled=separate_audio,
+            application_audio_tracks_enabled=application_audio,
+            keep_system_audio_backup=(self.settings_manager.get(
+                'keep_system_audio_backup', True) is not False),
+            application_audio_exclusions=(
+                encode_application_audio_exclusions(self.settings_manager.get(
+                    'application_audio_exclusions', []))
+                if sys.platform == 'win32' else ''),
+            audio_device_tracks=(
+                encode_audio_device_tracks(audio_device_tracks)
+                if sys.platform == 'win32' else ''),
             microphone_endpoint_id=str(
                 self.settings_manager.get('mic_device_id') or ''),
             playback_endpoint_id=str(self.settings_manager.get('playback_device_id') or '') if sys.platform == 'win32' else '',
@@ -5335,6 +11473,14 @@ class MainWindow(QMainWindow):
             crop_y=float(crop.get('y', 0.0)) if crop_enabled else 0.0,
             crop_w=float(crop.get('w', 1.0)) if crop_enabled else 1.0,
             crop_h=float(crop.get('h', 1.0)) if crop_enabled else 1.0,
+            replay_storage=ReplayStorageSettings.from_value(
+                self.settings_manager.get(REPLAY_STORAGE_KEY)),
+            allow_replay_gaps=(
+                self.settings_manager.get('allow_replay_gaps', True) is True),
+            allow_low_fps_clips=(
+                self.settings_manager.get('allow_low_fps_clips', True) is True),
+            capture_cursor=(
+                self.settings_manager.get('capture_cursor', True) is not False),
         )
 
     def _apply_active_audio_state(self, config: CaptureConfig) -> None:
@@ -5357,7 +11503,8 @@ class MainWindow(QMainWindow):
         values = asdict(config)
         return {
             'monitor': values['monitor'] or 'unavailable:not_configured',
-            'capture_backend': 'auto',
+            'capture_backend': values['capture_backend'],
+            'capture_cursor': values['capture_cursor'],
             'codec': values['codec'],
             'capture_resolution': {
                 'width': values['width'], 'height': values['height'],
@@ -5373,6 +11520,10 @@ class MainWindow(QMainWindow):
             'encoder_adapter': 'auto',
             'audio_enabled': values['audio_enabled'],
             'separate_audio_enabled': values['separate_audio_enabled'],
+            'application_audio_tracks_enabled': values[
+                'application_audio_tracks_enabled'],
+            'keep_system_audio_backup': values['keep_system_audio_backup'],
+            'audio_device_tracks': values['audio_device_tracks'],
             'microphone_endpoint': (
                 values['microphone_endpoint_id'] or 'system-default'),
             'scaling': values['scaling'],
@@ -5387,16 +11538,38 @@ class MainWindow(QMainWindow):
             and getattr(self, 'bridge', None) is bridge
         )
 
+    def _owns_capture_apply(self, token: int, config: CaptureConfig) -> bool:
+        """Accept callbacks only for the applying or accepted config receipt."""
+        tracker = getattr(self, '_capture_config', None)
+        if (tracker is None or token is None or config is None
+                or getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)):
+            return False
+        return (
+            (getattr(tracker, 'applying_token', None) == token
+             and getattr(tracker, 'applying', None) == config)
+            or
+            (getattr(tracker, 'accepted_token', None) == token
+             and getattr(tracker, 'active', None) == config)
+        )
+
     def _schedule_owned_hardware_check(
-            self, generation: int, process, bridge) -> None:
+            self, generation: int, process, bridge, *,
+            expected_config: CaptureConfig | None = None,
+            expected_token: int | None = None) -> None:
         """Defer encoder inspection without letting a stale timer read new state."""
         def check_if_current():
-            if not self._owns_engine_attempt(generation, process, bridge):
+            if (not self._owns_engine_attempt(generation, process, bridge)
+                    or (expected_token is not None
+                        and not self._owns_capture_apply(
+                            expected_token, expected_config))):
                 return
             self._check_hardware_encoding_status(
                 expected_generation=generation,
                 expected_process=process,
                 expected_bridge=bridge,
+                expected_config=expected_config,
+                expected_token=expected_token,
             )
 
         QTimer.singleShot(2000, check_if_current)
@@ -5481,7 +11654,9 @@ class MainWindow(QMainWindow):
                 print(f"Connected to capture engine (attempt {attempt}).")
                 self._set_status('STARTING CAPTURE', status_idle_qss())
                 self._schedule_owned_hardware_check(
-                    generation, process_owner, bridge_owner)
+                    generation, process_owner, bridge_owner,
+                    expected_config=getattr(
+                        self._capture_config, 'active', None))
                 return True
             if attempt < max_retries:
                 print(f"Connection attempt {attempt}/{max_retries} failed, retrying...")
@@ -5498,7 +11673,70 @@ class MainWindow(QMainWindow):
         self._set_status('DISCONNECTED', status_warning_qss())
         return False
 
-    def start_engine(self) -> bool:
+    def start_engine(self, *, _launch_receipt=None,
+                     _prepared_request=None) -> bool:
+        if not getattr(self, '_file_operations_ready', True):
+            return False
+        transition_check = getattr(self, '_admission_transition_active', None)
+        if not callable(transition_check):
+            transition_check = MainWindow._admission_transition_active.__get__(self)
+        if transition_check():
+            return False
+        # Resolve the current authority before touching engine generation or
+        # any camera/config/provider state.  A denied future B therefore leaves
+        # accepted A completely owned and truthful.
+        if _prepared_request is not None:
+            checker = getattr(self, '_admission_decision_for_request', None)
+            if not callable(checker):
+                checker = MainWindow._admission_decision_for_request.__get__(self)
+            admission = checker(_prepared_request)
+        else:
+            checker = getattr(self, '_admission_decision_for_settings', None)
+            if not callable(checker):
+                checker = MainWindow._admission_decision_for_settings.__get__(self)
+            admission = checker()
+        if (not isinstance(admission, AdmissionDecision)
+                or not admission.allowed):
+            denier = getattr(self, '_admission_deny', None)
+            if not callable(denier):
+                denier = MainWindow._admission_deny.__get__(self)
+            return denier(admission)
+        launch_admission_epoch = int(
+            getattr(self, '_admission_epoch', 0))
+        launch_admission_revision = getattr(
+            admission, 'policy_revision', None)
+        if (transition_check()
+                or launch_admission_epoch != int(
+                    getattr(self, '_admission_epoch', 0))):
+            denier = getattr(self, '_admission_deny', None)
+            if not callable(denier):
+                denier = MainWindow._admission_deny.__get__(self)
+            return denier(admission, message='Capture admission changed before launch.')
+        # Startup log construction is an external/re-entrant hook. Complete it
+        # before touching engine generation, provider, or capture-tracker state,
+        # then obtain a fresh decision so a hook cannot bless a stale epoch.
+        self._close_engine_startup_output()
+        engine_log_path = (
+            self._diagnostics.engine_log_path if self._diagnostics is not None
+            else Path.home() / '.fthr' / 'logs' / 'engine.log')
+        self._engine_startup_output = EngineLogCapture(
+            engine_log_path, self._diagnostics)
+        admission_after_log = checker(
+            _prepared_request) if _prepared_request is not None else checker()
+        if (not isinstance(admission_after_log, AdmissionDecision)
+                or not admission_after_log.allowed
+                or transition_check()
+                or int(getattr(self, '_admission_epoch', 0))
+                != launch_admission_epoch):
+            denier = getattr(self, '_admission_deny', None)
+            if not callable(denier):
+                denier = MainWindow._admission_deny.__get__(self)
+            return denier(
+                admission_after_log,
+                message='Capture admission changed during startup preparation.')
+        admission = admission_after_log
+        launch_admission_epoch = int(getattr(self, '_admission_epoch', 0))
+        launch_admission_revision = admission.policy_revision
         # This token identifies the launch attempt, not the native capture
         # backend generation reported later through shared memory.
         self._engine_gen = getattr(self, '_engine_gen', 0) + 1
@@ -5506,169 +11744,522 @@ class MainWindow(QMainWindow):
         self._diagnostic_engine_start_count += 1
         capture_restart_count = max(
             0, self._diagnostic_engine_start_count - 1)
+        launch_receipt = _launch_receipt
+        tracker = self._capture_config
+        preflight_revision = tracker.transition_revision
+        preflight_process = getattr(self, 'engine_process', None)
+        preflight_bridge = getattr(self, 'bridge', None)
+        terminal_state = {}
+        if launch_receipt is not None:
+            launch_receipt.update({
+                'generation': _my_gen,
+                'config': None,
+                'token': None,
+                'preflight_revision': preflight_revision,
+                'preflight_process': preflight_process,
+                'preflight_bridge': preflight_bridge,
+                'admission_epoch': launch_admission_epoch,
+                'admission_revision': launch_admission_revision,
+            })
+
+        def preflight_is_current() -> bool:
+            return (
+                getattr(self, '_engine_gen', None) == _my_gen
+                and self._capture_config is tracker
+                and tracker.transition_revision == preflight_revision
+                and getattr(tracker, 'applying', None) is None
+                and getattr(tracker, 'applying_token', None) is None
+                and getattr(self, 'engine_process', None) is preflight_process
+                and getattr(self, 'bridge', None) is preflight_bridge
+                and not getattr(self, '_shutdown_requested', False)
+                and not getattr(self, '_shutdown_complete', False))
+
+        def record_terminal(error, token=None) -> None:
+            terminal_state.update({
+                'generation': getattr(self, '_engine_gen', None),
+                'process': getattr(self, 'engine_process', None),
+                'bridge': getattr(self, 'bridge', None),
+                'tracker': self._capture_config,
+                'token': token,
+                'error': str(error),
+                'revision': self._capture_config.transition_revision,
+            })
+            if launch_receipt is not None:
+                launch_receipt['terminal'] = dict(terminal_state)
+            if (request is not None
+                    and self._latest_intent_owns_request(request)):
+                self._consume_capture_intent(
+                    request, state='terminal')
+                self._pending_capture_reason = str(error)
+
+        def launch_failure_is_current() -> bool:
+            return (
+                bool(terminal_state)
+                and getattr(self, '_engine_gen', None)
+                == terminal_state['generation']
+                and getattr(self, 'engine_process', None)
+                is terminal_state['process']
+                and getattr(self, 'bridge', None) is terminal_state['bridge']
+                and self._capture_config is terminal_state['tracker']
+                and self._capture_config.transition_revision
+                == terminal_state['revision']
+                and getattr(self._capture_config, 'status', None)
+                is ApplyStatus.FAILED
+                and getattr(self._capture_config, 'error', None)
+                == terminal_state['error']
+                and not getattr(self, '_shutdown_requested', False)
+                and not getattr(self, '_shutdown_complete', False))
+
+        def fail_preflight(error) -> bool:
+            if not preflight_is_current() or not tracker.fail(str(error)):
+                return False
+            if request is None:
+                self._latest_capture_intent_state = 'invalid'
+                self._latest_capture_intent_consumed = False
+                active_request = getattr(
+                    getattr(self, '_accepted_capture_session', None),
+                    'request', None)
+                if getattr(self, '_desired_capture_request', None) is not active_request:
+                    self._desired_capture_request = None
+                self._desired_capture_intent_id = getattr(
+                    self, '_latest_capture_intent_id', None)
+                self._pending_capture_reason = str(error)
+            record_terminal(error)
+            return True
+
+        request = None
         try:
-            launch_config = self._requested_capture_config()
+            request = self._resolve_capture_request(
+                getattr(self, '_engine_profile', 'clips'),
+                prepared_request=_prepared_request)
+            launch_config = request.capture_config
+            self._pending_launch_request = request
+            self._pending_launch_intent_id = self._capture_request_intent_id(
+                request)
         except MonitorSelectionError as monitor_error:
             selection = monitor_error.result
             detail = (f'{selection.reason}. Capture was not started; a canonical '
                       'Windows monitor device path is required.')
-            self._capture_config.fail(detail)
+            if not fail_preflight(detail):
+                return False
             self._restart_pending = False
             self._set_capture_apply_state(False)
+            if not launch_failure_is_current():
+                return False
             self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+            if not launch_failure_is_current():
+                return False
             emit_event(
                 'engine', 'start_failed', state='FAILED',
                 error=getattr(DiagnosticError, selection.code, selection.code),
                 monitor_selection=selection.as_dict(),
                 detail=detail)
+            if not launch_failure_is_current():
+                return False
             self.push_error('CAPTURE FAILED', f'{selection.code}: {detail}',
                             level='error')
             return False
-        self._capture_config.request(launch_config)
-        self._capture_config.begin_apply()
-        requested_diagnostics = self._diagnostic_capture_config(launch_config)
-        if self._diagnostics is not None:
-            self._diagnostics.update_summary(
-                'requested_configuration', requested_diagnostics)
-            self._diagnostics.update_summary(
-                'adapter_topology',
-                build_adapter_chain(
-                    None, unavailable_reason='engine_process_not_started'))
-        emit_event('engine', 'start_requested', state='REQUESTED',
-                   process_generation=_my_gen,
-                   requested_configuration=requested_diagnostics,
-                   engine_process_start_count=self._diagnostic_engine_start_count,
-                   capture_restart_count=capture_restart_count)
-        if self._diagnostics is not None:
-            self._diagnostics.merge_summary(
-                'health',
-                engine_process_start_count=self._diagnostic_engine_start_count,
-                capture_restart_count=capture_restart_count)
-        if not self.engine_path or not self.engine_path.exists():
-            print("Engine executable not found.")
-            self._set_status('NO ENGINE', status_warning_qss())
-            self._capture_config.fail('engine executable not found')
+        except Exception as error:
+            detail = f'Capture request could not be resolved: {error}'
+            if not fail_preflight(detail):
+                return False
+            self._restart_pending = False
+            self._set_capture_apply_state(False)
+            if not launch_failure_is_current():
+                return False
+            self._set_status('CAPTURE REQUEST FAILED', status_warning_qss())
+            self.push_error('CAPTURE REQUEST FAILED', str(error), level='warning')
+            return False
+        # A detached Windows window request must retain its saved source
+        # identity through the resolver boundary.  Reject it before camera
+        # admission, config tracking, or any native process work; desktop is
+        # never an implicit fallback for a missing/recycled manual window.
+        if (sys.platform == 'win32'
+                and request.source.source_mode == 'window'
+                and not self._prepared_source_is_live(request)):
+            raw_target_hwnd = (request.source.live_identity or {}).get(
+                'hwnd')
+            target_hwnd = (raw_target_hwnd
+                            if self._admission_positive_int(raw_target_hwnd)
+                            else 0)
+            detail = ('The selected window is missing or no longer matches '
+                      'its saved process identity. Reselect the window; '
+                      'capture was not redirected to Desktop.')
+            if not fail_preflight(detail):
+                return False
+            self._restart_pending = False
+            self._set_capture_apply_state(False)
+            if not launch_failure_is_current():
+                return False
+            self._set_status('WINDOW UNAVAILABLE', status_warning_qss())
+            if not launch_failure_is_current():
+                return False
             emit_event(
                 'engine', 'start_failed', state='FAILED',
                 error=DiagnosticError.ENGINE_START_FAILED,
-                compatibility_error='Error 003',
-                technical_cause='ENGINE_EXECUTABLE_MISSING',
-                technical_subsystem='process', operation='executable_discovery',
-                process_generation=_my_gen,
-                native_capture_generation=None,
-                api_call='engine_executable_discovery',
-                detail='engine executable not found')
-            self._warn_no_engine(process_generation=_my_gen)
+                detail=detail, capture_mode='window',
+                target_hwnd=target_hwnd or None,
+                operation='validate_saved_window_identity')
+            if not launch_failure_is_current():
+                return False
+            self.push_error('WINDOW SOURCE UNAVAILABLE', detail,
+                            level='error')
+            return False
+        guard = getattr(self, '_admission_guard_request', None)
+        if not callable(guard):
+            guard = MainWindow._admission_guard_request.__get__(self)
+        if not guard(request):
+            return False
+        if transition_check():
+            return False
+        camera_receipt = getattr(self, '_camera_runtime_receipt', None)
+        camera_matches = (
+            (not request.camera.enabled
+             and not isinstance(camera_receipt, dict))
+            or (request.camera.enabled
+                and isinstance(camera_receipt, dict)
+                and int(camera_receipt.get('device_index', -1))
+                == request.camera.device_index))
+        if not camera_matches:
+            self._request_camera_apply(
+                request.camera, origin='capture',
+                request_token=request.request_token,
+                capture_request=request)
+        if transition_check():
+            return False
+        capture_mode = request.source.source_mode
+        raw_target_hwnd = (request.source.live_identity or {}).get('hwnd')
+        target_hwnd = (raw_target_hwnd
+                        if self._admission_positive_int(raw_target_hwnd)
+                        else 0)
+        if not preflight_is_current():
+            return False
+        self._capture_config.request(launch_config)
+        apply_token = self._capture_config.begin_apply()
+        if launch_receipt is not None:
+            launch_receipt.update({
+                'generation': _my_gen,
+                'config': launch_config,
+                'token': apply_token,
+                'admission_epoch': launch_admission_epoch,
+                'admission_revision': launch_admission_revision,
+            })
+
+        def launch_attempt_is_current() -> bool:
+            return (
+                getattr(self, '_engine_gen', None) == _my_gen
+                and self._owns_capture_apply(apply_token, launch_config))
+
+        def reauthorize_launch_receipt() -> bool:
+            """Refresh captured authority without adopting a blind epoch."""
+            nonlocal launch_admission_epoch, launch_admission_revision
+            if transition_check():
+                return False
+            checker = getattr(self, '_admission_decision_for_request', None)
+            if not callable(checker):
+                checker = MainWindow._admission_decision_for_request.__get__(self)
+            decision = checker(request, authoritative=True)
+            if decision is None or not decision.allowed:
+                denier = getattr(self, '_admission_deny', None)
+                if not callable(denier):
+                    denier = MainWindow._admission_deny.__get__(self)
+                denier(decision, message='Capture admission changed before launch.')
+                return False
+            if transition_check():
+                return False
+            launch_admission_epoch = int(
+                getattr(self, '_admission_epoch', 0))
+            launch_admission_revision = getattr(
+                decision, 'policy_revision', None)
+            if launch_receipt is not None:
+                launch_receipt.update({
+                    'admission_epoch': launch_admission_epoch,
+                    'admission_revision': launch_admission_revision,
+                })
+            return True
+
+        def fail_launch(error) -> bool:
+            if not launch_attempt_is_current():
+                return False
+            return self._capture_config.fail(str(error), apply_token)
+
+        def record_launch_terminal(error) -> None:
+            record_terminal(error, apply_token)
+
+        def stop_and_record_launch_terminal(error) -> bool:
+            expected_generation = getattr(self, '_engine_gen', None)
+            expected_revision = self._capture_config.transition_revision
+            self.stop_engine()
+            if (getattr(self, '_engine_gen', None)
+                    != expected_generation + 1
+                    or self._capture_config.transition_revision
+                    != expected_revision + 1):
+                return False
+            record_launch_terminal(error)
+            return True
+
+        def abort_launch_authority_loss(detail) -> bool:
+            if transition_check() or not fail_launch(detail):
+                return False
+            if not stop_and_record_launch_terminal(detail):
+                return False
             self._restart_pending = False
             self._set_capture_apply_state(False)
             return False
 
-        # Preserve the legacy raw-capacity budget as a diagnostic input. Public
-        # alpha startup refuses hardware failure, but the engine reports how
-        # short the old raw history would have been instead of claiming 30/60s.
-        actual_w = launch_config.width if launch_config.width else 1920
-        actual_h = launch_config.height if launch_config.height else 1080
-        bytes_per_frame = actual_w * actual_h * 4
-        frames_needed   = launch_config.buffer_seconds * launch_config.fps
-        mb_needed       = max(64, (frames_needed * bytes_per_frame + (1024*1024-1)) // (1024*1024))
-        max_buffer_mb   = min(int(mb_needed) + 64, 2048)   # hard 2 GB ceiling
-
-        capture_mode    = self.settings_manager.get('capture_mode',    'desktop')
-        target_hwnd     = self.settings_manager.get('target_hwnd',     0)
-        capture_monitor = launch_config.monitor
-        engine_monitor_arg = capture_monitor
-        if sys.platform != 'win32' and is_native_x11_session():
-            xrandr = linux_tools.path('xrandr')
-            if not xrandr:
-                detail = linux_tools.missing_message('xrandr')
-                self._restart_pending = False
-                self._set_capture_apply_state(False)
-                self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
-                self.push_error('X11 MONITOR UNAVAILABLE', detail, level='error')
+        try:
+            requested_diagnostics = self._diagnostic_capture_config(launch_config)
+            if self._diagnostics is not None:
+                self._diagnostics.update_summary(
+                    'requested_configuration', requested_diagnostics)
+                self._diagnostics.update_summary(
+                    'adapter_topology',
+                    build_adapter_chain(
+                        None, unavailable_reason='engine_process_not_started'))
+            emit_event('engine', 'start_requested', state='REQUESTED',
+                       process_generation=_my_gen,
+                       requested_configuration=requested_diagnostics,
+                       engine_process_start_count=self._diagnostic_engine_start_count,
+                       capture_restart_count=capture_restart_count)
+            if self._diagnostics is not None:
+                self._diagnostics.merge_summary(
+                    'health',
+                    engine_process_start_count=self._diagnostic_engine_start_count,
+                    capture_restart_count=capture_restart_count)
+            if not launch_attempt_is_current():
                 return False
-            try:
-                x11_target = resolve_x11_capture_target(
-                    capture_monitor, xrandr)
-            except X11MonitorError as error:
-                detail = str(error)
-                self._capture_config.fail(detail)
-                self._restart_pending = False
-                self._set_capture_apply_state(False)
-                self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
-                self.push_error('X11 MONITOR UNAVAILABLE', detail, level='error')
-                return False
-            engine_monitor_arg = x11_target.engine_argument
-            capture_monitor = x11_target.output.name
-        if sys.platform == 'win32':
-            # The topology may change between config resolution and process
-            # creation; keep a final format-only guard at the native boundary.
-            try:
-                engine_monitor_arg = validate_engine_monitor_argument(
-                    engine_monitor_arg)
-            except MonitorSelectionError as monitor_error:
-                selection = monitor_error.result
-                detail = (f'{selection.reason}. Capture was not started; a '
-                          'canonical Windows monitor device path is required.')
-                self._capture_config.fail(detail)
-                self._restart_pending = False
-                self._set_capture_apply_state(False)
-                self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+            if not self.engine_path or not self.engine_path.exists():
+                print("Engine executable not found.")
+                if not fail_launch('engine executable not found'):
+                    return False
+                record_launch_terminal('engine executable not found')
+                if not launch_failure_is_current():
+                    return False
+                self._set_status('NO ENGINE', status_warning_qss())
+                if not launch_failure_is_current():
+                    return False
                 emit_event(
                     'engine', 'start_failed', state='FAILED',
-                    error=getattr(DiagnosticError, selection.code,
-                                  selection.code),
-                    monitor_selection=selection.as_dict(),
-                    detail=detail, api_call='native_process_argument_guard')
-                self.push_error('CAPTURE FAILED',
-                                f'{selection.code}: {detail}', level='error')
+                    error=DiagnosticError.ENGINE_START_FAILED,
+                    compatibility_error='Error 003',
+                    technical_cause='ENGINE_EXECUTABLE_MISSING',
+                    technical_subsystem='process', operation='executable_discovery',
+                    process_generation=_my_gen,
+                    native_capture_generation=None,
+                    api_call='engine_executable_discovery',
+                    detail='engine executable not found')
+                if not launch_failure_is_current():
+                    return False
+                self._warn_no_engine(process_generation=_my_gen)
+                if not launch_failure_is_current():
+                    return False
+                self._restart_pending = False
+                self._set_capture_apply_state(False)
+                if not launch_failure_is_current():
+                    return False
                 return False
-        # target_hwnd comes from user-editable settings.json — never trust it.
-        try:
-            target_hwnd = int(target_hwnd)
-        except (TypeError, ValueError):
-            target_hwnd = 0
-        mode_arg        = '1' if (capture_mode == 'window' and target_hwnd) else '0'
-        hwnd_arg        = str(target_hwnd)
 
-        # 0 = stretch (default), 1 = fit (letterbox/pillarbox)
-        scaling_mode = launch_config.scaling
-        scale_arg    = '1' if scaling_mode == 'fit' else '0'
+            if (sys.platform == 'win32' and launch_config.audio_enabled
+                    and launch_config.application_audio_tracks_enabled
+                    and ((launch_config.application_audio_exclusions
+                          and not native_audio_exclusions_supported(self.engine_path))
+                         or (not launch_config.keep_system_audio_backup
+                             and not native_audio_backup_control_supported(self.engine_path)))):
+                detail = ('The capture engine cannot enforce the requested program audio settings. '
+                          'Install or build the updated capture engine, then retry. '
+                          'Capture was stopped to preserve your audio selection.')
+                if not fail_launch(detail):
+                    return False
+                record_launch_terminal(detail)
+                if not launch_failure_is_current():
+                    return False
+                self._restart_pending = False
+                self._set_capture_apply_state(False)
+                if not launch_failure_is_current():
+                    return False
+                self._set_status('AUDIO ENGINE UPDATE REQUIRED', status_warning_qss())
+                if not launch_failure_is_current():
+                    return False
+                self.push_error('AUDIO ENGINE UPDATE REQUIRED', detail, level='error')
+                return False
 
-        print(f"Starting engine  |  FPS={launch_config.fps}  "
-              f"Buffer={launch_config.buffer_seconds}s  "
-              f"Bitrate={launch_config.bitrate_kbps}kbps  Pool={max_buffer_mb}MB  "
-              f"Scale={scaling_mode}"
-              + (f"  Monitor={capture_monitor}" if capture_monitor else ""))
-        codec_pref_int = {
-            'auto': 0, 'h264': 1, 'hevc': 2, 'av1': 3
-        }.get(launch_config.codec, 0)
-        encoder_pref_int = {
-            'auto': 0, 'nvenc': 1, 'amf': 2, 'qsv': 3, 'software': 4
-        }.get(launch_config.encoder, 0)
-        encoder_preset = launch_config.preset
-        # argv[13] is retained for native ABI compatibility only.
-        multiband_arg = '0'
-        audio_arg = '1' if launch_config.audio_enabled else '0'
-        audio_mode_arg = (
-            '1' if launch_config.separate_audio_enabled else '0')
-        microphone_id_arg = launch_config.microphone_endpoint_id
-        try:
-            microphone_gain = int(self.settings_manager.get('mic_volume', 100))
-        except (TypeError, ValueError):
-            microphone_gain = 100
-        microphone_gain_arg = str(max(0, min(200, microphone_gain)))
+            # Keep Linux's legacy raw-frame capacity argument independent of
+            # the explicit encoded replay memory budget.
+            replay_storage = launch_config.replay_storage
+            max_buffer_mb = replay_storage.memory_mib
+            if sys.platform != 'win32':
+                actual_w = launch_config.width if launch_config.width else 1920
+                actual_h = launch_config.height if launch_config.height else 1080
+                bytes_per_frame = actual_w * actual_h * 4
+                frames_needed = launch_config.buffer_seconds * launch_config.fps
+                mb_needed = max(64, (frames_needed * bytes_per_frame + (1024*1024-1)) // (1024*1024))
+                max_buffer_mb = min(int(mb_needed) + 64, 2048)
+
+            capture_monitor = launch_config.monitor
+            engine_monitor_arg = capture_monitor
+            if sys.platform != 'win32' and is_native_x11_session():
+                xrandr = linux_tools.path('xrandr')
+                if not xrandr:
+                    detail = linux_tools.missing_message('xrandr')
+                    if not fail_launch(detail):
+                        return False
+                    record_launch_terminal(detail)
+                    if not launch_failure_is_current():
+                        return False
+                    self._restart_pending = False
+                    self._set_capture_apply_state(False)
+                    if not launch_failure_is_current():
+                        return False
+                    self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+                    if not launch_failure_is_current():
+                        return False
+                    self.push_error('X11 MONITOR UNAVAILABLE', detail, level='error')
+                    return False
+                try:
+                    x11_target = resolve_x11_capture_target(
+                        capture_monitor, xrandr)
+                except X11MonitorError as error:
+                    detail = str(error)
+                    if not fail_launch(detail):
+                        return False
+                    record_launch_terminal(detail)
+                    if not launch_failure_is_current():
+                        return False
+                    self._restart_pending = False
+                    self._set_capture_apply_state(False)
+                    if not launch_failure_is_current():
+                        return False
+                    self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+                    if not launch_failure_is_current():
+                        return False
+                    self.push_error('X11 MONITOR UNAVAILABLE', detail, level='error')
+                    return False
+                engine_monitor_arg = x11_target.engine_argument
+                capture_monitor = x11_target.output.name
+            if sys.platform == 'win32':
+                # The topology may change between config resolution and process
+                # creation; keep a final format-only guard at the native boundary.
+                try:
+                    engine_monitor_arg = validate_engine_monitor_argument(
+                        engine_monitor_arg)
+                except MonitorSelectionError as monitor_error:
+                    selection = monitor_error.result
+                    detail = (f'{selection.reason}. Capture was not started; a '
+                              'canonical Windows monitor device path is required.')
+                    if not fail_launch(detail):
+                        return False
+                    record_launch_terminal(detail)
+                    if not launch_failure_is_current():
+                        return False
+                    self._restart_pending = False
+                    self._set_capture_apply_state(False)
+                    if not launch_failure_is_current():
+                        return False
+                    self._set_status('MONITOR UNAVAILABLE', status_warning_qss())
+                    if not launch_failure_is_current():
+                        return False
+                    emit_event(
+                        'engine', 'start_failed', state='FAILED',
+                        error=getattr(DiagnosticError, selection.code,
+                                      selection.code),
+                        monitor_selection=selection.as_dict(),
+                        detail=detail, api_call='native_process_argument_guard')
+                    if not launch_failure_is_current():
+                        return False
+                    self.push_error('CAPTURE FAILED',
+                                    f'{selection.code}: {detail}', level='error')
+                    if not launch_failure_is_current():
+                        return False
+                    return False
+            # Win32 source identity was validated above. Preserve window intent all
+            # the way to native startup; Linux retains its historical zero-HWND mode.
+            mode_arg        = '1' if (capture_mode == 'window'
+                                      and (target_hwnd or sys.platform == 'win32')) else '0'
+            hwnd_arg        = str(target_hwnd)
+
+            # 0 = stretch (default), 1 = fit (letterbox/pillarbox)
+            scaling_mode = launch_config.scaling
+            scale_arg    = '1' if scaling_mode == 'fit' else '0'
+
+            print(f"Starting engine  |  FPS={launch_config.fps}  "
+                  f"Buffer={launch_config.buffer_seconds}s  "
+                  f"Bitrate={launch_config.bitrate_kbps}kbps  "
+                  f"ReplayStorage={replay_storage.mode}  "
+                  f"ReplayBudget={replay_storage.budget_mode}  "
+                  + (f"ReplayMemory={replay_storage.memory_mib}MiB  "
+                     if replay_storage.budget_mode == 'manual' else '')
+                  + f"Scale={scaling_mode}"
+                  + (f"  Monitor={capture_monitor}" if capture_monitor else ""))
+            codec_pref_int = {
+                'auto': 0, 'h264': 1, 'hevc': 2, 'av1': 3
+            }.get(launch_config.codec, 0)
+            encoder_pref_int = {
+                'auto': 0, 'nvenc': 1, 'amf': 2, 'qsv': 3, 'software': 4
+            }.get(launch_config.encoder, 0)
+            encoder_preset = launch_config.preset
+            # argv[13] is retained for native ABI compatibility only.
+            multiband_arg = '0'
+            audio_arg = '1' if launch_config.audio_enabled else '0'
+            audio_mode_arg = (
+                '1' if launch_config.separate_audio_enabled else '0')
+            microphone_id_arg = launch_config.microphone_endpoint_id
+            microphone_gain_arg = str(request.mic_gain_percent)
+            if not launch_attempt_is_current():
+                return False
+        except Exception as error:
+            if not fail_launch(str(error)):
+                return False
+            if not stop_and_record_launch_terminal(error):
+                return False
+            emit_event(
+                'engine', 'start_failed', state='FAILED',
+                error=DiagnosticError.ENGINE_START_FAILED,
+                compatibility_error='Error 005',
+                technical_cause=type(error).__name__,
+                technical_subsystem='process', operation='launch',
+                process_generation=_my_gen,
+                native_capture_generation=None,
+                detail=f'{type(error).__name__}: {error}')
+            if not launch_failure_is_current():
+                return False
+            self._restart_pending = False
+            self._set_capture_apply_state(False)
+            if not launch_failure_is_current():
+                return False
+            self._set_status('ERROR', status_warning_qss())
+            if not launch_failure_is_current():
+                return False
+            self.push_error(
+                'ENGINE COULD NOT START',
+                f'Engine failed to start: {error}',
+                level='error',
+                actions=[('RESTART ENGINE', self._restart_capture_engine)],
+                key='engine-launch',
+                dismiss_on_action=False,
+                diagnostic_context={
+                    'diagnostic_error': DiagnosticError.ENGINE_START_FAILED,
+                    'technical_cause': type(error).__name__,
+                    'technical_subsystem': 'process',
+                    'operation': 'launch',
+                    'process_generation': _my_gen,
+                    'backend_generation': None,
+                    'recovery_kind': 'engine_lineage',
+                    'recovery_status': 'awaiting_replacement_engine',
+                },
+            )
+            return False
         try:
             # A process/backend restart starts a new replay generation. Keep the
             # one-per-incident recovery budget, but never carry stale buffer age.
             self._capture_health.reset(preserve_recovery_budget=True)
             popen_options = dict(_NO_WINDOW)
-            self._close_engine_startup_output()
-            engine_log_path = (
-                self._diagnostics.engine_log_path if self._diagnostics is not None
-                else Path.home() / '.fthr' / 'logs' / 'engine.log')
-            self._engine_startup_output = EngineLogCapture(
-                engine_log_path, self._diagnostics)
             engine_environment = os.environ.copy()
+            if sys.platform == 'win32':
+                engine_environment['FTHR_AUDIO_UI_PID'] = str(os.getpid())
+            engine_environment['FTHR_ALLOW_REPLAY_GAPS'] = (
+                '1' if launch_config.allow_replay_gaps else '0')
+            engine_environment['FTHR_ALLOW_LOW_FPS_CLIPS'] = (
+                '1' if launch_config.allow_low_fps_clips else '0')
             if self._diagnostics is not None:
                 engine_environment['FTHR_DIAGNOSTIC_SESSION_ID'] = (
                     self._diagnostics.session_id)
@@ -5681,26 +12272,60 @@ class MainWindow(QMainWindow):
                 bufsize=1,
                 env=engine_environment,
             )
+            engine_args = [
+                str(self.engine_path),
+                str(launch_config.fps), str(launch_config.buffer_seconds),
+                str(launch_config.width), str(launch_config.height),
+                str(launch_config.bitrate_kbps), str(max_buffer_mb),
+                mode_arg, hwnd_arg, scale_arg, engine_monitor_arg,
+                str(codec_pref_int), str(encoder_preset),
+                multiband_arg, audio_arg,
+                microphone_id_arg, microphone_gain_arg,
+                str(encoder_pref_int),
+                '1' if launch_config.crop_enabled else '0',
+                f'{launch_config.crop_x:.9g}',
+                f'{launch_config.crop_y:.9g}',
+                f'{launch_config.crop_w:.9g}',
+                f'{launch_config.crop_h:.9g}',
+                audio_mode_arg, launch_config.playback_endpoint_id,
+                '1' if launch_config.microphone_mono else '0',
+            ]
+            if sys.platform == 'win32':
+                engine_args.extend((
+                    launch_config.audio_device_tracks,
+                    '1' if launch_config.application_audio_tracks_enabled
+                    else '0'))
+            engine_args.extend(replay_storage.launch_args())
+            engine_args.extend((
+                '--capture-cursor', '1' if launch_config.capture_cursor else '0'))
+            if sys.platform == 'win32':
+                engine_args.extend(('--capture-backend', launch_config.capture_backend))
+            if sys.platform == 'win32':
+                engine_args.extend(native_audio_policy_arguments(
+                    audio_enabled=launch_config.audio_enabled,
+                    programs_enabled=launch_config.application_audio_tracks_enabled,
+                    exclusions=launch_config.application_audio_exclusions,
+                    keep_backup=launch_config.keep_system_audio_backup))
             try:
+                if not capture_policy_is_current(self, request):
+                    return abort_launch_authority_loss(
+                        'Capture compatibility changed before engine launch')
+                if not self._prepared_source_is_live(request):
+                    return abort_launch_authority_loss(
+                        'The selected capture window changed before engine launch')
+                if not reauthorize_launch_receipt():
+                    return abort_launch_authority_loss(
+                        'Capture admission changed before engine launch.')
+                if (transition_check()
+                        or launch_admission_epoch != int(
+                            getattr(self, '_admission_epoch', 0))
+                        or not launch_attempt_is_current()):
+                    return False
                 self.engine_process = subprocess.Popen(
-                    [str(self.engine_path),
-                     str(launch_config.fps), str(launch_config.buffer_seconds),
-                     str(launch_config.width), str(launch_config.height),
-                     str(launch_config.bitrate_kbps), str(max_buffer_mb),
-                     mode_arg, hwnd_arg, scale_arg, engine_monitor_arg,
-                     str(codec_pref_int), str(encoder_preset),
-                     multiband_arg, audio_arg,
-                     microphone_id_arg, microphone_gain_arg,
-                     str(encoder_pref_int),
-                     '1' if launch_config.crop_enabled else '0',
-                     f'{launch_config.crop_x:.9g}',
-                     f'{launch_config.crop_y:.9g}',
-                     f'{launch_config.crop_w:.9g}',
-                     f'{launch_config.crop_h:.9g}',
-                     audio_mode_arg, launch_config.playback_endpoint_id,
-                     '1' if launch_config.microphone_mono else '0'],
+                    engine_args,
                     **popen_options
                 )
+                self._engine_bridge_owner = getattr(self, 'bridge', None)
                 self._engine_startup_output.attach(self.engine_process.stdout)
             except OSError as error:
                 failure = format_engine_launch_failure(
@@ -5715,6 +12340,10 @@ class MainWindow(QMainWindow):
                     api_call=('CreateProcessW' if sys.platform == 'win32'
                               else 'subprocess.Popen'),
                 )
+                if not fail_launch(failure.detail):
+                    return False
+                if not stop_and_record_launch_terminal(failure.detail):
+                    return False
                 print(f'FTHR_STARTUP_ERROR: {failure.code}: {failure.detail}')
                 native_value = getattr(error, 'winerror', None)
                 if native_value is None:
@@ -5763,8 +12392,15 @@ class MainWindow(QMainWindow):
                             'unavailable:engine_process_not_started'),
                         'codec': launch_config.codec,
                     })
-                self.stop_engine()
+                if not launch_failure_is_current():
+                    return False
+                self._restart_pending = False
+                self._set_capture_apply_state(False)
+                if not launch_failure_is_current():
+                    return False
                 self._set_status('ERROR', status_warning_qss())
+                if not launch_failure_is_current():
+                    return False
                 self.push_error(
                     'ENGINE COULD NOT START',
                     f'{failure.title}: {failure.detail}',
@@ -5785,9 +12421,6 @@ class MainWindow(QMainWindow):
                         'win32_error': getattr(error, 'winerror', None),
                     },
                 )
-                self._capture_config.fail(failure.detail)
-                self._restart_pending = False
-                self._set_capture_apply_state(False)
                 return False
             # Poll for up to 10 seconds off the Qt thread during hardware startup.
             # Dispatch UI changes through _ui_call. A generation check prevents an old
@@ -5804,6 +12437,8 @@ class MainWindow(QMainWindow):
                     if not self._owns_engine_attempt(
                             _my_gen, process_owner, bridge_owner):
                         return   # superseded by a newer start/restart
+                    if not self._owns_capture_apply(apply_token, launch_config):
+                        return
                     connected = bridge_owner.initialize()
                     if not self._owns_engine_attempt(
                             _my_gen, process_owner, bridge_owner):
@@ -5820,10 +12455,30 @@ class MainWindow(QMainWindow):
                         if not self._owns_engine_attempt(
                                 _my_gen, process_owner, bridge_owner):
                             return
+                        if not self._owns_capture_apply(
+                                apply_token, launch_config):
+                            return
+                        # Preserve the first positive native generation while
+                        # the exact process/bridge owner is alive, before any
+                        # startup-output or UI/session hook can re-enter.
+                        try:
+                            attach_status = bridge_owner.get_status()
+                        except (AttributeError, OSError, RuntimeError, TypeError):
+                            attach_status = None
+                        attach_native_generation = (
+                            int(attach_status.get('capture_generation', 0) or 0)
+                            if isinstance(attach_status, dict) else 0)
+                        if attach_native_generation > 0:
+                            self._retain_terminal_response_owner_cache(
+                                process_owner, bridge_owner, _my_gen,
+                                attach_native_generation)
                         startup_output = self._read_engine_startup_output(
                             startup_owner)
                         if not self._owns_engine_attempt(
                                 _my_gen, process_owner, bridge_owner):
+                            return
+                        if not self._owns_capture_apply(
+                                apply_token, launch_config):
                             return
                         startup_warnings = extract_startup_warnings(startup_output)
                         if startup_output.strip():
@@ -5835,11 +12490,21 @@ class MainWindow(QMainWindow):
                                 return
                             if self._engine_handshake_generation != _my_gen:
                                 return
+                            if not self._owns_capture_apply(
+                                    apply_token, launch_config):
+                                return
+                            if not reauthorize_launch_receipt():
+                                abort_launch_authority_loss(
+                                    'Capture admission changed during engine handshake.')
+                                return
                             self._engine_handshake_generation = None
                             # Connection proves IPC only. Promote requested to
                             # active after capture-health observes fresh frames.
                             self._pending_launch_config = launch_config
                             self._pending_launch_generation = _my_gen
+                            self._pending_launch_token = apply_token
+                            self._pending_launch_admission_epoch = (
+                                launch_admission_epoch)
                             self._set_status('STARTING CAPTURE', status_idle_qss())
                             # Native endpoint discovery is intentionally
                             # deferred until the normal engine is already
@@ -5847,15 +12512,30 @@ class MainWindow(QMainWindow):
                             # launch a second capture executable merely to
                             # enumerate microphones.
                             if self._ui_ready:
+                                def populate_mic_devices_if_current():
+                                    if (not self._owns_engine_attempt(
+                                            _my_gen,
+                                            process_owner,
+                                            bridge_owner)
+                                            or not self._owns_capture_apply(
+                                                apply_token, launch_config)
+                                            or getattr(
+                                                self, '_shutdown_requested', False)
+                                            or getattr(
+                                                self, '_shutdown_complete', False)):
+                                        return
+                                    widget = getattr(
+                                        self, '_settings_page_widget', None)
+                                    if (widget is not None
+                                            and not getattr(self, '_ultra_performance', False)):
+                                        widget._populate_mic_devices()
+
                                 QTimer.singleShot(
-                                    0, lambda: (
-                                        self._settings_page_widget
-                                        ._populate_mic_devices()
-                                        if self._owns_engine_attempt(
-                                            _my_gen, process_owner, bridge_owner)
-                                        else None))
+                                    0, populate_mic_devices_if_current)
                             self._schedule_owned_hardware_check(
-                                _my_gen, process_owner, bridge_owner)
+                                _my_gen, process_owner, bridge_owner,
+                                expected_config=launch_config,
+                                expected_token=apply_token)
                             emit_event(
                                 'engine', 'handshake_completed', state='CONNECTED',
                                 process_generation=_my_gen,
@@ -5865,6 +12545,8 @@ class MainWindow(QMainWindow):
                                 warning_action = (
                                     ('EDIT GAME CROP', self._toggle_game_detection)
                                     if warning.code.startswith('CROP_') else
+                                    ('OPEN STORAGE SETTINGS', lambda: self._open_settings_category(10))
+                                    if warning.code.startswith('LOW_REPLAY_') else
                                     ('OPEN AUDIO SETTINGS', self._toggle_settings_page)
                                 )
                                 self.push_error(
@@ -5882,9 +12564,13 @@ class MainWindow(QMainWindow):
                 if not self._owns_engine_attempt(
                         _my_gen, process_owner, bridge_owner):
                     return   # a newer start owns the engine now — don't kill it
+                if not self._owns_capture_apply(apply_token, launch_config):
+                    return
                 startup_output = self._read_engine_startup_output(startup_owner)
                 if not self._owns_engine_attempt(
                         _my_gen, process_owner, bridge_owner):
+                    return
+                if not self._owns_capture_apply(apply_token, launch_config):
                     return
                 if startup_output.strip():
                     print(startup_output.rstrip())
@@ -5921,12 +12607,23 @@ class MainWindow(QMainWindow):
                         return
                     if self._engine_handshake_generation != _my_gen:
                         return
+                    if not self._owns_capture_apply(
+                            apply_token, launch_config):
+                        return
+                    if not fail_launch(failure.detail):
+                        return
                     self._engine_handshake_generation = None
-                    self.stop_engine()
-                    self._capture_config.fail(failure.detail)
+                    if not stop_and_record_launch_terminal(failure.detail):
+                        return
+                    if not launch_failure_is_current():
+                        return
                     self._restart_pending = False
                     self._set_capture_apply_state(False)
+                    if not launch_failure_is_current():
+                        return
                     self._set_status('DISCONNECTED', status_warning_qss())
+                    if not launch_failure_is_current():
+                        return
                     self.push_error(
                         failure_title,
                         f'{failure.title}: {failure.detail}',
@@ -5954,16 +12651,30 @@ class MainWindow(QMainWindow):
                                 else 'manual_restart_required'),
                         },
                     )
+                    if not launch_failure_is_current():
+                        return
                     if self._manual_record_state == 'preparing':
                         self._fail_manual_recording(
                             'The recording quality profile could not connect to capture.')
+                    if not explicit_native_failure and launch_failure_is_current():
+                        MainWindow._schedule_engine_failure_recovery(self, 'startup')
                 self._ui_call.emit(_on_failed)
 
             threading.Thread(target=_poll_connect, daemon=True,
                              name='fthr-engine-connect').start()
             return True
         except Exception as e:
+            if not fail_launch(str(e)):
+                return False
             print(f"Engine start error: {e}")
+            if not stop_and_record_launch_terminal(e):
+                return False
+            if not launch_failure_is_current():
+                return False
+            self._restart_pending = False
+            self._set_capture_apply_state(False)
+            if not launch_failure_is_current():
+                return False
             emit_event(
                 'engine', 'start_failed', state='FAILED',
                 error=DiagnosticError.ENGINE_START_FAILED,
@@ -5973,8 +12684,11 @@ class MainWindow(QMainWindow):
                 process_generation=_my_gen,
                 native_capture_generation=None,
                 detail=f'{type(e).__name__}: {e}')
-            self.stop_engine()
+            if not launch_failure_is_current():
+                return False
             self._set_status('ERROR', status_warning_qss())
+            if not launch_failure_is_current():
+                return False
             self.push_error(
                 'ENGINE COULD NOT START',
                 f'Engine failed to start: {e}',
@@ -5993,9 +12707,6 @@ class MainWindow(QMainWindow):
                     'recovery_status': 'awaiting_replacement_engine',
                 },
             )
-            self._capture_config.fail(str(e))
-            self._restart_pending = False
-            self._set_capture_apply_state(False)
             return False
 
     def _read_engine_startup_output(self, capture=None) -> str:
@@ -6019,16 +12730,51 @@ class MainWindow(QMainWindow):
                 pass
 
     def stop_engine(self):
+        if _admission_call(self, '_admission_transition_active'):
+            return
         # Invalidate queued handshake work before shutdown can block.
+        self._clear_focus_action()
+        self._capture_config.cancel_apply()
+        self._pending_launch_config = None
+        self._pending_launch_generation = None
+        self._pending_launch_token = None
+        self._pending_launch_admission_epoch = None
+        self._pending_launch_request = None
+        self._pending_launch_intent_id = None
+        self._accepted_capture_session = None
+        self._accepted_camera_runtime_receipt = None
+        self._refresh_capture_summary()
         self._engine_handshake_generation = None
         self._engine_gen = getattr(self, '_engine_gen', 0) + 1
         process = self.engine_process
         bridge = getattr(self, 'bridge', None)
         graceful_requested = False
         request_shutdown = getattr(bridge, 'request_engine_shutdown', None)
-        if callable(request_shutdown):
-            graceful_requested = request_shutdown()
-        if process:
+        owned_bridge = getattr(self, '_engine_bridge_owner', bridge)
+        process_is_owned = process is not None and process is getattr(
+            self, 'engine_process', None)
+        cached = getattr(self, '_terminal_response_owner_cache', None)
+        cached_owner = (cached.get('owner') if isinstance(cached, dict)
+                        else None)
+        cached_process = (cached.get('process') if isinstance(cached, dict)
+                          else None)
+        cached_bridge = (cached.get('bridge') if isinstance(cached, dict)
+                         else None)
+        cached_process_generation = (
+            cached.get('process_generation') if isinstance(cached, dict)
+            else None)
+        cached_native_generation = (
+            cached.get('native_generation') if isinstance(cached, dict)
+            else None)
+        current_process_generation = getattr(
+            self, '_engine_process_generation', None)
+        if (process_is_owned and bridge is owned_bridge
+                and callable(request_shutdown)):
+            try:
+                graceful_requested = request_shutdown()
+            except (OSError, RuntimeError, TypeError):
+                graceful_requested = False
+        if process_is_owned:
             try:
                 process.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
@@ -6050,22 +12796,128 @@ class MainWindow(QMainWindow):
             if self.engine_process is process:
                 self.engine_process = None
             self._engine_process_generation = None
+            if getattr(self, '_engine_bridge_owner', None) is bridge:
+                self._engine_bridge_owner = None
         if bridge:
             bridge.shutdown()
+        # A normal owned stop invalidates only the exact private A slot.  It
+        # must never call release through the cache helper: native shutdown
+        # already owns that lifecycle and a successor may immediately retain
+        # its own mapping token.
+        if (cached_owner is not None and cached_process is process
+                and cached_bridge is bridge
+                and cached_process_generation
+                == current_process_generation
+                and cached_native_generation is not None):
+            self._invalidate_terminal_response_owner_cache(
+                cached_process, cached_bridge, cached_process_generation,
+                cached_native_generation)
         self._close_engine_startup_output()
+        MainWindow._release_closed_recording_paths(self)
 
-    def _restart_capture_engine(self, *, allow_recording_prepare: bool = False):
-        manual_state = getattr(self, '_manual_record_state', 'idle')
-        if (manual_state != 'idle'
-                and not (allow_recording_prepare
-                         and manual_state == 'preparing')):
-            self.push_error(
-                'STOP RECORDING FIRST',
-                'Finish the manual recording before restarting capture or '
-                'applying encoder settings.',
-                level='warning',
-            )
+    def _defer_unready_capture_window(self, request) -> bool:
+        """Keep the current capture owner until a selected window can render."""
+        if sys.platform != 'win32' or request.source.source_mode != 'window':
+            return False
+        identity = request.source.live_identity or {}
+        hwnd = identity.get('hwnd', 0)
+        if is_capture_window_renderable(hwnd):
+            return False
+        # Invalid/reused handles still pass through the normal source-identity
+        # failure path. Only a live selected window may wait for restoration.
+        if not self._prepared_source_is_live(request):
+            return False
+        if (getattr(self, '_manual_prepare_deadline', None) is not None
+                and MainWindow._manual_prepare_owns_capture(self, request=request)):
+            MainWindow._set_manual_prepare_wait_reason(
+                self, 'Restore the selected game window to start recording.')
+            return True
+        reason = 'Restore the selected game window to apply capture changes'
+        if (getattr(self, '_desired_capture_request', None) is request
+                and getattr(self, '_latest_capture_intent_state', None) == 'queued'):
+            self._pending_capture_reason = reason
+        else:
+            self._queue_latest_desired_request(request, reason=reason)
+        if getattr(self, '_deferred_window_request', None) is request:
+            return True
+        self._deferred_window_request = request
+
+        def retry_when_restored():
+            if getattr(self, '_deferred_window_request', None) is not request:
+                return
+            self._deferred_window_request = None
+            if (getattr(self, '_shutdown_requested', False)
+                    or getattr(self, '_shutdown_complete', False)
+                    or getattr(self, '_desired_capture_request', None) is not request
+                    or getattr(self, '_latest_capture_intent_state', None) != 'queued'):
+                return
+            self._apply_latest_desired_request_if_idle()
+
+        QTimer.singleShot(500, retry_when_restored)
+        return True
+
+    def _restart_capture_engine(self, *, allow_recording_prepare: bool = False,
+                                _prepared_request=None):
+        if not getattr(self, '_file_operations_ready', True):
             return
+        if _prepared_request is None:
+            request = self._prepare_next_capture_request(
+                getattr(self, '_engine_profile', 'clips'))
+            if request is None:
+                return False
+        else:
+            request = _prepared_request
+        owner_snapshot = self._capture_owner_snapshot()
+        if _admission_call(self, '_admission_transition_active') or not _admission_call(self, '_admission_guard_request', request):
+            return False
+        if not self._capture_owner_snapshot_is_current(owner_snapshot):
+            return False
+        manual_state = getattr(self, '_manual_record_state', 'idle')
+        manual_owned = bool(
+            allow_recording_prepare
+            and self._manual_prepare_owns_capture(request=request))
+        if (manual_state != 'idle' and not manual_owned):
+            # Resolve the latest intent before refusing resource mutation. This
+            # keeps B (and a later invalid C) visible for the idle transition
+            # instead of dropping settings behind a STOP prompt.
+            self._queue_latest_desired_request(
+                request, reason='Manual recording is still active; change queued')
+            return False
+        if self._capture_resources_busy(
+                allow_manual_prepare=manual_owned, manual_request=request,
+                manual_path=(getattr(self, '_pending_manual_record_path', None)
+                             if manual_owned else None)):
+            self._queue_latest_desired_request(
+                request, reason='Capture resources are busy; change queued')
+            return False
+        active = getattr(self, '_accepted_capture_session', None)
+        # The process and IPC can remain alive after the capture thread exits.
+        # Identical requested settings do not make that backend reusable: a
+        # resize needs new source textures and encoder geometry even at SOURCE.
+        restart_required = MainWindow._capture_backend_requires_restart(self)
+        if (not restart_required and active is not None
+                and MainWindow._capture_native_inputs_equivalent(
+                    request, active.request)
+                and (request.camera.enabled, request.camera.device_index)
+                != (active.request.camera.enabled, active.request.camera.device_index)):
+            if self._bind_same_native_capture_request(request, active):
+                self._request_camera_apply(
+                    request.camera, origin='settings',
+                    request_token=request.request_token,
+                    capture_request=request)
+                return True
+        # All public Apply routes converge here.  Once request validation and
+        # the resource-busy gate have passed, metadata-only B may bind to the
+        # still-owned native A.  This admission must precede apply hooks and
+        # stop_engine; the heartbeat helper alone is insufficient because the
+        # profile Apply signal reaches this method directly.
+        if (not restart_required
+                and MainWindow._rebind_equivalent_capture_request(self, request)):
+            return False
+        if not self._capture_owner_snapshot_is_current(owner_snapshot):
+            return False
+        if MainWindow._defer_unready_capture_window(self, request):
+            return False
         self._set_capture_apply_state(True)
         if hasattr(self, '_save_state') and self._save_state.is_busy():
             # Save completion has its own bounded lifecycle. Do not terminate
@@ -6076,10 +12928,17 @@ class MainWindow(QMainWindow):
             self._set_status(self._capture_pending_text(), status_idle_qss())
             if not getattr(self, '_restart_deferred_for_save', False):
                 self._restart_deferred_for_save = True
+                deferred_generation = getattr(self, '_engine_gen', 0)
                 def _retry_after_save():
+                    if (getattr(self, '_shutdown_requested', False)
+                            or not self._capture_settings_applying
+                            or getattr(self, '_engine_gen', 0)
+                            != deferred_generation
+                            or not getattr(
+                                self, '_restart_deferred_for_save', False)):
+                        return
                     self._restart_deferred_for_save = False
-                    if self._capture_settings_applying:
-                        self._restart_capture_engine()
+                    self._restart_capture_engine()
                 QTimer.singleShot(500, _retry_after_save)
             return
         # Guard against button spam: each unguarded click would spawn another
@@ -6092,56 +12951,340 @@ class MainWindow(QMainWindow):
         if timer is not None:
             timer.start()
         self._set_status(self._capture_pending_text(), status_idle_qss())
+        proof = _admission_call(self, '_admission_stable_proof', request)
+        proof_current = (proof is not None
+                         and _admission_call(
+                             self, '_admission_pure_proof_current', proof))
+        if not proof_current:
+            # If the hook replaced A with successor B, its apply/restart
+            # state belongs to B and must remain untouched.  Only the exact
+            # A-owned attempt may clear its pending UI/timer state.
+            if not self._capture_owner_snapshot_is_current(owner_snapshot):
+                return False
+            self._restart_pending = False
+            self._set_capture_apply_state(False)
+            return False
+        if not self._capture_owner_snapshot_is_current(owner_snapshot):
+            return False
+        manual_path = getattr(self, '_pending_manual_record_path', None)
+        if manual_owned:
+            self._manual_prepare_restart_request = request
         self.stop_engine()
-        QTimer.singleShot(1000, self._finish_restart)
+        restart_generation = getattr(self, '_engine_gen', 0)
+
+        def finish_owned_restart():
+            if manual_owned:
+                if (getattr(self, '_pending_manual_record_request', None) is not request
+                        or getattr(self, '_pending_manual_record_path', None) is not manual_path
+                        or getattr(self, '_engine_gen', None) != restart_generation):
+                    return
+                if not MainWindow._manual_preparation_ready(self, request):
+                    if getattr(self, '_manual_prepare_restart_request', None) is request:
+                        self._restart_pending = False
+                        self._set_capture_apply_state(False)
+                    return
+            self._finish_restart(restart_generation, prepared_request=request)
+
+        QTimer.singleShot(1000, finish_owned_restart)
+
+    def _display_mode_resize_restart_is_active(self, status) -> bool:
+        """Return true only for the current engine's queued backend recovery."""
+        flags = int(status.get('capture_health_flags', 0) or 0)
+        generation = getattr(self, '_engine_gen', None)
+        return bool(
+            flags & int(CaptureHealthFlag.RECONFIGURE_REQUIRED
+                        | CaptureHealthFlag.BACKEND_FAILED)
+            and not getattr(self, '_shutdown_requested', False)
+            and not getattr(self, '_shutdown_complete', False)
+            and getattr(self, '_display_mode_restart_pending', False)
+            and getattr(self, '_manual_record_state', 'idle') == 'idle'
+            and getattr(self, '_display_mode_restart_pending_generation', None)
+            == generation
+            and getattr(self, '_engine_process_generation', None) == generation)
+
+    def _schedule_engine_failure_recovery(self, kind: str) -> bool:
+        """Retry a dead process, never a merely motionless capture source.
+
+        The callback owns the failed generation and user intent. A manual stop,
+        new settings/source request, or shutdown revokes it before any restart.
+        Budgets survive replacement processes until sustained healthy capture.
+        """
+        if kind not in ('startup', 'crash'):
+            return False
+        if (getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)
+                or getattr(self, '_manual_record_state', 'idle') != 'idle'
+                or getattr(self, 'engine_process', None) is not None
+                or getattr(self, '_automatic_engine_retry', None) is not None):
+            return False
+        attempts = dict(getattr(self, '_automatic_engine_attempts', {}))
+        count = attempts.get(kind, 0)
+        if count >= (1 if kind == 'startup' else 3):
+            return False
+        token = (
+            getattr(self, '_engine_gen', 0),
+            getattr(self, '_capture_intent_revision', 0),
+            getattr(self, '_source_authority_revision', 0),
+            getattr(self, '_admission_epoch', 0),
+        )
+        self._automatic_engine_retry = token
+
+        def retry():
+            if getattr(self, '_automatic_engine_retry', None) != token:
+                return
+            self._automatic_engine_retry = None
+            current = (
+                getattr(self, '_engine_gen', 0),
+                getattr(self, '_capture_intent_revision', 0),
+                getattr(self, '_source_authority_revision', 0),
+                getattr(self, '_admission_epoch', 0),
+            )
+            if (current != token
+                    or getattr(self, '_shutdown_requested', False)
+                    or getattr(self, '_shutdown_complete', False)
+                    or getattr(self, 'engine_process', None) is not None
+                    or getattr(self, '_manual_record_state', 'idle') != 'idle'
+                    or getattr(self, '_restart_pending', False)
+                    or getattr(self, '_capture_settings_applying', False)
+                    or not getattr(self, '_file_operations_ready', True)
+                    or _admission_call(self, '_admission_transition_active')):
+                return
+            attempts = dict(getattr(self, '_automatic_engine_attempts', {}))
+            attempts[kind] = attempts.get(kind, 0) + 1
+            self._automatic_engine_attempts = attempts
+            emit_event('engine', 'automatic_restart', state='RECOVERING',
+                       reason=kind, attempt=attempts[kind],
+                       process_generation=token[0])
+            self._restart_capture_engine()
+
+        QTimer.singleShot(1000 * (2 ** count), retry)
+        return True
 
     def _maybe_restart_for_display_mode_change(self, status):
+        # Some drivers report a failed acquire/texture instead of a resize
+        # notification. Apply the same bounded process recovery to either.
+        recovery_flags = int(CaptureHealthFlag.RECONFIGURE_REQUIRED
+                             | CaptureHealthFlag.BACKEND_FAILED)
         if (sys.platform != 'win32'
+                or getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)
                 or not status.get('connected')
-                or not int(status.get('capture_health_flags', 0)) & int(CaptureHealthFlag.RECONFIGURE_REQUIRED)
+                or not int(status.get('capture_health_flags', 0) or 0) & recovery_flags
                 or getattr(self, '_manual_record_state', 'idle') != 'idle'
                 or getattr(self, '_restart_pending', False)
                 or getattr(self, '_capture_settings_applying', False)):
             return
         generation = getattr(self, '_engine_gen', None)
+        if getattr(self, '_display_mode_restart_pending', False):
+            return
         if getattr(self, '_display_mode_restart_generation', None) == generation:
             return
-        now = time.monotonic()
-        attempts = [stamp for stamp in getattr(self, '_display_mode_restart_times', [])
-                    if now - stamp < 30]
+
+        # This method runs before the next capture-health observation. Use the
+        # preceding observed snapshot to reset the incident budget at the
+        # first failure poll; the delayed callback will see the failed state.
+        health = getattr(self, '_capture_health', None)
+        snapshot = getattr(self, '_capture_health_snapshot', None)
+        health_state = getattr(getattr(snapshot, 'state', None), 'value',
+                               getattr(snapshot, 'state', None))
+        fresh_duration = getattr(health, '_fresh_duration_s', 0.0)
+        attempts = list(getattr(self, '_display_mode_restart_times', []))
+        if (health_state == CaptureHealthState.HEALTHY.value
+                and fresh_duration >= 30.0):
+            # Fresh duration accumulates only intervals bracketed by actual
+            # frame-count progress; a single recently seen frame cannot reset.
+            attempts = []
+            self._display_mode_restart_times = []
         if len(attempts) >= 3:
             return
-        self._display_mode_restart_times = attempts + [now]
         self._display_mode_restart_generation = generation
+        self._display_mode_restart_pending = True
+        self._display_mode_restart_pending_generation = generation
         process, bridge = self.engine_process, self.bridge
+        source_revision = int(getattr(self, '_source_authority_revision', 0))
+        settings = self.settings_manager
+        source_mode = settings.get('capture_mode', 'desktop')
+        source_hwnd = settings.get('target_hwnd', 0)
+        source_identity = settings.get('target_window_identity')
+        source_authority = settings.get('capture_source_authority', 'manual')
+        source_window = (get_window_info(int(source_hwnd), own_pid=os.getpid())
+                         if source_mode == 'window' and source_hwnd else None)
+        source_signature = getattr(source_window, 'capture_signature', None)
         def restart():
-            if (self._owns_engine_attempt(generation, process, bridge)
-                    and getattr(self, '_manual_record_state', 'idle') == 'idle'
-                    and not getattr(self, '_restart_pending', False)
-                    and int(bridge.get_status().get('capture_health_flags', 0))
-                    & int(CaptureHealthFlag.RECONFIGURE_REQUIRED)):
+            attempted = False
+            try:
+                if not (not getattr(self, '_shutdown_requested', False)
+                        and not getattr(self, '_shutdown_complete', False)
+                        and self._owns_engine_attempt(generation, process, bridge)
+                        and source_revision == int(getattr(
+                            self, '_source_authority_revision', 0))
+                        and settings.get('capture_mode', 'desktop') == source_mode
+                        and settings.get('target_hwnd', 0) == source_hwnd
+                        and settings.get('target_window_identity') == source_identity
+                        and settings.get('capture_source_authority', 'manual')
+                        == source_authority
+                        and getattr(self, '_manual_record_state', 'idle') == 'idle'
+                        and not getattr(self, '_restart_pending', False)
+                        and int(bridge.get_status().get('capture_health_flags', 0) or 0)
+                        & recovery_flags):
+                    return
+                if source_mode == 'window' and source_hwnd:
+                    live_window = get_window_info(
+                        int(source_hwnd), own_pid=os.getpid())
+                    if (not identity_matches(source_identity, live_window)
+                            or getattr(live_window, 'capture_signature', None)
+                            != source_signature):
+                        # Defer geometry changes while the operator is resizing or
+                        # moving the target; retry a fresh stability window without
+                        # spending recovery budget.
+                        if getattr(self, '_display_mode_restart_generation', None) == generation:
+                            self._display_mode_restart_generation = None
+                        return
+                attempts = list(getattr(self, '_display_mode_restart_times', []))
+                if len(attempts) >= 3:
+                    return
+                self._display_mode_restart_times = attempts + [time.monotonic()]
+                attempted = True
                 self._restart_capture_engine()
+            finally:
+                if getattr(self, '_display_mode_restart_pending_generation', None) == generation:
+                    self._display_mode_restart_pending = False
+                    self._display_mode_restart_pending_generation = None
+                    if (not attempted
+                            and getattr(self, '_display_mode_restart_generation', None)
+                            == generation):
+                        self._display_mode_restart_generation = None
         QTimer.singleShot(750, restart)
 
     def _on_encoder_config_changed(self):
-        self._set_status('APPLYING SETTINGS', status_idle_qss())
-        self._restart_capture_engine()
+        self._queue_capture_settings_restart()
 
-    def _finish_restart(self):
+    def _finish_restart(self, expected_generation=None, *, prepared_request=None):
+        if _admission_call(self, '_admission_transition_active'):
+            return False
+        if (expected_generation is not None
+                and (getattr(self, '_shutdown_requested', False)
+                     or not getattr(self, '_restart_pending', False)
+                     or not getattr(self, '_capture_settings_applying', False)
+                     or getattr(self, '_engine_gen', None)
+                     != expected_generation)):
+            return
+        if (prepared_request is not None
+                and not capture_policy_is_current(self, prepared_request)):
+            # Activation/deactivation can arrive during the one-second owned
+            # restart delay. Resolve the latest policy before any new launch.
+            prepared_request = None
+        tracker = getattr(self, '_capture_config', None)
+        receipt = {
+            'caller_generation': expected_generation,
+            'pre_revision': getattr(tracker, 'transition_revision', None),
+            'pre_process': getattr(self, 'engine_process', None),
+            'pre_bridge': getattr(self, 'bridge', None),
+            'tracker': tracker,
+            'manual_state': getattr(self, '_manual_record_state', 'idle'),
+            'manual_path': getattr(self, '_pending_manual_record_path', None),
+        }
+
+        def terminal_is_current() -> bool:
+            terminal = receipt.get('terminal')
+            return bool(terminal) and (
+                getattr(self, '_engine_gen', None)
+                == terminal['generation']
+                and getattr(self, 'engine_process', None)
+                is terminal['process']
+                and getattr(self, 'bridge', None) is terminal['bridge']
+                and getattr(self, '_capture_config', None)
+                is terminal['tracker']
+                and getattr(self._capture_config, 'transition_revision', None)
+                == terminal['revision']
+                and getattr(self._capture_config, 'status', None)
+                is ApplyStatus.FAILED
+                and getattr(self._capture_config, 'error', None)
+                == terminal['error']
+                and not getattr(self, '_shutdown_requested', False)
+                and not getattr(self, '_shutdown_complete', False))
+
+        def record_wrapper_terminal(error) -> None:
+            receipt['terminal'] = {
+                'generation': getattr(self, '_engine_gen', None),
+                'process': getattr(self, 'engine_process', None),
+                'bridge': getattr(self, 'bridge', None),
+                'tracker': self._capture_config,
+                'token': receipt.get('token'),
+                'error': str(error),
+                'revision': self._capture_config.transition_revision,
+            }
+
         try:
             self.bridge = CaptureBridge()
-            started = self.start_engine()
+            started = self.start_engine(
+                _launch_receipt=receipt, _prepared_request=prepared_request)
         except Exception as error:
-            self._capture_config.fail(str(error))
+            if (receipt.get('token') is not None
+                    and not self._owns_capture_apply(
+                        receipt['token'], receipt.get('config'))):
+                return False
+            if (receipt.get('token') is None
+                    and (
+                        getattr(tracker, 'transition_revision', None)
+                        != receipt.get('preflight_revision',
+                                        receipt.get('pre_revision'))
+                        or getattr(self, '_capture_config', None)
+                        is not receipt.get('tracker')
+                        or getattr(self, '_engine_gen', None)
+                        != receipt.get('generation',
+                                       receipt.get('caller_generation'))
+                        or getattr(self, 'engine_process', None)
+                        is not receipt.get('preflight_process',
+                                           receipt.get('pre_process'))
+                        or getattr(self, 'bridge', None)
+                        is not receipt.get('preflight_bridge',
+                                           receipt.get('pre_bridge'))
+                        or getattr(self, '_shutdown_requested', False)
+                        or getattr(self, '_shutdown_complete', False))):
+                return False
+            if receipt.get('token') is None:
+                self._capture_config.fail(str(error))
+            else:
+                if not self._capture_config.fail(
+                        str(error), receipt['token']):
+                    return False
+                expected_generation = getattr(self, '_engine_gen', None)
+                expected_revision = self._capture_config.transition_revision
+                self.stop_engine()
+                if (getattr(self, '_engine_gen', None)
+                        != expected_generation + 1
+                        or self._capture_config.transition_revision
+                        != expected_revision + 1):
+                    return False
+            record_wrapper_terminal(error)
+            if not terminal_is_current():
+                return False
             self._set_status('SETTINGS APPLY FAILED', status_warning_qss())
+            if not terminal_is_current():
+                return False
             self.push_error('SETTINGS APPLY FAILED', str(error), level='error')
+            if not terminal_is_current():
+                return False
             started = False
         if not started:
+            if not terminal_is_current():
+                return False
             self._restart_pending = False
             self._set_capture_apply_state(False)
-            if getattr(self, '_manual_record_state', 'idle') == 'preparing':
+            if not terminal_is_current():
+                return False
+            if (receipt.get('manual_state') == 'preparing'
+                    and getattr(self, '_manual_record_state', 'idle')
+                    == receipt.get('manual_state')
+                    and getattr(self, '_pending_manual_record_path', None)
+                    == receipt.get('manual_path')):
                 self._fail_manual_recording(
                     'The recording quality profile could not be started.')
+                if not terminal_is_current():
+                    return False
+            return False
+        return True
 
     # Microphone recorder
 
@@ -6164,68 +13307,6 @@ class MainWindow(QMainWindow):
             # Device enumeration is optional; no match means mic capture stays off.
             pass
         return None
-
-    def _start_gary_mic_recorder(self) -> bool:
-        """Start the lightweight PortAudio stream used by Gary on Windows."""
-        if not MicRecorder.is_available():
-            return False
-        device_index = self._resolved_mic_device_index()
-        gain = float(self.settings_manager.get('mic_volume', 100)) / 100.0
-        if MicRecorder().start(device_index, gain=gain):
-            self._gary_recorder_active = True
-            print(f'[Gary] Recorder started (device={device_index}, gain={gain:.2f})')
-            return True
-        print('[Gary] Recorder failed to start')
-        return False
-
-    # Gary Mode
-
-    def _sync_gary_settings(self, restart_recorder: bool = True):
-        """Pull persisted Gary settings into the live response loop."""
-        self._gary_enabled = bool(
-            self.settings_manager.get('gary_mode_enabled', False))
-        self._gary_min_level, self._gary_max_level = clamp_thresholds(
-            self.settings_manager.get('gary_min_level', DEFAULT_MIN_LEVEL),
-            self.settings_manager.get('gary_max_level', DEFAULT_MAX_LEVEL),
-        )
-        if not hasattr(self, '_gary_overlay'):
-            return
-
-        self._gary_overlay.set_image(
-            self.settings_manager.get('gary_image_path'))
-        audio_enabled = bool(
-            self.settings_manager.get('audio_capture_enabled', True))
-        should_run = self._gary_enabled and audio_enabled
-        if should_run:
-            recorder_running = (MicRecorder.is_available()
-                                 and MicRecorder().is_running())
-            if restart_recorder or not recorder_running:
-                if recorder_running and self._gary_recorder_active:
-                    MicRecorder().stop()
-                self._start_gary_mic_recorder()
-        else:
-            self._gary_current_intensity = 0.0
-            self._gary_overlay.set_intensity(0.0)
-            if self._gary_recorder_active and MicRecorder.is_available():
-                MicRecorder().stop()
-                self._gary_recorder_active = False
-
-    def _update_gary_mode(self):
-        audio_enabled = bool(
-            self.settings_manager.get('audio_capture_enabled', True))
-        if (not self._gary_enabled or not audio_enabled
-                or not MicRecorder.is_available()):
-            if self._gary_current_intensity:
-                self._gary_current_intensity = 0.0
-                self._gary_overlay.set_intensity(0.0)
-            return
-
-        level = MicRecorder().latest_level()
-        target = intensity_for_level(
-            level, self._gary_min_level, self._gary_max_level)
-        self._gary_current_intensity = step_intensity(
-            self._gary_current_intensity, target)
-        self._gary_overlay.set_intensity(self._gary_current_intensity)
 
     # Manual recording
 
@@ -6259,17 +13340,41 @@ class MainWindow(QMainWindow):
     def _toggle_manual_recording(self):
         if self._manual_record_state == 'idle':
             self._start_manual_recording()
+        elif self._manual_record_state == 'preparing':
+            MainWindow._end_manual_recording_preparation(self)
+            self._set_status('RECORDING CANCELLED', status_idle_qss())
         elif self._manual_record_state == 'recording':
             self._stop_manual_recording()
 
     def _start_manual_recording(self):
-        pass
+        if (getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)
+                or _admission_call(self, '_admission_transition_active')):
+            return
+        if not _admission_call(self, '_admission_guard_current_session'):
+            return
+        backup_controller = getattr(self, 'library_backup_controller', None)
+        backup_operation = (getattr(backup_controller, 'operation', None)
+                            if backup_controller is not None else None)
+        if (backup_controller is not None
+                and getattr(backup_controller, 'busy', False)
+                and backup_operation in {'create', 'resume_backup'}):
+            backup_controller.cancel()
+        if not getattr(self, '_file_operations_ready', True):
+            self.push_error('LIBRARY RECOVERY REQUIRED', 'Wait for library recovery before recording.', level='warning')
+            return
         if self._save_state.is_busy():
             self.push_error(
                 'WAIT FOR CLIP SAVE',
                 'Start the manual recording after the current replay clip finishes saving.',
                 level='warning',
             )
+            return
+        if self._capture_resources_busy():
+            self.push_error(
+                'WAIT FOR CAPTURE WORK',
+                'Finish the current save or finalization before starting a manual recording.',
+                level='warning')
             return
         if not self.bridge or not self.bridge.is_connected():
             self.push_error(
@@ -6279,9 +13384,31 @@ class MainWindow(QMainWindow):
                 actions=[('RESTART CAPTURE', self._restart_capture_engine)],
             )
             return
+        if not self._accepted_session_owner_is_current():
+            self.push_error(
+                'RECORDING COULD NOT START',
+                'The accepted capture session no longer owns the live native '
+                'process or capture generation.',
+                level='warning')
+            return
+        status = self.bridge.get_status()
+        blocked_flags = (CaptureHealthFlag.RECOVERING
+                         | CaptureHealthFlag.BACKEND_FAILED
+                         | CaptureHealthFlag.RECONFIGURE_REQUIRED)
+        if int(status.get('capture_health_flags', 0) or 0) & int(blocked_flags):
+            self.push_error(
+                'RECORDING COULD NOT START',
+                'Wait for the capture engine to finish recovery or reconfiguration.',
+                level='warning',
+            )
+            return
         target_dir = recording_directory_from(self.settings_manager)
+        allowed, reason = self._storage_admission(target_dir)
+        if not allowed:
+            self.push_error('STORAGE LIMIT', reason, level='warning')
+            return
         try:
-            target_dir.mkdir(parents=True, exist_ok=True)
+            retry_file_operation(target_dir.mkdir, parents=True, exist_ok=True)
             free_bytes = shutil.disk_usage(target_dir).free
         except OSError as exc:
             self.push_error(
@@ -6296,12 +13423,10 @@ class MainWindow(QMainWindow):
             return
 
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        final_path = target_dir / f'FTHR_recording_{timestamp}.mp4'
-        suffix = 2
-        while final_path.exists():
-            final_path = target_dir / f'FTHR_recording_{timestamp}_{suffix}.mp4'
-            suffix += 1
-        if len(str(final_path)) > 255:
+        try:
+            final_path = next_available_output_path(
+                target_dir, f'FTHR_recording_{timestamp}', '.mp4')
+        except OutputPathTooLongError:
             self.push_error(
                 'RECORDING PATH TOO LONG',
                 'Choose a shorter recording folder; the native engine accepts '
@@ -6309,60 +13434,323 @@ class MainWindow(QMainWindow):
                 level='error',
             )
             return
+        except OSError as exc:
+            self.push_error('RECORDING FOLDER UNAVAILABLE', str(exc), level='error')
+            return
 
+        desired = self._prepare_next_capture_request('recording')
+        if desired is None:
+            return
         self._pending_manual_record_path = final_path
-        desired = self._requested_capture_config('recording')
-        active = self._capture_config.active
-        quality_fields = ('fps', 'width', 'height', 'bitrate_kbps')
-        needs_recording_profile = (
-            active is None or any(
-                getattr(active, field) != getattr(desired, field)
-                for field in quality_fields))
-        if needs_recording_profile:
+        self._pending_manual_record_request = desired
+        active_session = getattr(self, '_accepted_capture_session', None)
+        active_request = (active_session.request
+                          if active_session is not None else None)
+        self._pending_manual_record_session = active_session
+        self._pending_manual_record_process_generation = getattr(
+            active_session, 'process_generation', None)
+        self._pending_manual_record_native_generation = getattr(
+            active_session, 'native_capture_generation', None)
+        native_inputs_equal = MainWindow._capture_native_inputs_equivalent(
+            active_request, desired)
+        camera_resource_equal = (
+            active_request is not None
+            and (active_request.camera.enabled, active_request.camera.device_index)
+            == (desired.camera.enabled, desired.camera.device_index))
+        needs_recording_profile = active_request is None or not native_inputs_equal
+        if (needs_recording_profile or not camera_resource_equal
+                or getattr(active_request, 'purpose', None) == 'recording'):
             self._engine_profile = 'recording'
-            self._manual_record_state = 'preparing'
-            self.record_btn.setEnabled(False)
-            self.record_btn.setText('Preparing…')
-            set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(True)))
-            self._set_status('PREPARING RECORDING QUALITY', status_idle_qss())
-            self._restart_capture_engine(allow_recording_prepare=True)
+        MainWindow._begin_manual_recording_preparation(self, desired, final_path)
+        if needs_recording_profile:
+            self._continue_prepared_manual_recording()
+            return
+        if not camera_resource_equal:
+            # Camera ownership is coordinated at idle; the native process and
+            # its quality token remain valid while the new provider warms up.
+            if not self._bind_same_native_capture_request(desired, active_session):
+                self._fail_manual_recording(
+                    'The accepted capture owner changed before camera preparation.')
+                return
+            # Camera replay is optional.  Start the native manual command now;
+            # the provider may warm, fail, or remain unavailable independently.
+            self._request_camera_apply(
+                desired.camera, origin='manual',
+                request_token=desired.request_token,
+                capture_request=desired)
+            self._submit_manual_recording_start()
+            return
+        if not self._rebind_equivalent_capture_request(desired, active_session):
+            self._fail_manual_recording(
+                'The accepted capture owner changed before recording could start.')
             return
         self._submit_manual_recording_start()
+
+    def _active_recording_paths(self):
+        return frozenset(path for path in (
+            getattr(self, '_pending_manual_record_path', None),
+            getattr(self, '_manual_record_path', None),
+            *getattr(self, '_manual_unclosed_outputs', ()),
+        ) if path is not None)
+
+    def _sync_active_recording_library_paths(self) -> None:
+        setter = getattr(getattr(self, 'clip_grid', None),
+                         'set_active_output_paths', None)
+        if callable(setter):
+            setter(MainWindow._active_recording_paths(self))
+
+    def _release_closed_recording_paths(self) -> None:
+        retained = getattr(self, '_manual_unclosed_outputs', {})
+        released = [path for path, process in retained.items()
+                    if process.poll() is not None]
+        for path in released:
+            del retained[path]
+        if released:
+            MainWindow._sync_active_recording_library_paths(self)
+
+    def _begin_manual_recording_preparation(self, request, path) -> None:
+        self._manual_record_state = 'preparing'
+        self._manual_prepare_deadline = time.monotonic() + 30.0
+        MainWindow._sync_active_recording_library_paths(self)
+        if hasattr(self, 'record_btn'):
+            self.record_btn.setEnabled(True)
+            self.record_btn.setText('Cancel')
+            set_theme_style(self.record_btn, lambda: self._manual_record_button_qss(True))
+        MainWindow._set_manual_prepare_wait_reason(self, 'Preparing recording quality.')
+
+        def retry():
+            if (getattr(self, '_shutdown_requested', False)
+                    or getattr(self, '_shutdown_complete', False)
+                    or getattr(self, '_manual_record_state', 'idle') != 'preparing'
+                    or self._pending_manual_record_request is not request
+                    or self._pending_manual_record_path is not path):
+                return
+            self._continue_prepared_manual_recording()
+            if (getattr(self, '_manual_record_state', 'idle') == 'preparing'
+                    and self._pending_manual_record_request is request
+                    and self._pending_manual_record_path is path):
+                QTimer.singleShot(500, retry)
+
+        QTimer.singleShot(500, retry)
+
+    def _set_manual_prepare_wait_reason(self, reason: str) -> None:
+        self._manual_prepare_wait_reason = reason
+        if hasattr(self, 'record_btn'):
+            self.record_btn.setToolTip(f'{reason} Click Cancel to keep replay capture.')
+        set_status = getattr(self, '_set_status', None)
+        if callable(set_status):
+            set_status(reason, status_idle_qss())
+
+    def _clear_pending_manual_preparation(self, *, abort_restart=False) -> None:
+        request = getattr(self, '_pending_manual_record_request', None)
+        owns_restart = (
+            request is not None
+            and getattr(self, '_manual_prepare_restart_request', None) is request)
+        pending_launch = getattr(self, '_pending_launch_request', None)
+        self._pending_manual_record_path = None
+        self._pending_manual_record_request = None
+        self._pending_manual_record_session = None
+        self._pending_manual_record_process_generation = None
+        self._pending_manual_record_native_generation = None
+        self._manual_prepare_deadline = None
+        self._manual_prepare_wait_reason = ''
+        self._manual_prepare_restart_request = None
+        if not owns_restart or getattr(self, '_shutdown_forced', False):
+            return
+        if (abort_restart and pending_launch is request
+                and not _admission_call(self, '_admission_transition_active')):
+            self.stop_engine()
+            self._restart_pending = False
+            self._set_capture_apply_state(False)
+        elif pending_launch is None and getattr(self, 'engine_process', None) is None:
+            self._restart_pending = False
+            self._set_capture_apply_state(False)
+
+    def _reset_manual_record_button(self) -> None:
+        if hasattr(self, 'record_btn'):
+            self.record_btn.setEnabled(sys.platform == 'win32')
+            self.record_btn.setText('Record')
+            self.record_btn.setToolTip(
+                'Start a manual recording while replay capture stays active')
+            set_theme_style(self.record_btn, lambda: self._manual_record_button_qss(False))
+
+    def _end_manual_recording_preparation(self, *, restore=True) -> None:
+        self._manual_record_state = 'idle'
+        MainWindow._clear_pending_manual_preparation(self, abort_restart=restore)
+        MainWindow._sync_active_recording_library_paths(self)
+        if not restore:
+            self._engine_profile = 'clips'
+            return
+        MainWindow._reset_manual_record_button(self)
+        if not self._restore_clip_capture_profile():
+            self._apply_latest_desired_request_if_idle()
+
+    def _manual_preparation_ready(self, request) -> bool:
+        """Check the detached request before retrying or submitting it."""
+        deadline = getattr(self, '_manual_prepare_deadline', None)
+        if deadline is None:
+            return True
+        if (getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)):
+            return False
+        if (not self._latest_intent_owns_request(request)
+                or request.source_intent_revision
+                != getattr(self, '_source_intent_revision', 0)):
+            self._fail_manual_recording(
+                'Capture changed while preparing. Press Record to use the new source or settings.')
+            return False
+        if time.monotonic() >= deadline:
+            reason = self._manual_prepare_wait_reason
+            guidance = (reason if reason.startswith('Restore ')
+                        else 'Wait for capture to become ready.')
+            self._fail_manual_recording(
+                f'Recording preparation timed out. {guidance} Then press Record again.')
+            return False
+        if request.source.source_mode == 'window':
+            if not self._prepared_source_is_live(request):
+                self._fail_manual_recording(
+                    'The selected window closed or changed. Choose a capture source and press Record again.')
+                return False
+            if (sys.platform == 'win32' and not is_capture_window_renderable(
+                    (request.source.live_identity or {}).get('hwnd', 0))):
+                MainWindow._set_manual_prepare_wait_reason(
+                    self, 'Restore the selected game window to start recording.')
+                return False
+        return True
 
     def _continue_prepared_manual_recording(self):
         if self._manual_record_state != 'preparing':
             return
-        active = self._capture_config.active
-        desired = self._requested_capture_config('recording')
-        quality_fields = ('fps', 'width', 'height', 'bitrate_kbps')
-        if (active is None or any(
-                getattr(active, field) != getattr(desired, field)
-                for field in quality_fields)):
-            if not getattr(self, '_restart_pending', False):
-                self._engine_profile = 'recording'
-                self._restart_capture_engine(allow_recording_prepare=True)
+        desired = getattr(self, '_pending_manual_record_request', None)
+        if desired is None:
+            self._fail_manual_recording(
+                'The prepared recording request was lost before start.')
+            return
+        if not MainWindow._manual_preparation_ready(self, desired):
+            return
+        if (getattr(self, '_restart_pending', False)
+                or getattr(self, '_capture_settings_applying', False)
+                or getattr(self, '_pending_launch_config', None) is not None
+                or _admission_call(self, '_admission_transition_active')):
+            return
+        active_session = getattr(self, '_accepted_capture_session', None)
+        if active_session is not None and not _admission_call(
+                self, '_admission_guard_current_session'):
+            return
+        if getattr(active_session, 'request', None) != desired:
+            self._engine_profile = 'recording'
+            if getattr(self, '_manual_prepare_deadline', None) is not None:
+                busy = self._capture_resources_busy(
+                    allow_manual_prepare=True, manual_request=desired)
+                MainWindow._set_manual_prepare_wait_reason(
+                    self, 'Waiting for capture work to finish.' if busy
+                    else 'Preparing recording quality.')
+                if busy:
+                    return
+            self._restart_capture_engine(
+                allow_recording_prepare=True, _prepared_request=desired)
             return
         self._submit_manual_recording_start()
 
+    def _manual_start_owner_ready(self, session, request, path) -> bool:
+        """Wait for heartbeat to bind a resumed backend to its accepted owner."""
+        owner = MainWindow._capture_owner_snapshot(self, session)
+        preparing = getattr(self, '_manual_prepare_deadline', None) is not None
+        bridge = owner['bridge']
+        status = bridge.get_status() if preparing and bridge is not None else None
+        blocked_flags = (CaptureHealthFlag.PAUSED | CaptureHealthFlag.RECOVERING
+                         | CaptureHealthFlag.BACKEND_FAILED
+                         | CaptureHealthFlag.RECONFIGURE_REQUIRED)
+        blocked = bool(int((status or {}).get('capture_health_flags', 0))
+                       & int(blocked_flags))
+        exact = self._accepted_session_owner_is_current(session, status=status)
+        can_resume = preparing and (
+            exact or self._accepted_session_owner_is_current(
+                session, status=status, allow_native_generation=True))
+        if (not MainWindow._capture_owner_snapshot_is_current(self, owner)
+                or self._pending_manual_record_request is not request
+                or self._pending_manual_record_path is not path):
+            return False
+        if exact and not blocked:
+            return True
+        if can_resume:
+            MainWindow._set_manual_prepare_wait_reason(
+                self, 'Waiting for capture to resume.')
+        else:
+            self._fail_manual_recording(
+                'The accepted capture owner changed before recording could start.')
+        return False
+
     def _submit_manual_recording_start(self):
+        if (getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)
+                or _admission_call(self, '_admission_transition_active')):
+            return
         final_path = self._pending_manual_record_path
         if final_path is None:
             self._fail_manual_recording(
                 'The recording destination was lost before capture started.')
             return
+        request = getattr(self, '_pending_manual_record_request', None)
+        session = getattr(self, '_accepted_capture_session', None)
+        if (request is None or session is None or session.request != request):
+            self._fail_manual_recording(
+                'The capture request changed before recording could start.')
+            return
+        if not MainWindow._manual_preparation_ready(self, request):
+            return
+        if self._capture_resources_busy(
+                allow_manual_prepare=True, manual_request=request,
+                manual_path=final_path):
+            MainWindow._set_manual_prepare_wait_reason(
+                self, 'Waiting for capture work to finish.')
+            return
+        if not MainWindow._manual_start_owner_ready(self, session, request, final_path):
+            return
+        owner_bridge = self.bridge
+        self._clear_manual_stop_request()
         # Clear only a stale recording response. Replay-save responses belong
         # to their own state machine and are never touched here.
-        self.bridge.consume_manual_recording_response()
-        if not self.bridge.start_manual_recording(str(final_path)):
-            self._fail_manual_recording(
-                'The capture engine rejected the recording command.')
+        owner_bridge.consume_manual_recording_response()
+        if (self._pending_manual_record_request is not request
+                or self._pending_manual_record_path is not final_path
+                or not MainWindow._manual_preparation_ready(self, request)):
             return
+        proof = _admission_call(self, '_admission_stable_proof', request)
+        if (proof is None
+                or not MainWindow._manual_start_owner_ready(
+                    self, session, request, final_path)
+                or not _admission_call(
+                    self, '_admission_pure_proof_current', proof)
+                or not _admission_call(
+                    self, '_accepted_session_owner_pure_is_current', session)
+                or self.bridge is not owner_bridge
+                or self._pending_manual_record_request is not request
+                or self._pending_manual_record_path is not final_path
+                or getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)
+                or (getattr(self, '_manual_prepare_deadline', None) is not None
+                    and (not self._latest_intent_owns_request(request)
+                         or request.source_intent_revision
+                         != getattr(self, '_source_intent_revision', 0)))):
+            return
+        # Capture the complete immutable owner before the native command can
+        # acknowledge or re-enter any callback.
         self._manual_record_state = 'starting'
         self._manual_record_requested_at = time.monotonic()
+        self._manual_record_path = final_path
+        self._manual_record_request = request
+        self._manual_record_session = session
+        self._manual_record_process_generation = session.process_generation
+        self._manual_record_native_generation = session.native_capture_generation
+        MainWindow._clear_pending_manual_preparation(self)
+        if not owner_bridge.start_manual_recording(str(final_path)):
+            self._fail_manual_recording(
+                'The capture engine rejected the recording command.',
+                _writer_closed=True)
+            return
         # Fragmented MP4 is written directly to its destination. There is no
         # staging tree, raw-audio sidecar, or whole-file remux to lose at Stop.
-        self._manual_record_path = final_path
-        self._pending_manual_record_path = None
         self.record_btn.setEnabled(False)
         self.record_btn.setText('Starting…')
         set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(True)))
@@ -6372,19 +13760,54 @@ class MainWindow(QMainWindow):
     def _stop_manual_recording(self):
         if self._manual_record_state != 'recording':
             return
-        if not self.bridge.stop_manual_recording():
-            self.push_error(
-                'RECORDING COULD NOT STOP',
-                'The capture engine is unavailable. FTHR will try to recover '
-                'the staged recording during shutdown.',
-                level='error',
-            )
+        now = time.monotonic()
+        if not self._manual_stop_pending:
+            self._manual_stop_pending = True
+            self._manual_stop_deadline = (
+                now + self._MANUAL_RECORDING_STOP_TIMEOUT_SECONDS)
+            self._manual_stop_engine = self.engine_process
+            self._manual_stop_bridge = self.bridge
+            self._manual_stop_engine_generation = self._engine_process_generation
+            self._manual_stop_path = self._manual_record_path
+        if (self._manual_stop_engine is not self.engine_process
+                or self._manual_stop_bridge is not self.bridge
+                or self._manual_stop_engine_generation != self._engine_process_generation
+                or self._manual_stop_path != self._manual_record_path):
+            self._clear_manual_stop_request()
+            self._fail_manual_recording(
+                'The capture engine changed before the stop request was sent. '
+                'The completed fragments were kept.', keep_recording=True)
             return
+        # Never submit a retry after the bounded stop intent has expired.
+        if now >= self._manual_stop_deadline:
+            self._clear_manual_stop_request()
+            self._fail_manual_recording(
+                'The capture engine did not accept the stop request. '
+                'The completed fragments were kept.', keep_recording=True)
+            return
+        if not self._manual_stop_bridge.stop_manual_recording():
+            if now >= self._manual_stop_deadline:
+                self._clear_manual_stop_request()
+                self._fail_manual_recording(
+                    'The capture engine did not accept the stop request. '
+                    'The completed fragments were kept.', keep_recording=True)
+            elif not self._manual_record_timer.isActive():
+                self._manual_record_timer.start()
+            return
+        self._clear_manual_stop_request()
         self._manual_record_state = 'stopping'
-        self._manual_record_requested_at = time.monotonic()
+        self._manual_record_requested_at = now
         self.record_btn.setEnabled(False)
         self.record_btn.setText('Finalizing…')
         self._set_status('FINALIZING RECORDING', status_idle_qss())
+
+    def _clear_manual_stop_request(self):
+        self._manual_stop_pending = False
+        self._manual_stop_deadline = 0.0
+        self._manual_stop_engine = None
+        self._manual_stop_bridge = None
+        self._manual_stop_engine_generation = None
+        self._manual_stop_path = None
 
     @staticmethod
     def _format_recording_elapsed(seconds: float) -> str:
@@ -6394,6 +13817,8 @@ class MainWindow(QMainWindow):
         return f'{hours:02d}:{minutes:02d}:{secs:02d}'
 
     def _pump_manual_recording_responses(self):
+        if _admission_call(self, '_admission_transition_active'):
+            return
         state = self._manual_record_state
         if state == 'idle':
             self._manual_record_timer.stop()
@@ -6415,7 +13840,12 @@ class MainWindow(QMainWindow):
                         pass
                 self._fail_manual_recording(
                     detail or 'The recording writer closed unexpectedly.',
-                    keep_recording=keep_recording)
+                    keep_recording=keep_recording,
+                    _recover_fragments=keep_recording,
+                    # StopRecording has one pre-join error: its recovery wait
+                    # timeout. Every other STOP error is a closed writer result.
+                    _writer_closed=(state == 'stopping' and bool(detail)
+                                    and detail != 'Timed out waiting for recording recovery to close.'))
                 return
             if kind == 'started' and state == 'starting':
                 self._mark_manual_recording_started()
@@ -6436,9 +13866,12 @@ class MainWindow(QMainWindow):
                     'The capture engine did not acknowledge the start request.')
             return
         if state == 'recording':
+            if self._manual_stop_pending:
+                self._stop_manual_recording()
+                return
             elapsed = now - self._manual_record_started_at
             self.record_btn.setText(
-                f'Stop  {self._format_recording_elapsed(elapsed)}')
+                f'Stop ≈ {self._format_recording_elapsed(elapsed)}')
             recording = self._manual_record_path
             try:
                 if not native_recording and elapsed > 0.75:
@@ -6446,15 +13879,9 @@ class MainWindow(QMainWindow):
                     # dropping this flag. Route a STOP command through the
                     # native command loop so its detailed close result is the
                     # only publication boundary.
-                    if self.bridge.stop_manual_recording():
-                        self._manual_record_state = 'stopping'
-                        self._manual_record_requested_at = now
-                        self.record_btn.setEnabled(False)
+                    self._stop_manual_recording()
+                    if self._manual_record_state == 'stopping':
                         self.record_btn.setText('Recovering…')
-                    else:
-                        self._fail_manual_recording(
-                            'The recording writer stopped unexpectedly.',
-                            keep_recording=(recording is not None))
                     return
                 if (recording is not None
                         and shutil.disk_usage(recording.parent).free
@@ -6481,15 +13908,20 @@ class MainWindow(QMainWindow):
                     'The capture engine did not finish closing the manual '
                     'recording. Its completed fragments were kept.',
                     keep_recording=True,
+                    _recover_fragments=True,
                 )
 
     def _mark_manual_recording_started(self):
         self._manual_record_state = 'recording'
+        self._clear_manual_stop_request()
         self._manual_record_started_at = time.monotonic()
         self.record_btn.setEnabled(True)
-        self.record_btn.setText('Stop  00:00:00')
+        self.record_btn.setText('Stop ≈ 00:00:00')
         self.record_btn.setToolTip(
-            'Stop and finalize the current manual recording')
+            'Stop and finalize the current manual recording. The timer shows '
+            'approximate elapsed time since start confirmation, not the saved '
+            'video duration. The measured video duration is shown after saving '
+            'when available.')
         set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(True)))
         self._set_status('RECORDING', status_active_qss())
 
@@ -6497,19 +13929,77 @@ class MainWindow(QMainWindow):
         geometry_restart = bool(
             getattr(self, '_pending_game_geometry_restart', False))
         if getattr(self, '_engine_profile', 'clips') != 'recording':
-            if not geometry_restart or getattr(self, '_shutdown_complete', False):
-                return
+            if (not geometry_restart
+                    or getattr(self, '_shutdown_requested', False)
+                    or getattr(self, '_shutdown_complete', False)):
+                return False
             self._pending_game_geometry_restart = False
-            QTimer.singleShot(0, self._restart_capture_engine)
-            return
-        self._engine_profile = 'clips'
-        if getattr(self, '_shutdown_complete', False):
-            return
-        self._pending_game_geometry_restart = False
-        QTimer.singleShot(0, self._restart_capture_engine)
+        else:
+            self._engine_profile = 'clips'
+            if (getattr(self, '_shutdown_requested', False)
+                    or getattr(self, '_shutdown_complete', False)):
+                return False
+            self._pending_game_geometry_restart = False
+
+        # Resolve one clips-purpose request before any idle flush can consume
+        # an older queued recording request.  The invalid case is coordinated
+        # too: _prepare_next_capture_request marks it invalid and clears stale
+        # desired B while preserving the accepted A owner.
+        request = self._prepare_next_capture_request('clips')
+        if request is not None:
+            self._queue_latest_desired_request(
+                request, reason='Restoring clip capture')
+        else:
+            self._queue_latest_desired_request(
+                reason='Clip capture restore requires attention')
+        QTimer.singleShot(0, self._apply_latest_desired_request_if_idle)
+        return True
+
+    def _persist_manual_recording_highlights(
+            self, recording: Path, expected_identity: dict,
+            *, expected_clip_id=None) -> dict:
+        """Persist a manual recording's native markers before publication."""
+        try:
+            markers = read_capture_highlights(
+                recording, expected_identity=expected_identity)
+            if markers is None:
+                return expected_identity
+            manager = getattr(self, 'clip_metadata_manager', None)
+            manifest = manifest_path_for(recording)
+            had_manifest = bool(manifest.exists() or manifest.is_symlink())
+            final_identity = write_capture_highlights(
+                recording, markers, expected_identity=expected_identity)
+            if final_identity != expected_identity and had_manifest:
+                rebound = rebind_manifest_after_media_replace(recording)
+                if rebound is False:
+                    self._record_finalization_warning(
+                        str(recording),
+                        'Audio manifest could not be rebound after manual marker append')
+            setter = getattr(manager, 'set_highlight_markers', None)
+            if callable(setter):
+                setter(str(recording), markers,
+                       expected_identity=final_identity,
+                       expected_clip_id=expected_clip_id)
+            return final_identity
+        except Exception as error:
+            self._record_finalization_warning(
+                str(recording),
+                f'Manual recording highlights were not persisted: {error}')
+            return expected_identity
 
     def _finalize_manual_recording_file(self, *, publish_ui: bool = True):
         recording = self._manual_record_path
+        session_snapshot = getattr(self, '_manual_record_session', None)
+        config = getattr(getattr(session_snapshot, 'request', None),
+                         'capture_config', None)
+        combine_audio = bool(config is not None and config.audio_enabled
+                             and not config.separate_audio_enabled)
+
+        def prepare_audio():
+            if combine_audio:
+                from core.combined_audio_policy import combine_recording_audio
+                combine_recording_audio(recording)
+
         self._manual_record_timer.stop()
         if self._manual_record_state == 'finalizing':
             return
@@ -6520,7 +14010,8 @@ class MainWindow(QMainWindow):
             if not recording.is_file() or recording.stat().st_size == 0:
                 raise OSError('The recorder produced no playable video fragments.')
         except OSError as exc:
-            self._fail_manual_recording(str(exc), keep_recording=True)
+            self._fail_manual_recording(
+                str(exc), keep_recording=True, _writer_closed=True)
             return
         self._manual_record_state = 'finalizing'
         if hasattr(self, 'record_btn'):
@@ -6528,90 +14019,334 @@ class MainWindow(QMainWindow):
             self.record_btn.setText('Finalizing…')
         if not publish_ui:
             try:
+                prepare_audio()
                 probe_media(recording)
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 self._fail_manual_recording(
                     str(exc), keep_recording=True,
-                    expected_recording=recording)
+                    _recover_fragments=True, _writer_closed=True,
+                    expected_recording=recording,
+                    expected_session=session_snapshot)
                 return
             self._complete_manual_recording_file(
-                recording, publish_ui=False)
+                recording, publish_ui=False,
+                session_snapshot=session_snapshot)
             return
 
         def _worker():
             try:
-                # Validation is the only close-time work. Video and AAC are
-                # already in the destination file, fragment by fragment.
+                prepare_audio()
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                detail = str(exc)
+                self._ui_call.emit(
+                    lambda detail=detail: self._fail_manual_recording(
+                        detail, keep_recording=True,
+                        expected_recording=recording,
+                        expected_session=session_snapshot))
+                return
+            before_identity = None
+            try:
+                info = recording.stat()
+                before_identity = {
+                    'st_dev': int(info.st_dev), 'st_ino': int(info.st_ino),
+                    'size': int(info.st_size), 'mtime_ns': int(info.st_mtime_ns),
+                }
+            except OSError:
+                pass
+            expected_clip_id = None
+            manager = getattr(self, 'clip_metadata_manager', None)
+            resolver = getattr(manager, 'resolve_media', None)
+            snapshot_reader = getattr(
+                manager, 'get_highlight_state_snapshot', None)
+            try:
+                binding = (resolver(str(recording))
+                           if callable(resolver) else None)
+                if (before_identity is not None
+                        and callable(snapshot_reader)):
+                    snapshot_reader(
+                        str(recording), expected_identity=before_identity)
+                    expected_clip_id = (getattr(binding, 'clip_id', None)
+                                        if binding is not None else None)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                # An unavailable SQL snapshot must not be treated as an
+                # embedded-marker absence or as permission to adopt an owner.
+                expected_clip_id = None
+            try:
+                # Validate the finished MP4 before optional timing and highlights.
                 probe_media(recording)
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 detail = str(exc)
                 self._ui_call.emit(
                     lambda detail=detail: self._fail_manual_recording(
                         detail, keep_recording=True,
-                        expected_recording=recording))
+                        _recover_fragments=True, _writer_closed=True,
+                        expected_recording=recording,
+                        expected_session=session_snapshot))
+                return
+            duration_seconds = None
+            try:
+                duration_seconds = probe_video_presentation_duration(recording)
+            except Exception:
+                # Optional timing must never turn a valid saved file into a failure.
+                pass
+            expected_identity = None
+            try:
+                info = recording.stat()
+                after_identity = {
+                    'st_dev': int(info.st_dev), 'st_ino': int(info.st_ino),
+                    'size': int(info.st_size), 'mtime_ns': int(info.st_mtime_ns),
+                }
+                if before_identity is not None and after_identity == before_identity:
+                    expected_identity = after_identity
+            except OSError:
+                # Completion will retain the bytes for recovery when the final
+                # identity cannot be established.
+                pass
+            if publish_ui and expected_identity is not None:
+                expected_identity = self._persist_manual_recording_highlights(
+                    recording, expected_identity,
+                    expected_clip_id=expected_clip_id)
+            elif publish_ui:
+                self._ui_call.emit(
+                    lambda: self._fail_manual_recording(
+                        'The recording changed before marker publication.',
+                        keep_recording=True, expected_recording=recording,
+                        expected_session=session_snapshot))
                 return
             self._ui_call.emit(
-                lambda: self._complete_manual_recording_file(
-                    recording, publish_ui=True))
+                lambda duration_seconds=duration_seconds,
+                       expected_identity=expected_identity,
+                       session_snapshot=session_snapshot:
+                self._complete_manual_recording_file(
+                    recording, publish_ui=True, duration_seconds=duration_seconds,
+                    expected_identity=expected_identity,
+                    session_snapshot=session_snapshot))
 
         self._manual_record_finalize_thread = threading.Thread(
             target=_worker, name='ManualRecordingValidate', daemon=True)
         self._manual_record_finalize_thread.start()
 
     def _complete_manual_recording_file(
-            self, recording: Path, *, publish_ui: bool):
-        if self._manual_record_path != recording:
+            self, recording: Path, *, publish_ui: bool,
+            duration_seconds: float | None = None,
+            expected_identity: dict | None = None,
+            session_snapshot: CaptureSessionSnapshot | None = None):
+        owned_session = (session_snapshot if session_snapshot is not None else
+                         getattr(self, '_manual_record_session', None))
+        if (self._manual_record_path != recording
+                or owned_session is None
+                or getattr(self, '_manual_record_session', None)
+                is not owned_session):
+            return
+        if publish_ui and expected_identity is None:
+            self._fail_manual_recording(
+                'The recording identity could not be verified before publication.',
+                keep_recording=True, expected_recording=recording,
+                expected_session=owned_session)
+            return
+        if publish_ui:
+            try:
+                current_identity = media_identity(recording)
+            except (OSError, ValueError, RuntimeError) as error:
+                self._fail_manual_recording(
+                    f'The recording changed before publication: {error}',
+                    keep_recording=True, expected_recording=recording,
+                    expected_session=owned_session)
+                return
+            if current_identity != expected_identity:
+                self._fail_manual_recording(
+                    'The recording changed before publication; the file was kept '
+                    'for recovery.', keep_recording=True,
+                    expected_recording=recording, expected_session=owned_session)
+                return
+        if publish_ui and expected_identity is not None:
+            controller = getattr(self, 'library_storage_controller', None)
+            observer = getattr(controller, 'observe_completed_clip', None)
+            if callable(observer):
+                observer(recording, expected_identity, publish_ui=True)
+            if (self._manual_record_path != recording
+                    or self._manual_record_session is not owned_session
+                    or getattr(self, '_shutdown_requested', False)
+                    or getattr(self, '_shutdown_complete', False)):
+                return
+        MainWindow._reset_manual_record_button(self)
+        if publish_ui:
+            if (self._manual_record_path != recording
+                    or self._manual_record_session is not owned_session
+                    or getattr(self, '_shutdown_requested', False)
+                    or getattr(self, '_shutdown_complete', False)):
+                return
+            self._set_status('RECORDING SAVED', status_active_qss())
+            QTimer.singleShot(2500, self._update_status)
+            self.capture_card.show_recording_saved(
+                recording.name, duration_seconds=duration_seconds)
+            if (self._manual_record_path != recording
+                    or self._manual_record_session is not owned_session
+                    or getattr(self, '_shutdown_requested', False)
+                    or getattr(self, '_shutdown_complete', False)):
+                return
+        # Keep A's owner through all publication hooks.  Only this final,
+        # identity-checked tail may release it and allow a queued B to apply.
+        if (self._manual_record_path != recording
+                or self._manual_record_session is not owned_session):
             return
         self._manual_record_state = 'idle'
         self._manual_record_path = None
-        self._pending_manual_record_path = None
-        self._manual_record_finalize_thread = None
-        if hasattr(self, 'record_btn'):
-            self.record_btn.setEnabled(sys.platform == 'win32')
-            self.record_btn.setText('Record')
-            self.record_btn.setToolTip(
-                'Start a manual recording while replay capture stays active')
-            set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(False)))
-        if publish_ui:
-            if hasattr(self, 'clip_grid'):
-                self.clip_grid.force_refresh()
-            self._set_status('RECORDING SAVED', status_active_qss())
-            QTimer.singleShot(2500, self._update_status)
-            self.capture_card.show_recording_saved(recording.name)
-        self._restore_clip_capture_profile()
+        MainWindow._clear_pending_manual_preparation(self)
+        self._manual_record_request = None
+        self._manual_record_session = None
+        self._manual_record_process_generation = None
+        self._manual_record_native_generation = None
+        MainWindow._sync_active_recording_library_paths(self)
+        finalize_thread = getattr(self, '_manual_record_finalize_thread', None)
+        if finalize_thread is None or not finalize_thread.is_alive():
+            self._manual_record_finalize_thread = None
+        if not self._restore_clip_capture_profile():
+            self._apply_latest_desired_request_if_idle()
 
     def _fail_manual_recording(
             self, detail: str, *, keep_recording: bool = False,
-            expected_recording: Path | None = None):
+            expected_recording: Path | None = None,
+            expected_session: CaptureSessionSnapshot | None = None,
+            _defer_restore: bool = False,
+            _recover_fragments: bool = False, _writer_closed: bool = False):
         if (expected_recording is not None
                 and self._manual_record_path != expected_recording):
             return
+        if (expected_session is not None
+                and self._manual_record_session is not expected_session):
+            return
         recording = self._manual_record_path
+        failed_process = getattr(self, 'engine_process', None)
+        state = getattr(self, '_manual_record_state', 'idle')
+        if (recording is not None and state in {'starting', 'recording', 'stopping'}
+                and not _writer_closed and failed_process is not None
+                and failed_process.poll() is None):
+            retained = getattr(self, '_manual_unclosed_outputs', None)
+            if retained is None:
+                self._manual_unclosed_outputs = retained = {}
+            retained[recording] = failed_process
+            keep_recording = True
         self._manual_record_timer.stop()
+        self._clear_manual_stop_request()
         self._manual_record_state = 'idle'
         self._manual_record_path = None
-        self._pending_manual_record_path = None
-        self._manual_record_finalize_thread = None
+        MainWindow._clear_pending_manual_preparation(
+            self, abort_restart=state == 'preparing')
+        self._manual_record_request = None
+        self._manual_record_session = None
+        self._manual_record_process_generation = None
+        self._manual_record_native_generation = None
+        finalize_thread = getattr(self, '_manual_record_finalize_thread', None)
+        if finalize_thread is None or not finalize_thread.is_alive():
+            self._manual_record_finalize_thread = None
         if recording is not None and not keep_recording:
             try:
-                recording.unlink(missing_ok=True)
-            except OSError:
-                # Never make an already-written fragment less recoverable.
-                pass
-        if hasattr(self, 'record_btn'):
-            self.record_btn.setEnabled(sys.platform == 'win32')
-            self.record_btn.setText('Record')
-            set_theme_style(self.record_btn, lambda: (self._manual_record_button_qss(False)))
+                from core.library_ownership import delete_media
+                delete_media(recording, metadata_manager=getattr(self, 'clip_metadata_manager', None))
+            except (OSError, ValueError, TypeError) as error:
+                # Protected or uncertain fragments remain recoverable on disk.
+                keep_recording = recording.exists()
+                if keep_recording:
+                    detail += f' File kept: {error}'
+        MainWindow._sync_active_recording_library_paths(self)
+        MainWindow._reset_manual_record_button(self)
         self._set_status('RECORDING FAILED', status_warning_qss())
         if keep_recording and recording is not None:
             detail = (
-                f'{detail} Recoverable video fragments remain in '
+                f'{detail} The original file was kept in '
                 f'{recording.name}.')
         self.push_error(
             'MANUAL RECORDING FAILED', detail, level='error',
             actions=[('OPEN RECORDINGS', self._open_recordings_folder)],
         )
-        self._restore_clip_capture_profile()
+        if keep_recording and recording is not None and _recover_fragments:
+            MainWindow._recover_recording_fragments(
+                self, recording, writer_closed=_writer_closed,
+                process=failed_process)
+        if _defer_restore:
+            self._pending_capture_reason = detail
+            return
+        if not self._restore_clip_capture_profile():
+            self._apply_latest_desired_request_if_idle()
+
+    def _recover_recording_fragments(self, recording, *, writer_closed, process):
+        """Salvage a separate copy without adopting a replaced file or writer."""
+        if (getattr(self, '_shutdown_requested', False)
+                or getattr(self, '_shutdown_complete', False)
+                or not getattr(self, '_file_operations_ready', True)
+                or (not writer_closed and process is None)):
+            return
+        try:
+            original = recording.lstat()
+            identity = (retry_file_operation(media_identity, recording)
+                        if writer_closed else None)
+        except (OSError, ValueError, RuntimeError):
+            return
+        cancel = self._file_worker_stop
+
+        def recover():
+            from core.recording_recovery import recover_manual_recording
+            try:
+                if not writer_closed:
+                    deadline = time.monotonic() + 15.0
+                    while process.poll() is None:
+                        if time.monotonic() >= deadline or cancel.wait(0.1):
+                            return
+                if cancel.is_set():
+                    return
+                current = retry_file_operation(media_identity, recording)
+                if (current['st_dev'] != original.st_dev
+                        or current['st_ino'] != original.st_ino
+                        or (identity is not None and current != identity)):
+                    return
+                result = recover_manual_recording(
+                    recording, writer_closed=True, cancel_event=cancel,
+                    expected_identity=current)
+                if result is None or cancel.is_set():
+                    return
+                recovered_identity = media_identity(result.path)
+            except (OSError, ValueError, RuntimeError):
+                return
+
+            def publish():
+                if (cancel.is_set() or getattr(self, '_shutdown_requested', False)
+                        or getattr(self, '_shutdown_complete', False)):
+                    return
+                try:
+                    if media_identity(result.path) != recovered_identity:
+                        return
+                except (OSError, ValueError, RuntimeError):
+                    return
+                manager = getattr(self, 'clip_metadata_manager', None)
+                marker = getattr(manager, 'mark_recorded', None)
+                if callable(marker):
+                    try:
+                        marker(result.path, expected_identity=recovered_identity,
+                               group=recording.parent.name)
+                    except (OSError, ValueError, RuntimeError) as error:
+                        emit_event('recording', 'recovery_metadata_failed',
+                                   state='WARNING', detail=str(error))
+                controller = getattr(self, 'library_storage_controller', None)
+                observer = getattr(controller, 'observe_completed_clip', None)
+                if callable(observer):
+                    observer(result.path, recovered_identity, publish_ui=True)
+                if hasattr(self, 'clip_grid'):
+                    self.clip_grid.force_refresh()
+                self.push_error(
+                    'RECORDING PARTIALLY RECOVERED',
+                    f'Recovered {result.duration_seconds:.1f} seconds to '
+                    f'{result.path.name}. The ending may be missing. '
+                    'The original recording was kept.', level='warning',
+                    actions=[('OPEN RECORDINGS', self._open_recordings_folder)])
+
+            self._ui_call.emit(publish)
+
+        try:
+            self._launch_file_worker(recover)
+        except (OSError, RuntimeError) as error:
+            emit_event('recording', 'recovery_not_started', state='FAILED',
+                       detail=str(error))
 
     def _open_recordings_folder(self):
         try:
@@ -6630,8 +14365,45 @@ class MainWindow(QMainWindow):
     # Save clip
 
     def _save_clip(self, duration_seconds: int = 30):
+        if _admission_call(self, '_admission_transition_active'):
+            self._show_save_busy_feedback()
+            return
         if self._manual_record_state in ('preparing', 'starting', 'stopping'):
             self._show_save_busy_feedback()
+            return
+        accepted_session = getattr(self, '_accepted_capture_session', None)
+        accepted_request = (accepted_session.request
+                            if accepted_session is not None else None)
+        if accepted_request is None:
+            self._show_save_busy_feedback()
+            self.push_error(
+                'CAPTURE UNAVAILABLE',
+                'Capture has not produced an accepted session yet; no clip was saved.',
+                level='warning',
+            )
+            return
+        owner_current = self._accepted_session_owner_is_current(accepted_session)
+        if not owner_current:
+            # A focus resume can occur between the last heartbeat and this
+            # hotkey. Reconcile only the same owned request against fresh
+            # status before rejecting it as a stale native generation.
+            rebind = getattr(self, '_rebind_recovered_session', None)
+            try:
+                rebound = callable(rebind) and rebind(self.bridge.get_status())
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+                rebound = False
+            if rebound:
+                accepted_session = self._accepted_capture_session
+                accepted_request = accepted_session.request
+                owner_current = self._accepted_session_owner_is_current(accepted_session)
+        if not owner_current:
+            self._show_save_busy_feedback()
+            self.push_error(
+                'CAPTURE UNAVAILABLE',
+                'The accepted capture session no longer owns the live native '
+                'process or capture generation; no clip was saved.',
+                level='warning',
+            )
             return
         is_connected = getattr(self.bridge, 'is_connected', lambda: False)
         if not self.bridge or not is_connected():
@@ -6684,53 +14456,37 @@ class MainWindow(QMainWindow):
             self.capture_card.show_error()
             self.push_error('CLIP SAVE FAILED', str(error), level='error')
             return
-        capture_mode = self.settings_manager.get('capture_mode', 'desktop')
+        capture_mode = accepted_request.source.source_mode
 
         if capture_mode == 'window':
-            clip_source = None
-            if hasattr(self, 'source_popup'):
-                idx = self.source_popup.window_combo.currentIndex()
-                try:
-                    target_hwnd = int(self.settings_manager.get(
-                        'target_hwnd', 0) or 0)
-                except (TypeError, ValueError):
-                    target_hwnd = 0
-                if 0 <= idx < len(self.source_popup._window_list):
-                    candidate = self.source_popup._window_list[idx]
-                    try:
-                        candidate_hwnd = int(candidate.get('hwnd', 0) or 0)
-                    except (AttributeError, TypeError, ValueError):
-                        candidate_hwnd = 0
-                    if target_hwnd and candidate_hwnd == target_hwnd:
-                        clip_source = candidate
-
-            if clip_source is not None:
-                # The live source record has executable metadata when the
-                # picker was able to resolve it, so prefer its stable group.
-                game_name = clip_group_for_source(clip_source)
-            else:
-                # Background replay has no source popup. Its persisted group
-                # is trusted only as a safe folder name; older settings files
-                # fall back deterministically to the saved display title.
-                persisted_group = self.settings_manager.get(
-                    'target_clip_group', '')
-                if isinstance(persisted_group, str) and persisted_group.strip():
-                    game_name = sanitize_clip_folder_name(persisted_group)
-                else:
-                    legacy_name = self.settings_manager.get(
-                        'target_window_name', 'Unknown')
-                    game_name = clip_group_for_source({
-                        'title': legacy_name,
-                        'display_name': legacy_name,
-                    })
+            game_name = sanitize_clip_folder_name(
+                accepted_request.source.clip_group or
+                accepted_request.source.display_name or 'Game')
             clips_folder = clips_root / game_name
-            filename     = f'{game_name}_clip_from_{timestamp}.mp4'
         else:
             clips_folder = clips_root / 'Desktop'
-            filename     = f'desktop_clip_from_{timestamp}.mp4'
 
         try:
-            clips_folder.mkdir(parents=True, exist_ok=True)
+            output_path = next_available_output_path(
+                clips_root, game_name if capture_mode == 'window' else 'desktop',
+                '.mp4', generated_subdir=clips_folder.name,
+                stem_suffix=f'_clip_from_{timestamp}')
+            clips_folder = output_path.parent
+        except OutputPathTooLongError:
+            self.capture_card.show_error()
+            self.push_error(
+                'CLIP PATH TOO LONG',
+                'The clip folder is too long even with a shortened filename. '
+                'Choose a shorter clip folder.', level='error',
+                actions=[('OPEN FOLDER', self._open_clips_folder)])
+            return
+        except OSError as exc:
+            self.capture_card.show_error()
+            self.push_error('CLIP SAVE FAILED', str(exc), level='error')
+            return
+
+        try:
+            retry_file_operation(clips_folder.mkdir, parents=True, exist_ok=True)
         except OSError as e:
             # Read-only home / OneDrive lock / full disk — without this the
             # exception escapes the hotkey slot and the user sees nothing.
@@ -6741,30 +14497,11 @@ class MainWindow(QMainWindow):
                 level='error',
             )
             return
-        output_path  = clips_folder / filename
-        # Belt and suspenders: never overwrite an existing clip.
-        _base_stem = output_path.stem
-        n = 2
-        while output_path.exists():
-            output_path = clips_folder / f'{_base_stem}_{n}.mp4'
-            n += 1
-        # The Windows shared-memory field is c_wchar * 256, so the bridge
-        # refuses anything longer. Catch it here instead: from inside the
-        # bridge the failure is indistinguishable from a write error, and the
-        # user got told to check disk space while the real cause was a deep
-        # folder (a long game name under a long user profile path is enough).
-        if len(str(output_path)) > 255:
+        allowed, reason = self._storage_admission(clips_folder)
+        if not allowed:
             self.capture_card.show_error()
-            self.push_error(
-                'CLIP PATH TOO LONG',
-                f'The target path is {len(str(output_path))} characters; the '
-                'capture engine accepts at most 255. Choose a shorter clip '
-                'folder or a shorter capture-source name.',
-                level='error',
-                actions=[('OPEN FOLDER', self._open_clips_folder)],
-            )
+            self.push_error('STORAGE LIMIT', reason, level='warning')
             return
-
         print(f"Saving clip: {output_path.name}  ({duration_seconds}s)")
         self._save_diagnostic_started_at = time.monotonic()
         emit_event(
@@ -6776,40 +14513,94 @@ class MainWindow(QMainWindow):
         # and microphone rings, so post-processing extracts the matching interval.
         mic_end_time = time.monotonic()
         crop_profile = None
-        getattr(self, '_active_game_window', None)
-        pass
+        config = accepted_request.capture_config
+        if config.crop_enabled:
+            crop_profile = {
+                'enabled': True, 'x': config.crop_x, 'y': config.crop_y,
+                'w': config.crop_w, 'h': config.crop_h,
+            }
+        # Resolve every detached payload before writing the native command.
+        # ResolvedCaptureRequest.effects is a MappingProxy; its documented
+        # boundary is request.to_dict(), never deepcopy(proxy).
+        request_projection = accepted_request.to_dict()
+        detached_effects = request_projection['effects']
+        # Refresh under CameraRecorder's lock at every save admission.  A
+        # warmup receipt or a replaced provider generation must never be reused
+        # merely because accepted A still carries the same camera preference.
+        skip_clip_effects = getattr(self, '_ultra_performance', False)
+        camera_receipt = (None if skip_clip_effects else
+                          self._camera_runtime_receipt_for_request(accepted_request))
+        if skip_clip_effects:
+            detached_effects = {}
+        save_context = {
+            'skip_clip_effects': skip_clip_effects,
+            'mic_end_time': mic_end_time,
+            'crop_profile': crop_profile,
+            'session_snapshot': accepted_session,
+            'process_generation': accepted_session.process_generation,
+            'native_capture_generation': (
+                accepted_session.native_capture_generation),
+            'camera_runtime_receipt': camera_receipt,
+            'effects': detached_effects,
+        }
 
         try:
             # Consume the previous response before submitting another save, so its
             # completion can't be attributed to the new request.
             self._pump_save_responses()
 
-            if not self.bridge.save_clip(str(output_path), duration_seconds):
+            # A response callback can replace accepted A while the old response
+            # pump runs. Recheck both owners at the final command boundary so a
+            # native save is never issued for a session that no longer owns it.
+            if (not self._accepted_session_owner_is_current(accepted_session)
+                    or self._save_state.is_busy()):
+                self._show_save_busy_feedback()
+                self.push_error(
+                    'CLIP SAVE DEFERRED',
+                    'The capture session changed while the save was being admitted; '
+                    'try again after the current transition finishes.',
+                    level='warning')
+                return
+
+            owner_bridge = self.bridge
+            proof = _admission_call(
+                self, '_admission_stable_proof', accepted_request)
+            if (proof is None
+                    or not _admission_call(
+                        self, '_admission_pure_proof_current', proof)
+                    or not _admission_call(
+                        self, '_accepted_session_owner_pure_is_current',
+                        accepted_session)
+                    or self.bridge is not owner_bridge
+                    or self._save_state.is_busy()):
+                self._show_save_busy_feedback()
+                return
+
+            if not owner_bridge.save_clip(str(output_path), duration_seconds):
                 emit_event(
                     'clip_save', 'command_rejected', state='FAILED',
                     error=DiagnosticError.CLIP_SAVE_FAILED,
                     elapsed_ms=round(
                         (time.monotonic() - self._save_diagnostic_started_at) * 1000),
                     detail='capture engine did not accept the save command')
+                emit_event(
+                    'clip_save', 'save_rejected', state='REJECTED',
+                    requested_duration_seconds=duration_seconds,
+                    reason='engine_did_not_accept_command')
                 self.capture_card.show_error()
                 self.push_error(
                     'CLIP SAVE FAILED',
-                    'The capture engine did not accept the save command. '
-                    f'Check disk space at {clips_root}.',
+                    'The capture engine is busy or unavailable and did not '
+                    'accept the save command.',
                     level='error',
                     actions=[('OPEN FOLDER', self._open_clips_folder)],
                 )
                 return
 
-            # Submitted — NOT saved. Everything that asserts a file exists
-            # (grid entry, clip_saved, upload, "SAVED") still waits for
-            # CLIP_SAVED in _on_save_outcome(). The capture card is different:
-            # it acknowledges the user's capture action as soon as the command
-            # is handed off, so slow disk/mux work cannot delay feedback.
+            # Acknowledge the command while native save and finalization run.
             submit = self._save_state.submit(
                 str(output_path), duration_seconds, time.monotonic(),
-                mic_end_time=mic_end_time,
-                crop_profile=crop_profile,
+                **save_context,
             )
             if not submit.accepted:
                 # is_busy() was checked above; losing the race means another
@@ -6817,13 +14608,19 @@ class MainWindow(QMainWindow):
                 print('[Save] Submit rejected by state machine after the '
                       'command was written — response will be attributed to '
                       'the operation already in flight')
+                emit_event(
+                    'clip_save', 'save_rejected', state='REJECTED',
+                    requested_duration_seconds=duration_seconds,
+                    reason='save_operation_already_in_flight')
                 return
 
             self._clip_diagnostic_started_by_path[
                 os.path.normcase(os.path.abspath(str(output_path)))] = (
                     self._save_diagnostic_started_at)
 
-            self._show_clip_captured_feedback(duration_seconds)
+            self.capture_card.show_captured(
+                duration_seconds, config.fps,
+                _dims_to_label(config.width, config.height))
             emit_event(
                 'clip_save', 'command_submitted', state='SUBMITTED',
                 elapsed_ms=round(
@@ -6839,24 +14636,17 @@ class MainWindow(QMainWindow):
                 elapsed_ms=round(
                     (time.monotonic() - self._save_diagnostic_started_at) * 1000),
                 detail=f'{type(e).__name__}: {e}')
+            emit_event(
+                'clip_save', 'save_rejected', state='REJECTED',
+                requested_duration_seconds=duration_seconds,
+                reason='request_exception',
+                error_type=type(e).__name__)
             self.capture_card.show_error()
             self.push_error(
                 'CLIP SAVE FAILED',
                 f'Unexpected error: {e}',
                 level='error',
             )
-
-    def _show_clip_captured_feedback(self, duration_seconds: int) -> None:
-        """Show immediate feedback through the detached notification process.
-
-        This acknowledges the request; a later failure replaces it in _on_save_outcome.
-        """
-        config = self._capture_config.active
-        fps = config.fps if config else self.capture_fps
-        width = config.width if config else self.capture_width
-        height = config.height if config else self.capture_height
-        self.capture_card.show_clip(
-            duration_seconds, fps, _dims_to_label(width, height))
 
     def _show_save_busy_feedback(self):
         """Visible answer to a hotkey we refused. Never confirms a clip."""
@@ -6870,6 +14660,8 @@ class MainWindow(QMainWindow):
 
         This poller alone consumes save events and reads each code with its detail.
         """
+        if _admission_call(self, '_admission_transition_active'):
+            return
         if not self.bridge or not self.bridge.is_connected():
             return
         peeked = self.bridge.peek_save_response()
@@ -6907,6 +14699,7 @@ class MainWindow(QMainWindow):
             # _pump_save_responses(), so stopping the fast timer here does not
             # lose a late result.
             self._save_poll_timer.stop()
+            self._apply_latest_desired_request_if_idle()
 
     def _on_save_outcome(self, outcome):
         """Act on exactly one state-machine outcome."""
@@ -6937,6 +14730,7 @@ class MainWindow(QMainWindow):
                 'clip_save', 'save_failed', state='FAILED',
                 error=DiagnosticError.CLIP_SAVE_FAILED,
                 operation_id=op.op_id,
+                requested_duration_seconds=op.duration_seconds,
                 elapsed_ms=round(op.total_latency_ms or
                                  (time.monotonic() - op.requested_at) * 1000),
                 detail=outcome.detail or 'native clip save failed')
@@ -6974,6 +14768,161 @@ class MainWindow(QMainWindow):
                 late=outcome.late)
             self._on_clip_written(op, late=outcome.late)
 
+    def _register_saved_clip_duration_report(self, op, output_path: Path) -> None:
+        """Remember bounded request context until finalization is complete."""
+        operation_id = str(getattr(op, 'op_id', '') or '')
+        key = os.path.normcase(os.path.abspath(str(output_path)))
+        reports = getattr(self, '_save_duration_reports', None)
+        if reports is None:
+            reports = {}
+            self._save_duration_reports = reports
+        if key in reports:
+            return
+        try:
+            requested = float(op.duration_seconds)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            # A malformed save operation cannot support a duration claim.
+            requested = 0.0
+        context = getattr(op, 'context', None) or {}
+        session = context.get('session_snapshot')
+        config = getattr(getattr(session, 'request', None), 'capture_config', None)
+        if config is None:
+            config = getattr(getattr(self, '_capture_config', None), 'active', None)
+        fps = getattr(config, 'fps', getattr(self, 'capture_fps', None))
+        width = getattr(config, 'width', getattr(self, 'capture_width', 0))
+        height = getattr(config, 'height', getattr(self, 'capture_height', 0))
+        reports[key] = {
+            'operation_id': operation_id or None,
+            'requested_seconds': requested or None,
+            'fps': fps,
+            'resolution': _dims_to_label(width, height),
+            'duration_classification': None,
+            'actual_video_seconds': None,
+            'probe_complete': False,
+        }
+        inflight = getattr(self, '_save_duration_probe_inflight', set())
+        while len(reports) > 64:
+            oldest = next(iter(reports))
+            if oldest not in inflight:
+                reports.pop(oldest)
+            else:
+                # Keep an active probe's context; evict the oldest other save.
+                evict = next((item for item in reports if item not in inflight), None)
+                if evict is None:
+                    break
+                reports.pop(evict)
+
+    def _begin_saved_clip_duration_probe(self, clip_path: str, key: str) -> None:
+        """Probe only after rewrites finish, so measured duration is final."""
+        reports = getattr(self, '_save_duration_reports', {})
+        if key not in reports or reports[key].get('probe_complete'):
+            return
+        inflight = getattr(self, '_save_duration_probe_inflight', None)
+        if inflight is None:
+            inflight = set()
+            self._save_duration_probe_inflight = inflight
+        if key in inflight:
+            return
+        slots = _SAVE_DURATION_PROBE_SLOTS
+
+        def _complete_result(actual, reason=None):
+            current = reports.get(key)
+            if current is None:
+                inflight.discard(key)
+                return
+            classification = (
+                'unknown' if reason else classify_saved_clip_duration(
+                    requested_seconds=current.get('requested_seconds') or 0,
+                    actual_video_seconds=actual,
+                    fps=current.get('fps')))
+
+            def _publish():
+                current = reports.get(key)
+                if current is None:
+                    inflight.discard(key)
+                    return
+                current['actual_video_seconds'] = actual
+                current['duration_classification'] = classification
+                current['duration_probe_reason'] = reason
+                current['probe_complete'] = True
+                inflight.discard(key)
+                emit_event(
+                    'clip_save', 'save_duration_classified',
+                    state=classification.upper(),
+                    operation_id=current.get('operation_id'),
+                    requested_duration_seconds=current.get('requested_seconds'),
+                    actual_video_presentation_seconds=actual,
+                    fps=current.get('fps'), classification=classification,
+                    reason=reason)
+                emit_event(
+                    'clip_save', 'save_finalized', state='COMPLETED',
+                    operation_id=current.get('operation_id'),
+                    requested_duration_seconds=current.get('requested_seconds'),
+                    actual_video_presentation_seconds=actual,
+                    duration_classification=classification, reason=reason)
+                requested = current.get('requested_seconds')
+                if classification == 'rejected':
+                    emit_event(
+                        'clip_save', 'save_rejected', state='REJECTED',
+                        operation_id=current.get('operation_id'),
+                        requested_duration_seconds=requested,
+                        actual_video_presentation_seconds=actual,
+                        reason='actual_video_duration_below_minimum')
+                    self.capture_card.show_error()
+                    self._set_status('SAVE REJECTED (<0.5s)', status_warning_qss())
+                    return
+                if classification == 'partial':
+                    self._set_status(
+                        f'PARTIAL SAVED {actual:.1f}/{requested:g}s',
+                        status_warning_qss())
+                MainWindow._publish_final_clip(
+                    self, clip_path, int(requested or 0))
+
+            dispatcher = getattr(self, '_ui_call', None)
+            if dispatcher is not None and hasattr(dispatcher, 'emit'):
+                dispatcher.emit(_publish)
+            else:
+                # Unit harnesses can run this callback directly; the app path
+                # always queues it through MainWindow's UI dispatcher.
+                _publish()
+
+        if not slots.acquire(blocking=False):
+            # Saturation must not queue work or claim a full clip. Mark this
+            # result explicitly unknown and continue normal deduplicated publish.
+            inflight.add(key)
+            _complete_result(None, 'duration_probe_capacity')
+            return
+        inflight.add(key)
+        path = Path(clip_path)
+
+        def _probe_and_report():
+            actual = None
+            reason = None
+            try:
+                actual = probe_video_presentation_duration(path)
+            except Exception as error:
+                # A probe failure stays inconclusive but must not strand publish.
+                print(f'[Save] Duration probe failed: {type(error).__name__}: {error}')
+                reason = 'duration_probe_failed'
+            finally:
+                # Release the bounded slot even when probing raises.
+                slots.release()
+            if actual is None and reason is None:
+                reason = 'duration_unavailable'
+            _complete_result(actual, reason)
+
+        try:
+            threading.Thread(
+                target=_probe_and_report, name='SavedClipDurationProbe',
+                daemon=True).start()
+        except RuntimeError as error:
+            # Thread startup failure releases its reserved slot and degrades
+            # to an explicitly unknown duration instead of blocking publish.
+            slots.release()
+            inflight.discard(key)
+            print(f'[Save] Duration probe thread could not start: {error}')
+            _complete_result(None, 'duration_probe_start_failed')
+
     def _on_clip_written(self, op, late: bool = False):
         """CLIP_SAVED for `op`. Runs exactly once per operation.
 
@@ -7007,8 +14956,10 @@ class MainWindow(QMainWindow):
             return
 
         # Verify the saved path before confirming success or adding a library card.
+        output_identity = None
         try:
-            if not output_path.exists() or output_path.stat().st_size == 0:
+            output_stat = output_path.stat()
+            if not output_path.is_file() or output_stat.st_size == 0:
                 print(f'[Save] CLIP_SAVED but the file is missing or empty: '
                       f'{output_path.name}')
                 self.capture_card.show_error()
@@ -7035,8 +14986,16 @@ class MainWindow(QMainWindow):
                     },
                 )
                 return
+            output_identity = {
+                'st_dev': int(output_stat.st_dev),
+                'st_ino': int(output_stat.st_ino),
+                'size': int(output_stat.st_size),
+                'mtime_ns': int(output_stat.st_mtime_ns),
+            }
         except OSError as e:
             print(f'[Save] Could not stat the saved clip: {e}')
+
+        MainWindow._register_saved_clip_duration_report(self, op, output_path)
 
         duration_seconds = op.duration_seconds
         mic_end_time = op.context.get('mic_end_time', op.requested_at)
@@ -7047,28 +15006,54 @@ class MainWindow(QMainWindow):
                   f'timeout warning was premature')
 
         print(f'Base clip committed: {output_path.name}')
+        session_snapshot = op.context.get('session_snapshot')
+        if not isinstance(session_snapshot, CaptureSessionSnapshot):
+            if sys.platform == 'win32':
+                self._record_finalization_warning(
+                    str(output_path),
+                    'Saved clip was rejected because its accepted capture session was missing.')
+                self._clip_readiness.finalization_failed(
+                    str(output_path), 'Accepted capture session missing',
+                    base_clip_usable=False)
+                return
+            session_snapshot = getattr(self, '_accepted_capture_session', None)
+        retained_request = (session_snapshot.request
+                            if isinstance(session_snapshot, CaptureSessionSnapshot)
+                            else None)
+        retained_config = (retained_request.capture_config
+                           if retained_request is not None else None)
+        retained_effects = op.context.get('effects', {})
         # Pick the post-processing route. Exactly one runs — see
         # select_post_route() for why that exclusivity is load-bearing.
-        active_config = self._capture_config.active
-        audio_mode = normalize_audio_capture_mode(
-            AUDIO_CAPTURE_MODE_SEPARATED
-            if active_config and getattr(
-                active_config, 'separate_audio_enabled', False)
-            else self.settings_manager.get(
-                'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED))
+        active_config = retained_config
+        if active_config is not None:
+            # The clip belongs to the active engine generation.  A settings
+            # edit may already be persisted while that generation still uses
+            # its previous audio route, so never fall back to those settings.
+            audio_mode = (AUDIO_CAPTURE_MODE_SEPARATED
+                          if getattr(active_config,
+                                     'separate_audio_enabled', False)
+                          else AUDIO_CAPTURE_MODE_COMBINED)
+        else:
+            audio_mode = normalize_audio_capture_mode(
+                self.settings_manager.get(
+                    'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED))
         audio_enabled = (active_config.audio_enabled if active_config else
                          self.settings_manager.get('audio_capture_enabled', True))
-        keyboard_overlay_enabled = third_party_keyboard_settings(
-            self.settings_manager)['enabled']
+        retained_keyboard = retained_effects.get('third_party_keyboard', {})
+        keyboard_overlay_enabled = bool(
+            retained_keyboard.get('enabled', False)
+            if isinstance(retained_keyboard, dict) else False)
         route, has_async_mux = select_post_route(
             audio_on=audio_enabled,
             multiband_enabled=False,
             mic_running=(sys.platform != 'win32' and MicRecorder.is_available()
                          and MicRecorder().is_running()),
-            watermark=self.settings_manager.get('watermark_enabled', False),
+            watermark=bool(retained_effects.get('watermark_enabled', False)),
             manual_crop=bool(crop_profile),
-            camera=any(self.settings_manager.get(key, False) for key in (
-                'camera_enabled', 'image_overlay_enabled')),
+            camera=(not op.context.get('skip_clip_effects', False)
+                    and bool(retained_request and retained_request.camera.enabled))
+            or bool(retained_effects.get('image_overlay_enabled', False)),
             keyboard=keyboard_overlay_enabled,
             audio_capture_mode=audio_mode,
             native_audio=(sys.platform == 'win32'
@@ -7084,8 +15069,12 @@ class MainWindow(QMainWindow):
 
         # Get clip_ready from the upload manager. Finalization owns this event
         # until the source file is ready for upload.
+        # Every post-save route is now owned by the tracked finalization
+        # worker, including the former no-mic path. Keep upload readiness
+        # closed until CFR/rewrites, marker persistence and the final identity
+        # check have completed.
         clip_ready = self.upload_manager.notify_clip_saved(
-            str(output_path), has_mic_mux=has_async_mux)
+            str(output_path), has_mic_mux=True)
 
         # Register readiness before updating the library.  Otherwise the
         # new base file appears ready and can be opened while camera/image/
@@ -7113,33 +15102,346 @@ class MainWindow(QMainWindow):
 
         args = (str(output_path), duration_seconds, mic_end_time, clip_ready,
                 crop_profile)
+        initial_sql_presence = False
+        expected_clip_id = None
+        manager = getattr(self, 'clip_metadata_manager', None)
+        resolver = getattr(manager, 'resolve_media', None)
+        snapshot_reader = getattr(
+            manager, 'get_highlight_state_snapshot', None)
+        if callable(resolver):
+            try:
+                binding = resolver(str(output_path))
+                if callable(snapshot_reader) and output_identity is not None:
+                    snapshot = snapshot_reader(
+                        str(output_path), expected_identity=output_identity)
+                    expected_clip_id = (getattr(binding, 'clip_id', None)
+                                        if binding is not None else None)
+                    initial_sql_presence = (
+                        isinstance(snapshot, dict)
+                        and 'library_highlights' in snapshot)
+                else:
+                    # Compatibility for narrow test doubles and old manager
+                    # adapters; production uses the identity-bound snapshot.
+                    presence_reader = getattr(
+                        manager, 'has_highlight_markers', None)
+                    if callable(presence_reader):
+                        initial_sql_presence = bool(
+                            presence_reader(str(output_path), fresh=True))
+                    expected_clip_id = (getattr(binding, 'clip_id', None)
+                                        if binding is not None else None)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                # A new engine output is explicitly unregistered until its
+                # own post-processing transaction registers it.
+                expected_clip_id = None
+                initial_sql_presence = False
+        capture_job = {
+            'operation_id': str(getattr(op, 'op_id', '') or ''),
+            'initial_identity': dict(output_identity) if output_identity else None,
+            'owned_identity': dict(output_identity) if output_identity else None,
+            'initial_sql_presence': initial_sql_presence,
+            'expected_clip_id': expected_clip_id,
+            'session_snapshot': session_snapshot,
+            'camera_runtime_receipt': copy.deepcopy(
+                op.context.get('camera_runtime_receipt')),
+            'effects': copy.deepcopy(retained_effects),
+            'skip_clip_effects': bool(op.context.get('skip_clip_effects', False)),
+            'audio_mode': audio_mode,
+            'audio_enabled': bool(audio_enabled),
+            'allow_replay_gaps': bool(
+                retained_config and retained_config.allow_replay_gaps),
+            'mic_gain_percent': (
+                int(retained_request.mic_gain_percent)
+                if retained_request is not None else None),
+        }
         if route == 'mic':
-            self._mux_mic_into_clip(*args, audio_mode=audio_mode)
+            self._mux_mic_into_clip(*args, audio_mode=audio_mode,
+                                     capture_job=capture_job)
         else:
-            self._finalize_clip(*args)
-        if not has_async_mux:
-            self._publish_final_clip(str(output_path), duration_seconds)
+            self._finalize_clip(*args, capture_job=capture_job)
 
     def _record_finalization_warning(self, clip_path: str, message: str) -> None:
         self._clip_readiness.record_warning(clip_path, message)
 
+    def _replace_finalization_output(self, source: str, destination: str):
+        """Commit one post-processing replacement against the owned ledger."""
+        job = getattr(_FINALIZATION_CONTEXT, 'capture_job', None)
+        if not job:
+            source_identity = retry_file_operation(media_identity, source)
+            destination_identity = (retry_file_operation(media_identity, destination)
+                                    if os.path.lexists(destination) else None)
+
+            def replace_untracked():
+                current_destination = (media_identity(destination)
+                                       if os.path.lexists(destination) else None)
+                if (media_identity(source) != source_identity
+                        or current_destination != destination_identity):
+                    raise OSError('Finalization ownership changed before retry')
+                return os.replace(source, destination)
+
+            return retry_file_operation(replace_untracked)
+        owned = job.get('owned_identity')
+        if not isinstance(owned, dict):
+            job['ownership_invalid'] = True
+            raise OSError('Finalization source ownership is unavailable')
+        current = retry_file_operation(media_identity, destination)
+        if current != owned:
+            job['ownership_invalid'] = True
+            raise OSError('Finalization source changed before replacement')
+        manifest = manifest_path_for(destination)
+        job.setdefault('manifest_presence', []).append(
+            (str(manifest), bool(manifest.exists() or manifest.is_symlink())))
+        output_identity = retry_file_operation(media_identity, source)
+
+        def commit():
+            # A lock retry must not overwrite a replacement installed while we
+            # waited, or publish a different temporary file under this receipt.
+            if (media_identity(destination) != owned
+                    or media_identity(source) != output_identity):
+                job['ownership_invalid'] = True
+                raise OSError('Finalization ownership changed before retry')
+            os.replace(source, destination)
+
+        retry_file_operation(commit)
+        final_identity = retry_file_operation(media_identity, destination)
+        if final_identity != output_identity:
+            job['ownership_invalid'] = True
+            raise OSError('Finalization replacement published an unexpected file')
+        job['owned_identity'] = dict(final_identity)
+        job['final_identity'] = dict(final_identity)
+        return final_identity
+
+    def _note_owned_in_place_rewrite(self, clip_path: str) -> None:
+        """Update the ledger after a guarded in-place timing rewrite."""
+        job = getattr(_FINALIZATION_CONTEXT, 'capture_job', None)
+        if not job:
+            return
+        owned = job.get('owned_identity')
+        current = media_identity(clip_path)
+        if not isinstance(owned, dict) or current.get('st_dev') != owned.get('st_dev') \
+                or current.get('st_ino') != owned.get('st_ino'):
+            job['ownership_invalid'] = True
+            raise OSError('Finalization source changed during timing rewrite')
+        job['owned_identity'] = dict(current)
+        job['final_identity'] = dict(current)
+
+    def _rebind_manifest_after_owned_replace(self, clip_path: str):
+        """Check preservation rebinds while allowing absent sidecars."""
+        manifest = manifest_path_for(clip_path)
+        job = getattr(_FINALIZATION_CONTEXT, 'capture_job', None)
+        existed = bool(manifest.exists() or manifest.is_symlink())
+        if job:
+            for path, previous in reversed(job.get('manifest_presence', ())):
+                if path == str(manifest):
+                    existed = previous
+                    break
+        try:
+            rebound = rebind_manifest_after_media_replace(clip_path)
+        except Exception as error:
+            self._record_finalization_warning(
+                clip_path, f'Audio manifest rebind failed: {error}')
+            return False
+        if existed and rebound is False:
+            self._record_finalization_warning(
+                clip_path, 'Audio manifest could not be rebound after media replacement')
+        return rebound
+
+    def _persist_capture_highlights_worker(self, clip_path: str,
+                                           capture_job: dict) -> None:
+        """Persist native ring markers after all media rewrites complete.
+
+        The caller is a tracked post-processing worker.  Metadata failures are
+        warnings attached to an otherwise usable clip; they never manufacture
+        a successful marker write or delete the media.
+        """
+
+        markers = capture_job.get('markers')
+        if markers is None:
+            # No committed native UUID block was found.  This is distinct
+            # from a valid empty marker payload, which remains authoritative
+            # and must be preserved through the same checked writer.
+            return
+        owned = capture_job.get('owned_identity')
+        if not isinstance(owned, dict):
+            self._clip_readiness.finalization_failed(
+                clip_path, 'Finalization source ownership is unavailable',
+                base_clip_usable=False)
+            self._record_finalization_warning(
+                clip_path, 'Native highlight metadata was refused without source ownership')
+            return
+        verified_after = dict(owned)
+        try:
+            after = write_capture_highlights(
+                clip_path, markers, expected_identity=owned)
+            # The writer returns the descriptor-verified post-append identity.
+            # Publish it as the sole local authority before optional metadata
+            # work can raise.
+            verified_after = dict(after)
+            capture_job['owned_identity'] = dict(verified_after)
+            capture_job['final_identity'] = dict(verified_after)
+            if after != owned:
+                self._rebind_manifest_after_owned_replace(clip_path)
+            manager = getattr(self, 'clip_metadata_manager', None)
+            setter = getattr(manager, 'set_highlight_markers', None)
+            if callable(setter):
+                setter(
+                    clip_path, markers, expected_identity=after,
+                    expected_clip_id=capture_job.get('expected_clip_id'))
+        except CaptureHighlightAppendError as error:
+            sealed = getattr(error, 'verified_rollback_identity', None)
+            try:
+                current = media_identity(clip_path)
+            except Exception:
+                current = None
+            if (isinstance(sealed, dict)
+                    and current == sealed):
+                # The append was rolled back on the original descriptor and
+                # the post-close path still carries that exact identity.  The
+                # base clip remains publishable, but no marker SQL claim is
+                # made from the failed append.
+                capture_job['owned_identity'] = dict(sealed)
+                capture_job['final_identity'] = dict(sealed)
+                self._record_finalization_warning(
+                    clip_path,
+                    f'Native highlight metadata append was rolled back: {error}')
+                return
+            capture_job['ownership_invalid'] = True
+            self._clip_readiness.finalization_failed(
+                clip_path,
+                'Native marker persistence saw an unrelated source replacement',
+                base_clip_usable=False)
+            self._record_finalization_warning(
+                clip_path,
+                f'Native highlight metadata was not persisted: {error}')
+        except Exception as error:
+            try:
+                if media_identity(clip_path) != verified_after:
+                    capture_job['ownership_invalid'] = True
+                    self._clip_readiness.finalization_failed(
+                        clip_path,
+                        'Native marker persistence saw an unrelated source replacement',
+                        base_clip_usable=False)
+            except Exception:
+                # Publication still requires a fresh identity check; report
+                # this optional metadata failure through the warning below.
+                pass
+            self._record_finalization_warning(
+                clip_path,
+                f'Native highlight metadata was not persisted: {error}')
+
     def _complete_clip_finalization(
             self, clip_path: str, duration_seconds: int,
-            *, already_normalized: bool = False) -> None:
+            *, already_normalized: bool = False,
+            capture_job: dict | None = None) -> None:
+        tracked_identity = None
+        if capture_job is not None:
+            owned = capture_job.get('owned_identity')
+            try:
+                current = media_identity(clip_path)
+            except Exception as error:
+                self._clip_readiness.finalization_failed(
+                    clip_path, f'Finalization identity unavailable: {error}',
+                    base_clip_usable=False)
+                return
+            if not isinstance(owned, dict) or current != owned:
+                self._clip_readiness.finalization_failed(
+                    clip_path,
+                    'Finalization refused after an unrelated source replacement',
+                    base_clip_usable=False)
+                return
+            tracked_identity = dict(owned)
         if (not already_normalized
                 and self._clip_readiness.state(clip_path)
                 is not ClipReadinessState.FINALIZATION_FAILED):
             # Covers the race where a Linux mic route loses its recorder after
             # route selection and completes directly without a worker gate.
-            self._normalize_clip_to_cfr(clip_path)
+            try:
+                if capture_job and capture_job.get('allow_replay_gaps') is True:
+                    cfr_ok = self._normalize_clip_to_cfr(
+                        clip_path, allow_replay_gaps=True)
+                else:
+                    cfr_ok = self._normalize_clip_to_cfr(clip_path)
+                if (cfr_ok is not False
+                        and self._clip_readiness.state(clip_path)
+                        is not ClipReadinessState.FINALIZATION_FAILED):
+                    normalizer = getattr(
+                        self, '_normalize_clip_presentation_timing', None)
+                    if normalizer is not None:
+                        normalizer(clip_path)
+            except Exception as error:
+                self._clip_readiness.finalization_failed(
+                    clip_path,
+                    f'Required presentation timing normalization failed: {error}',
+                    base_clip_usable=False)
+        if capture_job is not None:
+            # A normalizer may replace the file and update the operation's
+            # ledger. Re-read that ledger, never adopt a path stat as a new
+            # authority, then compare the current four stats against it.
+            owned = capture_job.get('owned_identity')
+            if not isinstance(owned, dict):
+                self._clip_readiness.finalization_failed(
+                    clip_path, 'Finalization source ownership is unavailable',
+                    base_clip_usable=False)
+                return
+            tracked_identity = dict(owned)
+            try:
+                current = media_identity(clip_path)
+            except Exception as error:
+                self._clip_readiness.finalization_failed(
+                    clip_path, f'Finalization identity unavailable: {error}',
+                    base_clip_usable=False)
+                return
+            if current != tracked_identity:
+                self._clip_readiness.finalization_failed(
+                    clip_path,
+                    'Finalization refused after an unrelated source replacement',
+                    base_clip_usable=False)
+                return
         if self._clip_readiness.state(clip_path) is ClipReadinessState.FINALIZATION_FAILED:
             self._ui_call.emit(
-                lambda: self._publish_final_clip(clip_path, duration_seconds))
+                lambda identity=(dict(tracked_identity)
+                                 if tracked_identity is not None else None):
+                self._publish_final_clip(
+                    clip_path, duration_seconds, expected_identity=identity))
             return
-        try:
-            usable = os.path.isfile(clip_path) and os.path.getsize(clip_path) > 0
-        except OSError:
-            usable = False
+        expected_identity = None
+        if tracked_identity is not None:
+            # Re-read the ledger immediately before completion and keep its
+            # token bound to the callback; there is no fresh identity adopt.
+            if capture_job is not None:
+                owned = capture_job.get('owned_identity')
+                if not isinstance(owned, dict):
+                    self._clip_readiness.finalization_failed(
+                        clip_path, 'Finalization source ownership is unavailable',
+                        base_clip_usable=False)
+                    return
+                tracked_identity = dict(owned)
+            try:
+                current = media_identity(clip_path)
+                usable = (
+                    isinstance(current, dict)
+                    and current == tracked_identity
+                    and current.get('size', 0) > 0)
+            except Exception:
+                usable = False
+            expected_identity = dict(tracked_identity)
+        else:
+            try:
+                usable = os.path.isfile(clip_path) and os.path.getsize(clip_path) > 0
+                if usable:
+                    info = os.stat(clip_path, follow_symlinks=False)
+                    expected_identity = {
+                        'st_dev': int(info.st_dev), 'st_ino': int(info.st_ino),
+                        'size': int(info.st_size), 'mtime_ns': int(info.st_mtime_ns),
+                    }
+            except OSError:
+                usable = False
+        if not usable and tracked_identity is not None:
+            self._clip_readiness.finalization_failed(
+                clip_path,
+                'Finalization identity or file size changed before completion.',
+                base_clip_usable=False,
+            )
+            return
         if usable:
             self._clip_readiness.complete(clip_path)
         else:
@@ -7148,28 +15450,140 @@ class MainWindow(QMainWindow):
                 'The final clip file is missing or empty.',
                 base_clip_usable=False,
             )
-        self._ui_call.emit(
-            lambda: self._publish_final_clip(clip_path, duration_seconds))
+        if expected_identity is None:
+            self._ui_call.emit(
+                lambda: self._publish_final_clip(clip_path, duration_seconds))
+        else:
+            self._ui_call.emit(
+                lambda identity=dict(expected_identity): self._publish_final_clip(
+                    clip_path, duration_seconds, expected_identity=identity))
 
-    def _publish_final_clip(self, clip_path: str, duration_seconds: int) -> None:
+    def _publish_final_clip(self, clip_path: str, duration_seconds: int,
+                            *, expected_identity=None) -> None:
         key = os.path.normcase(os.path.abspath(clip_path))
-        if key in self._published_final_clips:
+        was_published = key in getattr(self, '_published_final_clips', ())
+        finalized_identities = getattr(self, '_finalized_clip_identities', None)
+        if finalized_identities is None:
+            finalized_identities = {}
+            self._finalized_clip_identities = finalized_identities
+        had_known_identity = (
+            expected_identity is not None
+            or os.path.normcase(os.path.abspath(clip_path)) in finalized_identities)
+        failed_final_clips = getattr(self, '_failed_final_clips', None)
+        if failed_final_clips is None:
+            failed_final_clips = set()
+            self._failed_final_clips = failed_final_clips
+
+        def fail_finalization(message: str) -> None:
+            failed_final_clips.add(key)
+            finalized_identities.pop(key, None)
+            failed = getattr(self._clip_readiness, 'finalization_failed', None)
+            if callable(failed):
+                failed(clip_path, message, base_clip_usable=False)
+            if was_published:
+                return
+            if key in getattr(self, '_save_duration_reports', {}):
+                self.capture_card.show_error()
+            set_status = getattr(self, '_set_status', None)
+            if callable(set_status):
+                set_status('FINALIZATION FAILED', status_warning_qss())
+            push_error = getattr(self, 'push_error', None)
+            if callable(push_error):
+                push_error(
+                    'CLIP FINALIZATION FAILED',
+                    'The final clip file is unavailable. The base save was not '
+                    'reported as a completed clip.',
+                    level='error',
+                )
+
+        if expected_identity is not None:
+            finalized_identities[key] = dict(expected_identity)
+        elif key in finalized_identities:
+            expected_identity = dict(finalized_identities[key])
+        if key in failed_final_clips:
+            finalized_identities.pop(key, None)
             return
-        self._published_final_clips.add(key)
+        if not isinstance(expected_identity, dict) and not had_known_identity:
+            # Direct synchronous callers have no queued token. Capture their
+            # identity at entry; all tracked finalization callbacks populate
+            # the ledger before reaching this method.
+            try:
+                expected_identity = retry_file_operation(media_identity, clip_path)
+            except Exception:
+                expected_identity = None
+        if not isinstance(expected_identity, dict):
+            fail_finalization('Final clip identity is unavailable')
+            return
+        try:
+            current_identity = retry_file_operation(media_identity, clip_path)
+        except Exception as error:
+            fail_finalization(f'Final clip identity is unavailable: {error}')
+            return
+        if current_identity != expected_identity:
+            fail_finalization(
+                'Final publication refused after a source replacement')
+            emit_event(
+                'clip_save', 'stale_finalization_discarded', state='FAILED',
+                error=DiagnosticError.CLIP_FINALIZE_FAILED,
+                detail='final media identity changed before publication')
+            return
         metadata_started = time.monotonic()
         if not self._clip_readiness.can_access(clip_path):
             emit_event(
                 'clip_save', 'finalization_failed', state='FAILED',
                 error=DiagnosticError.CLIP_FINALIZE_FAILED,
                 detail='final clip file is unavailable')
-            self._set_status('FINALIZATION FAILED', status_warning_qss())
-            self.push_error(
-                'CLIP FINALIZATION FAILED',
-                'The final clip file is unavailable. The base save was not '
-                'reported as a completed clip.',
-                level='error',
-            )
+            fail_finalization('The final clip file is unavailable.')
             return
+
+        # A save is not reported to the user until the finalized file has a
+        # measured video presentation duration. The probe runs off the UI
+        # thread and is intentionally deferred until readiness confirms that
+        # all rewriting/finalization has stopped.
+        report = getattr(self, '_save_duration_reports', {}).get(key)
+        if report is not None and report.get('duration_classification') == 'rejected':
+            # A sub-minimum result is terminal: duplicate finalizer callbacks
+            # must not fall through and publish it as a normal saved clip.
+            self._published_final_clips.add(key)
+            failed_final_clips.add(key)
+            finalized_identities.pop(key, None)
+            return
+        if report is not None and not report.get('probe_complete'):
+            self._begin_saved_clip_duration_probe(clip_path, key)
+            return
+        observation_allowed = not (
+            report is not None and (
+                report.get('duration_probe_reason') in {
+                    'duration_probe_capacity', 'failed', 'rejected'}
+                or report.get('duration_classification') in {'failed', 'rejected'}))
+        if key in self._published_final_clips:
+            # A replay may have been published by an early callback before the
+            # finalizer supplied its captured identity.  Storage observes only
+            # a later finalization that passed the same access/duration gates.
+            if (observation_allowed and expected_identity is not None):
+                storage_controller = getattr(self, 'library_storage_controller', None)
+                observer = getattr(storage_controller, 'observe_completed_clip', None)
+                if callable(observer):
+                    observer(clip_path, expected_identity, publish_ui=True)
+            finalized_identities.pop(key, None)
+            return
+        manager = getattr(self, 'clip_metadata_manager', None)
+        marker = getattr(manager, 'mark_recorded', None)
+        if callable(marker):
+            try:
+                from core.library_index import recorded_media_details
+                _recorded, group = recorded_media_details(clip_path, expected_identity)
+                marker(clip_path, expected_identity=expected_identity,
+                       group=group or Path(clip_path).parent.name)
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                print(f'[Save] Capture provenance could not be saved: {error}')
+        self._published_final_clips.add(key)
+
+        storage_controller = getattr(self, 'library_storage_controller', None)
+        observer = getattr(storage_controller, 'observe_completed_clip', None)
+        if observation_allowed and callable(observer) and expected_identity is not None:
+            observer(clip_path, expected_identity, publish_ui=True)
+        finalized_identities.pop(key, None)
 
         warnings = self._clip_readiness.warnings(clip_path)
         metadata_elapsed_ms = round(
@@ -7198,11 +15612,17 @@ class MainWindow(QMainWindow):
                 print(f'[Save] Incremental library finalization failed: {error}')
         library_update_ms = round(
             (time.monotonic() - library_started) * 1000)
+        # Capture was acknowledged at admission. Publish the library result
+        # silently; failures still use the error notification path.
         started = getattr(
             self, '_clip_diagnostic_started_by_path', {}).pop(key, None)
         emit_event(
             'clip_save', 'finalization_completed', state='COMPLETED',
             requested_duration_seconds=duration_seconds,
+            actual_video_presentation_seconds=(
+                report.get('actual_video_seconds') if report else None),
+            duration_classification=(
+                report.get('duration_classification') if report else None),
             elapsed_ms=(round((time.monotonic() - started) * 1000)
                         if started is not None else None),
             library_refresh_ms=library_update_ms,
@@ -7219,7 +15639,17 @@ class MainWindow(QMainWindow):
                 level='warning',
             )
         else:
-            self._set_status('SAVED', status_active_qss())
+            classification = (report or {}).get('duration_classification')
+            if classification == 'partial':
+                actual = report.get('actual_video_seconds')
+                requested = report.get('requested_seconds')
+                self._set_status(
+                    f'PARTIAL SAVED {actual:.1f}/{requested:g}s',
+                    status_warning_qss())
+            elif classification == 'unknown':
+                self._set_status('SAVED — DURATION UNVERIFIED', status_warning_qss())
+            else:
+                self._set_status('SAVED', status_active_qss())
         QTimer.singleShot(2000, self._update_status)
 
     def _open_clips_folder(self):
@@ -7345,7 +15775,8 @@ class MainWindow(QMainWindow):
                            duration_seconds: int,
                            mic_end_time: float,
                            clip_ready=None, crop_profile=None,
-                           *, audio_mode: str | None = None):
+                           *, audio_mode: str | None = None,
+                           capture_job: dict | None = None):
         """Finalize audio, then run the remaining source-clip post-processing.
 
         Windows supplies native system/microphone tracks; Linux supplies Python
@@ -7364,17 +15795,20 @@ class MainWindow(QMainWindow):
                 target=self._combine_native_audio_worker,
                 args=(clip_path, duration_seconds, mic_end_time,
                       clip_ready, crop_profile),
+                capture_job=capture_job,
             )
         else:
             # Separated Windows clips are already published as distinct
-            # native audio streams with a matching FTHR manifest. The
-            # normal route selector sends visual-only work to finalize.
-            if clip_ready is not None:
-                clip_ready.set()
+            # native audio streams with a matching FTHR manifest. They still
+            # pass through the tracked finalization worker so CFR normalization,
+            # marker persistence, readiness, and publish ordering are shared.
+            self._finalize_clip(
+                clip_path, duration_seconds, mic_end_time, clip_ready,
+                crop_profile, capture_job=capture_job)
         return
 
 
-    def _spawn_mux_thread(self, target, args):
+    def _spawn_mux_thread(self, target, args, *, capture_job=None):
         """Start a tracked post-processing worker (mic mux / finalize).
         Tracked so closeEvent can wait for pending ones — daemon
         threads killed mid-ffmpeg/os.replace leave a corrupt clip behind."""
@@ -7388,6 +15822,8 @@ class MainWindow(QMainWindow):
         # returns, which otherwise could publish a VFR base file before the
         # common completion callback runs.
         worker_args = list(args)
+        capture_job = (dict(capture_job)
+                       if capture_job is not None else None)
         original_ready = worker_args[3] if len(worker_args) > 3 else None
         if original_ready is not None:
             host = self
@@ -7402,8 +15838,41 @@ class MainWindow(QMainWindow):
                     if self._released:
                         return
                     self._released = True
+                    timing_ok = True
                     try:
-                        host._normalize_clip_to_cfr(clip_path)
+                        try:
+                            if capture_job is not None:
+                                current = media_identity(clip_path)
+                                if current != capture_job.get('owned_identity'):
+                                    capture_job['ownership_invalid'] = True
+                                    host._clip_readiness.finalization_failed(
+                                        clip_path,
+                                        'Finalization source changed before timing validation',
+                                        base_clip_usable=False)
+                                    timing_ok = False
+                            if timing_ok:
+                                cfr_ok = host._normalize_clip_to_cfr(clip_path)
+                                if cfr_ok is False:
+                                    timing_ok = False
+                                if (timing_ok
+                                        and host._clip_readiness.state(clip_path)
+                                        is not ClipReadinessState.FINALIZATION_FAILED):
+                                    normalizer = getattr(
+                                        host, '_normalize_clip_presentation_timing', None)
+                                    if normalizer is not None:
+                                        if normalizer(clip_path) is False:
+                                            timing_ok = (
+                                                host._clip_readiness.state(clip_path)
+                                                is not ClipReadinessState.FINALIZATION_FAILED)
+                        except Exception as error:
+                            timing_ok = False
+                            host._clip_readiness.finalization_failed(
+                                clip_path,
+                                f'Required presentation timing normalization failed: {error}',
+                                base_clip_usable=False)
+                        if timing_ok and capture_job is not None:
+                            host._persist_capture_highlights_worker(
+                                clip_path, capture_job)
                     finally:
                         # The completion callback must not probe/re-encode the
                         # same clip a second time. Keep this true even when
@@ -7425,6 +15894,7 @@ class MainWindow(QMainWindow):
         def _run_and_publish():
             source_timeline_rejected = False
             source_timeline_validated = False
+            _FINALIZATION_CONTEXT.capture_job = capture_job
             try:
                 # Reject a proven sparse native source before a crop/overlay
                 # can rewrite its timestamps and before CFR repair could
@@ -7438,10 +15908,36 @@ class MainWindow(QMainWindow):
                         worker_args[3].fail()
                     return
                 source_timeline_validated = True
+                if capture_job is not None:
+                    if not isinstance(capture_job.get('owned_identity'), dict):
+                        raise OSError('Finalization source ownership is unavailable')
+                    try:
+                        capture_job['markers'] = read_capture_highlights(
+                            str(worker_args[0]),
+                            expected_identity=capture_job.get('initial_identity'))
+                    except Exception as error:
+                        capture_job['markers'] = None
+                        self._record_finalization_warning(
+                            str(worker_args[0]),
+                            f'Native highlight metadata could not be read: {error}')
                 target(*worker_args)
             except Exception as exc:
                 worker_clip_path = str(worker_args[0])
                 print(f'[Finalize] Unhandled worker error: {exc}')
+                if (capture_job is not None
+                        and capture_job.get('ownership_invalid')):
+                    source_timeline_rejected = True
+                    try:
+                        self._clip_readiness.finalization_failed(
+                            worker_clip_path,
+                            f'Finalization ownership check failed: {exc}',
+                            base_clip_usable=False)
+                    except Exception:
+                        # The ownership failure is already terminal; a
+                        # diagnostic failure must not reopen processing.
+                        pass
+                    if original_ready is not None:
+                        worker_args[3].fail()
                 if not source_timeline_validated:
                     # A probe can fail before it has recorded readiness. Keep
                     # that exception on the same fail-closed path as missing
@@ -7469,15 +15965,53 @@ class MainWindow(QMainWindow):
                     # deliberately skipped the normalization/rewrite path.
                     pass
                 elif original_ready is not None:
-                    worker_args[3].set()
+                    try:
+                        worker_args[3].set()
+                    except Exception as error:
+                        self._record_finalization_warning(
+                            str(worker_args[0]),
+                            f'Finalization gate warning: {error}')
+                        try:
+                            original_ready.set()
+                        except Exception:
+                            # Late readiness release is best-effort after the
+                            # worker gate has already handled its failure.
+                            pass
                     already_normalized = bool(
                         getattr(worker_args[3], 'normalized', False))
                 else:
-                    self._normalize_clip_to_cfr(str(worker_args[0]))
+                    clip_path = str(worker_args[0])
+                    try:
+                        cfr_ok = self._normalize_clip_to_cfr(clip_path)
+                        if (cfr_ok is not False
+                                and self._clip_readiness.state(clip_path)
+                                is not ClipReadinessState.FINALIZATION_FAILED):
+                            normalizer = getattr(
+                                self, '_normalize_clip_presentation_timing', None)
+                            if normalizer is not None:
+                                normalizer(clip_path)
+                    except Exception as error:
+                        self._clip_readiness.finalization_failed(
+                            clip_path,
+                            f'Required presentation timing normalization failed: {error}',
+                            base_clip_usable=False)
                     already_normalized = True
-                self._complete_clip_finalization(
-                    str(worker_args[0]), int(worker_args[1]),
-                    already_normalized=already_normalized)
+                try:
+                    self._complete_clip_finalization(
+                        str(worker_args[0]), int(worker_args[1]),
+                        already_normalized=already_normalized,
+                        capture_job=capture_job)
+                finally:
+                    if getattr(_FINALIZATION_CONTEXT, 'capture_job', None) is capture_job:
+                        _FINALIZATION_CONTEXT.capture_job = None
+                    current = threading.current_thread()
+                    self._mux_threads = [
+                        thread for thread in getattr(self, '_mux_threads', ())
+                        if thread is not current and thread.is_alive()]
+                    try:
+                        self._ui_call.emit(self._apply_latest_desired_request_if_idle)
+                    except (RuntimeError, AttributeError):
+                        pass
 
         t = threading.Thread(target=_run_and_publish, daemon=True)
         self._mux_threads.append(t)
@@ -7508,6 +16042,10 @@ class MainWindow(QMainWindow):
             return False
         evidence = probe_video_cfr_evidence(clip_path, fps)
         if evidence.physical_timeline_bounded is True:
+            return True
+        job = getattr(_FINALIZATION_CONTEXT, 'capture_job', None)
+        if (job and job.get('allow_replay_gaps') is True
+                and evidence.has_large_forward_gap):
             return True
         message = (
             'Post-processing refused because the source video timeline '
@@ -7610,6 +16148,10 @@ class MainWindow(QMainWindow):
         if manifest is None and manifest_sidecar.exists():
             manifest = {'sources': []}
 
+        # This worker is selected by the clip's accepted combined capture
+        # configuration. Native source-preserving packets still need mixing;
+        # an independent manifest describes those inputs, not the user's mode.
+
         selected_audio_indexes = select_combined_audio_streams(
             manifest, stream_descriptors)
         if not selected_audio_indexes:
@@ -7622,7 +16164,8 @@ class MainWindow(QMainWindow):
             return
 
         audio_count = len(selected_audio_indexes)
-        audio_filter = build_combined_audio_filter(selected_audio_indexes)
+        audio_filter = build_combined_audio_filter(
+            selected_audio_indexes, pad_to_video_end=True, streams=stream_descriptors)
 
         with tempfile.TemporaryDirectory(
                 prefix='.fthr-audio-', dir=os.path.dirname(clip_path)) as td:
@@ -7634,6 +16177,8 @@ class MainWindow(QMainWindow):
                 '-map_metadata', '0', '-map_chapters', '0',
                 '-movflags', 'use_metadata_tags',
                 '-metadata', 'comment=fthr-audio-mode=combined',
+                '-metadata', 'fthr_audio_mode=combined',
+                '-metadata', 'fthr_capture_audio=',
                 '-metadata:s:a:0', 'title=Combined Audio',
                 '-metadata:s:a:0', 'handler_name=Combined Audio',
                 '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
@@ -7664,7 +16209,7 @@ class MainWindow(QMainWindow):
             emit_timeline('post_final_mix_av_timeline', output)
 
             try:
-                os.replace(output, clip_path)
+                self._replace_finalization_output(output, clip_path)
                 # The old sidecar described the pre-combine stream topology.
                 # Its hash would already make it unreadable, but removing it
                 # avoids leaving misleading metadata next to a combined clip.
@@ -7685,10 +16230,13 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _cfr_video_args(clip_path: str) -> list[str]:
-        """Use configured FPS and -fps_mode cfr for visual re-encodes.
+        """Apply the accepted replay's timing policy to visual re-encodes.
 
         The MP4 sample table must carry timing, not just a private metadata tag.
         """
+        job = getattr(_FINALIZATION_CONTEXT, 'capture_job', None)
+        if job and job.get('allow_replay_gaps') is True:
+            return ['-fps_mode', 'passthrough', '-enc_time_base', 'demux']
         metadata = probe_video_metadata(clip_path)
         fps = metadata.average_fps if metadata is not None else None
         if fps is None or not math.isfinite(fps) or fps <= 0:
@@ -7699,7 +16247,8 @@ class MainWindow(QMainWindow):
         return ['-fps_mode', 'cfr', '-r', fps_text]
 
     def _normalize_clip_to_cfr(self, clip_path: str,
-                               ffmpeg: str | None = None) -> bool:
+                               ffmpeg: str | None = None, *,
+                               allow_replay_gaps: bool = False) -> bool:
         """Validate timing while preserving healthy variable-rate video.
 
         Keep bounded cadence gaps without transcoding. Repair inconclusive CFR
@@ -7722,14 +16271,24 @@ class MainWindow(QMainWindow):
                 or cfr_evidence.physical_timeline_bounded is True):
             return True
 
+        job = getattr(_FINALIZATION_CONTEXT, 'capture_job', None)
+        allow_replay_gaps = (allow_replay_gaps is True
+                             or bool(job and job.get('allow_replay_gaps') is True))
         # Do not let the CFR repair path expand a native replay that contains
         # a multi-second physical PTS hole. Legitimate VFR clips remain
         # repairable when their packet timeline is bounded; an inconclusive
         # probe still follows the existing conservative repair path.
         if cfr_evidence.physical_timeline_bounded is False:
+            if allow_replay_gaps and cfr_evidence.has_large_forward_gap:
+                return True
             return fail(
                 'Frame-rate repair refused because the source video timeline '
                 'contains a large packet gap; the clip was not published.')
+
+        if allow_replay_gaps:
+            return fail(
+                'The replay packet timing could not be verified; '
+                'the clip was not published.')
 
         if ffmpeg is None:
             try:
@@ -7759,6 +16318,11 @@ class MainWindow(QMainWindow):
                 active_codec, bitrate_kbps, ffmpeg=ffmpeg),
             software_video_args(bitrate_kbps, ffmpeg=ffmpeg),
         ]
+        hdr_color = probe_hdr(clip_path)
+        if hdr_color is not None:
+            hdr_args = choose_hdr_video_args(ffmpeg, hdr_color, quality='fast')
+            if hdr_args:
+                video_arg_sets.insert(0, hdr_args)
         # Keep one command when the active codec is already the reviewed
         # software fallback; otherwise a failed GPU post-process gets one safe
         # software retry instead of leaving a VFR clip published.
@@ -7796,14 +16360,14 @@ class MainWindow(QMainWindow):
                     # input decoder/filter pools configured above.
                     bounded_video_args = [*video_args, '-threads:v', '2']
                     result = subprocess.run(
-                        [*common, *bounded_video_args,
-                         '-c:a', 'copy', output],
+                        sdr_command([*common, *bounded_video_args,
+                         '-c:a', 'copy', output], clip_path),
                         capture_output=True, timeout=timeout,
                         **_BACKGROUND_NO_WINDOW,
                     )
                     if result.returncode == 0 and os.path.isfile(output):
-                        os.replace(output, clip_path)
-                        rebind_manifest_after_media_replace(clip_path)
+                        self._replace_finalization_output(output, clip_path)
+                        self._rebind_manifest_after_owned_replace(clip_path)
                         print(f'[CFR] Repaired {os.path.basename(clip_path)} '
                               f'to {fps_text} FPS without changing duration')
                         return True
@@ -7824,6 +16388,72 @@ class MainWindow(QMainWindow):
         return fail(
             'Frame-rate repair failed; the original source clip was not '
             'published.')
+
+    def _normalize_clip_presentation_timing(self, clip_path: str) -> bool:
+        """Normalize a supported Windows MP4 edit list before publication.
+
+        The core rewrite is lossless and returns ``False`` when the file is
+        already normalized or outside its deliberately narrow MP4 contract.
+        Only hard I/O/validation failures make the clip unpublishable; the
+        source path remains owned by this finalization stage throughout.
+        """
+        if sys.platform != 'win32' or Path(clip_path).suffix.casefold() != '.mp4':
+            return False
+
+        def fail(message: str) -> bool:
+            readiness = getattr(self, '_clip_readiness', None)
+            if readiness is not None and hasattr(readiness, 'finalization_failed'):
+                readiness.finalization_failed(
+                    clip_path, message, base_clip_usable=False)
+            recorder = getattr(self, '_record_finalization_warning', None)
+            if recorder is not None:
+                recorder(clip_path, message)
+            emit_event(
+                'clip_save', 'presentation_timing_normalization_failed',
+                state='FAILED', error=DiagnosticError.CLIP_FINALIZE_FAILED,
+                detail=message)
+            return False
+
+        manifest_path = manifest_path_for(clip_path)
+        manifest_present = (
+            manifest_path.exists() or manifest_path.is_symlink())
+        try:
+            owned = getattr(_FINALIZATION_CONTEXT, 'capture_job', None)
+            if owned:
+                current = media_identity(clip_path)
+                if current != owned.get('owned_identity'):
+                    return fail(
+                        'MP4 presentation timing source changed before normalization')
+            commit_replace = None
+            if owned:
+                commit_replace = (
+                    lambda source, destination:
+                    self._replace_finalization_output(
+                        str(source), str(destination)))
+                rewritten = normalize_mp4_presentation_in_place(
+                    clip_path, commit_replace=commit_replace)
+            else:
+                rewritten = normalize_mp4_presentation_in_place(clip_path)
+        except (OSError, ValueError) as error:
+            message = (
+                'MP4 presentation-timing normalization failed; the clip was '
+                f'not published: {type(error).__name__}: {error}')
+            return fail(message)
+        if rewritten:
+            rebind_owned = getattr(
+                self, '_rebind_manifest_after_owned_replace', None)
+            manifest_rebound = (
+                rebind_owned(clip_path) if callable(rebind_owned)
+                else rebind_manifest_after_media_replace(clip_path))
+            if manifest_present and not manifest_rebound:
+                return fail(
+                    'MP4 presentation timing was rewritten, but its existing '
+                    'audio manifest could not be rebound; the clip was not '
+                    'published.')
+            emit_event(
+                'clip_save', 'presentation_timing_normalized',
+                state='COMPLETED', manifest_rebound=manifest_rebound)
+        return rewritten
 
     def _mic_mux_worker(self, clip_path: str,
                         duration_seconds: int,
@@ -7890,6 +16520,8 @@ class MainWindow(QMainWindow):
                                 '-map_chapters', '0',
                                 '-movflags', 'use_metadata_tags',
                                 '-metadata', 'comment=fthr-audio-mode=combined',
+                '-metadata', 'fthr_audio_mode=combined',
+                '-metadata', 'fthr_capture_audio=',
                                 '-metadata:s:a:0', 'handler_name=Combined Audio',
                                 '-c:v', 'copy',
                                 '-c:a', 'aac', '-b:a', '192k',
@@ -7903,7 +16535,7 @@ class MainWindow(QMainWindow):
                             )
                             if result.returncode == 0:
                                 try:
-                                    os.replace(mixed_mp4, clip_path)
+                                    self._replace_finalization_output(mixed_mp4, clip_path)
                                     layout_text = (
                                         'Kept separate mic track in'
                                         if separate_audio else 'Mixed mic into')
@@ -7974,12 +16606,28 @@ class MainWindow(QMainWindow):
             print(f'[Post] Could not probe clip dimensions: {exc}')
         return 1920, 1080
 
+    def _captured_effects(self) -> dict | None:
+        """Return the immutable effect snapshot attached to this finalizer."""
+        capture_job = getattr(_FINALIZATION_CONTEXT, 'capture_job', None)
+        if not isinstance(capture_job, dict):
+            return None
+        effects = capture_job.get('effects')
+        return effects if isinstance(effects, dict) else None
+
     def _apply_image_overlay(self, clip_path: str, ffmpeg: str) -> None:
-        if not self.settings_manager.get('image_overlay_enabled', False):
+        effects = self._captured_effects()
+        enabled = (
+            bool(effects.get('image_overlay_enabled', False))
+            if effects is not None else
+            bool(self.settings_manager.get('image_overlay_enabled', False)))
+        if not enabled:
             return
+        configured_layers = (
+            effects.get('image_overlays', []) if effects is not None else
+            image_overlay_layers(self.settings_manager))
         layers = [
-            layer for layer in image_overlay_layers(self.settings_manager)
-            if layer.get('enabled')]
+            layer for layer in configured_layers
+            if isinstance(layer, dict) and layer.get('enabled')]
         valid_layers = []
         for layer in layers:
             if os.path.isfile(layer['path']):
@@ -8033,7 +16681,7 @@ class MainWindow(QMainWindow):
         tmp_path = os.path.join(tmp_dir, 'output.mp4')
         try:
             result = subprocess.run(
-                [ffmpeg, '-y',
+                sdr_command([ffmpeg, '-y',
                  '-i', clip_path,
                  *image_inputs,
                  '-filter_complex', ';'.join(filters),
@@ -8043,13 +16691,13 @@ class MainWindow(QMainWindow):
                  *MainWindow._cfr_video_args(clip_path),
                  *software_video_args(),
                  '-c:a', 'copy',
-                 tmp_path],
+                 tmp_path], clip_path),
                 capture_output=True,
                 timeout=max(120, 45 * len(valid_layers)), **_NO_WINDOW,
             )
             if result.returncode == 0:
-                os.replace(tmp_path, clip_path)
-                rebind_manifest_after_media_replace(clip_path)
+                self._replace_finalization_output(tmp_path, clip_path)
+                self._rebind_manifest_after_owned_replace(clip_path)
                 print(f'[ImageOverlay] Applied {len(valid_layers)} layer(s) to '
                       f'{os.path.basename(clip_path)}')
             else:
@@ -8082,7 +16730,11 @@ class MainWindow(QMainWindow):
         Stream the source ring into the compositor. A missing source preserves
         the base clip and produces a finalization warning.
         """
-        config = third_party_keyboard_settings(self.settings_manager)
+        effects = self._captured_effects()
+        config = (
+            dict(effects.get('third_party_keyboard', {}))
+            if effects is not None else
+            third_party_keyboard_settings(self.settings_manager))
         if not config['enabled']:
             return
         capture = getattr(self, '_keyboard_overlay_capture', None)
@@ -8117,7 +16769,7 @@ class MainWindow(QMainWindow):
             writer_thread = None
             with tempfile.TemporaryFile() as ffmpeg_log:
                 process = subprocess.Popen(
-                    [ffmpeg, '-y', '-loglevel', 'error', '-i', clip_path,
+                    sdr_command([ffmpeg, '-y', '-loglevel', 'error', '-i', clip_path,
                      '-f', 'rawvideo', '-pix_fmt', 'rgba',
                      '-video_size', f'{keyboard_w}x{keyboard_h}',
                      '-framerate', str(KEYBOARD_COMPOSITE_FPS), '-i', '-',
@@ -8127,7 +16779,7 @@ class MainWindow(QMainWindow):
                      '-movflags', 'use_metadata_tags',
                      *MainWindow._cfr_video_args(clip_path),
                      *postprocess_video_args(active_codec, ffmpeg=ffmpeg),
-                     '-c:a', 'copy', output_path],
+                     '-c:a', 'copy', output_path], clip_path),
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     # A PIPE can fill while Python is blocked writing raw
@@ -8201,8 +16853,8 @@ class MainWindow(QMainWindow):
                     'Keyboard overlay source had no recent frames; the base clip was retained.')
                 return
             if returncode == 0:
-                os.replace(output_path, clip_path)
-                rebind_manifest_after_media_replace(clip_path)
+                self._replace_finalization_output(output_path, clip_path)
+                self._rebind_manifest_after_owned_replace(clip_path)
                 print(f'[KeyboardOverlay] Applied to {os.path.basename(clip_path)}')
             else:
                 detail = stderr.decode(errors='replace').strip().splitlines()
@@ -8237,10 +16889,63 @@ class MainWindow(QMainWindow):
 
     def _apply_camera_overlay(self, clip_path: str, ffmpeg: str,
                                clip_end_time: float, duration_sec: int) -> None:
-        if not self.settings_manager.get('camera_enabled', False):
+        capture_job = getattr(_FINALIZATION_CONTEXT, 'capture_job', None)
+        if isinstance(capture_job, dict) and capture_job.get('skip_clip_effects'):
+            return
+        session_snapshot = (
+            capture_job.get('session_snapshot')
+            if isinstance(capture_job, dict) else None)
+        retained_request = getattr(session_snapshot, 'request', None)
+        request_camera = getattr(retained_request, 'camera', None)
+        camera = (request_camera.to_dict()
+                  if request_camera is not None
+                  and hasattr(request_camera, 'to_dict') else None)
+        if camera is None and sys.platform == 'win32':
+            self._record_finalization_warning(
+                clip_path,
+                'Camera overlay was skipped because the accepted session had no camera snapshot.')
+            return
+        if camera is None and session_snapshot is None:
+            # Existing Linux jobs without a session may use their legacy
+            # settings path; Windows jobs above fail closed on missing A.
+            camera = {
+                'enabled': bool(self.settings_manager.get('camera_enabled', False)),
+                'device_index': int(self.settings_manager.get(
+                    'camera_device_index', 0) or 0),
+                'overlay_rect': self.settings_manager.get(
+                    'camera_overlay_rect', DEFAULT_OVERLAY_RECT),
+            }
+        camera_enabled = (bool(camera.get('enabled', False))
+                          if camera is not None else
+                          bool(self.settings_manager.get('camera_enabled', False)))
+        if not camera_enabled:
             return
         from core.camera_recorder import CameraRecorder
-        if not CameraRecorder.is_available() or not CameraRecorder().is_running():
+        recorder = CameraRecorder()
+        camera_receipt = (
+            getattr(_FINALIZATION_CONTEXT, 'capture_job', {}).get(
+                'camera_runtime_receipt')
+            if isinstance(getattr(_FINALIZATION_CONTEXT, 'capture_job', None), dict)
+            else None)
+        expected_generation = (
+            int(camera_receipt.get('generation'))
+            if isinstance(camera_receipt, dict)
+            and camera_receipt.get('generation') is not None else None)
+        if (session_snapshot is not None and camera_enabled
+                and expected_generation is None):
+            self._record_finalization_warning(
+                clip_path,
+                'Camera overlay was skipped because no accepted runtime generation was captured.')
+            return
+        expected_device_index = (
+            int(camera.get('device_index'))
+            if camera.get('device_index') is not None else None)
+        runtime = recorder.runtime_snapshot()
+        if (not CameraRecorder.is_available() or not runtime.running
+                or (expected_generation is not None
+                    and runtime.generation != expected_generation)
+                or (expected_device_index is not None
+                    and runtime.device_index != expected_device_index)):
             self._record_finalization_warning(
                 clip_path, 'Camera overlay was requested but the camera was unavailable.')
             return
@@ -8250,7 +16955,10 @@ class MainWindow(QMainWindow):
             prefix='.fthr-finalize-', dir=os.path.dirname(clip_path))
         cam_path = os.path.join(tmp_dir, 'camera.mp4')
 
-        if not CameraRecorder().write_segment(cam_path, clip_end_time, duration_sec, 30.0):
+        if not recorder.write_segment(
+                cam_path, clip_end_time, duration_sec, 30.0,
+                expected_generation=expected_generation,
+                expected_device_index=expected_device_index):
             self._record_finalization_warning(
                 clip_path, 'Camera overlay could not be rendered; the base clip was retained.')
             try:
@@ -8262,10 +16970,12 @@ class MainWindow(QMainWindow):
 
         clip_w, clip_h = self._clip_dimensions(clip_path, ffmpeg)
 
-        saved_rect = self.settings_manager.get('camera_overlay_rect')
-        if not isinstance(saved_rect, dict):
+        saved_rect = camera.get('overlay_rect') if camera is not None else None
+        if not isinstance(saved_rect, dict) and session_snapshot is None:
             saved_rect = legacy_overlay_rect(
+                camera.get('position', 'bottom-right') if camera else
                 self.settings_manager.get('camera_position', 'bottom-right'),
+                camera.get('size', 'medium') if camera else
                 self.settings_manager.get('camera_size', 'medium'),
             )
         rect = clamp_overlay_rect(saved_rect)
@@ -8279,7 +16989,7 @@ class MainWindow(QMainWindow):
 
         try:
             result = subprocess.run(
-                [ffmpeg, '-y',
+                sdr_command([ffmpeg, '-y',
                  '-i', clip_path,
                  '-i', cam_path,
                  '-filter_complex',
@@ -8292,12 +17002,12 @@ class MainWindow(QMainWindow):
                  *MainWindow._cfr_video_args(clip_path),
                  *software_video_args(),
                  '-c:a', 'copy',
-                 out_path],
+                 out_path], clip_path),
                 capture_output=True, timeout=120, **_NO_WINDOW,
             )
             if result.returncode == 0:
-                os.replace(out_path, clip_path)
-                rebind_manifest_after_media_replace(clip_path)
+                self._replace_finalization_output(out_path, clip_path)
+                self._rebind_manifest_after_owned_replace(clip_path)
                 print(f'[Camera] Overlay applied to {os.path.basename(clip_path)}')
             else:
                 err = result.stderr.decode(errors='replace').strip().splitlines()
@@ -8367,22 +17077,31 @@ class MainWindow(QMainWindow):
             int(round(16_000 * (width * height) / (1920 * 1080))),
         ))
         video_args = software_video_args(bitrate_kbps=target_bitrate)
+        video_arg_sets = [video_args]
+        hdr_color = probe_hdr(clip_path)
+        if hdr_color is not None:
+            hdr_args = choose_hdr_video_args(ffmpeg, hdr_color, quality='fast')
+            if hdr_args:
+                video_arg_sets.insert(0, hdr_args)
         run_options = dict(_NO_WINDOW)
         try:
-            result = subprocess.run(
-                [ffmpeg, '-y', '-i', clip_path,
-                 '-vf', f'crop={crop}',
-                 '-map', '0:v:0', '-map', '0:a?',
-                 '-map_metadata', '0', '-map_chapters', '0',
-                 '-movflags', 'use_metadata_tags',
-                 *MainWindow._cfr_video_args(clip_path),
-                 *video_args,
-                 '-c:a', 'copy', tmp_path],
-                capture_output=True, timeout=120, **run_options,
-            )
+            for video_args in video_arg_sets:
+                result = subprocess.run(
+                    sdr_command([ffmpeg, '-y', '-i', clip_path,
+                     '-vf', f'crop={crop}',
+                     '-map', '0:v:0', '-map', '0:a?',
+                     '-map_metadata', '0', '-map_chapters', '0',
+                     '-movflags', 'use_metadata_tags',
+                     *MainWindow._cfr_video_args(clip_path),
+                     *video_args,
+                     '-c:a', 'copy', tmp_path], clip_path),
+                    capture_output=True, timeout=120, **run_options,
+                )
+                if result.returncode == 0:
+                    break
             if result.returncode == 0:
-                os.replace(tmp_path, clip_path)
-                rebind_manifest_after_media_replace(clip_path)
+                self._replace_finalization_output(tmp_path, clip_path)
+                self._rebind_manifest_after_owned_replace(clip_path)
                 print(f'[{crop_source}] crop={crop} applied to '
                       f'{os.path.basename(clip_path)}')
             else:
@@ -8419,13 +17138,13 @@ class MainWindow(QMainWindow):
 
     def _finalize_clip(self, clip_path: str, duration_seconds: int,
                        clip_end_time: float = 0.0, clip_ready=None,
-                       crop_profile=None):
+                       crop_profile=None, *, capture_job: dict | None = None):
         if not self._allow_completed_clip_pipeline(clip_path, clip_ready):
             return
         self._spawn_mux_thread(
             target=self._finalize_clip_worker,
             args=(clip_path, duration_seconds, clip_end_time, clip_ready,
-                  crop_profile),
+                  crop_profile), capture_job=capture_job,
         )
 
     def _finalize_clip_worker(self, clip_path: str, duration_seconds: int,
@@ -8470,78 +17189,213 @@ class MainWindow(QMainWindow):
             if clip_ready is not None:
                 clip_ready.set()
 
+    def _publish_engine_crash_recovery(
+            self, proc, bridge_owner, *, exit_code=None,
+            process_generation=None, native_generation=None,
+            owner_already_drained=False):
+        """Publish the existing Error 006 route for one exact process owner."""
+        if (self.engine_process is not proc
+                or self.bridge is not bridge_owner):
+            return False
+        code = (getattr(proc, 'returncode', None)
+                if exit_code is None else exit_code)
+        self._clear_focus_action()
+        original_generation = (getattr(self, '_engine_process_generation', None)
+                               if process_generation is None
+                               else process_generation)
+        self._engine_gen = getattr(self, '_engine_gen', 0) + 1
+        self.engine_process = None
+        self._engine_process_generation = None
+        self._capture_config.deactivate(
+            f'capture engine exited unexpectedly (code {code})')
+        self._accepted_capture_session = None
+        self._accepted_camera_runtime_receipt = None
+        self._pending_launch_config = None
+        self._pending_launch_generation = None
+        self._pending_launch_token = None
+        self._pending_launch_admission_epoch = None
+        self._restart_pending = False
+        self._set_capture_apply_state(False)
+        if bridge_owner and not owner_already_drained:
+            bridge_owner.shutdown()
+        if getattr(self, '_engine_bridge_owner', None) is bridge_owner:
+            self._engine_bridge_owner = None
+        cache = getattr(self, '_terminal_response_owner_cache', None)
+        if (isinstance(cache, dict)
+                and cache.get('process') is proc
+                and cache.get('bridge') is bridge_owner
+                and cache.get('process_generation') == original_generation):
+            self._invalidate_terminal_response_owner_cache(
+                proc, bridge_owner, original_generation,
+                cache.get('native_generation'))
+        self.bridge = CaptureBridge()
+        recovery_key = 'engine-process-exit'
+        original_generation = (
+            self._engine_gen - 1 if original_generation is None
+            else original_generation)
+        self._capture_health_snapshot = self._capture_health.observe(
+            connected=False, frame_count=0, engine_flags=0)
+        tracker = getattr(self, '_error_recovery_tracker', None)
+        if tracker is not None:
+            tracker.reset()
+        self._set_status('ENGINE STOPPED', status_warning_qss())
+        backend_generation = (native_generation
+                              if native_generation is not None
+                              else getattr(self, '_last_native_capture_generation', None))
+        emit_event(
+            'engine', 'process_exited', state='FAILED',
+            error=DiagnosticError.ENGINE_START_FAILED,
+            compatibility_error='Error 006',
+            technical_cause='UNEXPECTED_PROCESS_EXIT',
+            technical_subsystem='process', operation='process_poll',
+            process_generation=original_generation,
+            native_capture_generation=backend_generation,
+            exit_code=code, unexpected=True)
+        retry_generation = self._engine_gen
+        self.push_error(
+            'ENGINE STOPPED',
+            f'The capture engine exited unexpectedly (code {code}). '
+            'Clips cannot be saved until it is restarted.',
+            level='error',
+            actions=[('RESTART ENGINE', self._restart_capture_engine)],
+            key=recovery_key,
+            dismiss_on_action=False,
+            diagnostic_context={
+                'diagnostic_error': DiagnosticError.ENGINE_START_FAILED,
+                'technical_cause': 'UNEXPECTED_PROCESS_EXIT',
+                'technical_subsystem': 'process',
+                'operation': 'process_poll',
+                'process_generation': original_generation,
+                'backend_generation': backend_generation,
+                'recovery_kind': 'engine_lineage',
+                'recovery_status': 'awaiting_replacement_engine',
+            },
+        )
+        if self._engine_gen == retry_generation:
+            MainWindow._schedule_engine_failure_recovery(self, 'crash')
+        return True
+
     # UI state
 
     def _update_status(self):
+        MainWindow._release_closed_recording_paths(self)
+        if _admission_call(self, '_admission_transition_active'):
+            self._pump_admission_transition()
+            return
+        # Heartbeat admission watch runs before library/crash early returns.
+        # The raw-owner cache is cheap; only an enabled policy performs the
+        # fresh source identity proof.  Disabled admission never performs an
+        # executable/window lookup.
+        policy = _admission_call(
+            self, '_reload_admission_policy', authoritative=False,
+            trigger_transition=False)
+        # The authoritative reload above can synchronously create a retained
+        # A latch through a policy callback.  Pump it before any library,
+        # crash, or reconnect branch gets a chance to observe successor state.
+        if _admission_call(self, '_admission_transition_active'):
+            self._pump_admission_transition()
+            return
+        session = getattr(self, '_accepted_capture_session', None)
+        request = getattr(session, 'request', None)
+        pending_manual_request = getattr(
+            self, '_pending_manual_record_request', None)
+        camera_pending = getattr(self, '_camera_pending_operation', None)
+        camera_pending_request = getattr(
+            camera_pending, 'capture_request', None)
+        if camera_pending_request is None and isinstance(camera_pending, dict):
+            camera_pending_request = camera_pending.get('capture_request')
+        pending_launch_request = getattr(self, '_pending_launch_request', None)
+        candidates = [candidate for candidate in (
+            request,
+            pending_manual_request,
+            camera_pending_request,
+            pending_launch_request
+            if isinstance(pending_launch_request, ResolvedCaptureRequest)
+            else None) if candidate is not None]
+        if policy is None and candidates:
+            self._begin_admission_transition(
+                reason='Capture admission became unavailable during heartbeat.')
+            return
+        if (isinstance(policy, AdmissionPolicy) and policy.enabled):
+            for candidate in candidates:
+                decision = _admission_call(
+                    self, '_admission_decision_for_policy', candidate, policy)
+                if _admission_call(self, '_admission_transition_active'):
+                    return
+                if decision is None or not decision.allowed:
+                    self._begin_admission_transition(
+                        reason='Capture admission changed during heartbeat.')
+                    return
+        if not getattr(self, '_file_operations_ready', True):
+            failed = bool(getattr(self, '_library_recovery_error', None))
+            self._set_status('LIBRARY RECOVERY REQUIRED' if failed else 'PREPARING LIBRARY',
+                             status_warning_qss() if failed else status_idle_qss())
+            return
         # Detect an engine crash. The shared-memory mapping outlives the
         # process (is_initialized stays true), so is_connected() keeps lying
         # after a crash: the UI shows CAPTURING forever and every hotkey
         # burns the 1 s save timeout with a generic error.
         proc = self.engine_process
         if proc is not None and proc.poll() is not None:
+            # The connect worker owns startup failure reporting and cleanup.
+            # A process can exit between its poll and the queued UI callback;
+            # treating that pending launch as a runtime crash revokes its
+            # receipt before _on_failed can clear the apply/restart state.
+            if (getattr(self, '_engine_handshake_generation', None)
+                    == getattr(self, '_engine_gen', 0)):
+                return
+            save_state = getattr(self, '_save_state', None)
+            camera_owned = bool(
+                getattr(self, '_camera_provider', None) is not None
+                or getattr(self, '_camera_pending_operation', None) is not None
+                or getattr(self, '_camera_active_physical', None) is not None
+                or getattr(self, '_camera_stop_receipts', ()))
+            save_operation = (getattr(save_state, 'current', None)
+                              if save_state is not None else None)
+            save_unresolved = bool(
+                save_operation is not None
+                and not getattr(save_operation, 'result_emitted', False))
+            pending_native_owner = isinstance(
+                pending_launch_request, ResolvedCaptureRequest)
+            owner_requires_transition = bool(
+                save_unresolved
+                or getattr(self, '_manual_record_state', 'idle') != 'idle'
+                or camera_owned
+                or pending_manual_request is not None
+                or camera_pending_request is not None
+                or pending_native_owner)
+            if (owner_requires_transition
+                    and not _admission_call(
+                        self, '_admission_transition_active')):
+                self._begin_admission_transition(
+                    reason='The capture engine exited before heartbeat cleanup.')
+                crash_latch = getattr(self, '_admission_transition_latch', None)
+                if isinstance(crash_latch, dict):
+                    crash_latch['crash_recovery_pending'] = True
+                    crash_latch['crash_process_generation'] = (
+                        getattr(self, '_engine_process_generation', None))
+                    crash_latch['crash_native_generation'] = (
+                        getattr(self, '_last_native_capture_generation', None))
+            if (owner_requires_transition
+                    and _admission_call(self, '_admission_transition_active')):
+                self._pump_admission_transition()
+                return
             process_generation = getattr(
                 self, '_engine_process_generation', None)
             bridge_owner = getattr(self, 'bridge', None)
-            if (self.engine_process is not proc
-                    or self.bridge is not bridge_owner):
-                return
-            code = proc.returncode
-            self._engine_gen = getattr(self, '_engine_gen', 0) + 1
-            self.engine_process = None
-            self._engine_process_generation = None
-            self._capture_config.deactivate(
-                f'capture engine exited unexpectedly (code {code})')
-            self._pending_launch_config = None
-            self._pending_launch_generation = None
-            self._restart_pending = False
-            self._set_capture_apply_state(False)
-            if bridge_owner:
-                bridge_owner.shutdown()
-            self.bridge = CaptureBridge()
-            recovery_key = 'engine-process-exit'
-            process_generation = (
-                self._engine_gen - 1 if process_generation is None
-                else process_generation)
-            self._capture_health_snapshot = self._capture_health.observe(
-                connected=False, frame_count=0, engine_flags=0)
-            tracker = getattr(self, '_error_recovery_tracker', None)
-            if tracker is not None:
-                tracker.reset()
-            self._set_status('ENGINE STOPPED', status_warning_qss())
-            emit_event(
-                'engine', 'process_exited', state='FAILED',
-                error=DiagnosticError.ENGINE_START_FAILED,
-                compatibility_error='Error 006',
-                technical_cause='UNEXPECTED_PROCESS_EXIT',
-                technical_subsystem='process', operation='process_poll',
+            self._publish_engine_crash_recovery(
+                proc, bridge_owner,
                 process_generation=process_generation,
-                native_capture_generation=getattr(
-                    self, '_last_native_capture_generation', None),
-                exit_code=code,
-                unexpected=True)
-            self.push_error(
-                'ENGINE STOPPED',
-                f'The capture engine exited unexpectedly (code {code}). '
-                'Clips cannot be saved until it is restarted.',
-                level='error',
-                actions=[('RESTART ENGINE', self._restart_capture_engine)],
-                key=recovery_key,
-                dismiss_on_action=False,
-                diagnostic_context={
-                    'diagnostic_error': DiagnosticError.ENGINE_START_FAILED,
-                    'technical_cause': 'UNEXPECTED_PROCESS_EXIT',
-                    'technical_subsystem': 'process',
-                    'operation': 'process_poll',
-                    'process_generation': process_generation,
-                    'backend_generation': getattr(
-                        self, '_last_native_capture_generation', None),
-                    'recovery_kind': 'engine_lineage',
-                    'recovery_status': 'awaiting_replacement_engine',
-                },
-            )
+                native_generation=getattr(
+                    self, '_last_native_capture_generation', None))
             return
         is_connected = getattr(self.bridge, 'is_connected', lambda: False)
         if not self.bridge or not is_connected():
+            if (self.engine_process is None
+                    and getattr(self._capture_config, 'status', None)
+                    is ApplyStatus.FAILED):
+                self._set_status('DISCONNECTED', status_warning_qss())
+                return
             self._advance_recoverable_errors(
                 connected=False, frame_count=0,
                 health_state=CaptureHealthState.STOPPED,
@@ -8575,7 +17429,9 @@ class MainWindow(QMainWindow):
                     self._set_status('STARTING CAPTURE', status_idle_qss())
                     self._reconnect_counter = 0
                     self._schedule_owned_hardware_check(
-                        generation, process_owner, reconnect_bridge)
+                        generation, process_owner, reconnect_bridge,
+                        expected_config=getattr(
+                            self._capture_config, 'active', None))
                     return
             self._set_status(
                 self._capture_pending_text() if self._capture_settings_applying else 'CONNECTING',
@@ -8584,6 +17440,13 @@ class MainWindow(QMainWindow):
             return
 
         status = self.bridge.get_status()
+        current_native_generation = int(
+            status.get('capture_generation', 0) or 0)
+        if current_native_generation > 0:
+            self._retain_terminal_response_owner_cache(
+                self.engine_process, self.bridge,
+                getattr(self, '_engine_process_generation', None),
+                current_native_generation)
         self._maybe_restart_for_display_mode_change(status)
         if not status.get('connected'):
             self._capture_health_snapshot = self._capture_health.observe(
@@ -8596,12 +17459,21 @@ class MainWindow(QMainWindow):
             self._set_status('DISCONNECTED', status_warning_qss())
             return
 
+        # Binding the current mapping is an ownership observation, independent
+        # of frame freshness. A resumed/paused backend may never meet the
+        # healthy-frame gate before the next hotkey or shutdown request.
+        if (getattr(self, '_pending_launch_config', None) is None
+                and getattr(self, '_accepted_capture_session', None) is not None):
+            self._rebind_recovered_session(status)
+
         # Second driver of the same single reader. The fast save timer stops as
         # soon as nothing is in flight; this keeps a *timed-out* operation's
         # late-result window open, and catches a response for a save the fast
         # timer had already given up on. Both call the same method, so there is
         # still exactly one consumer.
         self._pump_save_responses()
+        if getattr(self, '_ultra_effects_pending', False):
+            self._sync_ultra_effect_providers()
         codec = self.bridge.get_active_codec()
         if codec:
             if encoder_preset_supported(sys.platform, 'nvenc') \
@@ -8624,6 +17496,11 @@ class MainWindow(QMainWindow):
                 generation=backend_generation,
             )
             self._capture_health_snapshot = snapshot
+            healthy_since = getattr(self._capture_health, '_healthy_since', None)
+            if (snapshot.state is CaptureHealthState.HEALTHY
+                    and healthy_since is not None
+                    and time.monotonic() - healthy_since >= 30.0):
+                self._automatic_engine_attempts = {}
             self._last_native_capture_generation = backend_generation
             self._advance_recoverable_errors(
                 connected=True, frame_count=frames,
@@ -8635,8 +17512,17 @@ class MainWindow(QMainWindow):
             pending_config = getattr(self, '_pending_launch_config', None)
             pending_generation = getattr(
                 self, '_pending_launch_generation', None)
+            pending_token = getattr(self, '_pending_launch_token', None)
             if (pending_config is not None
-                    and pending_generation == self._engine_gen):
+                    and not self._admission_reauthorize_pending_launch()):
+                return
+            if (pending_config is not None
+                    and pending_generation == self._engine_gen
+                    and pending_token is not None
+                    and getattr(self._capture_config, 'applying', None)
+                    == pending_config
+                    and getattr(self._capture_config, 'applying_token', None)
+                    == pending_token):
                 if snapshot.state in {
                         CaptureHealthState.HEALTHY,
                         CaptureHealthState.CONTENT_SUSPECT} or (
@@ -8647,12 +17533,105 @@ class MainWindow(QMainWindow):
                             & int(CaptureHealthFlag.ACTIVE)
                             and status.get('nvenc_active') is True
                             ):
-                    self._capture_config.succeed()
-                    self._restart_pending = False
+                    accepted = self._capture_config.succeed(pending_token)
+                    if not accepted:
+                        return
+                    owner_process = getattr(self, 'engine_process', None)
+                    owner_bridge = getattr(self, 'bridge', None)
+                    accepted_request = getattr(
+                        self, '_pending_launch_request', None)
+                    def capture_continuation_is_owned():
+                        return (
+                            self._owns_engine_attempt(
+                                pending_generation,
+                                owner_process,
+                                owner_bridge)
+                            and self._owns_capture_apply(
+                                pending_token, pending_config))
+
+                    if not capture_continuation_is_owned():
+                        return
+                    if (isinstance(accepted_request, ResolvedCaptureRequest)
+                            and getattr(self, '_engine_process_generation', None)
+                            == pending_generation):
+                        proof = _admission_call(
+                            self, '_admission_stable_proof', accepted_request)
+                        if (proof is None
+                                or not _admission_call(
+                                    self, '_admission_pure_proof_current', proof)
+                                or not capture_continuation_is_owned()):
+                            return
+                        try:
+                            native_generation = int(
+                                status.get('capture_generation', 0) or 0)
+                            self._retain_terminal_response_owner_cache(
+                                owner_process, owner_bridge,
+                                int(pending_generation), native_generation)
+                            self._accepted_capture_session = bind_capture_session(
+                                accepted_request,
+                                process_generation=int(pending_generation),
+                                native_capture_generation=native_generation,
+                                accepted_config_token=int(pending_token),
+                                allowlist_revision=(
+                                    proof['decision'].policy_revision),
+                            )
+                            self._accepted_camera_runtime_receipt = (
+                                self._camera_runtime_receipt_for_request(
+                                    accepted_request))
+                            self._configure_keyboard_capture_for_request(
+                                accepted_request)
+                            if self._latest_intent_owns_request(accepted_request):
+                                self._desired_capture_request = accepted_request
+                                self._desired_capture_intent_id = (
+                                    self._capture_request_intent_id(accepted_request))
+                                self._consume_capture_intent(
+                                    accepted_request, state='accepted')
+                            pending_latest = (
+                                getattr(self, '_latest_capture_intent_state', None)
+                                in {'resolving', 'valid', 'queued', 'invalid'}
+                                and not getattr(
+                                    self, '_latest_capture_intent_consumed', True))
+                            self._publish_capture_profile_status(
+                                pending=pending_latest,
+                                message=(getattr(
+                                    self, '_pending_capture_reason', '')
+                                         if pending_latest else ''))
+                            if capture_continuation_is_owned():
+                                MainWindow._notify_accepted_automatic_game_capture(
+                                    self, accepted_request)
+                        except (TypeError, ValueError) as error:
+                            # A malformed session cannot be used for save
+                            # admission; the accepted native config remains
+                            # alive and will be re-bound on the next healthy
+                            # generation instead of being relabelled.
+                            print(f'[Capture] Session bind rejected: {error}')
+                            self._accepted_capture_session = None
+                            self._accepted_camera_runtime_receipt = None
+
+                    if not capture_continuation_is_owned():
+                        return
                     self._apply_active_audio_state(pending_config)
-                    self._pending_launch_config = None
-                    self._pending_launch_generation = None
-                    self._set_capture_apply_state(False)
+                    # Audio setup can synchronously start a newer apply.  A's
+                    # receipt and engine lineage must still be ours before
+                    # touching pending/UI state or scheduling recording.
+                    if not capture_continuation_is_owned():
+                        return
+                    if (getattr(self, '_pending_launch_config', None)
+                            is pending_config
+                            and getattr(self, '_pending_launch_generation', None)
+                            == pending_generation
+                            and getattr(self, '_pending_launch_token', None)
+                            == pending_token):
+                        self._pending_launch_config = None
+                        self._pending_launch_generation = None
+                        self._pending_launch_token = None
+                        self._pending_launch_admission_epoch = None
+                        self._pending_launch_request = None
+                        self._pending_launch_intent_id = None
+                        self._restart_pending = False
+                        self._set_capture_apply_state(False)
+                        if not capture_continuation_is_owned():
+                            return
                     actual = {
                         'actual_codec': codec or pending_config.codec,
                         'capture_generation': status.get(
@@ -8674,26 +17653,110 @@ class MainWindow(QMainWindow):
                             'actual_configuration', **actual)
                         actual = self._diagnostics.summary().get(
                             'actual_configuration', actual)
+                    if not capture_continuation_is_owned():
+                        return
                     emit_event(
                         'capture', 'configuration_activated', state='ACTIVE',
                         actual_configuration=actual,
                         process_generation=getattr(
                             self, '_engine_process_generation', None),
                         capture_generation=status.get('capture_generation', 0))
+                    if not capture_continuation_is_owned():
+                        return
                     if self._manual_record_state == 'preparing':
+                        manual_state = self._manual_record_state
+                        manual_path = getattr(
+                            self, '_pending_manual_record_path', None)
+
+                        def continue_prepared_if_current():
+                            tracker = getattr(self, '_capture_config', None)
+                            if (getattr(self, '_shutdown_requested', False)
+                                    or getattr(self, '_shutdown_complete', False)
+                                    or getattr(self, '_manual_record_state', None)
+                                    != manual_state
+                                    or getattr(
+                                        self, '_pending_manual_record_path', None)
+                                    != manual_path
+                                    or not self._owns_engine_attempt(
+                                        pending_generation,
+                                        owner_process,
+                                        owner_bridge)
+                                    or tracker is None
+                                    or getattr(tracker, 'accepted_token', None)
+                                    != pending_token
+                                    or getattr(tracker, 'active', None)
+                                    != pending_config):
+                                return
+                            self._continue_prepared_manual_recording()
+
                         QTimer.singleShot(
-                            0, self._continue_prepared_manual_recording)
+                            0, continue_prepared_if_current)
                 elif snapshot.state in {
                         CaptureHealthState.STALLED,
                         CaptureHealthState.FAILED}:
-                    self._capture_config.fail(snapshot.reason)
-                    self._restart_pending = False
-                    self._pending_launch_config = None
-                    self._pending_launch_generation = None
-                    self._set_capture_apply_state(False)
-                    if self._manual_record_state == 'preparing':
-                        self._fail_manual_recording(
-                            'The recording quality profile did not become healthy.')
+                    failure_process = getattr(self, 'engine_process', None)
+                    failure_bridge = getattr(self, 'bridge', None)
+                    failure_manual_state = getattr(
+                        self, '_manual_record_state', 'idle')
+                    failure_manual_path = getattr(
+                        self, '_pending_manual_record_path', None)
+                    failed = self._capture_config.fail(
+                        snapshot.reason, pending_token)
+                    failure_tracker = self._capture_config
+                    failure_generation = pending_generation
+                    failure_error = str(snapshot.reason)
+                    failure_revision = (
+                        getattr(failure_tracker, 'transition_revision', None)
+                        if failed else None)
+                    if failed and (
+                            getattr(self, '_pending_launch_config', None)
+                            is pending_config
+                            and getattr(self, '_pending_launch_generation', None)
+                            == pending_generation
+                            and getattr(self, '_pending_launch_token', None)
+                            == pending_token):
+                        self._restart_pending = False
+                        self._pending_launch_config = None
+                        self._pending_launch_generation = None
+                        self._pending_launch_token = None
+                        self._pending_launch_admission_epoch = None
+                        self._set_capture_apply_state(False)
+                        def failure_owner_is_current():
+                            return (
+                                not getattr(
+                                    self, '_shutdown_requested', False)
+                                and not getattr(
+                                    self, '_shutdown_complete', False)
+                                and getattr(self, '_capture_config', None)
+                                is failure_tracker
+                                and self._owns_engine_attempt(
+                                    failure_generation,
+                                    failure_process,
+                                    failure_bridge)
+                                and getattr(
+                                    failure_tracker,
+                                    'transition_revision', None)
+                                == failure_revision
+                                and getattr(
+                                    failure_tracker, 'status', None)
+                                is ApplyStatus.FAILED
+                                and getattr(
+                                    failure_tracker, 'error', None)
+                                == failure_error)
+
+                        if (not failure_owner_is_current()
+                                or getattr(
+                                    self, '_manual_record_state', 'idle')
+                                != failure_manual_state
+                                or getattr(
+                                    self, '_pending_manual_record_path', None)
+                                != failure_manual_path):
+                            return
+                        if failure_manual_state == 'preparing':
+                            self._fail_manual_recording(
+                                'The recording quality profile did not become healthy.')
+                            if not failure_owner_is_current():
+                                return
             if snapshot.changed:
                 diagnostic_error = None
                 if snapshot.state is CaptureHealthState.STALLED:
@@ -8714,32 +17777,6 @@ class MainWindow(QMainWindow):
                         'content_suspicious_streak', 0),
                     luma_mean=status.get('content_luma_mean', 0.0),
                     luma_variance=status.get('content_luma_variance', 0.0))
-                if snapshot.state is CaptureHealthState.FAILED:
-                    # Linux capture backends publish their terminal reason in
-                    # engine_string so portal failures are actionable.
-                    self.push_error(
-                        'CAPTURE FAILED',
-                        status.get('capture_failure_detail')
-                        or snapshot.reason or 'The capture backend failed.',
-                        level='error',
-                        actions=[('RESTART ENGINE', self._restart_capture_engine)],
-                        key='capture-backend',
-                        dismiss_on_action=False,
-                        diagnostic_context={
-                            'diagnostic_error': (
-                                DiagnosticError.CAPTURE_NO_FRAMES),
-                            'technical_cause': (
-                                status.get('capture_failure_code')
-                                or 'CAPTURE_BACKEND_FAILED'),
-                            'technical_subsystem': 'capture_backend',
-                            'operation': 'capture_health_poll',
-                            'process_generation': getattr(
-                                self, '_engine_process_generation', None),
-                            'backend_generation': backend_generation,
-                            'recovery_kind': 'capture_backend',
-                            'recovery_status': 'awaiting_stable_progress',
-                        },
-                    )
                 self._capture_health_log.info(
                     'Capture health: %s -> %s reason=%s frame_count=%d generation=%d '
                     'sample_sequence=%d suspicious_streak=%d luma_mean=%.2f '
@@ -8751,6 +17788,43 @@ class MainWindow(QMainWindow):
                     status.get('content_suspicious_streak', 0),
                     status.get('content_luma_mean', 0.0),
                     status.get('content_luma_variance', 0.0),
+                )
+
+            resize_restart_active = (
+                MainWindow._display_mode_resize_restart_is_active(
+                    self, status))
+            failure_owner = (getattr(self, '_engine_gen', None), backend_generation)
+            if snapshot.state is not CaptureHealthState.FAILED:
+                self._reported_capture_backend_failure = None
+            if (snapshot.state is CaptureHealthState.FAILED
+                    and not resize_restart_active
+                    and getattr(self, '_reported_capture_backend_failure', None)
+                    != failure_owner):
+                self._reported_capture_backend_failure = failure_owner
+                # Linux capture backends publish their terminal reason in
+                # engine_string so portal failures are actionable.
+                self.push_error(
+                    'CAPTURE FAILED',
+                    status.get('capture_failure_detail')
+                    or snapshot.reason or 'The capture backend failed.',
+                    level='error',
+                    actions=[('RESTART ENGINE', self._restart_capture_engine)],
+                    key='capture-backend',
+                    dismiss_on_action=False,
+                    diagnostic_context={
+                        'diagnostic_error': (
+                            DiagnosticError.CAPTURE_NO_FRAMES),
+                        'technical_cause': (
+                            status.get('capture_failure_code')
+                            or 'CAPTURE_BACKEND_FAILED'),
+                        'technical_subsystem': 'capture_backend',
+                        'operation': 'capture_health_poll',
+                        'process_generation': getattr(
+                            self, '_engine_process_generation', None),
+                        'backend_generation': backend_generation,
+                        'recovery_kind': 'capture_backend',
+                        'recovery_status': 'awaiting_stable_progress',
+                    },
                 )
 
             now = time.monotonic()
@@ -8786,10 +17860,12 @@ class MainWindow(QMainWindow):
             }
             new_text = (
                 self._capture_pending_text()
-                if self._capture_settings_applying else state_text[snapshot.state]
+                if self._capture_settings_applying else
+                'RECOVERING CAPTURE' if resize_restart_active else
+                state_text[snapshot.state]
             )
             style = (status_idle_qss()
-                     if self._capture_settings_applying
+                     if self._capture_settings_applying or resize_restart_active
                      else status_active_qss()
                      if (snapshot.state is CaptureHealthState.HEALTHY
                          or (snapshot.state in (
@@ -8801,12 +17877,27 @@ class MainWindow(QMainWindow):
                      }
                      else status_warning_qss())
             self._set_status(new_text, style)
+            # Heartbeat is only a bounded owner-release seam.  It consumes one
+            # latest valid/invalid intent after all current resources release;
+            # it never reparses the catalog, enumerates devices, or retries a
+            # terminal intent.
+            if getattr(self, '_pending_launch_config', None) is None:
+                owner_before_flush = self._capture_owner_signature()
+                self._apply_latest_desired_request_if_idle()
+                # A flush can stop/rebind the native owner synchronously. Do
+                # not publish recovery or other cached A status after that
+                # transition; the next poll owns the new lineage.
+                if owner_before_flush != self._capture_owner_signature():
+                    return
             if snapshot.request_recovery:
                 self._capture_health_log.warning(
                     'Capture stalled; bounded automatic backend recovery is '
                     'engine-owned and a manual process restart is available')
 
     def _set_status(self, text: str, style: str):
+        waiting_reason = getattr(self, '_manual_prepare_wait_reason', '')
+        if getattr(self, '_manual_record_state', 'idle') == 'preparing' and waiting_reason:
+            text, style = waiting_reason, status_idle_qss()
         if (getattr(self, '_engine_restart_requested', False)
                 and getattr(self, '_capture_settings_applying', False)
                 and (text == 'STARTING CAPTURE' or text.startswith('CONNECTING'))):
@@ -8817,6 +17908,11 @@ class MainWindow(QMainWindow):
             return
         if self._background_ui_paused:
             return
+        if getattr(self, '_ultra_performance', False):
+            self._ultra_page.status.setText(text.capitalize())
+            if self._ultra_page.status.styleSheet() != style:
+                self._ultra_page.status.setStyleSheet(style)
+            self._refresh_ultra_details()
         self.status_label.setText(text.capitalize())
         # Skip the QSS reapply when the style didn't change (CONNECTING ticks
         # every 500ms during reconnect would otherwise re-style on every tick).
@@ -8863,7 +17959,8 @@ class MainWindow(QMainWindow):
         self.clip_grid.set_background_paused(
             paused or (stack is not None and stack.currentIndex() != 0) or editor_active)
         self._settings_page_widget.set_background_ui_paused(
-            paused or (stack is not None and stack.currentIndex() != 1) or editor_active)
+            paused or (stack is not None and stack.currentIndex() != 1) or editor_active
+            or getattr(self, '_ultra_performance', False))
         if not paused:
             if self._pending_status_display is not None:
                 text, style = self._pending_status_display
@@ -8873,7 +17970,66 @@ class MainWindow(QMainWindow):
     def _on_background_ui_pause_changed(self, _enabled: bool) -> None:
         self._refresh_background_ui_pause_state()
 
+    def _on_overlap_merge_requested(self, paths):
+        if getattr(self, '_ultra_performance', False) or self._editor_trash_pending():
+            return
+        from core.clip_overlap import submit_merge
+        from ui.export_jobs import show_export_jobs
+        from ui.editor_sessions import MAX_EDITOR_SESSIONS
+        if len(self._editor_sessions) >= MAX_EDITOR_SESSIONS:
+            QMessageBox.information(self, 'Three editors are open',
+                                    'Close a sidebar editor before merging clips.')
+            return
+        if any(not self._clip_readiness.can_access(path) for path in paths):
+            return
+        try:
+            task = submit_merge(paths, os.path.join(self.clip_grid.clips_dir, 'Merged'))
+        except Exception as error:
+            self.push_error('MERGE FAILED', str(error))
+            return
+        show_export_jobs()
+        timer = QTimer(self)
+        timer.setInterval(250)
+        timer.timeout.connect(lambda: self._poll_overlap_merge(task, timer))
+        timer.start()
+
+    def _poll_overlap_merge(self, task, timer):
+        if not task.done:
+            return
+        timer.stop()
+        timer.deleteLater()
+        from core.export_lifecycle import ExportState
+        result = task.result
+        if result is not None and result.state == ExportState.COMPLETED:
+            self.clip_grid._load_clips()
+            self._open_merged_clip(task.output)
+        elif result is None or result.state != ExportState.CANCELLED:
+            self.push_error('MERGE FAILED', task.detail or 'The merged clip could not be created. Try again.')
+
+    def _open_merged_clip(self, clip_path):
+        # A merge always hands its new file to the full editor, regardless of
+        # the library's basic-viewer preference.
+        if not os.path.isfile(clip_path):
+            self.push_error('MERGED CLIP NOT FOUND',
+                            'The merged clip was moved or deleted before it could open.', level='warning')
+            self.clip_grid._load_clips()
+            return
+        if getattr(self, '_ultra_performance', False) or self._editor_trash_pending():
+            self.push_error('MERGED CLIP SAVED',
+                            'Open the merged clip from the library when editing is available.', level='warning')
+            return
+        from ui.editor_sessions import MAX_EDITOR_SESSIONS
+        if len(self._editor_sessions) >= MAX_EDITOR_SESSIONS:
+            self.push_error('MERGED CLIP SAVED',
+                            'Close a sidebar editor, then open the merged clip from the library.', level='warning')
+            return
+        if self._active_clip_viewer is not None:
+            self._active_clip_viewer._close()
+        self._show_editor_session(self._add_editor_session(clip_path), QPixmap())
+
     def _on_clip_opened(self, clip_path: str, thumb_pixmap: QPixmap, card_global_rect: QRect):
+        if getattr(self, '_ultra_performance', False) or self._editor_trash_pending():
+            return
         if not self._clip_readiness.can_access(clip_path):
             self.push_error(
                 'CLIP STILL FINALIZING',
@@ -9117,10 +18273,16 @@ class MainWindow(QMainWindow):
 
     def _check_hardware_encoding_status(
             self, *, expected_generation: int | None = None,
-            expected_process=None, expected_bridge=None):
+            expected_process=None, expected_bridge=None,
+            expected_config: CaptureConfig | None = None,
+            expected_token: int | None = None):
         if (expected_generation is not None
                 and not self._owns_engine_attempt(
                     expected_generation, expected_process, expected_bridge)):
+            return
+        if (expected_token is not None
+                and not self._owns_capture_apply(
+                    expected_token, expected_config)):
             return
         bridge = (self.bridge if expected_bridge is None
                   else expected_bridge)
@@ -9135,8 +18297,11 @@ class MainWindow(QMainWindow):
         except Exception:
             nvenc_active = False
 
+        expected_encoder = (
+            expected_config.encoder if expected_config is not None
+            else self.settings_manager.get('encoder_pref', 'auto'))
         software_active = (codec == 'libopenh264' and nvenc_active
-                           and self.settings_manager.get('encoder_pref', 'auto') == 'software')
+                           and expected_encoder == 'software')
         is_hw = hw_active or (nvenc_active and codec != 'libopenh264')
         self._encoder_type = codec.upper() if codec else ('NVENC' if nvenc_active else 'SW')
 
@@ -9203,7 +18368,7 @@ class MainWindow(QMainWindow):
                 background-color: transparent;
                 color: {Colors.TEXT};
             }}
-            QFrame#topClusterMain {{
+            QFrame#captureToolbar, QFrame#topClusterMain {{
                 background: {Colors.SHELL_BG_2};
                 border: none;
             }}
@@ -9320,7 +18485,7 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self):
         """Rebuild the main window stylesheet from current Colors class values.
-        Called by the Customize page after the user clicks Apply Theme."""
+        Called when the Customize page updates the theme."""
         self._apply_styles()
         for widget in (
                 getattr(self, 'cap_settings_popup', None),
@@ -9349,12 +18514,111 @@ class MainWindow(QMainWindow):
 
     _FINALIZATION_GRACE_SECONDS = 1.5
 
+    def _arm_full_exit_deadline(self) -> None:
+        """End the Qt loop even when an admission cleanup proof never arrives."""
+        if getattr(self, '_full_exit_deadline_armed', False):
+            return
+        self._full_exit_deadline_armed = True
+
+        def expire():
+            if not getattr(self, '_shutdown_requested', False):
+                return
+            # Keep the latch and every exact owner for the bounded emergency
+            # drain in main's finally block. Never invent a successful stop or
+            # publish unfinished recordings merely to make the window close.
+            self._shutdown_complete = False
+            self._shutdown_mark('ShutdownDeadlineExpired')
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+
+        QTimer.singleShot(4000, expire)
+
+    def _request_update_installation(self, installer):
+        if getattr(self, '_shutdown_requested', False):
+            raise RuntimeError('Shutdown is already in progress.')
+        controller = self.app_update_controller
+        processes = [os.getpid()]
+        engine = getattr(self, 'engine_process', None)
+        card = getattr(getattr(self, 'capture_card', None), '_proc', None)
+        for process in (engine, card):
+            if process is not None and process.poll() is None:
+                processes.append(process.pid)
+        self._pending_update_install = (Path(installer), controller.release.sha256, processes)
+        try:
+            self.request_full_exit()
+            if not getattr(self, '_shutdown_requested', False):
+                raise RuntimeError('Save the current editor details before installing.')
+        except Exception:
+            self._pending_update_install = None
+            raise
+
+    def _handoff_update_after_shutdown(self):
+        pending = getattr(self, '_pending_update_install', None)
+        self._pending_update_install = None
+        if pending is None or getattr(self, '_shutdown_uncertain_owner', False):
+            return
+        from core.update_handoff import launch_after_exit
+        try:
+            launch_after_exit(*pending)
+        except (OSError, ValueError) as error:
+            # Shutdown is complete; keep the downloaded installer for a retry.
+            print(f'[Updates] Installer handoff failed: {error}')
+
     def request_full_exit(self) -> None:
         """Make full exit visually immediate, then clean up on the event loop."""
         if self._shutdown_requested:
             return
+        active_viewer = getattr(self, '_active_clip_viewer', None)
+        parked_viewer = getattr(self, '_parked_editor_shell', None)
+        checked_shells = set()
+        for candidate in (active_viewer, parked_viewer):
+            if candidate is None or id(candidate) in checked_shells:
+                continue
+            checked_shells.add(id(candidate))
+            page = getattr(candidate, 'clip_page', candidate)
+            prepare = getattr(page, '_prepare_detail_boundary', None)
+            try:
+                prepared = prepare() if callable(prepare) else True
+            except (OSError, TypeError, ValueError) as error:
+                prepared = False
+                warn = getattr(page, '_warn_clip_details_error', None)
+                if callable(warn):
+                    warn(error)
+            if not prepared:
+                self.push_error(
+                    'Editor details unchanged',
+                    'Save the current clip details before exiting.',
+                    level='warning')
+                return
+        if not _admission_call(self, '_admission_transition_active'):
+            if getattr(self, '_manual_record_state', 'idle') == 'preparing':
+                # No native recording command exists yet. Revoke its retries
+                # before taking the shutdown snapshot of the real owners.
+                MainWindow._end_manual_recording_preparation(self, restore=False)
+            process = getattr(self, 'engine_process', None)
+            session = getattr(self, '_accepted_capture_session', None)
+            save_state = getattr(self, '_save_state', None)
+            camera_owned = bool(
+                getattr(self, '_camera_provider', None) is not None
+                or getattr(self, '_camera_pending_operation', None) is not None
+                or getattr(self, '_camera_active_physical', None) is not None
+                or getattr(self, '_camera_stop_receipts', ()))
+            manual_owned = getattr(self, '_manual_record_state', 'idle') != 'idle'
+            if (process is not None or session is not None or camera_owned
+                    or manual_owned or getattr(save_state, 'current', None) is not None):
+                self._begin_admission_transition(reason='application shutdown')
+        if self._defer_full_exit_for_admission():
+            return
+        storage_controller = getattr(self, 'library_storage_controller', None)
+        if storage_controller is not None:
+            storage_controller.close()
+        backup_controller = getattr(self, 'library_backup_controller', None)
+        if backup_controller is not None:
+            backup_controller.close()
         self._shutdown_requested = True
         self._shutdown_timer_started = time.monotonic()
+        MainWindow._arm_full_exit_deadline(self)
         print('[Lifecycle] ShutdownRequested')
         self._lifecycle_log.info('ShutdownRequested')
 
@@ -9365,7 +18629,9 @@ class MainWindow(QMainWindow):
         self.hide()
         if self._tray_icon is not None:
             self._tray_icon.hide()
-        self._shutdown_mark('UIHidden')
+        mark = getattr(self, '_shutdown_mark', None)
+        if callable(mark):
+            mark('UIHidden')
         QTimer.singleShot(0, self._perform_full_shutdown)
 
     def _shutdown_mark(self, phase: str) -> None:
@@ -9402,7 +18668,80 @@ class MainWindow(QMainWindow):
         """One idempotent, bounded shutdown sequence for tray and app exit."""
         if self._shutdown_complete:
             return
+        forced_route = bool(getattr(self, '_shutdown_forced', False))
+        if (forced_route
+                and getattr(self, '_admission_transition_latch', None) is None
+                and self._admission_has_transition_obligation()):
+            self._begin_admission_transition(
+                reason='Forced shutdown retained original capture owners.',
+                _forced=True)
+        if forced_route and getattr(self, '_admission_transition_latch', None) is not None:
+            self._force_admission_transition_for_exit()
+        retained_admission = getattr(
+            self, '_retained_admission_teardown_receipt', None)
+        if (retained_admission is not None
+                and not self._admission_receipt_matches_current(
+                    retained_admission)):
+            retained_admission = None
+        uncertain_transition = False
+        if getattr(self, '_admission_transition_latch', None) is not None:
+            self._shutdown_pending_exit = True
+            self._shutdown_requested = True
+            if forced_route:
+                self._force_admission_transition_for_exit()
+                retained_admission = getattr(
+                    self, '_retained_admission_teardown_receipt', None)
+            if getattr(self, '_admission_transition_latch', None) is not None:
+                if not getattr(self, '_shutdown_uncertain_owner', False):
+                    return
+                uncertain_transition = True
+        protects_native = bool(
+            retained_admission is not None
+            and self._admission_receipt_matches_current(
+                retained_admission, 'native'))
+        protects_save = bool(
+            retained_admission is not None
+            and self._admission_receipt_matches_current(
+                retained_admission, 'save'))
+        protects_manual = bool(
+            retained_admission is not None
+            and self._admission_receipt_matches_current(
+                retained_admission, 'manual'))
+        protects_camera = bool(
+            retained_admission is not None
+            and self._admission_receipt_matches_current(
+                retained_admission, 'camera'))
+        if uncertain_transition:
+            # The Qt loop is already gone.  Preserve the exact owner latch and
+            # stop here; generic UI/native/save/manual/camera tails would turn
+            # an honest uncertain receipt into an unowned cleanup claim.
+            self._shutdown_complete = True
+            self._shutdown_mark('ForcedOwnerUncertain')
+            return
+        if forced_route:
+            # The event loop is gone.  Keep the retained receipt and perform
+            # only non-Qt controller/worker/log cleanup; all UI and generic A
+            # tails would be unowned after a successor/reentrant callback.
+            self._shutdown_complete = True
+            self._forced_non_qt_shutdown_tail()
+            return
         self._shutdown_complete = True
+        backup_controller = getattr(self, 'library_backup_controller', None)
+        if backup_controller is not None:
+            backup_controller.close()
+        storage_controller = getattr(self, 'library_storage_controller', None)
+        if storage_controller is not None:
+            storage_controller.close()
+        stop = getattr(self, '_file_worker_stop', None)
+        if stop is not None:
+            stop.set()
+            self._cancel_waiting_file_admissions()
+            with self._file_worker_lock:
+                workers = tuple(self._file_workers)
+            deadline = time.monotonic() + 2.0
+            for worker in workers:
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
+            # Any interrupted rename is durable in SQLite and recovered next boot.
         self._persist_window_geometry()
         from core.export_queue import shutdown as shutdown_exports
         from ui.clip_viewer import _share_windows
@@ -9418,8 +18757,32 @@ class MainWindow(QMainWindow):
 
         active_viewer = getattr(self, '_active_clip_viewer', None)
         if active_viewer is not None:
+            flush_error = None
             try:
-                active_viewer.close()
+                page = getattr(active_viewer, 'clip_page', active_viewer)
+                flush = getattr(page, '_flush_clip_details', None)
+                if callable(flush):
+                    previous_suppress_warning = getattr(
+                        page, '_suppress_details_warning', False)
+                    page._suppress_details_warning = True
+                    try:
+                        flush_result = flush()
+                    except (OSError, TypeError, ValueError) as error:
+                        flush_result = False
+                        flush_error = error
+                    finally:
+                        page._suppress_details_warning = previous_suppress_warning
+                    if flush_result is False:
+                        detail_error = flush_error or getattr(
+                            page, '_last_details_error', None)
+                        detail = str(detail_error) if detail_error is not None else (
+                            'The clip details could not be saved.')
+                        print(f'[Lifecycle] EditorDetailsSaveFailed: {detail}')
+                        logger = getattr(self, '_lifecycle_log', None)
+                        log_error = getattr(logger, 'error', None)
+                        if callable(log_error):
+                            log_error('EditorDetailsSaveFailed: %s', detail)
+                page._skip_detail_flush_on_teardown = True
                 active_viewer._teardown_player()
                 active_viewer.deleteLater()
             except (AttributeError, RuntimeError, TypeError):
@@ -9432,28 +18795,50 @@ class MainWindow(QMainWindow):
 
         parked = getattr(self, '_parked_editor_shell', None)
         if parked is not None:
-            parked._teardown_player()
-            parked.deleteLater()
-            self._parked_editor_shell = None
+            parked_error = None
+            parked_page = getattr(parked, 'clip_page', parked)
+            try:
+                flush = getattr(parked_page, '_flush_clip_details', None)
+                if callable(flush):
+                    previous_suppress_warning = getattr(
+                        parked_page, '_suppress_details_warning', False)
+                    parked_page._suppress_details_warning = True
+                    try:
+                        flush_result = flush()
+                    except (OSError, TypeError, ValueError) as error:
+                        parked_error = error
+                        flush_result = False
+                    finally:
+                        parked_page._suppress_details_warning = previous_suppress_warning
+                    if flush_result is False and parked_error is None:
+                        parked_error = getattr(
+                            parked_page, '_last_details_error', None)
+                parked_page._skip_detail_flush_on_teardown = True
+                parked._teardown_player()
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
+                if parked_error is None:
+                    parked_error = error
+            finally:
+                parked.deleteLater()
+                self._parked_editor_shell = None
+            if parked_error is not None:
+                print(f'[Lifecycle] ParkedEditorDetailsSaveFailed: {parked_error}')
+                logger = getattr(self, '_lifecycle_log', None)
+                log_error = getattr(logger, 'error', None)
+                if callable(log_error):
+                    log_error('ParkedEditorDetailsSaveFailed: %s', parked_error)
 
         if hasattr(self, 'status_timer'):
             self.status_timer.stop()
         if hasattr(self, '_save_poll_timer'):
             self._save_poll_timer.stop()
-        if hasattr(self, '_gary_timer'):
-            self._gary_timer.stop()
-        if hasattr(self, '_gary_overlay'):
-            self._gary_overlay.set_intensity(0.0)
-        if getattr(self, '_gary_recorder_active', False):
-            try:
-                MicRecorder().stop()
-            except Exception:
-                # Shutdown continues even if the optional mic backend is gone.
-                pass
-            self._gary_recorder_active = False
-        if hasattr(self, '_save_state'):
+        if hasattr(self, '_plugin_runtime'):
+            self._plugin_runtime.close()
+        if (hasattr(self, '_save_state') and not uncertain_transition
+                and not protects_save):
             self._save_state.cancel_active(time.monotonic(), reason='shutdown')
-        self._prepare_manual_recording_shutdown()
+        if not uncertain_transition and not protects_manual:
+            self._prepare_manual_recording_shutdown()
         self._stop_screenshot_jobs()
         self._shutdown_mark('SaveCommandsStopped')
 
@@ -9472,11 +18857,12 @@ class MainWindow(QMainWindow):
             pass
         self._shutdown_mark('MicrophoneStopped')
 
-        try:
-            from core.camera_recorder import CameraRecorder
-            CameraRecorder().stop()
-        except Exception as error:
-            print(f'[Shutdown] Camera release failed: {error}')
+        if not uncertain_transition and not protects_camera:
+            try:
+                from core.camera_recorder import CameraRecorder
+                CameraRecorder().stop()
+            except Exception as error:
+                print(f'[Shutdown] Camera release failed: {error}')
         self._shutdown_mark('CameraStopped')
 
         try:
@@ -9500,10 +18886,13 @@ class MainWindow(QMainWindow):
             self._shutdown_mark('LibraryStopped')
         self.capture_card.close()
         self._shutdown_mark('CaptureCardStopped')
-        self.stop_engine()
+        if not uncertain_transition and not protects_native:
+            self.stop_engine()
         # Engine shutdown closes the last fragment even if the dedicated stop
         # acknowledgement missed its bounded grace period.
-        if self._manual_record_path is not None:
+        if (self._manual_record_path is not None
+                and not uncertain_transition
+                and not protects_manual):
             self._finalize_manual_recording_file(publish_ui=False)
         self._shutdown_mark('EngineStopped')
 
@@ -9513,19 +18902,20 @@ class MainWindow(QMainWindow):
             self._tray_icon = None
         self._shutdown_mark('TrayRemoved')
         self._shutdown_mark('ShutdownComplete')
+        MainWindow._handoff_update_after_shutdown(self)
         app = QApplication.instance()
         if app is not None:
             app.quit()
 
     def _prepare_manual_recording_shutdown(self) -> None:
+        if _admission_call(self, '_admission_transition_active'):
+            return
         state = getattr(self, '_manual_record_state', 'idle')
         if state == 'idle':
             return
         self._manual_record_timer.stop()
         if state == 'preparing':
-            self._manual_record_state = 'idle'
-            self._pending_manual_record_path = None
-            self._restore_clip_capture_profile()
+            MainWindow._end_manual_recording_preparation(self, restore=False)
             return
         if state == 'finalizing':
             worker = self._manual_record_finalize_thread
@@ -9579,32 +18969,58 @@ class MainWindow(QMainWindow):
         event.ignore()
         self.request_full_exit()
 
-    def _show_editor_session(self, session, thumb_pixmap, *, animate_restore=False):
-        self._cancel_editor_transition()
+    def _show_editor_session(self, session, thumb_pixmap, *, restore_geometry=False):
+        if self._editor_trash_pending():
+            return
         from ui.clip_editor_window import ClipEditorWindow
+        from core.editor_upload import EditorUploadCoordinator
         clip_path = session.clip_path
         upload_on = self.upload_manager.is_enabled()
+        upload_coordinator = getattr(self, '_editor_upload_coordinator', None)
+        if upload_coordinator is None:
+            upload_coordinator = EditorUploadCoordinator(self)
+            upload_coordinator.upload_requested.connect(
+                self.upload_manager.enqueue_upload)
+            upload_coordinator.export_error.connect(self.push_error)
+            self._editor_upload_coordinator = upload_coordinator
         options = dict(thumb_pixmap=thumb_pixmap, settings_manager=self.settings_manager,
                        upload_enabled=upload_on, metadata_manager=self.clip_metadata_manager,
-                       linked_import=self.clip_grid.is_linked_import(clip_path))
+                       linked_import=self.clip_grid.is_linked_import(clip_path),
+                       upload_coordinator=upload_coordinator, trash_handler=self._request_clip_trash)
         viewer = getattr(self, '_parked_editor_shell', None)
-        self._parked_editor_shell = None
         reused = viewer is not None
         if reused:
-            if not viewer.replace_clip(clip_path, session_state=session.state, **options):
-                viewer._teardown_player(wait_for_workers=False)
-                viewer.hide()
-                self._parked_editor_shell = viewer
+            try:
+                replaced = viewer.replace_clip(
+                    clip_path, session_state=session.state, **options)
+            except (OSError, TypeError, ValueError) as error:
+                page = getattr(viewer, 'clip_page', viewer)
+                warn = getattr(page, '_warn_clip_details_error', None)
+                if callable(warn):
+                    warn(error)
                 return
+            if not replaced:
+                return
+            self._parked_editor_shell = None
             # A hidden maximized QWidget otherwise keeps its old window-state
             # bit and skips the platform maximize geometry negotiation.
             viewer.setWindowState(Qt.WindowState.WindowNoState)
         else:
             viewer = ClipEditorWindow(clip_path, self.bridge, self,
                                       session_state=session.state, **options)
+        viewer.clip_page._trash_handler = self._request_clip_trash
         viewer.editor_session = session
         if not reused:
+            # Keep the legacy page signal for standalone/compatibility
+            # fastpaths; the coordinator has its own completion signal.
             viewer.upload_requested.connect(self.upload_manager.enqueue_upload)
+            flags_signal = getattr(viewer, 'library_flags_changed', None)
+            if flags_signal is not None:
+                flags_signal.connect(self._on_library_flags_changed)
+            details_signal = getattr(viewer, 'library_details_changed', None)
+            details_handler = getattr(self, '_on_library_details_changed', None)
+            if details_signal is not None and callable(details_handler):
+                details_signal.connect(details_handler)
             viewer.export_error.connect(self.push_error)
             viewer.clip_navigation_requested.connect(
                 lambda step: self._navigate_editor_clip(viewer, step))
@@ -9620,48 +19036,12 @@ class MainWindow(QMainWindow):
         self._refresh_editor_sidebar()
         # Nonmodal ownership lets a minimized editor disappear completely,
         # without a nested exec() loop or an OS-minimized dialog on the shell.
-        if animate_restore and session.window_geometry is not None:
+        if restore_geometry and session.window_geometry is not None:
             if session.window_maximized:
                 viewer.move(session.window_geometry.topLeft())
             else:
                 viewer.setGeometry(session.window_geometry)
-        if animate_restore and self.isVisible() and not reduce_motion(self):
-            # Let the window manager resolve the final maximized size before
-            # capturing. Reveal this same native surface at the end; showing
-            # it maximized a second time can change the target geometry.
-            viewer.setWindowOpacity(0.0)
-            if session.window_maximized:
-                viewer.showMaximized()
-            else:
-                viewer.show()
-
-            def begin_restore():
-                if self._active_clip_viewer is not viewer:
-                    return
-                if reduce_motion(self):
-                    viewer.setWindowOpacity(1.0)
-                    viewer.raise_()
-                    viewer.activateWindow()
-                    return
-                end = QRect(viewer.mapToGlobal(QPoint(0, 0)), viewer.size())
-                flight = SnapshotFlight(self, viewer.grab(), sidebar_rect(session.button), end)
-                self._editor_flight = flight
-                flight._animation.finished.connect(self._editor_transition_finished)
-
-                def reveal():
-                    if self._active_clip_viewer is viewer:
-                        viewer.setWindowOpacity(1.0)
-                        viewer.raise_()
-                        viewer.activateWindow()
-
-                flight._animation.finished.connect(reveal)
-                flight.start()
-
-            # Native maximize/resize notifications can arrive after the first
-            # queued callback. Allow two display frames for that handoff.
-            QTimer.singleShot(32, viewer, begin_restore)
-            return
-        if (animate_restore and session.window_geometry is not None
+        if (restore_geometry and session.window_geometry is not None
                 and not session.window_maximized):
             viewer.show()
         else:
@@ -9670,8 +19050,48 @@ class MainWindow(QMainWindow):
         viewer.activateWindow()
 
 
+    def _on_library_details_changed(self, path, *, refresh_grid=True):
+        grid = getattr(self, 'clip_grid', None)
+        if grid is None:
+            return
+        if refresh_grid:
+            refresh = getattr(grid, 'refresh_library_details', None)
+            if callable(refresh):
+                refresh(path)
+        details_reader = getattr(grid, 'library_details_for', None)
+        details = details_reader(path) if callable(details_reader) else None
+        try:
+            key = canonical_media_path(path)
+        except (OSError, TypeError, ValueError):
+            # Invalid event paths are rejected so no unrelated editor is refreshed.
+            return
+        seen = set()
+        for viewer in (getattr(self, '_active_clip_viewer', None),
+                       getattr(self, '_parked_editor_shell', None)):
+            if viewer is None or id(viewer) in seen:
+                continue
+            seen.add(id(viewer))
+            try:
+                viewer_path = viewer.clip_path
+                matches = canonical_media_path(viewer_path) == key
+            except (AttributeError, OSError, TypeError, ValueError):
+                matches = False
+            if not matches:
+                continue
+            refresh_viewer = getattr(viewer, 'refresh_library_details', None)
+            if callable(refresh_viewer) and details is not None:
+                refresh_viewer(path, details=details)
+
+
     def _editor_finished(self, viewer, session):
-        viewer._teardown_player()
+        try:
+            viewer._teardown_player()
+        except (OSError, TypeError, ValueError, RuntimeError) as error:
+            page = getattr(viewer, 'clip_page', viewer)
+            warn = getattr(page, '_warn_clip_details_error', None)
+            if callable(warn):
+                warn(error)
+            return
         viewer.deleteLater()
         was_active = self._active_clip_viewer is viewer
         if was_active:
@@ -9686,6 +19106,8 @@ class MainWindow(QMainWindow):
 
 
     def _navigate_editor_clip(self, viewer, step):
+        if self._editor_trash_pending():
+            return
         if viewer is not self._active_clip_viewer or viewer._closing:
             return
         destination = self.clip_grid.adjacent_clip(viewer.clip_path, step)
@@ -9697,7 +19119,6 @@ class MainWindow(QMainWindow):
             state = existing.state if existing is not None else None
             if not viewer.replace_clip(
                     destination, session_state=state,
-                    navigation_step=step,
                     thumb_pixmap=QPixmap(),
                     linked_import=self.clip_grid.is_linked_import(destination)):
                 return
@@ -9757,17 +19178,15 @@ def _settings_vsep() -> QFrame:
 # Lightweight settings page stack
 
 class SlidingStackedWidget(QWidget):
-    """QStackedWidget-compatible container that lays out only the selected page.
+    """A lazy page stack that lays out only the selected settings page."""
 
-    Horizontal transitions paint snapshots without moving live settings trees.
-    """
+    currentChanged = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._pages = []
         self._current = -1
-        self._slide = None
 
     # API mirrors QStackedWidget
 
@@ -9785,7 +19204,6 @@ class SlidingStackedWidget(QWidget):
         return idx
 
     def replaceWidget(self, index, widget):
-        self._finish_slide()
         old = self._pages[index]
         old.hide()
         self._pages[index] = widget
@@ -9793,13 +19211,6 @@ class SlidingStackedWidget(QWidget):
         widget.setGeometry(0, 0, self.width(), self.height())
         widget.setVisible(index == self._current)
         old.deleteLater()
-
-    def _finish_slide(self):
-        if self._slide is not None:
-            self._slide.animation.stop()
-            self._slide.hide()
-            self._slide.deleteLater()
-            self._slide = None
 
     def setCurrentIndex(self, new_idx, *, direction=None):
         if new_idx < 0 or new_idx >= len(self._pages):
@@ -9809,10 +19220,6 @@ class SlidingStackedWidget(QWidget):
             ensure(new_idx)
         if new_idx == self._current:
             return
-        previous = self._current
-        animate = self.isVisible() and previous >= 0 and not reduce_motion(self)
-        self._finish_slide()
-        outgoing = self.grab() if animate else None
         if self._current >= 0:
             self._pages[self._current].hide()
         self._current = new_idx
@@ -9820,18 +19227,7 @@ class SlidingStackedWidget(QWidget):
         page.setGeometry(0, 0, self.width(), self.height())
         page.show()
         page.raise_()
-        if animate:
-            if page.layout() is not None:
-                page.layout().activate()
-            self._slide = SnapshotSlide(
-                self, outgoing, page.grab(),
-                direction if direction is not None else (1 if new_idx > previous else -1),
-                horizontal=True, use_gpu=False,
-            )
-            self._slide.show()
-            self._slide.raise_()
-            self._slide.animation.finished.connect(self._finish_slide)
-            self._slide.animation.start()
+        self.currentChanged.emit(new_idx)
 
     def currentIndex(self):
         return self._current
@@ -9867,23 +19263,17 @@ class SlidingStackedWidget(QWidget):
         return s
 
     def resizeEvent(self, event):
-        self._finish_slide()
         super().resizeEvent(event)
         if self._current >= 0:
             w, h = self.width(), self.height()
             self._pages[self._current].setGeometry(0, 0, w, h)
-
-    def hideEvent(self, event):
-        self._finish_slide()
-        super().hideEvent(event)
-
 
 # Full-screen settings page (embedded in main content stack)
 
 class _SettingsSlider(QSlider):
     """Audio slider with absolute click-to-set and a forgiving hit area."""
 
-    _HIT_HEIGHT = 26
+    _HIT_HEIGHT = Sizes.SLIDER_H
 
     def __init__(self, orientation: Qt.Orientation, parent=None):
         super().__init__(orientation, parent)
@@ -9941,24 +19331,41 @@ class _SettingsSlider(QSlider):
 class _SettingsPage(QWidget):
     close_requested           = Signal()
     camera_unavailable        = Signal(str)
+    camera_settings_requested = Signal(object)
     _camera_start_result      = Signal(int, int, bool, str)
     _camera_devices_result   = Signal(object, str)
+    _camera_inventory_ready  = Signal(object, str, int)
+    _profile_mic_inventory_ready = Signal(object, object, int)
+    _profile_playback_inventory_ready = Signal(object, bool, int)
     clips_directory_changed  = Signal(str)
     imported_folders_changed  = Signal()
-    gary_settings_changed     = Signal()
-    _playback_inventory_ready = Signal(object)
+    _playback_inventory_ready = Signal(list, bool)
     notification_monitor_changed = Signal()
     error_notifications_changed = Signal(bool)
     upload_connection_failed = Signal(str)
     close_to_tray_changed        = Signal(bool)
     kofi_widget_changed = Signal(bool)
     encoder_config_changed    = Signal()
+    replay_storage_changed    = Signal()
+    replay_gap_policy_changed = Signal()
+    capture_cursor_changed    = Signal()
+    capture_effects_changed   = Signal()
     audio_capture_changed     = Signal(bool)
     audio_capture_mode_changed = Signal(str)
     capture_card_changed      = Signal(bool)
+    profile_catalog_changed   = Signal(int)
+    profile_apply_requested   = Signal()
+    profile_refresh_devices_requested = Signal()
+    ultra_performance_mode_changed = Signal(bool)
     background_ui_pause_changed = Signal(bool)
     encoder_capabilities_ready = Signal(object)
     diagnostic_export_requested = Signal()
+    capture_admission_policy_changed = Signal(object)
+    capture_admission_refresh_windows_requested = Signal()
+
+    _top_categories = (0, 1, 10, 2, 3, 4, 5, 6, 9)
+    _clip_categories = ((1, 'Capture && editing'), (7, 'Game Profiles'), (8, 'Allowed games'))
+    _clip_subcategories = frozenset(index for index, _ in _clip_categories if index != 1)
 
     _lazy_control_categories = {
         '_camera_preview_timer': 3,
@@ -9977,16 +19384,13 @@ class _SettingsPage(QWidget):
         'camera_check': 3,
         'camera_device_combo': 3,
         'clear_image_overlays_btn': 3,
-        'clips_directory_edit': 1,
+        'clips_directory_edit': 10,
         'codec_combo': 1,
-        'encoder_apply_btn': 1,
         'encoder_combo': 1,
         'encoder_detection_lbl': 1,
         'encoder_preset_combo': 1,
         'encoder_preset_row': 1,
         'encoder_refresh_btn': 1,
-        'gary_enabled_check': 2,
-        'gary_preview': 2,
         'hide_deleted_timeline_segments_check': 1,
         'grid_show_edited_duration_check': 1,
         'image_overlay_check': 3,
@@ -10018,13 +19422,23 @@ class _SettingsPage(QWidget):
         'performance_audio_check': 5,
         'performance_background_pause_check': 5,
         'performance_clip_preview_check': 5,
-        'performance_encoder_apply_btn': 5,
         'performance_encoder_preset_combo': 5,
         'performance_encoder_preset_row': 5,
         'performance_encoder_section': 5,
+        'profiles_widget': 7,
+        'capture_admission_widget': 8,
+        'plugin_settings_widget': 9,
         'playback_combo': 2,
-        'recording_directory_edit': 1,
-        'reduce_ui_animations_check': 5,
+        'audio_exclusions_group': 2,
+        'audio_exclusions_widget': 2,
+        'keep_system_audio_backup_check': 2,
+        'recording_directory_edit': 10,
+        'replay_storage_widget': 10,
+        'allow_replay_gaps_check': 1,
+        'allow_low_fps_clips_check': 1,
+        'capture_cursor_check': 1,
+        'library_storage_panel': 10,
+        'library_backup_panel': 10,
         'remove_image_overlay_btn': 3,
         'separate_audio_check': 2,
         'shortcut_settings': 6,
@@ -10050,6 +19464,17 @@ class _SettingsPage(QWidget):
     def _ensure_category(self, index):
         if index in self._loaded_categories or index in self._building_categories:
             return
+        if index in self._clip_subcategories:
+            self._ensure_category(1)
+            self._building_categories.add(index)
+            try:
+                widget = (self._make_profiles_page() if index == 7
+                          else self._make_capture_admission_page())
+                self._clip_embedded_sections[index].add_content(widget)
+                self._loaded_categories.add(index)
+            finally:
+                self._building_categories.discard(index)
+            return
         self._building_categories.add(index)
         try:
             builders = {
@@ -10057,8 +19482,15 @@ class _SettingsPage(QWidget):
                 2: self._make_audio_page, 3: self._make_visuals_page,
                 4: self._make_customize_page, 5: self._make_performance_page,
                 6: self._make_shortcuts_page,
+                7: self._make_profiles_page,
+                8: self._make_capture_admission_page,
+                9: self._make_plugins_page,
+                10: self._make_storage_page,
             }
             page = builders[index]()
+            if index in (0, 1, 2, 3, 5, 10):
+                from ui.settings_layout import standardize_settings_spacing
+                standardize_settings_spacing(page)
             self.stack.replaceWidget(index, page)
             self._loaded_categories.add(index)
             if index == 2:
@@ -10082,6 +19514,121 @@ class _SettingsPage(QWidget):
         from ui.keyboard_navigation import KeyboardShortcutSettings
         self.shortcut_settings = KeyboardShortcutSettings(self.navigation_bindings)
         return self.shortcut_settings
+
+    def _make_profiles_page(self):
+        from ui.game_profiles import GameProfilesWidget
+        self.profiles_widget = GameProfilesWidget(self.sm, parent=self, embedded=True)
+        self.profiles_widget.catalog_changed.connect(
+            self.profile_catalog_changed.emit)
+        self.profiles_widget.apply_requested.connect(
+            self.profile_apply_requested.emit)
+        self.profiles_widget.refresh_devices_requested.connect(
+            self.profile_refresh_devices_requested.emit)
+        self.profiles_widget.refresh_windows_requested.connect(
+            self.capture_admission_refresh_windows_requested.emit)
+        self.profiles_widget.set_available_windows(
+            getattr(self, '_capture_admission_windows', ()))
+        self.profiles_widget.set_windows_status(
+            getattr(self, '_capture_admission_status', ''))
+        self._apply_profile_adapters()
+        QTimer.singleShot(0, self.profile_refresh_devices_requested.emit)
+        return self.profiles_widget
+
+    def _make_capture_admission_page(self):
+        from ui.capture_admission import CaptureAdmissionWidget
+        self.capture_admission_widget = CaptureAdmissionWidget(
+            self.sm, parent=self, windows_available=sys.platform == 'win32', embedded=True)
+        self.capture_admission_widget.policy_changed.connect(
+            self.capture_admission_policy_changed.emit)
+        self.capture_admission_widget.refresh_windows_requested.connect(
+            self.capture_admission_refresh_windows_requested.emit)
+        self.capture_admission_widget.set_capture_status(
+            getattr(self, '_capture_admission_status', ''))
+        self.capture_admission_widget.set_available_windows(
+            getattr(self, '_capture_admission_windows', ()))
+        return self.capture_admission_widget
+
+    def _make_plugins_page(self):
+        from ui.plugin_settings import PluginSettingsWidget
+
+        self.plugin_settings_widget = PluginSettingsWidget(
+            self, runtime=self.__dict__.get('plugin_runtime'))
+        self.plugin_settings_widget.theme_applied.connect(self._on_theme_applied)
+        self.plugin_settings_widget.presets_changed.connect(self.export_presets_widget.refresh)
+        return self.plugin_settings_widget
+
+    def get_plugin_surfaces(self):
+        if '_plugin_surfaces' not in self.__dict__:
+            from ui.plugin_surfaces import PluginSettingsSurfaces
+            self._plugin_surfaces = PluginSettingsSurfaces(self)
+        return self._plugin_surfaces
+
+    def set_capture_admission_status(self, message: str = ''):
+        self._capture_admission_status = str(message or '')
+        profiles = self.__dict__.get('profiles_widget')
+        if profiles is not None:
+            profiles.set_windows_status(self._capture_admission_status)
+        widget = self.__dict__.get('capture_admission_widget')
+        if widget is not None:
+            widget.set_capture_status(self._capture_admission_status)
+
+    def set_capture_admission_windows(self, records):
+        self._capture_admission_windows = [
+            dict(item) for item in (records or ()) if isinstance(item, dict)]
+        profiles = self.__dict__.get('profiles_widget')
+        if profiles is not None:
+            profiles.set_available_windows(self._capture_admission_windows)
+        widget = self.__dict__.get('capture_admission_widget')
+        if widget is not None:
+            widget.set_available_windows(self._capture_admission_windows)
+
+    def navigate_category_to(self, index: int):
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            # Navigation input is UI-only; malformed indices leave the
+            # current category selected and require no user-facing error.
+            return
+        if not 0 <= index < self.stack.count():
+            return
+        self._tab_buttons[1 if index in self._clip_subcategories else index].setChecked(True)
+        self._on_category_changed(index)
+
+    def _apply_profile_adapters(self):
+        widget = self.__dict__.get('profiles_widget')
+        if widget is None:
+            return
+        widget.set_capture_status(
+            *getattr(self, '_profile_capture_status',
+                     (None, None, '')))
+        widget.set_audio_devices(
+            getattr(self, '_profile_microphones', ()),
+            getattr(self, '_profile_playback_devices', ()))
+        widget.set_camera_devices(
+            getattr(self, '_profile_camera_devices', ()))
+
+    def set_profile_capture_status(self, active, pending, message=''):
+        self._profile_capture_status = (active, pending, str(message or ''))
+        widget = self.__dict__.get('profiles_widget')
+        if widget is not None:
+            widget.set_capture_status(active, pending, message)
+
+    def set_profile_audio_devices(self, microphones, playback):
+        self._profile_microphones = [dict(item) for item in (microphones or [])
+                                     if isinstance(item, dict)]
+        self._profile_playback_devices = [dict(item) for item in (playback or [])
+                                          if isinstance(item, dict)]
+        widget = self.__dict__.get('profiles_widget')
+        if widget is not None:
+            widget.set_audio_devices(
+                self._profile_microphones, self._profile_playback_devices)
+
+    def set_profile_camera_devices(self, records):
+        self._profile_camera_devices = [dict(item) for item in (records or [])
+                                        if isinstance(item, dict)]
+        widget = self.__dict__.get('profiles_widget')
+        if widget is not None:
+            widget.set_camera_devices(self._profile_camera_devices)
 
     def _init_autostart_checkbox(self):
         from core.windows_autostart import is_packaged_launch, read_enabled
@@ -10127,21 +19674,37 @@ class _SettingsPage(QWidget):
         self.error_notifications_changed.emit(enabled)
 
     def __init__(self, settings_manager: SettingsManager = None, parent=None,
-                 keyboard_capture: ThirdPartyKeyboardCapture | None = None):
+                 keyboard_capture: ThirdPartyKeyboardCapture | None = None,
+                 storage_controller=None, backup_controller=None, update_controller=None):
         super().__init__(parent)
         self.sm = settings_manager
         from core.navigation_bindings import navigation_bindings_for
         self.navigation_bindings = navigation_bindings_for(settings_manager)
         self._keyboard_capture = keyboard_capture
+        self._storage_controller = storage_controller
+        self._backup_controller = backup_controller
+        self._update_controller = update_controller
         self._keyboard_windows: list[dict] = []
         self._background_ui_paused = False
         self._camera_start_generation = 0
         self._camera_pending_device_index: int | None = None
+        self._camera_inventory_generation = 0
+        self._camera_inventory_cache: list[dict] = []
+        self._camera_inventory_admission_epoch = 0
+        self._camera_inventory_deferred = False
+        self._capture_admission_status = ''
+        self._capture_admission_windows: list[dict] = []
         self.setObjectName('settingsPage')
         self._loopback_stream = None
         self._mic_discovery_generation = 0
         self._mic_discovery_job: MicrophoneDiscoveryJob | None = None
         self._mic_discovery_context: dict[str, object] | None = None
+        # Profiles owns one detached audio inventory cache.  It survives lazy
+        # page construction and is updated only by generation-checked results.
+        self._profile_microphones: list[dict] = []
+        self._profile_playback_devices: list[dict] = []
+        self._profile_mic_inventory_generation = 0
+        self._profile_playback_inventory_generation = 0
         self._mic_discovery_poll_timer = QTimer(self)
         self._mic_discovery_poll_timer.setInterval(25)
         self._mic_discovery_poll_timer.timeout.connect(
@@ -10156,6 +19719,11 @@ class _SettingsPage(QWidget):
         self._audio_preview_timer.setInterval(180)
         self._audio_preview_timer.timeout.connect(
             self._start_audio_preview_if_current)
+        self._capture_effects_timer = QTimer(self)
+        self._capture_effects_timer.setSingleShot(True)
+        self._capture_effects_timer.setInterval(150)
+        self._capture_effects_timer.timeout.connect(
+            self.capture_effects_changed.emit)
         self._pending_category_index = 0
         self._category_switch_timer = QTimer(self)
         self._category_switch_timer.setSingleShot(True)
@@ -10165,11 +19733,14 @@ class _SettingsPage(QWidget):
         self.encoder_capabilities_ready.connect(
             self._on_encoder_capabilities_ready)
         self._camera_start_result.connect(self._on_camera_start_result)
-        self._camera_devices_result.connect(self._on_camera_devices_result)
+        self._camera_inventory_ready.connect(self._on_camera_inventory_ready)
+        self._profile_mic_inventory_ready.connect(
+            self._on_profile_mic_inventory_ready)
+        self._profile_playback_inventory_ready.connect(
+            self._on_profile_playback_inventory_ready)
         self._loaded_categories = set()
         self._building_categories = set()
         self._pending_encoder_preset = None
-        self._encoder_dirty = False
         self._setup_ui()
         self._apply_styles()
 
@@ -10182,46 +19753,64 @@ class _SettingsPage(QWidget):
         tab_bar = QFrame()
         tab_bar.setObjectName('settingsTabBar')
         tab_layout = QHBoxLayout(tab_bar)
-        tab_layout.setContentsMargins(24, 0, 24, 0)
+        tab_layout.setContentsMargins(16, 6, 16, 6)
         tab_layout.setSpacing(0)
         tab_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
 
-        self._cat_titles = [
-            'General', 'Clip', 'Audio', 'Visuals', 'Customize', 'Performance', 'Shortcuts']
-        _tab_icons = [
-            'settings(general).png',
-            'clip.png',
-            'sound.png',
-            'visuals.png',
-            'personalize.png',
-            'performance.png',
-            'shortcuts.png',
-        ]
+        from ui.settings_search import SettingsSearchField, SettingsSearchResults
+        self.settings_search = SettingsSearchField(self)
+        tab_layout.addWidget(self.settings_search, 1)
+        tab_layout.addSpacing(Sizes.SPACE_4)
 
+        # Let categories scroll on smaller windows while search remains reachable.
+        category_strip = QWidget()
+        category_layout = QHBoxLayout(category_strip)
+        category_layout.setContentsMargins(0, 0, 0, 0)
+        category_layout.setSpacing(0)
+        category_scroll = QScrollArea()
+        category_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        category_scroll.setWidgetResizable(True)
+        category_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        category_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        category_scroll.setWidget(category_strip)
+        category_scroll.setMinimumWidth(0)
+        self._category_scroll = category_scroll
+        set_theme_style(category_scroll, lambda: f'''
+            QScrollArea {{ background: {Colors.SHELL_BG_2}; border: none; }}
+            QScrollArea > QWidget > QWidget {{ background: {Colors.SHELL_BG_2}; }}
+        ''' + scrollbar_qss())
+        tab_layout.addWidget(category_scroll, 4)
+
+        self._cat_titles = [
+            'General', 'Clip', 'Audio', 'Visuals', 'Customize', 'Performance',
+            'Shortcuts', 'Profiles', 'Allowed games', 'Plugins', 'Storage']
         self._tab_buttons: list = []
         self._tab_group = QButtonGroup(self)
         self._tab_group.setExclusive(True)
 
-        # strict=False keeps the existing behaviour: if the icon list and the
-        # title list ever fall out of step, the extra tabs are dropped rather
-        # than raising in the middle of building the settings page.
-        for i, (title, icon_file) in enumerate(
-                zip(self._cat_titles, _tab_icons, strict=False)):
+        for i, title in enumerate(self._cat_titles):
             btn = QToolButton()
             btn.setText(title)
-            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            icon = _load_icon(icon_file, 36)
-            btn.setIcon(icon)
-            btn.setIconSize(QSize(36, 36))
-            _register_icon_widget(btn, icon_file, 36)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
             btn.setCheckable(True)
             btn.setObjectName('settingsTabBtn')
+            btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self._tab_group.addButton(btn, i)
-            tab_layout.addWidget(btn)
             self._tab_buttons.append(btn)
+            if i in self._clip_subcategories:
+                # Keep the internal routes for capture and profile integrations.
+                btn.hide()
 
+        previous_tab = self.settings_search
+        for index in self._top_categories:
+            button = self._tab_buttons[index]
+            category_layout.addWidget(button)
+            QWidget.setTabOrder(previous_tab, button)
+            previous_tab = button
         self._tab_group.idClicked.connect(self._on_category_changed)
+        category_strip.ensurePolished()
+        category_scroll.setFixedHeight(category_strip.sizeHint().height() + 16)
         main_layout.addWidget(tab_bar)
 
         # Thin separator line
@@ -10241,22 +19830,151 @@ class _SettingsPage(QWidget):
         content_layout.setContentsMargins(Sizes.PAGE_INSET, Sizes.PAGE_INSET, Sizes.PAGE_INSET, 0)
         content_layout.setSpacing(0)
 
+        self._clip_navigation = QWidget()
+        clip_navigation_layout = QHBoxLayout(self._clip_navigation)
+        clip_navigation_layout.setContentsMargins(0, 0, 0, Sizes.SPACE_3)
+        clip_navigation_layout.setSpacing(Sizes.SPACE_2)
+        self._clip_navigation_group = QButtonGroup(self)
+        self._clip_navigation_group.setExclusive(True)
+        for index, title in self._clip_categories:
+            button = QPushButton(title)
+            button.setObjectName('clipSettingsSection')
+            button.setCheckable(True)
+            set_theme_style(button, lambda: button_outline_qss() + f'''
+                QPushButton:checked {{ color: {Colors.ACCENT};
+                    background: {Colors.ACCENT_SOFT}; border-color: {Colors.ACCENT}; }}
+            ''')
+            self._clip_navigation_group.addButton(button, index)
+            clip_navigation_layout.addWidget(button)
+        clip_navigation_layout.addStretch(1)
+        self._clip_navigation_group.idClicked.connect(self.navigate_category_to)
+        self._clip_navigation.hide()
+        content_layout.addWidget(self._clip_navigation)
+
+        self.settings_search_results = SettingsSearchResults(self)
+        self.settings_search_results.hide()
+        content_layout.addWidget(self.settings_search_results, 1)
+
         self.stack = SlidingStackedWidget()
         self.stack._ensure_page = self._ensure_category
         for _ in self._cat_titles:
             self.stack.addWidget(QWidget())
         self._ensure_category(0)
         content_layout.addWidget(self.stack, stretch=1)
+        self.stack.currentChanged.connect(self._sync_settings_navigation)
+        self.settings_search.textChanged.connect(self._search_settings)
+        self.settings_search.results_requested.connect(
+            self.settings_search_results.setFocus)
+        self.settings_search.returnPressed.connect(lambda:
+            self.settings_search_results.open_item(self.settings_search_results.currentItem())
+            if self.settings_search.text().strip() else None)
+        self.settings_search.dismissed.connect(self.stack.setFocus)
+        self.settings_search_results.dismissed.connect(self._dismiss_settings_search)
+        self.settings_search_results.destination_requested.connect(self._open_setting_result)
 
         main_layout.addWidget(content, stretch=1)
 
         # Select first tab
         self._tab_buttons[0].setChecked(True)
+        QTimer.singleShot(0, self._fit_category_bar)
+
+    def _fit_category_bar(self):
+        self._category_scroll.widget().ensurePolished()
+        for button in self._tab_buttons:
+            button.ensurePolished()
+            button.setFixedWidth(max(button.sizeHint().width(),
+                button.fontMetrics().horizontalAdvance(button.text()) + 28))
+        self._category_scroll.setFixedHeight(
+            self._category_scroll.widget().sizeHint().height() + 16)
+
+    def _sync_settings_navigation(self, index):
+        tab = self._tab_buttons[1 if index in self._clip_subcategories else index]
+        tab.setChecked(True)
+        clip_section = self._clip_navigation_group.button(index)
+        self._clip_navigation.hide()
+        if clip_section is not None:
+            clip_section.setChecked(True)
+        self._category_scroll.ensureWidgetVisible(tab)
+
+    def _search_settings(self, query):
+        self._clear_search_highlight()
+        searching = bool(query.strip())
+        self.settings_search_results.setVisible(searching)
+        self.stack.setVisible(not searching)
+        self._sync_settings_navigation(self.stack.currentIndex())
+        if searching:
+            self.settings_search_results.set_query(query)
+            self._audio_preview_timer.stop()
+            if 'mic_level_meter' in self.__dict__:
+                self.mic_level_meter.stop()
+                self._stop_loopback()
+            for name in ('_camera_preview_timer', '_keyboard_preview_timer'):
+                timer = self.__dict__.get(name)
+                if timer is not None:
+                    timer.stop()
+        else:
+            self._category_switch_timer.start()
+
+    def _dismiss_settings_search(self):
+        self.settings_search.clear()
+        self.settings_search.setFocus()
+
+    def _clear_search_highlight(self):
+        highlight = self.__dict__.pop('_search_highlight', None)
+        if highlight is not None:
+            highlight.clear()
+
+    def _open_setting_result(self, destination):
+        self.settings_search.clear()
+        self._pending_search_destination = destination
+        self.navigate_category_to(destination.category)
+
+    def _reveal_setting_result(self):
+        destination = self.__dict__.pop('_pending_search_destination', None)
+        category = (1 if destination and destination.category in self._clip_subcategories
+                    else getattr(destination, 'category', None))
+        if destination is None or self.stack.currentIndex() != category:
+            return
+        parts = destination.target.split('.')
+        target = self.__dict__.get(parts[0])
+        for part in parts[1:]:
+            target = getattr(target, part, None)
+        expand = getattr(target, 'expand', None)
+        if callable(expand):
+            expand()
+        if not isinstance(target, QWidget):
+            target = next((label for label in self.stack.currentWidget().findChildren(QLabel)
+                           if label.text() == destination.target), None)
+        if target is None:
+            return
+        if destination.target == 'credits_toggle':
+            target.setChecked(True)
+        parent = target.parentWidget()
+        while parent is not None and parent is not self:
+            expand_parent = getattr(parent, "expand", None)
+            if callable(expand_parent):
+                expand_parent()
+            if isinstance(parent, QScrollArea):
+                parent.ensureWidgetVisible(target, 0, 16)
+                # Expanding an ancestor posts a layout request. Scroll again
+                # after it settles so a formerly hidden result is in view.
+                QTimer.singleShot(0, target,
+                    lambda scroll=parent, control=target:
+                    scroll.ensureWidgetVisible(control, 0, 16))
+            parent = parent.parentWidget()
+        if target.focusPolicy() != Qt.FocusPolicy.NoFocus:
+            target.setFocus(Qt.FocusReason.OtherFocusReason)
+
+        from ui.settings_highlight import SettingsSearchHighlight
+        self._clear_search_highlight()
+        self._search_highlight = SettingsSearchHighlight(target)
 
     def _on_category_changed(self, idx):
         """Coalesce rapid tab clicks so intermediate heavy pages are not painted."""
         if idx < 0 or idx >= self.stack.count():
             return
+        self._clear_search_highlight()
+        self.settings_search.clear()
         self._pending_category_index = idx
         self._pending_category_direction = None
         self._audio_preview_timer.stop()
@@ -10268,18 +19986,35 @@ class _SettingsPage(QWidget):
         self._category_switch_timer.start()
 
     def navigate_category(self, step):
-        idx = (self._pending_category_index + step) % self.stack.count()
+        categories = self._top_categories
+        current = self._pending_category_index
+        if current in self._clip_subcategories:
+            current = 1
+        idx = categories[(categories.index(current) + step) % len(categories)]
         self._tab_buttons[idx].setChecked(True)
         self._on_category_changed(idx)
         self._pending_category_direction = 1 if step > 0 else -1
 
     def _apply_pending_category(self):
-        if getattr(self, '_background_ui_paused', False):
+        if (getattr(self, '_background_ui_paused', False)
+                or self.settings_search.text().strip()):
             return
         idx = self._pending_category_index
         self._ensure_category(idx)
+        if idx in self._clip_subcategories:
+            section = self._clip_embedded_sections[idx]
+            section.expand()
+            idx = 1
+            self._pending_category_index = 1
+            scroll = self.stack.widget(1).findChild(QScrollArea)
+            QTimer.singleShot(0, section,
+                lambda: scroll.verticalScrollBar().setValue(
+                    section.mapTo(scroll.widget(), QPoint(0, 0)).y()))
         self.stack.setCurrentIndex(
             idx, direction=getattr(self, '_pending_category_direction', None))
+        self._sync_settings_navigation(idx)
+        if '_pending_search_destination' in self.__dict__:
+            QTimer.singleShot(0, self._reveal_setting_result)
         if idx in (1, 5):
             self._start_encoder_probe()
         # Audio sub-page is index 2 — start the live meter only there
@@ -10312,6 +20047,8 @@ class _SettingsPage(QWidget):
     def _start_audio_preview_if_current(self) -> None:
         if (not self.isVisible() or 'mic_level_meter' not in self.__dict__
                 or self.stack.currentIndex() != 2
+                or (self.__dict__.get('settings_search') is not None
+                    and self.settings_search.text().strip())
                 or getattr(self, '_background_ui_paused', False)):
             return
         self.mic_level_meter.set_gain(self.mic_vol_slider.value() / 100.0)
@@ -10336,10 +20073,13 @@ class _SettingsPage(QWidget):
         layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
         layout.setSpacing(0)
 
+        from ui.settings_layout import folded_settings_section
+        root_layout = layout
+        system_section, layout = folded_settings_section('System', expanded=True)
+
         # System --
-        layout.addWidget(_flat_section_header('System'))
-        layout.addSpacing(12)
-        self.autostart_check = QCheckBox('Autostart with Windows')
+        layout.addSpacing(8)
+        self.autostart_check = QCheckBox('Start with Windows')
         pass
         layout.addWidget(self.autostart_check)
         self._init_autostart_checkbox()
@@ -10347,7 +20087,7 @@ class _SettingsPage(QWidget):
         layout.addSpacing(8)
 
         self.close_to_tray_check = QCheckBox(
-            'Minimize to system tray when closing FTHR')
+            'Keep running when closed')
         set_theme_style(self.close_to_tray_check, checkbox_qss)
         self.close_to_tray_check.setChecked(
             bool(self.sm.get('close_to_tray', True)))
@@ -10360,16 +20100,16 @@ class _SettingsPage(QWidget):
         layout.addWidget(self.close_to_tray_check)
         layout.addSpacing(6)
 
-        self.kofi_widget_check = QCheckBox('Show Ko-fi donation widget')
+        self.kofi_widget_check = QCheckBox('Show support button')
         set_theme_style(self.kofi_widget_check, checkbox_qss)
         self.kofi_widget_check.setChecked(bool(self.sm.get('show_kofi_widget', True)))
         self.kofi_widget_check.toggled.connect(self._on_kofi_widget_toggled)
         layout.addWidget(self.kofi_widget_check)
 
         # Notifications --
-        layout.addSpacing(24)
-        layout.addWidget(_flat_section_header('Notifications'))
-        layout.addSpacing(12)
+        layout.addSpacing(16)
+        notifications_section, layout = folded_settings_section('Notifications')
+        layout.addSpacing(8)
         self.error_notifications_check = QCheckBox(
             'Show capture error messages')
         set_theme_style(self.error_notifications_check, checkbox_qss)
@@ -10382,14 +20122,16 @@ class _SettingsPage(QWidget):
             self._on_error_notifications_toggled)
         layout.addWidget(self.error_notifications_check)
 
-        layout.addSpacing(12)
-        layout.addWidget(QLabel('Capture card'))
+        layout.addSpacing(8)
+        capture_card_row = QHBoxLayout()
+        capture_card_row.setSpacing(Sizes.ROW_GAP)
+        capture_card_row.addWidget(QLabel('Capture card'))
         self.capture_card_mode_combo = QComboBox()
         set_theme_style(self.capture_card_mode_combo, combo_qss)
         for label, mode in (
                 ('All notifications', 'all'),
-                ('Clips, recordings and screenshots only', 'capture'),
-                ('Game detection / window switching only', 'detection'),
+                ('Captures only', 'capture'),
+                ('Game detection only', 'detection'),
                 ('Off', 'off')):
             self.capture_card_mode_combo.addItem(label, mode)
         saved_mode = self.sm.get('capture_card_mode', None)
@@ -10399,72 +20141,23 @@ class _SettingsPage(QWidget):
             0, self.capture_card_mode_combo.findData(saved_mode)))
         self.capture_card_mode_combo.currentIndexChanged.connect(
             self._on_capture_card_mode_changed)
-        layout.addWidget(self.capture_card_mode_combo)
+        capture_card_row.addWidget(self.capture_card_mode_combo, 1)
+        layout.addLayout(capture_card_row)
 
+        upload_section, layout = folded_settings_section('Uploads')
         # Upload --
-        layout.addSpacing(24)
         self._upload_settings_widget = UploadSettingsWidget(
             getattr(self.sm, '_upload_manager_ref', self.sm),
             no_scroll=True,
+            show_title=False,
         )
         self._upload_settings_widget.connection_failed.connect(
             self.upload_connection_failed.emit)
         layout.addWidget(self._upload_settings_widget)
 
-        # Export presets --
-        layout.addSpacing(24)
-        layout.addWidget(_flat_section_header('Export Presets'))
-        layout.addSpacing(10)
-        layout.addSpacing(10)
-        from ui.export_presets_widget import ExportPresetsWidget
-        self.export_presets_widget = ExportPresetsWidget(parent=page)
-        layout.addWidget(self.export_presets_widget)
-
-        # Troubleshooting --
-        layout.addSpacing(24)
-        layout.addWidget(_flat_section_header('Troubleshooting'))
-        layout.addSpacing(10)
-        diagnostic_hint = QLabel(
-            'After reproducing an alpha bug, export a privacy-redacted report '
-            'containing bounded hardware, capture, audio, playback, export, and '
-            'library diagnostics. Nothing is uploaded automatically.')
-        diagnostic_hint.setWordWrap(True)
-        set_theme_style(diagnostic_hint, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_BODY)))
-        layout.addWidget(diagnostic_hint)
-        layout.addSpacing(8)
-        self.export_diagnostic_btn = QPushButton('Export diagnostic report')
-        set_theme_style(self.export_diagnostic_btn, button_outline_qss)
-        self.export_diagnostic_btn.setCursor(
-            QCursor(Qt.CursorShape.PointingHandCursor))
-        self.export_diagnostic_btn.clicked.connect(
-            self.diagnostic_export_requested.emit)
-        layout.addWidget(self.export_diagnostic_btn, 0,
-                         Qt.AlignmentFlag.AlignLeft)
-        from ui.diagnostic_report import DiagnosticReportFile
-        self.diagnostic_report_file = DiagnosticReportFile(page)
-        layout.addWidget(self.diagnostic_report_file, 0,
-                         Qt.AlignmentFlag.AlignLeft)
-
-        # Focus pause has no Windows replay implementation. Do not expose a
-        # control that would route through the unrelated legacy record toggle.
-        if focus_pause_supported(sys.platform):
-            layout.addSpacing(24)
-            layout.addWidget(_flat_section_header('Anticheat Detection'))
-            layout.addSpacing(12)
-
-            self.anticheat_check = QCheckBox(
-                'Pause recording when game is unfocused')
-            set_theme_style(self.anticheat_check, checkbox_qss)
-            self.anticheat_check.setChecked(
-                self.sm.get('anticheat_detection_enabled', False))
-            self.anticheat_check.toggled.connect(self._on_anticheat_toggled)
-            layout.addWidget(self.anticheat_check)
-            layout.addSpacing(4)
-
+        presets_section, layout = folded_settings_section('Settings presets')
         # Settings Presets --
-        layout.addSpacing(24)
-        layout.addWidget(_flat_section_header('Settings Presets'))
-        layout.addSpacing(12)
+        layout.addSpacing(8)
 
         preset_row = QHBoxLayout()
         preset_row.setSpacing(8)
@@ -10495,10 +20188,62 @@ class _SettingsPage(QWidget):
 
         layout.addLayout(preset_row)
 
+        export_section, layout = folded_settings_section('Export presets')
+        # Export presets --
+        layout.addSpacing(6)
+        from ui.export_presets_widget import ExportPresetsWidget
+        self.export_presets_widget = ExportPresetsWidget(parent=page)
+        layout.addWidget(self.export_presets_widget)
+
+        support_section, layout = folded_settings_section('Troubleshooting')
+        # Troubleshooting --
+        layout.addSpacing(6)
+        diagnostic_hint = QLabel(
+            'Save a report to help troubleshoot a problem. Nothing is uploaded automatically.')
+        diagnostic_hint.setWordWrap(True)
+        set_theme_style(diagnostic_hint, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_BODY)))
+        layout.addWidget(diagnostic_hint)
+        layout.addSpacing(8)
+        self.export_diagnostic_btn = QPushButton('Export diagnostic report')
+        set_theme_style(self.export_diagnostic_btn, button_outline_qss)
+        self.export_diagnostic_btn.setCursor(
+            QCursor(Qt.CursorShape.PointingHandCursor))
+        self.export_diagnostic_btn.clicked.connect(
+            self.diagnostic_export_requested.emit)
+        layout.addWidget(self.export_diagnostic_btn, 0,
+                         Qt.AlignmentFlag.AlignLeft)
+        from ui.diagnostic_report import DiagnosticReportFile
+        self.diagnostic_report_file = DiagnosticReportFile(page)
+        layout.addWidget(self.diagnostic_report_file, 0,
+                         Qt.AlignmentFlag.AlignLeft)
+
+        # Focus pause has no Windows replay implementation. Do not expose a
+        # control that would route through the unrelated legacy record toggle.
+        if focus_pause_supported(sys.platform):
+            layout.addSpacing(16)
+            layout.addWidget(_flat_section_header('Anticheat Detection'))
+            layout.addSpacing(8)
+
+            self.anticheat_check = QCheckBox(
+                'Pause recording when game is unfocused')
+            set_theme_style(self.anticheat_check, checkbox_qss)
+            self.anticheat_check.setChecked(
+                self.sm.get('anticheat_detection_enabled', False))
+            self.anticheat_check.toggled.connect(self._on_anticheat_toggled)
+            layout.addWidget(self.anticheat_check)
+            layout.addSpacing(4)
+
+        updates_section, layout = folded_settings_section('Updates')
+        self.updates_toggle = updates_section._header
+        from ui.app_updates import AppUpdateController, AppUpdatesWidget
+        if self._update_controller is None:
+            self._update_controller = AppUpdateController(self.sm, self)
+        self.app_updates_widget = AppUpdatesWidget(self._update_controller, page)
+        layout.addWidget(self.app_updates_widget)
+
+        credits_section, layout = folded_settings_section('About FTHRClips')
+        self.credits_toggle = credits_section._header
         # App Credits --
-        layout.addSpacing(24)
-        layout.addWidget(_flat_section_header('App Credits'))
-        layout.addSpacing(10)
         credits_hint = QLabel(
             'FTHRClips\n\n'
             'Haakon\n'
@@ -10517,8 +20262,11 @@ class _SettingsPage(QWidget):
         credits_hint.setWordWrap(True)
         set_theme_style(credits_hint, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
         layout.addWidget(credits_hint)
-
-        layout.addStretch()
+        root_layout.setSpacing(12)
+        for section in (system_section, notifications_section, upload_section,
+                        presets_section, export_section, support_section, updates_section, credits_section):
+            root_layout.addWidget(section)
+        root_layout.addStretch()
 
         # Wrap everything in a scroll area so the combined content fits
         scroll = QScrollArea()
@@ -10902,15 +20650,12 @@ class _SettingsPage(QWidget):
             raw_value = self.sm.get(setting_key, '')
             return '' if raw_value is None else str(raw_value)
 
-    def _make_clip_page(self):
+    def _make_storage_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
         layout.setSpacing(0)
-
-        layout.addWidget(_flat_section_header('Clip Settings'))
-        layout.addSpacing(12)
 
         def _folder_row(label_text, current, browse_text, slot,
                         default_slot=None):
@@ -10922,7 +20667,7 @@ class _SettingsPage(QWidget):
             label = QLabel(label_text)
             label.setFixedWidth(180)
             set_theme_style(label,
-                lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
+                lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
             row.addWidget(label)
             edit = QLineEdit(str(current))
             edit.setReadOnly(True)
@@ -10930,14 +20675,14 @@ class _SettingsPage(QWidget):
                 f'color:{Colors.TEXT_DIM}; border:1px solid {Colors.BORDER}; '
                 f'padding:7px 9px; }}'))
             row.addWidget(edit, 1)
-            browse = QPushButton('BROWSE')
+            browse = QPushButton('Browse')
             set_theme_style(browse, button_outline_qss)
             browse.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             browse.setToolTip(browse_text)
             browse.clicked.connect(slot)
             row.addWidget(browse)
             if default_slot is not None:
-                use_default = QPushButton('USE DEFAULT')
+                use_default = QPushButton('Use default')
                 set_theme_style(use_default, button_outline_qss)
                 use_default.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 use_default.setToolTip('Use the platform default clips folder.')
@@ -10945,11 +20690,14 @@ class _SettingsPage(QWidget):
                 row.addWidget(use_default)
             return row_widget, edit
 
+        from ui.settings_layout import folded_settings_section
+        root_layout = layout
+        folders_section, layout = folded_settings_section('Folders', expanded=True)
+
         # Folders --
-        layout.addWidget(_flat_section_header('Folders'))
-        layout.addSpacing(12)
+        layout.addSpacing(8)
         storage_row, self.clips_directory_edit = _folder_row(
-            'CLIPS STORAGE FOLDER', self._storage_path_for_display(
+            'Clips folder', self._storage_path_for_display(
                 'clips_directory', clips_directory_from),
             'Choose where FTHR stores clips, screenshots, exports, and shares.',
             self._on_clips_folder_browse,
@@ -10957,58 +20705,75 @@ class _SettingsPage(QWidget):
         layout.addWidget(storage_row)
         layout.addSpacing(8)
         recording_row, self.recording_directory_edit = _folder_row(
-            'MANUAL RECORDING FOLDER', self._storage_path_for_display(
+            'Recordings folder', self._storage_path_for_display(
                 'recording_directory', recording_directory_from),
             'Choose where manual recordings are written.',
             self._on_recording_folder_browse)
         layout.addWidget(recording_row)
 
-        # Import Clips --
-        layout.addSpacing(24)
-        layout.addWidget(_flat_section_header('Import Clips'))
-        layout.addSpacing(10)
+        replay_section, layout = folded_settings_section('Replay buffer')
+        from ui.replay_storage import ReplayStorageWidget
+        layout.addSpacing(8)
+        self.replay_storage_widget = ReplayStorageWidget(
+            self.sm, BITRATE_PRESETS, _DropdownCombo, _NumberSpinBox, parent=page)
+        self.replay_storage_widget.applied.connect(self.replay_storage_changed.emit)
+        layout.addWidget(self.replay_storage_widget)
+        library_section, layout = folded_settings_section('Library and backups')
+        library_panels = []
+        if self._storage_controller is not None:
+            from ui.library_storage import LibraryStoragePanel
+            self.library_storage_panel = LibraryStoragePanel(
+                self.sm, self._storage_controller, parent=page)
+            library_panels.append(self.library_storage_panel)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        if self._backup_controller is not None:
+            from ui.library_backup import LibraryBackupPanel
+            self.library_backup_panel = LibraryBackupPanel(
+                self._backup_controller, parent=page)
+            library_panels.append(self.library_backup_panel)
 
-        add_btn = QPushButton('Add folder')
-        set_theme_style(add_btn, button_outline_qss)
-        add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        add_btn.clicked.connect(self._on_import_folder_add)
-        btn_row.addWidget(add_btn)
+        if library_panels:
+            if len(library_panels) == 2:
+                from ui.library_storage import StorageBackupRow
+                layout.addWidget(StorageBackupRow(*library_panels, parent=page))
+            else:
+                layout.addWidget(library_panels[0])
 
-        self._scan_btn = QPushButton('Scan for clips')
-        set_theme_style(self._scan_btn, button_secondary_qss)
-        self._scan_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._scan_btn.clicked.connect(self._on_import_folder_scan)
-        btn_row.addWidget(self._scan_btn)
+        root_layout.setSpacing(12)
+        root_layout.addWidget(folders_section)
+        root_layout.addWidget(replay_section)
+        if library_panels:
+            root_layout.addWidget(library_section)
+        root_layout.addStretch()
 
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
-        layout.addSpacing(12)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        set_theme_style(scroll, scrollbar_qss)
+        scroll.setWidget(page)
 
-        self._import_folders_container = QWidget()
-        self._import_folders_container.setStyleSheet('background: transparent;')
-        self._import_folders_layout = QVBoxLayout(self._import_folders_container)
-        self._import_folders_layout.setContentsMargins(0, 0, 0, 0)
-        self._import_folders_layout.setSpacing(4)
-        layout.addWidget(self._import_folders_container)
+        wrapper = QWidget()
+        wrapper.setStyleSheet('background: transparent;')
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.setSpacing(0)
+        wrapper_layout.addWidget(scroll)
 
-        layout.addSpacing(4)
-        self._scan_results_container = QWidget()
-        self._scan_results_container.setVisible(False)
-        self._scan_results_container.setStyleSheet('background: transparent;')
-        self._scan_results_layout = QVBoxLayout(self._scan_results_container)
-        self._scan_results_layout.setContentsMargins(0, 0, 0, 0)
-        self._scan_results_layout.setSpacing(4)
-        layout.addWidget(self._scan_results_container)
+        return wrapper
 
+    def _make_clip_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
+        layout.setSpacing(0)
+
+        from ui.settings_layout import folded_settings_section
+        root_layout = layout
+        encoding_section, layout = folded_settings_section('Video encoding', expanded=True)
         # Video Encoding --
-        layout.addSpacing(24)
-        layout.addWidget(_settings_hsep())
-        layout.addSpacing(18)
-        layout.addWidget(_flat_section_header('Video Encoding'))
-        layout.addSpacing(12)
+        layout.addSpacing(8)
 
         def _encoding_row(label_text, widget):
             row_widget = QWidget()
@@ -11019,7 +20784,7 @@ class _SettingsPage(QWidget):
             lbl = QLabel(label_text)
             lbl.setFixedWidth(140)
             set_theme_style(lbl,
-                lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
+                lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
             row.addWidget(lbl)
             row.addWidget(widget, 1)
             return row_widget
@@ -11033,6 +20798,11 @@ class _SettingsPage(QWidget):
 
         self.codec_combo = _DropdownCombo()
         self.codec_combo.addItem('Automatic', 'auto')
+        if sys.platform == 'win32':
+            self.codec_combo.setToolTip(
+                'HDR is detected automatically. HEVC on NVIDIA or Intel can '
+                'preserve HDR; NVIDIA AV1 can also preserve HDR when supported. '
+                'Other paths convert HDR to SDR. Your selected codec is respected.')
         self.codec_combo.setEnabled(False)
         set_theme_style(self.codec_combo, combo_qss)
         layout.addWidget(_encoding_row('Codec', self.codec_combo))
@@ -11055,15 +20825,10 @@ class _SettingsPage(QWidget):
         set_theme_style(self.active_encoder_lbl,
             lambda: (label_body(Colors.ACCENT, Fonts.SIZE_BODY)))
         layout.addWidget(_encoding_row('Active encoder', self.active_encoder_lbl))
-        layout.addSpacing(10)
+        layout.addSpacing(6)
 
         encoder_actions = QHBoxLayout()
         encoder_actions.setSpacing(Sizes.ROW_GAP)
-        self.encoder_apply_btn = QPushButton('Apply')
-        set_theme_style(self.encoder_apply_btn, button_primary_qss)
-        self.encoder_apply_btn.setVisible(False)
-        self.encoder_apply_btn.clicked.connect(self._on_encoder_apply)
-        encoder_actions.addWidget(self.encoder_apply_btn)
         self.encoder_refresh_btn = QPushButton('Redetect')
         set_theme_style(self.encoder_refresh_btn, button_outline_qss)
         self.encoder_refresh_btn.setToolTip(
@@ -11077,6 +20842,8 @@ class _SettingsPage(QWidget):
             lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
         encoder_actions.addWidget(self.encoder_detection_lbl, 1)
         layout.addLayout(encoder_actions)
+        self.encoder_save_error = self._encoder_save_error_label()
+        layout.addWidget(self.encoder_save_error)
 
         self.encoder_combo.currentIndexChanged.connect(
             self._on_encoder_setting_changed)
@@ -11084,39 +20851,141 @@ class _SettingsPage(QWidget):
             self._on_codec_setting_changed)
         self.encoder_preset_combo.currentIndexChanged.connect(
             self._on_encoder_setting_changed)
+        layout.addSpacing(Sizes.SPACE_3)
+        from ui.settings_layout import SettingHelp
+        self.capture_cursor_check = QCheckBox('Capture cursor')
+        self.capture_cursor_check.setChecked(
+            self.sm.get('capture_cursor', True) is not False)
+        set_theme_style(self.capture_cursor_check, checkbox_qss)
+        cursor_hint = ('Include the system cursor in captures. Game-rendered cursors '
+                       'and crosshairs remain visible. Changing this restarts the replay buffer.')
+        self.capture_cursor_check.setAccessibleDescription(cursor_hint)
+        self.capture_cursor_check.toggled.connect(self._on_capture_cursor_toggled)
+        layout.addWidget(SettingHelp(self.capture_cursor_check, cursor_hint))
+        self.capture_cursor_save_error = QLabel('This setting could not be saved. Try again.')
+        self.capture_cursor_save_error.setWordWrap(True)
+        set_theme_style(self.capture_cursor_save_error,
+                        lambda: label_body(Colors.ERROR, Fonts.SIZE_BODY))
+        self.capture_cursor_save_error.hide()
+        layout.addWidget(self.capture_cursor_save_error)
+        self.allow_replay_gaps_check = QCheckBox('Save clips with gaps')
+        self.allow_replay_gaps_check.setChecked(
+            self.sm.get('allow_replay_gaps', True) is True)
+        set_theme_style(self.allow_replay_gaps_check, checkbox_qss)
+        gap_hint = ('Saved clips may freeze or stutter where frames are missing. '
+                    'Changing this restarts the replay buffer.')
+        self.allow_replay_gaps_check.setAccessibleDescription(gap_hint)
+        self.allow_replay_gaps_check.toggled.connect(self._on_allow_replay_gaps_toggled)
+        from ui.settings_layout import SettingHelp
+        layout.addWidget(SettingHelp(self.allow_replay_gaps_check, gap_hint))
+        self.replay_gap_save_error = QLabel('This setting could not be saved. Try again.')
+        self.replay_gap_save_error.setWordWrap(True)
+        set_theme_style(self.replay_gap_save_error,
+                        lambda: label_body(Colors.ERROR, Fonts.SIZE_BODY))
+        self.replay_gap_save_error.hide()
+        layout.addWidget(self.replay_gap_save_error)
+        self.allow_low_fps_clips_check = QCheckBox('Save low-FPS clips')
+        self.allow_low_fps_clips_check.setChecked(
+            self.sm.get('allow_low_fps_clips', True) is True)
+        set_theme_style(self.allow_low_fps_clips_check, checkbox_qss)
+        low_fps_hint = ('Save clips even when capture runs below the selected frame rate. '
+                        'Clips may look less smooth. Changing this restarts the replay buffer.')
+        self.allow_low_fps_clips_check.setAccessibleDescription(low_fps_hint)
+        self.allow_low_fps_clips_check.toggled.connect(self._on_allow_low_fps_clips_toggled)
+        from ui.settings_layout import SettingHelp
+        layout.addWidget(SettingHelp(self.allow_low_fps_clips_check, low_fps_hint))
+        self.replay_low_fps_save_error = QLabel('This setting could not be saved. Try again.')
+        self.replay_low_fps_save_error.setWordWrap(True)
+        set_theme_style(self.replay_low_fps_save_error,
+                        lambda: label_body(Colors.ERROR, Fonts.SIZE_BODY))
+        self.replay_low_fps_save_error.hide()
+        layout.addWidget(self.replay_low_fps_save_error)
+
+        import_section, layout = folded_settings_section('Import clips')
+        # Import Clips --
+        layout.addSpacing(6)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        add_btn = QPushButton('Add folder')
+        set_theme_style(add_btn, button_outline_qss)
+        add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        add_btn.clicked.connect(self._on_import_folder_add)
+        btn_row.addWidget(add_btn)
+
+        self._scan_btn = QPushButton('Scan for clips')
+        set_theme_style(self._scan_btn, button_secondary_qss)
+        self._scan_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._scan_btn.clicked.connect(self._on_import_folder_scan)
+        btn_row.addWidget(self._scan_btn)
+
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+        layout.addSpacing(8)
+
+        self._import_folders_container = QWidget()
+        self._import_folders_container.setStyleSheet('background: transparent;')
+        self._import_folders_layout = QVBoxLayout(self._import_folders_container)
+        self._import_folders_layout.setContentsMargins(0, 0, 0, 0)
+        self._import_folders_layout.setSpacing(4)
+        layout.addWidget(self._import_folders_container)
+
+        layout.addSpacing(4)
+        self._scan_results_container = QWidget()
+        self._scan_results_container.setVisible(False)
+        self._scan_results_container.setStyleSheet('background: transparent;')
+        self._scan_results_layout = QVBoxLayout(self._scan_results_container)
+        self._scan_results_layout.setContentsMargins(0, 0, 0, 0)
+        self._scan_results_layout.setSpacing(4)
+        layout.addWidget(self._scan_results_container)
+
+        editor_section, layout = folded_settings_section('Watermark')
         # Watermark --
-        layout.addSpacing(24)
-        layout.addWidget(_flat_section_header('Watermark'))
-        layout.addSpacing(12)
+        layout.addSpacing(8)
 
         self.watermark_check = QCheckBox(
-            'Add animated Capture Card to exports and shares')
+            'Enable export watermark')
         set_theme_style(self.watermark_check, checkbox_qss)
         self.watermark_check.setChecked(self.sm.get('watermark_enabled', False))
         self.watermark_check.toggled.connect(self._on_watermark_toggled)
-        layout.addWidget(self.watermark_check)
-        layout.addSpacing(10)
-
-        layout.addSpacing(18)
-        layout.addWidget(_flat_section_header('Clip Editor'))
-        layout.addSpacing(12)
+        from ui.settings_layout import SettingHelp
+        layout.addWidget(SettingHelp(self.watermark_check,
+            'Add an animated capture card to exported and shared clips. Your original clips stay unchanged.'))
+        layout.addSpacing(16)
+        timeline_section, layout = folded_settings_section('Clip editor')
+        layout.addSpacing(8)
         for key, text, tip in (
                 ('timeline_preview_strip_enabled', 'Seek bar preview',
                  'Off: the app will no longer generate preview images in the timeline.'),
-                ('hide_deleted_timeline_segments', 'Hide deleted segments in the editor seek bar',
+                ('hide_deleted_timeline_segments', 'Hide deleted sections',
                  'Collapse deleted sections out of the timeline. Turn off to view and restore them.'),
-                ('grid_show_edited_duration', 'Show clip length excluding deleted segments in the grid',
-                 'Use saved trim boundaries and kept segments for the duration badge.')):
+                ('grid_show_edited_duration', 'Show edited clip length',
+                 'Show the length after your cuts in the clip library.')):
             check = QCheckBox(text)
             check.setToolTip(tip)
             set_theme_style(check, checkbox_qss)
             check.setChecked(bool(self.sm.get(key, key == 'timeline_preview_strip_enabled')))
             check.toggled.connect(lambda enabled, setting=key: self._save_clip_display_setting(setting, enabled))
             setattr(self, key + '_check', check)
-            layout.addWidget(check)
-            layout.addSpacing(10)
+            layout.addWidget(SettingHelp(check, tip))
+            layout.addSpacing(6)
 
-        layout.addStretch()
+        root_layout.setSpacing(12)
+        root_layout.addWidget(encoding_section)
+        root_layout.addWidget(timeline_section)
+        root_layout.addWidget(editor_section)
+        root_layout.addWidget(import_section)
+        from ui.customize_page import _AccordionSection
+        self._clip_embedded_sections = {}
+        for index, title in ((7, 'Game profiles'), (8, 'Allowed games')):
+            section = _AccordionSection(title)
+            section._header.toggled.connect(
+                lambda expanded, category=index:
+                self._ensure_category(category) if expanded else None)
+            self._clip_embedded_sections[index] = section
+            root_layout.addWidget(section)
+        root_layout.addStretch()
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -11135,6 +21004,42 @@ class _SettingsPage(QWidget):
         self._scan_pending: list[tuple[str, str]] = []
         self._refresh_import_folders_list()
         return wrapper
+
+    def _on_capture_cursor_toggled(self, enabled: bool) -> None:
+        previous = self.sm.get('capture_cursor', True) is not False
+        self.sm.set('capture_cursor', enabled)
+        if self.sm.save_settings() is False:
+            self.sm.set('capture_cursor', previous)
+            with QSignalBlocker(self.capture_cursor_check):
+                self.capture_cursor_check.setChecked(previous)
+            self.capture_cursor_save_error.show()
+            return
+        self.capture_cursor_save_error.hide()
+        self.capture_cursor_changed.emit()
+
+    def _on_allow_replay_gaps_toggled(self, enabled: bool) -> None:
+        previous = self.sm.get('allow_replay_gaps', True) is True
+        self.sm.set('allow_replay_gaps', enabled)
+        if self.sm.save_settings() is False:
+            self.sm.set('allow_replay_gaps', previous)
+            with QSignalBlocker(self.allow_replay_gaps_check):
+                self.allow_replay_gaps_check.setChecked(previous)
+            self.replay_gap_save_error.show()
+            return
+        self.replay_gap_save_error.hide()
+        self.replay_gap_policy_changed.emit()
+
+    def _on_allow_low_fps_clips_toggled(self, enabled: bool) -> None:
+        previous = self.sm.get('allow_low_fps_clips', True) is True
+        self.sm.set('allow_low_fps_clips', enabled)
+        if self.sm.save_settings() is False:
+            self.sm.set('allow_low_fps_clips', previous)
+            with QSignalBlocker(self.allow_low_fps_clips_check):
+                self.allow_low_fps_clips_check.setChecked(previous)
+            self.replay_low_fps_save_error.show()
+            return
+        self.replay_low_fps_save_error.hide()
+        self.replay_gap_policy_changed.emit()
 
     def _save_clip_display_setting(self, key, enabled):
         self.sm.set(key, bool(enabled))
@@ -11156,22 +21061,11 @@ class _SettingsPage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        cols = QHBoxLayout()
-        cols.setContentsMargins(0, 0, 0, 0)
-        cols.setSpacing(0)
 
-        # Left: Microphone --
-        left = QWidget()
-        left.setStyleSheet('background: transparent;')
-        left.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, Sizes.SECTION_GAP, 0)
-        left_layout.setSpacing(0)
-        left_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-
-        left_layout.addWidget(_flat_section_header('Microphone'))
-        left_layout.addSpacing(12)
+        from ui.settings_layout import folded_settings_section
+        root_layout = outer
+        root_layout.setSpacing(12)
+        left, left_layout = folded_settings_section('Microphone')
 
         # Device row
         dev_row = QHBoxLayout()
@@ -11198,29 +21092,32 @@ class _SettingsPage(QWidget):
         left_layout.addLayout(dev_row)
         left_layout.addSpacing(8)
 
-        self.mic_mono_check = QCheckBox('Downmix stereo microphone to mono')
+        self.mic_mono_check = QCheckBox('Use mono microphone audio')
         set_theme_style(self.mic_mono_check, checkbox_qss)
         self.mic_mono_check.setChecked(bool(self.sm.get('mic_downmix_mono', False)))
         self.mic_mono_check.setToolTip('Center your microphone in both speakers when recording.')
         self.mic_mono_check.toggled.connect(self._on_mic_mono_changed)
-        left_layout.addWidget(self.mic_mono_check)
+        from ui.settings_layout import SettingHelp
+        left_layout.addWidget(SettingHelp(self.mic_mono_check,
+            'Play your microphone equally through both speakers. Useful if your microphone only records on one side.'))
         left_layout.addSpacing(12)
 
         # Volume row
         vol_row = QHBoxLayout()
         vol_row.setSpacing(8)
-        self.mic_gain_label = QLabel('Microphone gain')
+        self.mic_gain_label = QLabel('Volume')
         self.mic_gain_label.setFixedWidth(100)
         vol_row.addWidget(self.mic_gain_label)
         self.mic_vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.mic_vol_slider.setRange(0, 200)
         self.mic_vol_slider.setValue(100)
+        self.mic_vol_slider.setTracking(False)
         self.mic_vol_slider.setToolTip(
             'Microphone gain: 100% is unity (no digital boost). Values above '
             '100% apply a digital boost to newly captured microphone audio and '
             'can cause over-range or distortion on loud input. Windows audio '
-            'enhancements are independent of this control. On Windows, restart '
-            'capture for a changed engine gain to take effect.')
+            'enhancements are independent of this control. On Windows, changing '
+            'this setting restarts capture.')
         vol_row.addWidget(self.mic_vol_slider, 1)
         self.mic_vol_value = QLabel('100%')
         self.mic_vol_value.setFixedWidth(42)
@@ -11230,12 +21127,17 @@ class _SettingsPage(QWidget):
         left_layout.addLayout(vol_row)
         self.mic_gain_warning = QLabel(
             '⚠ Above 100% applies a digital boost and may distort loud input. '
-            'Restart capture for Windows engine gain changes to take effect.')
+            'On Windows, changing this setting restarts capture.')
         self.mic_gain_warning.setObjectName('micGainWarning')
         self.mic_gain_warning.setWordWrap(True)
         set_theme_style(self.mic_gain_warning,
                         lambda: (label_body(Colors.WARNING, Fonts.SIZE_MICRO)))
         left_layout.addWidget(self.mic_gain_warning)
+        self.mic_save_error = QLabel('Microphone settings could not be saved. Try again.')
+        self.mic_save_error.setWordWrap(True)
+        set_theme_style(self.mic_save_error, lambda: label_body(Colors.ERROR, Fonts.SIZE_BODY))
+        self.mic_save_error.hide()
+        left_layout.addWidget(self.mic_save_error)
         self._update_mic_gain_warning(self.mic_vol_slider.value())
         left_layout.addSpacing(8)
 
@@ -11246,58 +21148,22 @@ class _SettingsPage(QWidget):
         meter_lbl.setFixedWidth(100)
         meter_row.addWidget(meter_lbl)
         self.mic_level_meter = _MicLevelMeter()
-        self.mic_level_meter.gary_thresholds_changed.connect(
-            self._on_gary_thresholds_dragged)
         meter_row.addWidget(self.mic_level_meter, 1)
         left_layout.addLayout(meter_row)
         left_layout.addSpacing(10)
 
         # Loopback checkbox
         self.mic_loopback_check = QCheckBox(
-            'Monitor (route mic to speakers so I can hear it)')
+            'Listen to microphone')
         self.mic_loopback_check.setToolTip(
             'Plays your microphone back through your speakers in real time so '
             'you can judge volume. Stops when you leave this page.')
         self.mic_loopback_check.toggled.connect(self._on_loopback_toggled)
-        left_layout.addWidget(self.mic_loopback_check)
+        left_layout.addWidget(SettingHelp(self.mic_loopback_check,
+            'Hear your microphone while adjusting its volume. Listening stops when you leave this page. Use headphones to avoid feedback.'))
 
-        left_layout.addSpacing(18)
-        left_layout.addWidget(_flat_section_header('Gary Mode'))
-        left_layout.addSpacing(8)
-
-        gary_panel = QFrame()
-        gary_panel.setObjectName('garyPanel')
-        gary_layout = QHBoxLayout(gary_panel)
-        gary_layout.setContentsMargins(10, 4, 10, 4)
-        gary_layout.setSpacing(12)
-
-        self.gary_preview = QLabel()
-        self.gary_preview.setObjectName('garyPreview')
-        self.gary_preview.setFixedSize(76, 58)
-        self.gary_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        gary_layout.addWidget(self.gary_preview)
-
-        self.gary_enabled_check = QCheckBox('Enable Gary Mode')
-        self.gary_enabled_check.setToolTip(
-            'Show the selected image when the microphone crosses the start handle.')
-        self.gary_enabled_check.toggled.connect(self._on_gary_enabled_changed)
-        gary_layout.addWidget(
-            self.gary_enabled_check, 0, Qt.AlignmentFlag.AlignVCenter)
-        gary_layout.addStretch()
-
-        choose_image = QPushButton('Choose')
-        choose_image.setObjectName('garyImageButton')
-        choose_image.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        choose_image.clicked.connect(self._choose_gary_image)
-        gary_layout.addWidget(
-            choose_image, 0, Qt.AlignmentFlag.AlignVCenter)
-        reset_image = QPushButton('Default')
-        reset_image.setObjectName('garyImageButton')
-        reset_image.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        reset_image.clicked.connect(self._reset_gary_image)
-        gary_layout.addWidget(
-            reset_image, 0, Qt.AlignmentFlag.AlignVCenter)
-        left_layout.addWidget(gary_panel)
+        self.get_plugin_surfaces().attach_audio(
+            left_layout, meter_row, self.mic_level_meter)
 
         if not _SD_AVAILABLE:
             warn = QLabel(
@@ -11307,26 +21173,13 @@ class _SettingsPage(QWidget):
             left_layout.addSpacing(6)
             left_layout.addWidget(warn)
 
-        cols.addWidget(left, 1)
-
-        cols.addWidget(_settings_vsep())
 
         # Right: Notification placement and playback levels. Custom sound
         # files remain under Customize, but the everyday loudness controls
         # belong here beside the rest of the audio settings.
-        right = QWidget()
-        right.setStyleSheet('background: transparent;')
-        right.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(Sizes.SECTION_GAP, 0, 0, 0)
-        right_layout.setSpacing(0)
-        right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-
+        right, right_layout = folded_settings_section('Notifications')
         self.sound_sliders = {}
         self.sound_value_labels = {}
-        right_layout.addWidget(_flat_section_header('Notifications'))
-        right_layout.addSpacing(12)
 
         self.notification_sounds_check = QCheckBox('Enable notification sounds')
         set_theme_style(self.notification_sounds_check, checkbox_qss)
@@ -11344,7 +21197,7 @@ class _SettingsPage(QWidget):
         mon_lbl.setFixedWidth(150)
         mon_row.addWidget(mon_lbl)
         self.notif_monitor_combo = _DropdownCombo()
-        self.notif_monitor_combo.addItem('Auto (highest Hz)', userData='auto')
+        self.notif_monitor_combo.addItem('Automatic', userData='auto')
         for s in QApplication.screens():
             g = s.availableGeometry()
             self.notif_monitor_combo.addItem(
@@ -11358,7 +21211,7 @@ class _SettingsPage(QWidget):
         right_layout.addSpacing(18)
         volume_heading = QLabel('Notification volume')
         set_theme_style(volume_heading,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
         right_layout.addWidget(volume_heading)
         right_layout.addSpacing(8)
 
@@ -11400,21 +21253,12 @@ class _SettingsPage(QWidget):
             right_layout.addLayout(sound_row)
             right_layout.addSpacing(7)
 
-        cols.addWidget(right, 1)
-
-        outer.addLayout(cols)
-
         # Show a placeholder and defer device inventory until after widget
         # construction; driver queries can block for hundreds of milliseconds.
         self.mic_combo.addItem('System Default', userData=None)
         QTimer.singleShot(0, self._populate_mic_devices)
 
-        # Audio Capture --
-        outer.addSpacing(24)
-        outer.addWidget(_settings_hsep())
-        outer.addSpacing(20)
-        outer.addWidget(_flat_section_header('Audio Capture'))
-        outer.addSpacing(12)
+        capture_section, outer = folded_settings_section('Audio capture', expanded=True)
 
         self.audio_capture_check = QCheckBox('Enable audio capture')
         set_theme_style(self.audio_capture_check, checkbox_qss)
@@ -11423,11 +21267,52 @@ class _SettingsPage(QWidget):
         outer.addWidget(self.audio_capture_check)
         outer.addSpacing(12)
 
+        # These source selectors map to the Windows native endpoint ABI.  Do
+        # not expose or persist this route on Linux, whose PortAudio path keeps
+        # the established combined/separated setting semantics.
+        self._playback_endpoints = []
+        self._playback_inventory_state = 'not_checked'
+        if sys.platform == 'win32':
+            source_row = QHBoxLayout()
+            source_row.setContentsMargins(0, 0, 0, 0)
+            source_row.setSpacing(Sizes.ROW_GAP)
+            source_label = QLabel('Record')
+            source_label.setObjectName('audioSourceModeLabel')
+            source_row.addWidget(source_label)
+            self.audio_source_combo = QComboBox()
+            self.audio_source_combo.setObjectName('audioSourceModeCombo')
+            self.audio_source_combo.setMinimumWidth(0)
+            self.audio_source_combo.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            set_theme_style(self.audio_source_combo, combo_qss)
+            source_label.setBuddy(self.audio_source_combo)
+            self.audio_source_combo.setAccessibleName('Record audio')
+            self.audio_source_combo.addItem(
+                'All in one track', AUDIO_SOURCE_COMBINED)
+            self.audio_source_combo.addItem(
+                'System Audio plus Microphone', AUDIO_SOURCE_DEVICE)
+            self.audio_source_combo.addItem(
+                'Each program as its own track', AUDIO_SOURCE_PROGRAMS)
+            self.audio_source_combo.addItem(
+                'Several devices as separate tracks', AUDIO_SOURCE_DEVICES)
+            self.audio_source_combo.currentIndexChanged.connect(
+                self._on_audio_source_mode_changed)
+            source_row.addWidget(self.audio_source_combo, 1)
+            outer.addLayout(source_row)
+            outer.addSpacing(Sizes.SPACE_3)
+            self.audio_source_hint = QLabel()
+            self.audio_source_hint.setWordWrap(True)
+            set_theme_style(self.audio_source_hint, lambda: (
+                label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
+            outer.addWidget(self.audio_source_hint)
+            outer.addSpacing(12)
+
         playback_row = QHBoxLayout()
         playback_row.setContentsMargins(0, 0, 0, 0)
         playback_row.setSpacing(Sizes.ROW_GAP)
-        playback_label = QLabel('Playback device to capture')
+        playback_label = QLabel('Playback device')
         playback_label.setObjectName('playbackDeviceLabel')
+        self.playback_label = playback_label
         playback_row.addWidget(playback_label)
         self.playback_combo = QComboBox()
         self.playback_combo.setMinimumWidth(0)
@@ -11438,6 +21323,9 @@ class _SettingsPage(QWidget):
         playback_row.addWidget(self.playback_combo, 1)
         refresh_playback = QPushButton('Refresh')
         refresh_playback.setObjectName('playbackDeviceRefresh')
+        refresh_playback.setToolTip('Refresh playback device availability')
+        refresh_playback.setAccessibleName('Refresh playback devices')
+        self.playback_refresh = refresh_playback
         set_theme_style(refresh_playback, button_outline_qss)
         refresh_playback.clicked.connect(self._populate_playback_devices)
         playback_row.addWidget(refresh_playback)
@@ -11445,13 +21333,116 @@ class _SettingsPage(QWidget):
         outer.addSpacing(Sizes.SPACE_3)
         hint = QLabel('If this device disconnects, capture switches to the Windows default.')
         hint.setWordWrap(True)
+        self.playback_hint = hint
         outer.addWidget(hint)
         outer.addSpacing(12)
-        self._playback_inventory_ready.connect(self._apply_playback_devices)
-        QTimer.singleShot(0, self._populate_playback_devices)
+        if sys.platform == 'win32':
+            QTimer.singleShot(0, self._populate_playback_devices)
+
+        if sys.platform == 'win32':
+            self.extra_audio_group = QWidget()
+            extra_layout = QVBoxLayout(self.extra_audio_group)
+            extra_layout.setContentsMargins(0, 0, 0, 0)
+            extra_layout.setSpacing(12)
+            extra_hint = QLabel(
+                'Pick each device, name its track and add it. A named track '
+                'appears only when audio from that device was successfully captured.')
+            extra_hint.setWordWrap(True)
+            set_theme_style(extra_hint, lambda: (
+                label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
+            self.extra_audio_group.setToolTip(extra_hint.text())
+            extra_hint.deleteLater()
+            self.extra_audio_inventory_hint = QLabel()
+            self.extra_audio_inventory_hint.setObjectName('extraAudioInventoryHint')
+            self.extra_audio_inventory_hint.setWordWrap(True)
+            set_theme_style(self.extra_audio_inventory_hint, lambda: (
+                label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
+            inventory_row = QHBoxLayout()
+            inventory_row.addWidget(self.extra_audio_inventory_hint, 1)
+            self.extra_audio_refresh = QPushButton('Refresh')
+            self.extra_audio_refresh.setObjectName('extraAudioDeviceRefresh')
+            self.extra_audio_refresh.setAccessibleName('Refresh separate playback devices')
+            self.extra_audio_refresh.setToolTip('Refresh playback device availability')
+            set_theme_style(self.extra_audio_refresh, button_outline_qss)
+            self.extra_audio_refresh.clicked.connect(self._populate_playback_devices)
+            inventory_row.addWidget(self.extra_audio_refresh)
+            extra_layout.addLayout(inventory_row)
+            self.extra_audio_devices_box = QVBoxLayout()
+            self.extra_audio_devices_box.setContentsMargins(0, 0, 0, 0)
+            self.extra_audio_devices_box.setSpacing(10)
+            extra_layout.addLayout(self.extra_audio_devices_box)
+            extra_row = QHBoxLayout()
+            extra_row.setContentsMargins(0, 0, 0, 0)
+            extra_row.setSpacing(Sizes.ROW_GAP)
+            self.extra_device_combo = QComboBox()
+            self.extra_device_combo.setObjectName('extraAudioDeviceCombo')
+            self.extra_device_combo.setMinimumWidth(0)
+            self.extra_device_combo.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            set_theme_style(self.extra_device_combo, combo_qss)
+            extra_row.addWidget(self.extra_device_combo, 2)
+            self.extra_device_name = QLineEdit()
+            self.extra_device_name.setObjectName('extraAudioDeviceName')
+            self.extra_device_name.setPlaceholderText('Track name, e.g. Chat')
+            self.extra_device_name.setMaxLength(MAX_AUDIO_DEVICE_TRACK_NAME)
+            set_theme_style(self.extra_device_name, lambda: (
+                f'QLineEdit {{ background:{Colors.SURFACE_1}; '
+                f'color:{Colors.TEXT}; border:{Sizes.BORDER_W}px solid '
+                f'{Colors.BORDER}; border-radius:{Sizes.RADIUS_SM}px; '
+                f'padding:7px 9px; }}'))
+            extra_row.addWidget(self.extra_device_name, 1)
+            self.extra_device_add = QPushButton('Add track')
+            self.extra_device_add.setObjectName('extraAudioDeviceAdd')
+            set_theme_style(self.extra_device_add, button_outline_qss)
+            self.extra_device_add.clicked.connect(
+                self._on_add_extra_audio_device)
+            extra_row.addWidget(self.extra_device_add)
+            extra_layout.addLayout(extra_row)
+            outer.addWidget(self.extra_audio_group)
+            outer.addSpacing(16)
+            self._refresh_extra_audio_devices()
+            self._refresh_playback_selection()
+            self._sync_audio_source_mode()
+
+            from ui.audio_exclusions import AudioExclusionsWidget
+            self.audio_exclusions_group = QWidget()
+            exclusions_layout = QVBoxLayout(self.audio_exclusions_group)
+            exclusions_layout.setContentsMargins(0, 0, 0, 0)
+            exclusions_title = QLabel('Excluded application audio')
+            set_theme_style(exclusions_title, lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
+            exclusions_layout.addWidget(exclusions_title)
+            self.audio_exclusions_widget = AudioExclusionsWidget(self.sm)
+            self.audio_exclusions_widget.changed.connect(self._on_audio_exclusions_changed)
+            exclusions_layout.addWidget(self.audio_exclusions_widget)
+            outer.addWidget(self.audio_exclusions_group)
+            self.audio_exclusions_group.setVisible(self._audio_source_mode() == AUDIO_SOURCE_PROGRAMS)
+
+            self.keep_system_audio_backup_check = QCheckBox('Keep System Audio Backup')
+            self.keep_system_audio_backup_check.setObjectName('keepSystemAudioBackupCheck')
+            set_theme_style(self.keep_system_audio_backup_check, checkbox_qss)
+            self.keep_system_audio_backup_check.setChecked(
+                self.sm.get('keep_system_audio_backup', True) is not False)
+            self.keep_system_audio_backup_check.setToolTip(
+                'Keep a separate full-device backup in future Programs captures. '
+                'App exclusions always disable this backup.')
+            self.keep_system_audio_backup_check.toggled.connect(
+                self._on_keep_system_audio_backup_toggled)
+            outer.addWidget(self.keep_system_audio_backup_check)
+            self.system_audio_backup_hint = QLabel()
+            self.system_audio_backup_hint.setWordWrap(True)
+            set_theme_style(self.system_audio_backup_hint,
+                            lambda: label_body(Colors.TEXT_DIM, Fonts.SIZE_MICRO))
+            outer.addWidget(self.system_audio_backup_hint)
+            self.system_audio_backup_save_error = QLabel('Could not save the audio backup setting. Try again.')
+            self.system_audio_backup_save_error.setWordWrap(True)
+            set_theme_style(self.system_audio_backup_save_error,
+                            lambda: label_body(Colors.ERROR, Fonts.SIZE_MICRO))
+            self.system_audio_backup_save_error.hide()
+            outer.addWidget(self.system_audio_backup_save_error)
+            self._sync_audio_source_mode()
 
         self.separate_audio_check = QCheckBox(
-            'Keep system and microphone audio as separate tracks')
+            'Separate audio tracks')
         self.separate_audio_check.setObjectName('separateAudioCheck')
         set_theme_style(self.separate_audio_check, checkbox_qss)
         self.separate_audio_check.setChecked(
@@ -11474,21 +21465,27 @@ class _SettingsPage(QWidget):
             'you need independent system and microphone mixing in the editor.')
         mode_hint.setWordWrap(True)
         set_theme_style(mode_hint, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
-        outer.addWidget(mode_hint)
+        if sys.platform == 'win32':
+            self.separate_audio_check.setVisible(False)
+            mode_hint.setText(
+                'Original audio tracks are kept separately. Adjust them in the clip viewer; '
+                'sharing creates a standard mixed track. Lossless audio uses more disk space.')
+        self.separate_audio_check.setToolTip(
+            self.separate_audio_check.toolTip() + '\n' + mode_hint.text())
+        mode_hint.deleteLater()
 
-        return page
-
-    def _on_game_detection_toggled(self, checked: bool):
-        self.sm.set('game_detection_enabled', checked)
-        self.sm.save_settings()
-        main_win = self.window()
-        if hasattr(main_win, 'game_detection_popup'):
-            main_win.game_detection_popup.set_enabled_state(checked)
-        if hasattr(main_win, '_on_game_detection_configuration_changed'):
-            main_win._on_game_detection_configuration_changed(
-                checked,
-                str(self.sm.get('game_detection_mode', 'auto')).lower(),
-            )
+        root_layout.addWidget(capture_section)
+        root_layout.addWidget(left)
+        root_layout.addWidget(right)
+        root_layout.addStretch()
+        root_layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        set_theme_style(scroll, scrollbar_qss)
+        scroll.setWidget(page)
+        return scroll
 
     def _on_audio_capture_toggled(self, checked: bool):
         checked = bool(checked)
@@ -11504,6 +21501,255 @@ class _SettingsPage(QWidget):
         self.sm.save_settings()
         self.audio_capture_mode_changed.emit(mode)
 
+    def _audio_source_mode(self) -> str:
+        return effective_audio_source_mode(
+            self.sm.get('audio_source_mode', None),
+            self.sm.get('audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED),
+            self.sm.get('audio_device_tracks', []),
+            self.sm.get('per_app_audio_tracks', None))
+
+    def _sync_audio_source_mode(self) -> None:
+        """Keep Windows source controls consistent with the saved plan."""
+        combo = self.__dict__.get('audio_source_combo')
+        if combo is None:
+            return
+        mode = self._audio_source_mode()
+        combo.blockSignals(True)
+        combo.setCurrentIndex(max(0, combo.findData(mode)))
+        combo.blockSignals(False)
+        self.extra_audio_group.setVisible(mode == AUDIO_SOURCE_DEVICES)
+        exclusions_group = self.__dict__.get('audio_exclusions_group')
+        if exclusions_group is not None:
+            exclusions_group.setVisible(mode == AUDIO_SOURCE_PROGRAMS)
+            self.audio_exclusions_widget.refresh()
+        backup_check = self.__dict__.get('keep_system_audio_backup_check')
+        if backup_check is not None:
+            program_mode = mode == AUDIO_SOURCE_PROGRAMS
+            excluded = bool(encode_application_audio_exclusions(
+                self.sm.get('application_audio_exclusions', [])))
+            backup_requested = self.sm.get('keep_system_audio_backup', True) is not False
+            with QSignalBlocker(backup_check):
+                backup_check.setChecked(backup_requested)
+            backup_check.setVisible(program_mode)
+            backup_check.setEnabled(bool(self.sm.get('audio_capture_enabled', True)) and not excluded)
+            self.system_audio_backup_hint.setVisible(program_mode and excluded)
+            self.system_audio_backup_hint.setText(
+                'App exclusions disable the system audio backup.'
+                if excluded else
+                ('Future Programs captures keep the full device mix as an optional backup.'
+                 if backup_requested else
+                 'Future Programs captures keep only program tracks and microphone audio. '
+                 'Unavailable program audio stays silent.'))
+            if not program_mode:
+                self.system_audio_backup_save_error.hide()
+        visible = mode in (AUDIO_SOURCE_COMBINED, AUDIO_SOURCE_DEVICE)
+        for widget in (self.playback_label, self.playback_combo,
+                       self.playback_refresh):
+            widget.setVisible(visible)
+        playback_ready = self._playback_inventory_state == 'ready'
+        playback_saved = self.sm.get('playback_device_id', '')
+        playback_missing = bool(playback_saved and not any(
+            endpoint.endpoint_id == playback_saved for endpoint in self._playback_endpoints))
+        self.playback_hint.setVisible(visible and (not playback_ready or playback_missing))
+        tracks = normalize_audio_device_tracks(
+            self.sm.get('audio_device_tracks', []))
+        devices_hint = (
+            'No devices selected. Clips and manual recordings use the Windows system mix '
+            'as a fallback.'
+            if not tracks else
+            'No combined system mix track is added to replay clips. Selected '
+            'device tracks appear in clips and manual recordings when their audio was successfully captured.')
+        hint = {
+            AUDIO_SOURCE_COMBINED: 'System audio and microphone are mixed into one '
+                                   'audio track inside the saved MP4. No separate audio file.',
+            AUDIO_SOURCE_DEVICE: 'System audio and microphone are kept as separate '
+                                 'tracks for independent volume control in the editor.',
+            AUDIO_SOURCE_PROGRAMS: 'On supported Windows systems, clips and manual recordings keep up to '
+                                   '32 independent program groups plus microphone audio. '
+                                   'The full system mix is retained as a switchable backup. '
+                                   'Nested programs can share a group to prevent duplicate sound. '
+                                   'If app capture is unavailable, the device mix is used.',
+            AUDIO_SOURCE_DEVICES: devices_hint,
+        }[mode]
+        if not self.sm.get('audio_capture_enabled', True):
+            hint = 'Audio capture is off. Your source selection is saved.'
+        self.audio_source_hint.setText(hint)
+        if (mode == AUDIO_SOURCE_PROGRAMS
+                and self.sm.get('application_audio_exclusions', [])):
+            self.audio_source_hint.setText(
+                'Excluded apps are omitted from program tracks. The full device mix '
+                'is disabled to keep excluded audio out. Unavailable app capture '
+                'stays silent; microphone audio is retained when available. '
+                'Nested groups containing an excluded app may also be omitted.')
+        elif (mode == AUDIO_SOURCE_PROGRAMS
+                and self.sm.get('keep_system_audio_backup', True) is False):
+            self.audio_source_hint.setText(
+                'Clips and recordings keep independent program tracks plus microphone audio. '
+                'The full device mix backup is off. Unavailable app capture stays silent.')
+        self.audio_source_combo.setToolTip(self.audio_source_hint.text())
+        self.audio_source_combo.setAccessibleDescription(self.audio_source_hint.text())
+        self.audio_source_hint.setVisible(
+            not self.sm.get('audio_capture_enabled', True)
+            or mode in (AUDIO_SOURCE_COMBINED, AUDIO_SOURCE_DEVICE)
+            or (mode == AUDIO_SOURCE_DEVICES and not tracks))
+
+    def _on_keep_system_audio_backup_toggled(self, enabled: bool):
+        previous = self.sm.get('keep_system_audio_backup', True) is not False
+        self.sm.set('keep_system_audio_backup', bool(enabled))
+        if self.sm.save_settings() is False:
+            self.sm.set('keep_system_audio_backup', previous)
+            with QSignalBlocker(self.keep_system_audio_backup_check):
+                self.keep_system_audio_backup_check.setChecked(previous)
+            self.system_audio_backup_save_error.show()
+            return
+        self.system_audio_backup_save_error.hide()
+        self._sync_audio_source_mode()
+        self.audio_capture_mode_changed.emit(str(self.sm.get(
+            'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED)))
+
+    def _on_audio_exclusions_changed(self):
+        self._sync_audio_source_mode()
+        self.audio_capture_mode_changed.emit(str(self.sm.get(
+            'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED)))
+
+    def _on_audio_source_mode_changed(self, _index: int) -> None:
+        if sys.platform != 'win32':
+            return
+        mode = self.audio_source_combo.currentData()
+        if mode not in (AUDIO_SOURCE_COMBINED, AUDIO_SOURCE_DEVICE, AUDIO_SOURCE_PROGRAMS,
+                        AUDIO_SOURCE_DEVICES):
+            return
+        previous = self._audio_source_mode()
+        previous_per_app = self.sm.get('per_app_audio_tracks', None)
+        new_per_app = mode == AUDIO_SOURCE_PROGRAMS
+        capture_mode = (AUDIO_CAPTURE_MODE_COMBINED if mode == AUDIO_SOURCE_COMBINED
+                        else AUDIO_CAPTURE_MODE_SEPARATED)
+        changed = (previous != mode or previous_per_app is not new_per_app
+                   or self.sm.get('audio_capture_mode') != capture_mode)
+        self.sm.set('audio_capture_mode', capture_mode)
+        if 'separate_audio_check' in self.__dict__:
+            with QSignalBlocker(self.separate_audio_check):
+                self.separate_audio_check.setChecked(capture_mode == AUDIO_CAPTURE_MODE_SEPARATED)
+        self.sm.set('audio_source_mode', mode)
+        self.sm.set('per_app_audio_tracks', new_per_app)
+        if changed:
+            self.sm.save_settings()
+            self.audio_capture_mode_changed.emit(str(self.sm.get(
+                'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED)))
+        self._sync_audio_source_mode()
+
+    def _refresh_extra_audio_devices(self) -> None:
+        """Rebuild selected-device rows and the available endpoint picker."""
+        if sys.platform != 'win32' or 'extra_device_combo' not in self.__dict__:
+            return
+        tracks = normalize_audio_device_tracks(
+            self.sm.get('audio_device_tracks', []))
+        while self.extra_audio_devices_box.count():
+            item = self.extra_audio_devices_box.takeAt(0)
+            row = item.layout()
+            if row is not None:
+                while row.count():
+                    child = row.takeAt(0).widget()
+                    if child is not None:
+                        child.deleteLater()
+        known = {endpoint.endpoint_id: endpoint.display_name
+                 for endpoint in self._playback_endpoints}
+        ready = self._playback_inventory_state == 'ready'
+        saved_names = self.sm.get('audio_device_names', {}) or {}
+        for track in tracks:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(Sizes.ROW_GAP)
+            device = known.get(track['id']) or saved_names.get(
+                track['id'], 'Selected device')
+            availability = (
+                'found' if track['id'] in known else 'not found'
+            ) if ready else 'availability not confirmed'
+            label = QLabel(f"{track['name']}  -  {device} ({availability})")
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setWordWrap(True)
+            label.setAccessibleName(label.text())
+            set_theme_style(label, lambda: (
+                label_body(Colors.TEXT, Fonts.SIZE_BODY)))
+            row.addWidget(label, 1)
+            remove = QPushButton('Remove')
+            remove.setToolTip(f"Remove saved track {track['name']}")
+            remove.setAccessibleName(f"Remove track {track['name']} ({device})")
+            set_theme_style(remove, button_outline_qss)
+            remove.clicked.connect(
+                lambda _checked=False, endpoint_id=track['id']:
+                self._on_remove_extra_audio_device(endpoint_id))
+            row.addWidget(remove)
+            self.extra_audio_devices_box.addLayout(row)
+        used = {track['id'] for track in tracks}
+        self.extra_device_combo.clear()
+        for endpoint in self._playback_endpoints if ready else []:
+            if endpoint.endpoint_id not in used:
+                self.extra_device_combo.addItem(
+                    endpoint.display_name, endpoint.endpoint_id)
+        full = len(tracks) >= MAX_AUDIO_DEVICE_TRACKS
+        self.extra_device_combo.setEnabled(ready and not full)
+        self.extra_device_name.setEnabled(ready and not full)
+        self.extra_device_add.setEnabled(
+            ready and not full and self.extra_device_combo.count() > 0)
+        inventory_hint = {
+            'not_checked': 'Device availability has not been checked.',
+            'loading': 'Checking playback devices; availability not confirmed.',
+            'error': 'Could not check playback devices; availability not confirmed. '
+                     'Use Refresh to try again.',
+            'ready': 'Devices ready.',
+        }[self._playback_inventory_state]
+        if ready and tracks:
+            missing = sum(track['id'] not in known for track in tracks)
+            inventory_hint += f' Selected devices not found: {missing} of {len(tracks)}.'
+        self.extra_audio_inventory_hint.setText(inventory_hint)
+        self.extra_audio_inventory_hint.setVisible(
+            not ready or any(track['id'] not in known for track in tracks))
+        self.extra_audio_group.setToolTip(
+            'Pick a device, name its track and add it. Tracks appear only when '
+            'their audio was captured. Device detection does not confirm successful capture.')
+        self.extra_audio_refresh.setEnabled(self._playback_inventory_state != 'loading')
+        self._sync_audio_source_mode()
+
+    def _on_add_extra_audio_device(self) -> None:
+        if (sys.platform != 'win32'
+                or self._playback_inventory_state != 'ready'):
+            return
+        endpoint_id = self.extra_device_combo.currentData()
+        if not endpoint_id:
+            return
+        tracks = normalize_audio_device_tracks(
+            self.sm.get('audio_device_tracks', []))
+        if len(tracks) >= MAX_AUDIO_DEVICE_TRACKS:
+            return
+        device_name = self.extra_device_combo.currentText()
+        tracks.append({'id': str(endpoint_id),
+                       'name': self.extra_device_name.text() or device_name})
+        normalized_tracks = normalize_audio_device_tracks(tracks)
+        if normalized_tracks == tracks[:-1]:
+            return
+        names = dict(self.sm.get('audio_device_names', {}) or {})
+        names[str(endpoint_id)] = device_name
+        self.sm.set('audio_device_names', names)
+        self.sm.set('audio_device_tracks', normalized_tracks)
+        self.sm.save_settings()
+        self.extra_device_name.clear()
+        self._refresh_extra_audio_devices()
+        self.audio_capture_changed.emit(True)
+
+    def _on_remove_extra_audio_device(self, endpoint_id: str) -> None:
+        if sys.platform != 'win32':
+            return
+        previous = normalize_audio_device_tracks(
+            self.sm.get('audio_device_tracks', []))
+        tracks = [track for track in previous if track['id'] != endpoint_id]
+        if tracks == previous:
+            return
+        self.sm.set('audio_device_tracks', tracks)
+        self.sm.save_settings()
+        self._refresh_extra_audio_devices()
+        self.audio_capture_changed.emit(True)
+
     def _sync_audio_controls(self):
         """Keep Audio and Performance views backed by one audio setting."""
         audio_enabled = bool(self.sm.get('audio_capture_enabled', True))
@@ -11516,10 +21762,20 @@ class _SettingsPage(QWidget):
         separate = self.__dict__.get('separate_audio_check', None)
         if separate is not None:
             separate.setEnabled(audio_enabled)
+        self._sync_audio_source_mode()
 
     def _on_watermark_toggled(self, checked: bool):
         self.sm.set('watermark_enabled', checked)
         self.sm.save_settings()
+        self._queue_capture_effects_changed()
+
+    def _queue_capture_effects_changed(self) -> None:
+        """Coalesce visual edits before the Main capture intent boundary."""
+        timer = self.__dict__.get('_capture_effects_timer')
+        if timer is not None:
+            timer.start()
+        else:
+            self.capture_effects_changed.emit()
 
     def _on_anticheat_toggled(self, checked: bool):
         self.sm.set('anticheat_detection_enabled', checked)
@@ -11533,8 +21789,28 @@ class _SettingsPage(QWidget):
             main_win._focus_monitor.start()
         else:
             main_win._focus_monitor.stop()
-            if hasattr(main_win, 'bridge') and main_win.bridge.is_connected():
-                main_win.bridge.resume_recording()
+            if (hasattr(main_win, 'bridge')
+                    and main_win.bridge.is_connected()):
+                session = getattr(main_win, '_accepted_capture_session', None)
+                owner_bridge = main_win.bridge
+                owner_current = getattr(
+                    main_win, '_accepted_session_owner_is_current', None)
+                proof_getter = getattr(
+                    main_win, '_admission_stable_proof', None)
+                proof_current = getattr(
+                    main_win, '_admission_pure_proof_current', None)
+                owner_pure = getattr(
+                    main_win, '_accepted_session_owner_pure_is_current', None)
+                if (callable(owner_current) and session is not None
+                        and owner_current(session)
+                        and callable(proof_getter)
+                        and callable(proof_current)
+                        and callable(owner_pure)):
+                    proof = proof_getter(session.request)
+                    if (proof is not None and proof_current(proof)
+                            and owner_pure(session)
+                            and main_win.bridge is owner_bridge):
+                        owner_bridge.resume_recording()
 
     def _populate_camera_devices(self):
         # Device discovery can launch FFmpeg and open up to eight cameras.
@@ -11542,12 +21818,27 @@ class _SettingsPage(QWidget):
         worker = self.__dict__.get('_camera_device_scan_thread')
         if worker is not None and worker.is_alive():
             return
-        combo = self.camera_device_combo
-        blocked = combo.blockSignals(True)
-        combo.clear()
-        combo.addItem('Scanning cameras…')
-        combo.setEnabled(False)
-        combo.blockSignals(blocked)
+        owner = self.window()
+        owner_busy = getattr(owner, '_capture_resources_busy', None)
+        camera_receipt = getattr(owner, '_camera_runtime_receipt', None)
+        if (callable(owner_busy) and owner_busy()
+                or isinstance(camera_receipt, dict)
+                and camera_receipt.get('generation') is not None):
+            self._camera_inventory_deferred = True
+            if self._camera_inventory_cache:
+                self._apply_camera_devices(self._camera_inventory_cache, '')
+            return
+        self._camera_inventory_generation += 1
+        scan_generation = self._camera_inventory_generation
+        self._camera_inventory_admission_epoch = int(
+            getattr(owner, '_admission_epoch', 0) or 0)
+        combo = self.__dict__.get('camera_device_combo')
+        if combo is not None:
+            blocked = combo.blockSignals(True)
+            combo.clear()
+            combo.addItem('Scanning cameras…')
+            combo.setEnabled(False)
+            combo.blockSignals(blocked)
 
         def discover():
             try:
@@ -11558,6 +21849,12 @@ class _SettingsPage(QWidget):
             except Exception:
                 devices, error = [], 'Camera discovery failed; try Refresh'
             try:
+                detached = [dict(device) for device in devices
+                            if isinstance(device, dict)]
+                self._camera_inventory_ready.emit(
+                    detached, error, scan_generation)
+                # Compatibility signal remains available to existing callers;
+                # SettingsPage itself consumes the generation-bound signal.
                 self._camera_devices_result.emit(devices, error)
             except RuntimeError:
                 # The page may have been destroyed while a driver was scanning.
@@ -11569,6 +21866,11 @@ class _SettingsPage(QWidget):
 
     @Slot(object, str)
     def _on_camera_devices_result(self, devices, error):
+        """Compatibility entrypoint for focused settings tests."""
+        if 'camera_device_combo' not in self.__dict__:
+            self._camera_inventory_cache = [dict(device) for device in (devices or [])
+                                            if isinstance(device, dict)]
+            return
         combo = self.camera_device_combo
         blocked = combo.blockSignals(True)
         try:
@@ -11576,7 +21878,27 @@ class _SettingsPage(QWidget):
         finally:
             combo.blockSignals(blocked)
 
+    @Slot(object, str, int)
+    def _on_camera_inventory_ready(self, devices, error, generation):
+        if int(generation) != self._camera_inventory_generation:
+            return
+        owner = self.window()
+        if (owner is not self and int(getattr(
+                owner, '_admission_epoch', 0) or 0)
+                != self._camera_inventory_admission_epoch):
+            return
+        self._camera_inventory_deferred = False
+        self._camera_inventory_cache = [dict(device) for device in devices
+                                        if isinstance(device, dict)]
+        if 'camera_device_combo' in self.__dict__:
+            self._apply_camera_devices(self._camera_inventory_cache, error)
+        forward = getattr(owner, '_on_camera_inventory_ready', None)
+        if owner is not self and callable(forward):
+            forward(self._camera_inventory_cache, int(generation))
+
     def _apply_camera_devices(self, devices, error):
+        if 'camera_device_combo' not in self.__dict__:
+            return
         self.camera_device_combo.clear()
         if not devices:
             self.camera_device_combo.addItem(error or 'No cameras detected')
@@ -11592,24 +21914,17 @@ class _SettingsPage(QWidget):
             saved_index if saved_index >= 0 else 0)
 
     def _on_camera_toggled(self, checked: bool):
-        from core.camera_recorder import CameraRecorder
-
-        if checked:
-            self.sm.set('camera_enabled', True)
-            self.sm.save_settings()
-            idx = int(self.sm.get('camera_device_index', 0) or 0)
-            self._set_camera_overlay_enabled(False)
-            self._start_camera_open(idx)
-            return
-
+        self.sm.set('camera_enabled', bool(checked))
+        self.sm.save_settings()
+        idx = int(self.sm.get('camera_device_index', 0) or 0)
         self._camera_start_generation += 1
         self._camera_pending_device_index = None
-        self.sm.set('camera_enabled', False)
-        self.sm.save_settings()
-        CameraRecorder().stop()
-        self._camera_preview_timer.stop()
-        self._set_camera_overlay_enabled(False)
-        self._clear_camera_preview()
+        self.camera_settings_requested.emit({
+            'enabled': bool(checked),
+            'device_index': idx,
+            'overlay_rect': dict(self.sm.get(
+                'camera_overlay_rect', DEFAULT_OVERLAY_RECT)),
+        })
 
     def _on_camera_device_changed(self, combo_index: int):
         if combo_index < 0:
@@ -11621,47 +21936,65 @@ class _SettingsPage(QWidget):
         self.sm.set('camera_device_index', int(device_index))
         self.sm.save_settings()
         if self.sm.get('camera_enabled', False):
-            self._start_camera_open(idx)
+            self.camera_settings_requested.emit({
+                'enabled': True,
+                'device_index': idx,
+                'overlay_rect': dict(self.sm.get(
+                    'camera_overlay_rect', DEFAULT_OVERLAY_RECT)),
+            })
+
+    def _on_main_camera_apply(self, camera, ok: bool, diagnostic: str = ''):
+        """Apply Main's detached camera receipt to presentation only."""
+        # Main remains the runtime owner while this lazy page may be hidden;
+        # hidden previews must not restart timers or mutate destroyed controls.
+        if not self.isVisible():
+            return
+        if not ok:
+            timer = self.__dict__.get('_camera_preview_timer')
+            if timer is not None:
+                timer.stop()
+            if 'camera_check' in self.__dict__:
+                blocked = self.camera_check.blockSignals(True)
+                self.camera_check.setChecked(
+                    bool(self.sm.get('camera_enabled', False)))
+                self.camera_check.blockSignals(blocked)
+            self._set_camera_overlay_enabled(False)
+            self._clear_camera_preview()
+            detail = (
+                f'Could not open camera device {getattr(camera, "device_index", 0)}. '
+                'Confirm it is connected and not in use by another app, then '
+                'choose another camera or retry.')
+            if diagnostic:
+                detail += f' ({" ".join(str(diagnostic).split())[:80]})'
+            self.camera_unavailable.emit(detail[:240])
+            return
+        self._set_camera_overlay_enabled(bool(getattr(camera, 'enabled', False)))
+        timer = self.__dict__.get('_camera_preview_timer')
+        if getattr(camera, 'enabled', False) and not self._background_ui_paused:
+            if timer is not None:
+                timer.start()
+        else:
+            if timer is not None:
+                timer.stop()
+            self._clear_camera_preview()
 
     def _start_camera_open(self, device_index: int) -> None:
-        """Open a camera asynchronously and marshal its result to this page."""
-        from core.camera_recorder import CameraRecorder
-
-        self._camera_start_generation += 1
-        generation = self._camera_start_generation
+        """Compatibility shim: camera ownership lives in MainWindow."""
         device_index = int(device_index)
-        self._camera_pending_device_index = device_index
-        self._camera_preview_timer.stop()
-        self._clear_camera_preview()
-
-        try:
-            available = CameraRecorder.is_available()
-        except Exception as exc:
-            self._camera_start_result.emit(
-                generation, device_index, False, str(exc)[:80])
-            return
-        if not available:
-            self._camera_start_result.emit(
-                generation, device_index, False,
-                'Camera capture is unavailable in this installation.')
-            return
-
-        def on_result(ok: bool) -> None:
-            # CameraRecorder invokes this on its worker thread. Emitting a Qt
-            # signal is the only action here; all widget/settings work is
-            # performed by _on_camera_start_result on the page's UI thread.
-            self._camera_start_result.emit(
-                generation, device_index, bool(ok), '')
-
-        try:
-            CameraRecorder().start_async(device_index, on_result=on_result)
-        except Exception as exc:
-            self._camera_start_result.emit(
-                generation, device_index, False, str(exc)[:80])
+        self.camera_settings_requested.emit({
+            'enabled': bool(self.sm.get('camera_enabled', False)),
+            'device_index': device_index,
+            'overlay_rect': dict(self.sm.get(
+                'camera_overlay_rect', DEFAULT_OVERLAY_RECT)),
+        })
 
     @Slot(int, int, bool, str)
     def _on_camera_start_result(self, generation: int, device_index: int,
                                 ok: bool, diagnostic: str) -> None:
+        owner = self.window()
+        if (getattr(owner, '_shutdown_requested', False)
+                or getattr(owner, '_shutdown_complete', False)):
+            return
         current_device = int(self.sm.get('camera_device_index', 0) or 0)
         if (generation != self._camera_start_generation
                 or device_index != self._camera_pending_device_index
@@ -11676,11 +22009,10 @@ class _SettingsPage(QWidget):
                 self._camera_preview_timer.start()
             return
 
-        self.sm.set('camera_enabled', False)
-        self.sm.save_settings()
         if 'camera_check' in self.__dict__:
             was_blocked = self.camera_check.blockSignals(True)
-            self.camera_check.setChecked(False)
+            self.camera_check.setChecked(
+                bool(self.sm.get('camera_enabled', False)))
             self.camera_check.blockSignals(was_blocked)
         self._camera_preview_timer.stop()
         self._set_camera_overlay_enabled(False)
@@ -11698,28 +22030,31 @@ class _SettingsPage(QWidget):
     def _set_camera_overlay_enabled(self, enabled: bool) -> None:
         if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_overlay_enabled('camera', enabled)
-        elif hasattr(self, 'camera_overlay_editor'):
+        elif 'camera_overlay_editor' in self.__dict__:
             self.camera_overlay_editor.set_enabled(enabled)
 
     def _clear_camera_preview(self) -> None:
         if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_camera_pixmap(QPixmap())
-        elif hasattr(self, 'camera_overlay_editor'):
+        elif 'camera_overlay_editor' in self.__dict__:
             self.camera_overlay_editor.set_frame(QPixmap())
 
     def _on_camera_overlay_rect_changed(self, rect: dict):
         self.sm.set('camera_overlay_rect', clamp_overlay_rect(rect))
         self.sm.save_settings()
+        self._queue_capture_effects_changed()
 
     def _on_camera_pos_changed(self, idx: int):
         keys = ['bottom-right', 'bottom-left', 'top-right', 'top-left']
         self.sm.set('camera_position', keys[idx] if idx < len(keys) else 'bottom-right')
         self.sm.save_settings()
+        self._queue_capture_effects_changed()
 
     def _on_camera_size_changed(self, idx: int):
         keys = ['small', 'medium', 'large']
         self.sm.set('camera_size', keys[idx] if idx < len(keys) else 'medium')
         self.sm.save_settings()
+        self._queue_capture_effects_changed()
 
     def _update_camera_preview(self):
         sm = getattr(self, 'sm', None)
@@ -11785,7 +22120,7 @@ class _SettingsPage(QWidget):
         self.sm.save_settings()
         if 'input_overlay_preview_background_path' in self.__dict__:
             self.input_overlay_preview_background_path.setText(
-                path or 'DEFAULT · DESKTOP SCREENSHOT')
+                path or 'Default background')
         if 'input_overlay_preview_source' in self.__dict__:
             self.input_overlay_preview_source.setText(
                 Path(path).name if path else 'DEFAULT · DESKTOP')
@@ -11824,6 +22159,7 @@ class _SettingsPage(QWidget):
         self.sm.save_settings()
         if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_overlay_enabled('image', checked)
+        self._queue_capture_effects_changed()
 
     def _stored_image_layers(self) -> list[dict]:
         raw = self.sm.get('image_overlays', None)
@@ -11921,6 +22257,7 @@ class _SettingsPage(QWidget):
         self.image_overlay_check.setChecked(True)
         self.image_overlay_check.blockSignals(False)
         self._refresh_image_overlay_controls(len(layers) - 1)
+        self._queue_capture_effects_changed()
         return True
 
     def _remove_selected_image_overlay(self):
@@ -11934,6 +22271,7 @@ class _SettingsPage(QWidget):
         self.image_overlay_check.setChecked(bool(layers))
         self.image_overlay_check.blockSignals(False)
         self._refresh_image_overlay_controls(min(index, len(layers) - 1))
+        self._queue_capture_effects_changed()
 
     def _clear_image_overlay(self):
         self._save_image_layers([])
@@ -11941,6 +22279,7 @@ class _SettingsPage(QWidget):
         self.image_overlay_check.setChecked(False)
         self.image_overlay_check.blockSignals(False)
         self._refresh_image_overlay_controls(-1)
+        self._queue_capture_effects_changed()
 
     def _on_image_layer_selected(self, index: int):
         selected = self.image_overlay_selector.itemData(index)
@@ -11953,6 +22292,7 @@ class _SettingsPage(QWidget):
             layers[0]['rect'] = clamp_overlay_rect(
                 rect, DEFAULT_IMAGE_OVERLAY_RECT)
             self._save_image_layers(layers)
+            self._queue_capture_effects_changed()
 
     def _on_image_overlay_opacity_changed(self, value: int):
         layers = self._stored_image_layers()
@@ -11960,6 +22300,7 @@ class _SettingsPage(QWidget):
         if 0 <= index < len(layers):
             layers[index]['opacity'] = int(value)
             self._save_image_layers(layers)
+            self._queue_capture_effects_changed()
         self.image_overlay_opacity_value.setText(f'{int(value)}%')
         self._refresh_image_overlay_controls(index)
 
@@ -11971,6 +22312,7 @@ class _SettingsPage(QWidget):
             layers[selected]['fit'] = value
             self._save_image_layers(layers)
             self._refresh_image_overlay_controls(selected)
+            self._queue_capture_effects_changed()
 
     def _on_input_overlay_rects_changed(self, rects: dict):
         rects = rects if isinstance(rects, dict) else {}
@@ -11990,6 +22332,7 @@ class _SettingsPage(QWidget):
                 rects.get('keyboard'), DEFAULT_KEYBOARD_OVERLAY_RECT)
             self.sm.set('third_party_keyboard', keyboard)
             self.sm.save_settings()
+        self._queue_capture_effects_changed()
 
     def _keyboard_config_for_write(self) -> dict:
         return third_party_keyboard_settings(self.sm)
@@ -12005,9 +22348,9 @@ class _SettingsPage(QWidget):
                 config.get('rect'), DEFAULT_KEYBOARD_OVERLAY_RECT),
         })
         self.sm.save_settings()
-        if self._keyboard_capture is not None:
-            self._keyboard_capture.configure(
-                third_party_keyboard_settings(self.sm))
+        # Main owns the captured provider.  Persist and debounce the desired
+        # effect only; no settings-page edit may mutate an admitted A ring.
+        self._queue_capture_effects_changed()
 
     def _refresh_keyboard_windows(self) -> None:
         if 'keyboard_window_combo' not in self.__dict__:
@@ -12073,6 +22416,8 @@ class _SettingsPage(QWidget):
         if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_overlay_enabled('keyboard', True)
         self._sync_keyboard_overlay_controls()
+        self._queue_capture_effects_changed()
+        self._queue_capture_effects_changed()
 
     def _on_keyboard_overlay_toggled(self, checked: bool) -> None:
         config = self._keyboard_config_for_write()
@@ -12112,6 +22457,7 @@ class _SettingsPage(QWidget):
         self._save_keyboard_config(config)
         self._sync_keyboard_color_swatch(config['color'])
         self._update_keyboard_preview()
+        self._queue_capture_effects_changed()
 
     def _on_keyboard_intensity_changed(self, value: int) -> None:
         value = max(0, min(100, int(value)))
@@ -12120,6 +22466,7 @@ class _SettingsPage(QWidget):
         config['intensity'] = value
         self._save_keyboard_config(config)
         self._update_keyboard_preview()
+        self._queue_capture_effects_changed()
 
     def _sync_keyboard_overlay_controls(self) -> None:
         if 'keyboard_overlay_check' not in self.__dict__:
@@ -12268,10 +22615,16 @@ class _SettingsPage(QWidget):
     def _populate_playback_devices(self):
         if getattr(self, '_playback_scan_running', False):
             return
+        self._profile_playback_inventory_generation += 1
+        scan_generation = self._profile_playback_inventory_generation
         self._playback_scan_running = True
+        self._playback_inventory_state = 'loading'
+        self._refresh_extra_audio_devices()
+        self._refresh_playback_selection()
         engine = getattr(self.window(), 'engine_path', None)
         def scan():
             result = []
+            successful = False
             try:
                 from core.windows_microphone_devices import parse_microphone_inventory
                 if engine:
@@ -12280,30 +22633,159 @@ class _SettingsPage(QWidget):
                         text=True, encoding='utf-8', timeout=5,
                         creationflags=subprocess.CREATE_NO_WINDOW)
                     if completed.returncode == 0:
-                        result = [endpoint for endpoint in parse_microphone_inventory(completed.stdout)
+                        result = [endpoint for endpoint in parse_microphone_inventory(
+                            completed.stdout, strict=True)
                                   if endpoint.is_active]
+                        successful = True
             except (OSError, ValueError, subprocess.TimeoutExpired):
+                # An unavailable playback provider is a cache miss; the last
+                # generation remains published until a later refresh succeeds.
                 pass
-            self._playback_inventory_ready.emit(result)
+            self._profile_playback_inventory_ready.emit(
+                result, successful, scan_generation)
         threading.Thread(target=scan, daemon=True, name='FTHRPlaybackInventory').start()
 
-    def _apply_playback_devices(self, endpoints):
+    def _apply_playback_devices(self, endpoints, successful=True):
         self._playback_scan_running = False
+        self._playback_inventory_state = 'ready' if successful else 'error'
+        if successful:
+            self._playback_endpoints = list(endpoints or [])
+            self._profile_playback_devices = [{
+                'endpoint_id': str(getattr(endpoint, 'endpoint_id', '')),
+                'display_name': str(getattr(
+                    endpoint, 'display_name', getattr(endpoint, 'endpoint_id', ''))),
+                'is_default': bool(getattr(endpoint, 'is_default', False)),
+                'available': bool(getattr(endpoint, 'is_active', True)),
+            } for endpoint in self._playback_endpoints
+              if getattr(endpoint, 'endpoint_id', None) is not None]
+        else:
+            self._profile_playback_devices = [
+                dict(item, available=False)
+                for item in self._profile_playback_devices]
+        # Keep the last useful endpoint IDs when availability is unconfirmed;
+        # the UI labels them as unavailable instead of silently selecting default.
+        self._refresh_extra_audio_devices()
+        self._refresh_playback_selection()
+        self._publish_profile_audio_inventory()
+
+    @Slot(object, bool, int)
+    def _on_profile_playback_inventory_ready(self, endpoints, successful,
+                                             generation):
+        if int(generation) != self._profile_playback_inventory_generation:
+            return
+        self._apply_playback_devices(endpoints, successful)
+        # Compatibility consumers receive only the already generation-checked
+        # result; worker threads never emit this unguarded signal directly.
+        self._playback_inventory_ready.emit(list(endpoints or []), bool(successful))
+
+    def _publish_profile_audio_inventory(self):
+        """Publish the single detached cache owner to the Profiles widget."""
+        self.set_profile_audio_devices(
+            self._profile_microphones, self._profile_playback_devices)
+
+    @staticmethod
+    def _profile_microphone_records(result):
+        records = []
+        if isinstance(result, MicrophoneDiscoveryResult):
+            for endpoint in result.native_endpoints:
+                if not endpoint.is_active:
+                    continue
+                records.append({
+                    'endpoint_id': str(endpoint.endpoint_id),
+                    'display_name': str(endpoint.display_name),
+                    'is_default': bool(getattr(endpoint, 'is_default', False)),
+                    'available': True,
+                })
+            if (not records and _SD_AVAILABLE and result.legacy_indices):
+                records.extend({
+                    'endpoint_id': str(name), 'display_name': str(name),
+                    'is_default': False, 'available': True,
+                } for name in result.legacy_indices)
+        return records
+
+    def _update_profile_microphone_cache(self, result, error=None) -> None:
+        records = self._profile_microphone_records(result)
+        failed = bool(error)
+        if isinstance(result, MicrophoneDiscoveryResult):
+            failed = failed or bool(result.native_error or result.legacy_error)
+        if records:
+            self._profile_microphones = records
+        elif failed or result is None:
+            self._profile_microphones = [
+                dict(item, available=False)
+                for item in self._profile_microphones]
+        else:
+            self._profile_microphones = []
+
+    def _refresh_playback_selection(self):
+        """Display inventory confidence without changing the saved selection."""
+        if 'playback_combo' not in self.__dict__:
+            return
+        ready = self._playback_inventory_state == 'ready'
         saved = self.sm.get('playback_device_id', '')
         self.playback_combo.blockSignals(True)
         try:
             self.playback_combo.clear()
             self.playback_combo.addItem('Windows default', '')
-            for endpoint in endpoints:
+            for endpoint in self._playback_endpoints if ready else []:
                 self.playback_combo.addItem(endpoint.display_name, endpoint.endpoint_id)
             index = self.playback_combo.findData(saved)
             if saved and index < 0:
                 name = self.sm.get('playback_device_name', 'Selected device')
-                self.playback_combo.addItem(f'{name} (unavailable; using Windows default)', saved)
+                status = ('unavailable; using Windows default' if ready
+                          else 'availability not confirmed')
+                self.playback_combo.addItem(f'{name} ({status})', saved)
                 index = self.playback_combo.count() - 1
             self.playback_combo.setCurrentIndex(max(0, index))
         finally:
             self.playback_combo.blockSignals(False)
+        self.playback_combo.setEnabled(ready)
+        self.playback_hint.setText(
+            ('Selected device unavailable. Using Windows default.'
+             if saved and saved not in {endpoint.endpoint_id for endpoint in self._playback_endpoints}
+             else 'Playback device ready.') if ready else
+            'Device availability not confirmed. Refresh to check playback devices.')
+        self.playback_combo.setToolTip(
+            'If this device disconnects, capture switches to the Windows default.')
+        self.playback_hint.setVisible(
+            self._audio_source_mode() in (AUDIO_SOURCE_COMBINED, AUDIO_SOURCE_DEVICE)
+            and (not ready or bool(saved and self.playback_combo.findData(saved) < 0)
+                 or bool(saved and saved not in {endpoint.endpoint_id for endpoint in self._playback_endpoints})))
+
+    def _populate_profile_mic_devices(self):
+        """Refresh the detached Profiles microphone inventory only."""
+        if 'mic_combo' in self.__dict__:
+            # Audio owns the materialized provider route. Reuse it so a
+            # Profiles refresh cancels/replaces any older Audio query.
+            self._populate_mic_devices()
+            return
+        self._profile_mic_inventory_generation += 1
+        generation = self._profile_mic_inventory_generation
+        engine_path = getattr(self.window(), 'engine_path', None)
+        legacy_query = (
+            _sd.query_devices
+            if _SD_AVAILABLE and sys.platform != 'win32' else None)
+        job = MicrophoneDiscoveryJob(
+            engine_path if engine_path and Path(engine_path).is_file() else None,
+            legacy_query=legacy_query, timeout=5, generation=generation)
+
+        def completed(result, error=None):
+            try:
+                self._profile_mic_inventory_ready.emit(
+                    result, error, generation)
+            except RuntimeError:
+                # Teardown can race the queued signal; no widget remains to
+                # receive this detached provider result.
+                pass
+
+        job.start(completed)
+
+    @Slot(object, object, int)
+    def _on_profile_mic_inventory_ready(self, result, error, generation):
+        if int(generation) != self._profile_mic_inventory_generation:
+            return
+        self._update_profile_microphone_cache(result, error)
+        self._publish_profile_audio_inventory()
 
     def _populate_mic_devices(self):
         """Discover microphones on a worker and apply results on the Qt thread.
@@ -12316,6 +22798,8 @@ class _SettingsPage(QWidget):
         self._cancel_mic_discovery()
         self._mic_discovery_generation += 1
         generation = self._mic_discovery_generation
+        self._profile_mic_inventory_generation += 1
+        provider_generation = self._profile_mic_inventory_generation
         saved_id = self.sm.get('mic_device_id') if self.sm is not None else None
         saved_name = self.sm.get('mic_device_name') if self.sm is not None else None
         previous_name = self.mic_combo.currentText() if self.mic_combo.count() else None
@@ -12334,6 +22818,7 @@ class _SettingsPage(QWidget):
             if _SD_AVAILABLE and sys.platform != 'win32' else None)
         self._mic_discovery_context = {
             'generation': generation,
+            'provider_generation': provider_generation,
             'saved_id': saved_id,
             'saved_name': saved_name,
             'previous_name': previous_name,
@@ -12347,7 +22832,7 @@ class _SettingsPage(QWidget):
             engine_path,
             legacy_query=legacy_query,
             timeout=5,
-            generation=generation,
+            generation=provider_generation,
         )
         self._mic_discovery_job = job
         job.start(lambda _result, _error: None)
@@ -12370,6 +22855,9 @@ class _SettingsPage(QWidget):
         self._mic_discovery_job = None
         self._mic_discovery_context = None
         if context['generation'] != self._mic_discovery_generation:
+            return
+        if (context.get('provider_generation')
+                != self._profile_mic_inventory_generation):
             return
         if isinstance(job.error, MicrophoneDiscoveryCancelled):
             return
@@ -12484,6 +22972,11 @@ class _SettingsPage(QWidget):
             self.mic_combo.currentIndexChanged.connect(
                 self._on_mic_device_changed)
             self._mic_combo_connected = True
+        # Normal Audio-page discovery feeds the same detached Profiles cache;
+        # no combo reconstruction or Main-side publication is needed.
+        self._update_profile_microphone_cache(
+            result, result.native_error or result.legacy_error)
+        self._publish_profile_audio_inventory()
 
     def _load_audio_settings(self):
         if self.sm is None:
@@ -12494,6 +22987,8 @@ class _SettingsPage(QWidget):
         self.mic_loopback_check.blockSignals(True)
         if 'separate_audio_check' in self.__dict__:
             self.separate_audio_check.blockSignals(True)
+        if 'audio_source_combo' in self.__dict__:
+            self.audio_source_combo.blockSignals(True)
         self.notif_monitor_combo.blockSignals(True)
         for slider in self.sound_sliders.values():
             slider.blockSignals(True)
@@ -12501,6 +22996,8 @@ class _SettingsPage(QWidget):
         try:
             endpoint_id = self.sm.get('mic_device_id')
             name = self.sm.get('mic_device_name')
+            if not endpoint_id and not name and self.mic_combo.count():
+                self.mic_combo.setCurrentIndex(0)
             for idx in range(self.mic_combo.count()):
                 data = self.mic_combo.itemData(idx)
                 if isinstance(data, dict) and endpoint_id and data.get('endpoint_id') == endpoint_id:
@@ -12520,6 +23017,10 @@ class _SettingsPage(QWidget):
                 normalize_audio_capture_mode(self.sm.get(
                     'audio_capture_mode', AUDIO_CAPTURE_MODE_COMBINED))
                 == AUDIO_CAPTURE_MODE_SEPARATED)
+            self._sync_audio_source_mode()
+            self._refresh_extra_audio_devices()
+            if sys.platform == 'win32':
+                self._refresh_playback_selection()
             saved_mon = self.sm.get('notification_monitor', 'auto')
             idx = self.notif_monitor_combo.findData(saved_mon)
             if idx >= 0:
@@ -12539,106 +23040,12 @@ class _SettingsPage(QWidget):
             self.mic_loopback_check.blockSignals(False)
             if 'separate_audio_check' in self.__dict__:
                 self.separate_audio_check.blockSignals(False)
+            if 'audio_source_combo' in self.__dict__:
+                self.audio_source_combo.blockSignals(False)
             self.notif_monitor_combo.blockSignals(False)
             for slider in self.sound_sliders.values():
                 slider.blockSignals(False)
             self.notification_sounds_check.blockSignals(False)
-        self._load_gary_settings()
-
-    def _load_gary_settings(self):
-        if self.sm is None or 'gary_enabled_check' not in self.__dict__:
-            return
-        low, high = clamp_thresholds(
-            self.sm.get('gary_min_level', DEFAULT_MIN_LEVEL),
-            self.sm.get('gary_max_level', DEFAULT_MAX_LEVEL),
-        )
-        self.gary_enabled_check.blockSignals(True)
-        try:
-            self.gary_enabled_check.setChecked(
-                bool(self.sm.get('gary_mode_enabled', False)))
-            self._gary_min_level = low
-            self._gary_max_level = high
-            self.gary_image_path = self.sm.get('gary_image_path')
-        finally:
-            self.gary_enabled_check.blockSignals(False)
-        self._refresh_gary_controls()
-        self._refresh_gary_preview()
-
-    def _save_gary_settings(self):
-        if self.sm is None:
-            return
-        low, high = clamp_thresholds(
-            self._gary_min_level, self._gary_max_level)
-        self.sm.update({
-            'gary_mode_enabled': self.gary_enabled_check.isChecked(),
-            'gary_min_level': low,
-            'gary_max_level': high,
-            'gary_image_path': self.gary_image_path,
-        })
-        self.sm.save_settings()
-        self.gary_settings_changed.emit()
-
-    def _refresh_gary_controls(self):
-        low, high = clamp_thresholds(
-            self._gary_min_level, self._gary_max_level)
-        self._gary_min_level, self._gary_max_level = low, high
-        self.mic_level_meter.set_gary_thresholds(low, high)
-        self.mic_level_meter.set_gary_enabled(
-            self.gary_enabled_check.isChecked())
-
-    def _on_gary_enabled_changed(self, _checked: bool):
-        self._refresh_gary_controls()
-        self._save_gary_settings()
-
-    def _on_gary_thresholds_dragged(self, low: int, high: int):
-        self._gary_min_level, self._gary_max_level = clamp_thresholds(low, high)
-        self._refresh_gary_controls()
-        self._save_gary_settings()
-
-    def _choose_gary_image(self):
-        start = self.gary_image_path or str(Path.home())
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            'Choose Gary Mode image',
-            start,
-            'Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All files (*.*)',
-        )
-        if not path:
-            return
-        if QPixmap(path).isNull():
-            FthrMessageDialog.warning(
-                self, 'Image not supported',
-                'Choose a valid PNG, JPG, WEBP, BMP, or GIF image.')
-            return
-        self.gary_image_path = path
-        self._refresh_gary_preview()
-        self._save_gary_settings()
-
-    def _reset_gary_image(self):
-        self.gary_image_path = None
-        self._refresh_gary_preview()
-        self._save_gary_settings()
-
-    def _effective_gary_image_path(self) -> Path:
-        if self.gary_image_path:
-            candidate = Path(self.gary_image_path).expanduser()
-            if candidate.is_file():
-                return candidate
-        return Path(__file__).parent / 'assets' / 'gary.png'
-
-    def _refresh_gary_preview(self):
-        path = self._effective_gary_image_path()
-        pix = QPixmap(str(path))
-        if not pix.isNull():
-            self.gary_preview.setPixmap(pix.scaled(
-                self.gary_preview.size() - QSize(8, 8),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            ))
-        else:
-            self.gary_preview.clear()
-            self.gary_preview.setText('No image')
-        self.gary_preview.setToolTip(str(path))
 
     def _on_notif_monitor_changed(self, _idx: int):
         if self.sm is None:
@@ -12650,18 +23057,20 @@ class _SettingsPage(QWidget):
 
     def _save_audio_settings(self):
         if self.sm is None:
-            return
+            return False
         data = self.mic_combo.currentData()
         endpoint_id = data.get('endpoint_id') if isinstance(data, dict) else None
         display_name = data.get('display_name') if isinstance(data, dict) else None
-        self.sm.set('mic_device_id', endpoint_id)
-        self.sm.set('mic_device_name', display_name if endpoint_id else None)
-        self.sm.set('mic_volume', self.mic_vol_slider.value())
-        self.sm.set('mic_loopback', self.mic_loopback_check.isChecked())
-        self.sm.save_settings()
-        # Linux still owns its temporary legacy recorder. Windows applies the
-        # requested endpoint/input gain only on the next engine generation.
-        return
+        saved = _persist_setting_changes(self.sm, {
+            'mic_device_id': endpoint_id,
+            'mic_device_name': display_name if endpoint_id else None,
+            'mic_volume': self.mic_vol_slider.value(),
+            'mic_loopback': self.mic_loopback_check.isChecked(),
+        })
+        self.mic_save_error.setVisible(not saved)
+        if not saved:
+            self._load_audio_settings()
+        return saved
 
     def _selected_mic_index(self):
         data = self.mic_combo.currentData() if self.mic_combo.count() else None
@@ -12675,13 +23084,11 @@ class _SettingsPage(QWidget):
         self.mic_vol_value.setText(f'{v}%')
         self.mic_level_meter.set_gain(v / 100.0)
         self._update_mic_gain_warning(v)
-        if self._loopback_stream is not None:
-            # Volume is read live by the loopback callback closure
-            pass
-        self._save_audio_settings()
+        if self._save_audio_settings() and sys.platform == 'win32':
+            self.audio_capture_changed.emit(True)
 
     def _update_mic_gain_warning(self, value: int) -> None:
-        """Show the distortion/restart warning only for digital boost values."""
+        """Show the distortion warning only for digital boost values."""
         if 'mic_gain_warning' in self.__dict__:
             self.mic_gain_warning.setVisible(int(value) > 100)
 
@@ -12718,8 +23125,8 @@ class _SettingsPage(QWidget):
         if self.mic_loopback_check.isChecked():
             self._stop_loopback()
             self._start_loopback(idx)
-        self._save_audio_settings()
-        self.audio_capture_changed.emit(True)
+        if self._save_audio_settings():
+            self.audio_capture_changed.emit(True)
 
     def _start_loopback(self, device_index):
         self._stop_loopback()
@@ -12776,6 +23183,8 @@ class _SettingsPage(QWidget):
     # Page lifecycle — start/stop the live meter as the page comes/goes
     def showEvent(self, event):
         super().showEvent(event)
+        if self.settings_search.text().strip():
+            return
         if (hasattr(self, '_category_switch_timer')
                 and self._pending_category_index != self.stack.currentIndex()
                 and not getattr(self, '_background_ui_paused', False)):
@@ -12792,6 +23201,7 @@ class _SettingsPage(QWidget):
             self._keyboard_preview_timer.start()
 
     def hideEvent(self, event):
+        self._clear_search_highlight()
         self._camera_start_generation += 1
         self._camera_pending_device_index = None
         if '_camera_preview_timer' in self.__dict__:
@@ -12847,42 +23257,51 @@ class _SettingsPage(QWidget):
         preview_background_path = str(self.sm.get(
             'input_overlay_preview_background', '') or '')
 
-        layout.addWidget(_flat_section_header('Visual Overlays'))
+        layout.addWidget(_flat_section_header('Overlays'))
         layout.addSpacing(Sizes.ROW_GAP)
 
-        columns = QHBoxLayout()
-        columns.setSpacing(16)
 
         options = QFrame()
         options.setObjectName('overlayOptionsPanel')
-        options.setFixedWidth(380)
+        options.setMinimumWidth(360)
         set_theme_style(options,
             lambda: ('QFrame#overlayOptionsPanel { background: transparent; border: none; }'))
-        options_layout = QVBoxLayout(options)
-        options_layout.setContentsMargins(0, 0, Sizes.ROW_GAP, 0)
-        options_layout.setSpacing(0)
+        from ui.customize_page import _AccordionSection
+        from ui.style import lineedit_qss
+        from ui.settings_layout import SettingHelp
+        sections_layout = QVBoxLayout(options)
+        sections_layout.setContentsMargins(0, 0, 0, 0)
+        sections_layout.setSpacing(12)
+        self._overlay_sections = {}
 
-        def option_header(text: str) -> None:
-            label = QLabel(text)
-            set_theme_style(label, lambda: (label_uppercase(Colors.ACCENT, Fonts.SIZE_MICRO, 2)))
-            options_layout.addWidget(label)
-            options_layout.addSpacing(8)
+        def option_section(title):
+            section = _AccordionSection(title)
+            section._header.setAccessibleName(title + ' overlay settings')
+            content = QWidget()
+            form = QVBoxLayout(content)
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setSpacing(12)
+            section.add_content(content)
+            sections_layout.addWidget(section)
+            self._overlay_sections[title] = section
+            return form
 
-        # Camera options
-        option_header('Camera')
-        self.camera_check = QCheckBox('Burn camera overlay into clips')
+        options_layout = option_section('Camera')
+        self._overlay_sections['Camera'].expand()
+        self.camera_check = QCheckBox('Enable camera overlay')
         set_theme_style(self.camera_check, checkbox_qss)
         self.camera_check.setChecked(bool(self.sm.get('camera_enabled', False)))
         self.camera_check.toggled.connect(self._on_camera_toggled)
-        options_layout.addWidget(self.camera_check)
+        options_layout.addWidget(SettingHelp(self.camera_check,
+            'Add your camera to saved clips. Choose a camera below, then drag or resize it in the preview.'))
         options_layout.addSpacing(8)
 
         cam_dev_row = QHBoxLayout()
         cam_dev_row.setSpacing(Sizes.SPACE_3)
         cam_label = QLabel('Device')
         set_theme_style(cam_label,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
-        cam_label.setFixedWidth(58)
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
+        cam_label.setFixedWidth(64)
         cam_dev_row.addWidget(cam_label)
         self.camera_device_combo = _DropdownCombo()
         set_theme_style(self.camera_device_combo, combo_qss)
@@ -12892,7 +23311,7 @@ class _SettingsPage(QWidget):
         cam_dev_row.addWidget(self.camera_device_combo, 1)
         refresh = IconButton('refresh.png', label='Refresh')
         refresh.setObjectName('micRefreshBtn')
-        refresh.setFixedSize(26, 26)
+        refresh.setFixedSize(28, 28)
         refresh.setToolTip('Re-scan video devices')
         refresh.clicked.connect(self._populate_camera_devices)
         cam_dev_row.addWidget(refresh)
@@ -12900,15 +23319,16 @@ class _SettingsPage(QWidget):
         options_layout.addSpacing(18)
 
         # Image options
-        option_header('Image layers')
+        options_layout = option_section('Images')
         image_layers = self._stored_image_layers()
         image_enabled = bool(
             image_layers and self.sm.get('image_overlay_enabled', False))
-        self.image_overlay_check = QCheckBox('Burn image layers into clips')
+        self.image_overlay_check = QCheckBox('Enable image overlays')
         set_theme_style(self.image_overlay_check, checkbox_qss)
         self.image_overlay_check.setChecked(image_enabled)
         self.image_overlay_check.toggled.connect(self._on_image_overlay_toggled)
-        options_layout.addWidget(self.image_overlay_check)
+        options_layout.addWidget(SettingHelp(self.image_overlay_check,
+            'Add images or logos to saved clips. Transparent images keep their transparent background.'))
         options_layout.addSpacing(8)
 
         selector_row = QHBoxLayout()
@@ -12917,15 +23337,20 @@ class _SettingsPage(QWidget):
         set_theme_style(self.image_overlay_selector, combo_qss)
         self.image_overlay_selector.currentIndexChanged.connect(
             self._on_image_layer_selected)
+        image_label = QLabel('Image')
+        image_label.setFixedWidth(64)
+        selector_row.addWidget(image_label)
         selector_row.addWidget(self.image_overlay_selector, 1)
+        selector_row.addSpacing(36)
         self.image_overlay_count = QLabel()
-        self.image_overlay_count.setFixedWidth(92)
+        self.image_overlay_count.setWordWrap(True)
         self.image_overlay_count.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         set_theme_style(self.image_overlay_count,
             lambda: (label_uppercase(Colors.TEXT_MUTED, Fonts.SIZE_MICRO, 1)))
-        selector_row.addWidget(self.image_overlay_count)
+
         options_layout.addLayout(selector_row)
+        options_layout.addWidget(self.image_overlay_count)
         options_layout.addSpacing(8)
 
         image_actions = QHBoxLayout()
@@ -12953,8 +23378,8 @@ class _SettingsPage(QWidget):
         image_controls.setSpacing(Sizes.SPACE_3)
         fit_label = QLabel('Fit')
         set_theme_style(fit_label,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
-        fit_label.setFixedWidth(30)
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
+        fit_label.setFixedWidth(64)
         image_controls.addWidget(fit_label)
         self.image_overlay_fit = _DropdownCombo()
         set_theme_style(self.image_overlay_fit, combo_qss)
@@ -12963,10 +23388,14 @@ class _SettingsPage(QWidget):
         self.image_overlay_fit.currentIndexChanged.connect(
             self._on_image_overlay_fit_changed)
         image_controls.addWidget(self.image_overlay_fit, 1)
+        image_controls.addSpacing(36)
+        options_layout.addLayout(image_controls)
+        image_controls = QHBoxLayout()
+        image_controls.setSpacing(Sizes.SPACE_3)
         opacity_label = QLabel('Opacity')
         set_theme_style(opacity_label,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
-        opacity_label.setFixedWidth(52)
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
+        opacity_label.setFixedWidth(64)
         image_controls.addWidget(opacity_label)
         self.image_overlay_opacity = QSlider(Qt.Orientation.Horizontal)
         self.image_overlay_opacity.setRange(10, 100)
@@ -12977,7 +23406,7 @@ class _SettingsPage(QWidget):
         image_controls.addWidget(self.image_overlay_opacity, 1)
         self.image_overlay_opacity_value = QLabel(
             f"{self.image_overlay_opacity.value()}%")
-        self.image_overlay_opacity_value.setFixedWidth(34)
+        self.image_overlay_opacity_value.setFixedWidth(42)
         set_theme_style(self.image_overlay_opacity_value,
             lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
         image_controls.addWidget(self.image_overlay_opacity_value)
@@ -12989,23 +23418,24 @@ class _SettingsPage(QWidget):
         # window-capture source. The capture worker stays independent of the
         # native replay engine so the eyedropper and intensity slider never
         # trigger an engine restart.
-        option_header('Third-party keyboard')
+        options_layout = option_section('Keyboard')
         keyboard_config = third_party_keyboard_settings(self.sm)
         self.keyboard_overlay_check = QCheckBox(
-            'Show external keyboard in clips')
+            'Enable keyboard overlay')
         set_theme_style(self.keyboard_overlay_check, checkbox_qss)
         self.keyboard_overlay_check.setChecked(keyboard_config['enabled'])
         self.keyboard_overlay_check.toggled.connect(
             self._on_keyboard_overlay_toggled)
-        options_layout.addWidget(self.keyboard_overlay_check)
+        options_layout.addWidget(SettingHelp(self.keyboard_overlay_check,
+            'Show a keyboard visualizer in your clips. Select its window below, then pick its background color to hide it.'))
         options_layout.addSpacing(8)
 
         keyboard_window_row = QHBoxLayout()
         keyboard_window_row.setSpacing(Sizes.SPACE_3)
         keyboard_window_label = QLabel('Window')
         set_theme_style(keyboard_window_label,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
-        keyboard_window_label.setFixedWidth(58)
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
+        keyboard_window_label.setFixedWidth(64)
         keyboard_window_row.addWidget(keyboard_window_label)
         self.keyboard_window_combo = _DropdownCombo()
         set_theme_style(self.keyboard_window_combo, combo_qss)
@@ -13014,7 +23444,7 @@ class _SettingsPage(QWidget):
         keyboard_window_row.addWidget(self.keyboard_window_combo, 1)
         keyboard_refresh = IconButton('refresh.png', label='Refresh')
         keyboard_refresh.setObjectName('micRefreshBtn')
-        keyboard_refresh.setFixedSize(26, 26)
+        keyboard_refresh.setFixedSize(28, 28)
         keyboard_refresh.setToolTip('Re-scan external keyboard windows')
         keyboard_refresh.clicked.connect(self._refresh_keyboard_windows)
         keyboard_window_row.addWidget(keyboard_refresh)
@@ -13034,8 +23464,8 @@ class _SettingsPage(QWidget):
         keyboard_color_row.setSpacing(Sizes.SPACE_3)
         keyboard_color_label = QLabel('Key color')
         set_theme_style(keyboard_color_label,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
-        keyboard_color_label.setFixedWidth(58)
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
+        keyboard_color_label.setFixedWidth(64)
         keyboard_color_row.addWidget(keyboard_color_label)
         self.keyboard_color_swatch = QPushButton()
         self.keyboard_color_swatch.setFixedSize(36, 26)
@@ -13060,8 +23490,8 @@ class _SettingsPage(QWidget):
         keyboard_intensity_row.setSpacing(Sizes.SPACE_3)
         keyboard_intensity_label = QLabel('Intensity')
         set_theme_style(keyboard_intensity_label,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
-        keyboard_intensity_label.setFixedWidth(58)
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
+        keyboard_intensity_label.setFixedWidth(64)
         keyboard_intensity_row.addWidget(keyboard_intensity_label)
         self.keyboard_intensity = _SettingsSlider(Qt.Orientation.Horizontal)
         self.keyboard_intensity.setRange(0, 100)
@@ -13072,35 +23502,32 @@ class _SettingsPage(QWidget):
         keyboard_intensity_row.addWidget(self.keyboard_intensity, 1)
         self.keyboard_intensity_value = QLabel(
             f"{keyboard_config['intensity']}%")
-        self.keyboard_intensity_value.setFixedWidth(34)
+        self.keyboard_intensity_value.setFixedWidth(42)
         set_theme_style(self.keyboard_intensity_value,
             lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
         keyboard_intensity_row.addWidget(self.keyboard_intensity_value)
         options_layout.addLayout(keyboard_intensity_row)
         options_layout.addSpacing(6)
 
-        keyboard_hint = QLabel(
-            'Capture a Noboard/NohBoard-style window, then click its solid '
-            'background above. Changes are applied to the live preview '
-            'immediately.')
-        keyboard_hint.setWordWrap(True)
-        set_theme_style(keyboard_hint, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
-        options_layout.addWidget(keyboard_hint)
         pass
         self._refresh_keyboard_windows()
         self._sync_keyboard_color_swatch(keyboard_config['color'])
         self._sync_keyboard_overlay_controls()
         options_layout.addSpacing(20)
 
-        option_header('Preview background')
+        background_controls = QWidget()
+        background_layout = QVBoxLayout(background_controls)
+        background_layout.setContentsMargins(0, 0, 0, 0)
+        background_layout.setSpacing(8)
+        background_layout.addWidget(QLabel('Preview background'))
         self.input_overlay_preview_background_path = QLineEdit(
-            preview_background_path or 'DEFAULT · DESKTOP SCREENSHOT')
+            preview_background_path or 'Default background')
         self.input_overlay_preview_background_path.setReadOnly(True)
         self.input_overlay_preview_background_path.setToolTip(
             str(self._default_overlay_preview_background_path())
             if not preview_background_path else preview_background_path)
-        set_theme_style(self.input_overlay_preview_background_path, combo_qss)
-        options_layout.addWidget(self.input_overlay_preview_background_path)
+        set_theme_style(self.input_overlay_preview_background_path, lineedit_qss)
+        background_layout.addWidget(self.input_overlay_preview_background_path)
         options_layout.addSpacing(6)
         source_buttons = QHBoxLayout()
         source_buttons.setSpacing(Sizes.SPACE_3)
@@ -13116,8 +23543,8 @@ class _SettingsPage(QWidget):
         newest_preview.clicked.connect(
             self._use_default_input_overlay_preview_background)
         source_buttons.addWidget(newest_preview)
-        options_layout.addLayout(source_buttons)
-        options_layout.addStretch()
+        background_layout.addLayout(source_buttons)
+        sections_layout.addStretch()
 
         # Composite preview
         preview_panel = QFrame()
@@ -13125,10 +23552,10 @@ class _SettingsPage(QWidget):
         set_theme_style(preview_panel,
             lambda: ('QFrame#overlayPreviewPanel { background: transparent; border: none; }'))
         preview_layout = QVBoxLayout(preview_panel)
-        preview_layout.setContentsMargins(Sizes.ROW_GAP, 0, 0, 0)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(8)
         preview_header = QHBoxLayout()
-        preview_title = QLabel('Composite preview')
+        preview_title = QLabel('Preview')
         set_theme_style(preview_title, lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_LABEL, 2)))
         preview_header.addWidget(preview_title)
         preview_header.addStretch()
@@ -13140,7 +23567,7 @@ class _SettingsPage(QWidget):
         self.input_overlay_preview_source.setToolTip(
             preview_background_path
             or str(self._default_overlay_preview_background_path()))
-        preview_header.addWidget(self.input_overlay_preview_source)
+        self.input_overlay_preview_source.hide()  # Full path is shown beneath the preview.
         preview_layout.addLayout(preview_header)
 
         self.unified_overlay_editor = UnifiedOverlayPreview()
@@ -13163,10 +23590,23 @@ class _SettingsPage(QWidget):
             self._on_input_overlay_rects_changed)
         self.unified_overlay_editor.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.unified_overlay_editor.setMinimumSize(360, 240)
         preview_layout.addWidget(self.unified_overlay_editor, 1)
-        columns.addWidget(options, 0)
-        columns.addWidget(preview_panel, 1)
-        layout.addLayout(columns, 1)
+        preview_layout.addWidget(background_controls)
+        for combo in (self.camera_device_combo, self.image_overlay_selector,
+                      self.image_overlay_fit, self.keyboard_window_combo):
+            combo.setMinimumWidth(0)
+            combo.setMinimumContentsLength(12)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            combo.currentTextChanged.connect(combo.setToolTip)
+            combo.setToolTip(combo.currentText())
+        if image_enabled:
+            self._overlay_sections['Images'].expand()
+        if keyboard_config['enabled']:
+            self._overlay_sections['Keyboard'].expand()
+        from ui.settings_layout import SettingsSectionPair
+        layout.addWidget(SettingsSectionPair(options, preview_panel))
 
         self._camera_preview_timer = QTimer(self)
         self._camera_preview_timer.setInterval(100)
@@ -13208,7 +23648,7 @@ class _SettingsPage(QWidget):
         layout.addWidget(_flat_section_header('Camera Overlay'))
         layout.addSpacing(12)
 
-        self.camera_check = QCheckBox('Burn camera overlay into clips')
+        self.camera_check = QCheckBox('Enable camera overlay')
         set_theme_style(self.camera_check, checkbox_qss)
         self.camera_check.setChecked(self.sm.get('camera_enabled', False))
         self.camera_check.toggled.connect(self._on_camera_toggled)
@@ -13219,7 +23659,7 @@ class _SettingsPage(QWidget):
         cam_dev_row.setSpacing(8)
         _dev_lbl = QLabel('Device')
         set_theme_style(_dev_lbl,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
         _dev_lbl.setFixedWidth(80)
         cam_dev_row.addWidget(_dev_lbl)
         self.camera_device_combo = _DropdownCombo()
@@ -13258,7 +23698,7 @@ class _SettingsPage(QWidget):
 
         image_path = str(self.sm.get('image_overlay_path', '') or '')
         image_enabled = bool(self.sm.get('image_overlay_enabled', False))
-        self.image_overlay_check = QCheckBox('Burn an image into clips')
+        self.image_overlay_check = QCheckBox('Enable image overlay')
         set_theme_style(self.image_overlay_check, checkbox_qss)
         self.image_overlay_check.setChecked(image_enabled)
         self.image_overlay_check.toggled.connect(self._on_image_overlay_toggled)
@@ -13269,7 +23709,7 @@ class _SettingsPage(QWidget):
         image_row.setSpacing(8)
         image_label = QLabel('Image')
         set_theme_style(image_label,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
         image_label.setFixedWidth(80)
         image_row.addWidget(image_label)
         self.image_overlay_path = QLineEdit(image_path)
@@ -13292,7 +23732,7 @@ class _SettingsPage(QWidget):
         image_controls.setSpacing(8)
         fit_label = QLabel('Placement')
         set_theme_style(fit_label,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
         fit_label.setFixedWidth(80)
         image_controls.addWidget(fit_label)
         self.image_overlay_fit = _DropdownCombo()
@@ -13307,7 +23747,7 @@ class _SettingsPage(QWidget):
         image_controls.addWidget(self.image_overlay_fit, 1)
         opacity_label = QLabel('Opacity')
         set_theme_style(opacity_label,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
         opacity_label.setFixedWidth(72)
         image_controls.addWidget(opacity_label)
         self.image_overlay_opacity = QSlider(Qt.Orientation.Horizontal)
@@ -13381,7 +23821,7 @@ class _SettingsPage(QWidget):
         theme_fonts = theme.get_fonts()
         Fonts.configure(theme_fonts.get('display'), theme_fonts.get('body'))
         # Patch the Colors class at runtime so all future QSS references use
-        # the custom values. This is a one-time operation per Apply click.
+        # the custom values.
         from ui.style import Colors as C
         for token, value in colors.items():
             if hasattr(C, token):
@@ -13396,6 +23836,7 @@ class _SettingsPage(QWidget):
             apply_app_style(app)
         # Re-apply styles for this settings page
         self._apply_styles()
+        QTimer.singleShot(0, self._fit_category_bar)
         self._set_settings_content_surface()
         # Detached editors, popups and dialogs are also part of the live UI.
         for surface in (app.topLevelWidgets() if app is not None else [self.window()]):
@@ -13416,6 +23857,12 @@ class _SettingsPage(QWidget):
         if hasattr(top, '_apply_theme'):
             top._apply_theme()
 
+    def set_ultra_performance_mode(self, enabled):
+        check = self.__dict__.get('ultra_performance_check')
+        if check is not None:
+            with QSignalBlocker(check):
+                check.setChecked(bool(enabled))
+
     def _make_performance_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -13423,29 +23870,36 @@ class _SettingsPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        from ui.settings_layout import folded_settings_section
+        root_layout = layout
+        root_layout.setSpacing(12)
+        ultra_section, layout = folded_settings_section('Ultra performance mode', expanded=True)
+        root_layout.addWidget(ultra_section)
+        layout.addSpacing(8)
+        self.ultra_performance_check = QCheckBox('Enable Ultra Performance mode')
+        self.ultra_performance_check.setChecked(bool(self.sm.get('ultra_performance_mode', False)))
+        set_theme_style(self.ultra_performance_check, checkbox_qss)
+        self.ultra_performance_check.toggled.connect(self.ultra_performance_mode_changed.emit)
+        from ui.settings_layout import SettingHelp
+        layout.addWidget(SettingHelp(self.ultra_performance_check,
+            'Keep recording and saving clips while pausing the library, editor, uploads and overlays. Your usual settings return when you turn this off. Saves already in progress finish first.'))
+
         from core.ui_performance import PRESETS, UI_OPTIONS
-        layout.addWidget(_flat_section_header('Interface performance'))
+        interface_section, layout = folded_settings_section('Interface performance')
+        root_layout.addWidget(interface_section)
         layout.addSpacing(12)
         self.ui_performance_preset_combo = _DropdownCombo()
         self.ui_performance_preset_combo.setAccessibleName('Interface performance preset')
         self.ui_performance_preset_combo.addItems([*PRESETS, 'Custom'])
         set_theme_style(self.ui_performance_preset_combo, combo_qss)
-        layout.addWidget(self.ui_performance_preset_combo)
-        hint = QLabel(
-            'Choose a preset, or adjust the options below to suit your PC. '
-            'Impact shows how much each option may help your PC run more smoothly; '
-            'results depend on how you use the app. These settings do not change '
-            'recording or export quality.')
-        hint.setWordWrap(True)
-        set_theme_style(hint, lambda: label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
-        layout.addWidget(hint)
+        layout.addWidget(SettingHelp(self.ui_performance_preset_combo,
+            'Choose how much work the interface does. Recording and export quality stay the same. You can also change each option below.'))
         layout.addSpacing(12)
         self._ui_performance_checks = {}
         aliases = {'pause_ui_in_background': 'performance_background_pause_check',
-                   'reduce_ui_animations': 'reduce_ui_animations_check',
                    'clip_editor_live_preview': 'performance_clip_preview_check'}
-        for key, default, title, impact, tip in UI_OPTIONS:
-            check = QCheckBox(f'{title} · {impact} impact')
+        for key, default, title, _impact, tip in UI_OPTIONS:
+            check = QCheckBox(title)
             check.setObjectName(key + '_performance_check')
             check.setToolTip(tip)
             set_theme_style(check, checkbox_qss)
@@ -13455,22 +23909,19 @@ class _SettingsPage(QWidget):
             self._ui_performance_checks[key] = check
             if key in aliases:
                 setattr(self, aliases[key], check)
-            layout.addWidget(check)
-            detail = QLabel(tip)
-            detail.setWordWrap(True)
-            set_theme_style(detail, lambda: label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
-            layout.addWidget(detail)
+            layout.addWidget(SettingHelp(check, tip))
             layout.addSpacing(12)
         self._sync_ui_performance_controls()
         self.ui_performance_preset_combo.currentTextChanged.connect(self._apply_ui_performance_preset)
-        layout.addSpacing(16)
 
-        layout.addWidget(_flat_section_header('Clip exports'))
+        exports_section, layout = folded_settings_section('Clip exports')
+        root_layout.addWidget(exports_section)
         layout.addSpacing(12)
         self.parallel_exports_check = QCheckBox('Allow simultaneous exports')
         self.parallel_exports_check.setChecked(bool(self.sm.get('parallel_exports', False)))
         set_theme_style(self.parallel_exports_check, checkbox_qss)
-        layout.addWidget(self.parallel_exports_check)
+        layout.addWidget(SettingHelp(self.parallel_exports_check,
+            'Export more than one clip at a time. This uses more of your PC and may affect games or recording. Turn it off to export clips one at a time.'))
         self.parallel_export_limit_combo = _DropdownCombo()
         self.parallel_export_limit_combo.setAccessibleName('Maximum simultaneous exports')
         for count in (2, 3, 4):
@@ -13480,18 +23931,11 @@ class _SettingsPage(QWidget):
         self.parallel_export_limit_combo.setEnabled(self.parallel_exports_check.isChecked())
         set_theme_style(self.parallel_export_limit_combo, combo_qss)
         layout.addWidget(self.parallel_export_limit_combo)
-        export_hint = QLabel(
-            'Off by default: clips export one at a time. You can keep browsing and queue more clips. '
-            'Simultaneous exports use more CPU, GPU, memory and disk bandwidth and can affect '
-            'recording or games. Lowering the limit lets running jobs finish before starting more.')
-        export_hint.setWordWrap(True)
-        set_theme_style(export_hint, lambda: label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
-        layout.addWidget(export_hint)
         from ui.export_jobs import show_export_jobs
         jobs_button = QPushButton('View export jobs')
-        set_theme_style(jobs_button, button_primary_qss)
+        set_theme_style(jobs_button, button_outline_qss)
         jobs_button.clicked.connect(show_export_jobs)
-        layout.addWidget(jobs_button)
+        layout.addWidget(jobs_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         def save_export_performance(*_):
             enabled = self.parallel_exports_check.isChecked()
@@ -13504,15 +23948,13 @@ class _SettingsPage(QWidget):
 
         self.parallel_exports_check.toggled.connect(save_export_performance)
         self.parallel_export_limit_combo.currentIndexChanged.connect(save_export_performance)
-        layout.addSpacing(20)
-        layout.addWidget(_settings_hsep())
-        layout.addSpacing(20)
 
-        layout.addWidget(_flat_section_header('Audio Processing'))
+        audio_section, layout = folded_settings_section('Audio capture')
+        root_layout.addWidget(audio_section)
         layout.addSpacing(12)
 
         self.performance_audio_check = QCheckBox(
-            'Enable audio capture · Medium impact')
+            'Enable audio capture')
         set_theme_style(self.performance_audio_check, checkbox_qss)
         self.performance_audio_check.toggled.connect(
             self._on_audio_capture_toggled)
@@ -13524,16 +23966,7 @@ class _SettingsPage(QWidget):
         # Keep the NVIDIA quality/performance choice available from the
         # performance-oriented settings tab as well as Clip. Both controls
         # write the same persisted encoder_preset value.
-        self.performance_encoder_section = QWidget()
-        self.performance_encoder_section.setStyleSheet(
-            'background: transparent;')
-        performance_encoder_layout = QVBoxLayout(
-            self.performance_encoder_section)
-        performance_encoder_layout.setContentsMargins(0, 0, 0, 0)
-        performance_encoder_layout.setSpacing(0)
-        performance_encoder_layout.addWidget(
-            _flat_section_header('Video Encoding'))
-        performance_encoder_layout.addSpacing(12)
+        self.performance_encoder_section, performance_encoder_layout = folded_settings_section('Video encoding')
 
         performance_encoder_row = QWidget()
         performance_encoder_row.setStyleSheet('background: transparent;')
@@ -13543,7 +23976,7 @@ class _SettingsPage(QWidget):
         performance_encoder_label = QLabel('NVIDIA preset')
         performance_encoder_label.setFixedWidth(140)
         set_theme_style(performance_encoder_label,
-            lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_MICRO, Fonts.TRACK_LABEL)))
+            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
         performance_encoder_row_layout.addWidget(performance_encoder_label)
 
         self.performance_encoder_preset_combo = _DropdownCombo()
@@ -13559,34 +23992,21 @@ class _SettingsPage(QWidget):
         self.performance_encoder_preset_row = performance_encoder_row
         self.performance_encoder_preset_row.setVisible(False)
 
-        performance_encoder_actions = QHBoxLayout()
-        performance_encoder_actions.setContentsMargins(0, 8, 0, 0)
-        performance_encoder_actions.setSpacing(Sizes.ROW_GAP)
-        self.performance_encoder_apply_btn = QPushButton('Apply')
-        set_theme_style(self.performance_encoder_apply_btn, button_primary_qss)
-        self.performance_encoder_apply_btn.setVisible(False)
-        self.performance_encoder_apply_btn.clicked.connect(
-            self._on_encoder_apply)
-        performance_encoder_actions.addWidget(
-            self.performance_encoder_apply_btn)
-        performance_encoder_actions.addStretch()
-        performance_encoder_layout.addLayout(performance_encoder_actions)
+        self.performance_encoder_save_error = self._encoder_save_error_label()
+        performance_encoder_layout.addWidget(self.performance_encoder_save_error)
         self.performance_encoder_preset_combo.currentIndexChanged.connect(
             self._on_performance_encoder_preset_changed)
         self.performance_encoder_section.setVisible(False)
-        layout.addWidget(self.performance_encoder_section)
+        root_layout.addWidget(self.performance_encoder_section)
 
-        layout.addSpacing(28)
-        layout.addWidget(_settings_hsep())
-        layout.addSpacing(20)
 
-        layout.addStretch()
+        root_layout.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         set_theme_style(scroll, scrollbar_qss)
-        layout.setContentsMargins(0, 0, 12, 20)
+        root_layout.setContentsMargins(0, 0, 12, 20)
         scroll.setWidget(page)
         return scroll
 
@@ -13623,7 +24043,6 @@ class _SettingsPage(QWidget):
 
     def _apply_ui_performance_runtime(self):
         from ui.clip_viewer import ClipViewer, _TIMELINE_IMAGE_CACHE, _TIMELINE_CACHE_LOCK
-        set_reduce_motion(self.sm.get('reduce_ui_animations', False))
         self.background_ui_pause_changed.emit(bool(self.sm.get('pause_ui_in_background', True)))
         timeline = bool(self.sm.get('timeline_preview_strip_enabled', True))
         for widget in QApplication.instance().allWidgets():
@@ -13643,11 +24062,6 @@ class _SettingsPage(QWidget):
                 if timer is not None:
                     timer.stop()
         self._sync_ui_performance_controls()
-
-    def _on_reduce_ui_animations_toggled(self, checked: bool):
-        self.sm.set('reduce_ui_animations', bool(checked))
-        self.sm.save_settings()
-        set_reduce_motion(checked)
 
     def _on_background_ui_pause_toggled(self, checked: bool):
         if self.sm is None:
@@ -13678,17 +24092,36 @@ class _SettingsPage(QWidget):
         self.sm.save_settings()
         self.capture_card_changed.emit(checked)
 
+    def _encoder_probe_context(self):
+        def setting_int(key, default):
+            try:
+                return int(self.sm.get(key, default))
+            except (TypeError, ValueError):
+                # Malformed persisted numbers use the same safe probe defaults.
+                return default
+        resolution = self.sm.get('resolution', 'source')
+        width, height = _resolution_to_dims(resolution)
+        quality = self.sm.get('bitrate_level', 'medium')
+        bitrate = (setting_int('custom_bitrate_kbps', 25000) if quality == 'custom'
+                   else BITRATE_PRESETS.get(resolution, BITRATE_PRESETS['source']).get(quality, 25000))
+        return GpuProbeContext(
+            monitor=str(self.sm.get('capture_monitor', '') or ''),
+            width=width, height=height, fps=setting_int('framerate', 60),
+            bitrate_kbps=max(500, min(200000, bitrate)),
+            preset=setting_int('encoder_preset', 4),
+            fit=int(self.sm.get('scaling_mode', 'stretch') == 'fit'))
+
     def _start_encoder_probe(self, *, force: bool = False):
-        if self._encoder_probe_started and not force:
+        settings_context = self._encoder_probe_context()
+        if (self._encoder_probe_started and not force
+                and self.__dict__.get('_encoder_probe_settings_context') == settings_context):
             return
         self._encoder_probe_started = True
-        if not force:
-            cached = load_cached_encoder_capabilities()
-            if cached is not None:
-                self._encoder_probe_from_cache = True
-                self._on_encoder_capabilities_ready(cached)
-                return
-
+        self._encoder_probe_settings_context = settings_context
+        epoch = self.__dict__.get('_encoder_probe_epoch', 0) + 1
+        self._encoder_probe_epoch = epoch
+        engine = getattr(self.window(), 'engine_path', None)
+        engine = str(engine) if engine else None
         self._encoder_probe_from_cache = False
         if 'encoder_combo' in self.__dict__:
             self.encoder_detection_lbl.setText('Checking this device…')
@@ -13697,10 +24130,25 @@ class _SettingsPage(QWidget):
             self.codec_combo.setEnabled(False)
 
         def _probe():
-            capabilities = probe_encoder_capabilities()
-            save_encoder_capabilities_cache(capabilities)
+            # Monitor enumeration, executable hashing, cache IO and driver
+            # initialization all stay off the GUI thread.
+            context = settings_context
+            valid = True
+            if sys.platform == 'win32':
+                selection = resolve_monitor_selection(
+                    context.monitor, enumerate_windows_monitors())
+                valid = bool(selection.path)
+                context = GpuProbeContext(**{**context.__dict__, 'monitor': selection.path or ''})
+            options = dict(engine=engine, context=context)
+            cached = (load_cached_encoder_capabilities(**options)
+                      if not force and valid else None)
+            capabilities = (cached if cached is not None else
+                            probe_encoder_capabilities(**options) if valid else ())
+            if cached is None and valid:
+                save_encoder_capabilities_cache(capabilities, **options)
             try:
-                self.encoder_capabilities_ready.emit(capabilities)
+                self.encoder_capabilities_ready.emit(
+                    (epoch, settings_context, capabilities, cached is not None))
             except RuntimeError:
                 # Closing Settings while driver probing is in flight deletes
                 # the Qt signal source; the result then has no consumer.
@@ -13710,6 +24158,15 @@ class _SettingsPage(QWidget):
             target=_probe, name='fthr-encoder-probe', daemon=True).start()
 
     def _on_encoder_capabilities_ready(self, capabilities):
+        if (isinstance(capabilities, tuple) and len(capabilities) == 4
+                and isinstance(capabilities[1], GpuProbeContext)):
+            epoch, context, capabilities, from_cache = capabilities
+            if epoch != self._encoder_probe_epoch:
+                return
+            if context != self._encoder_probe_context():
+                self._start_encoder_probe(force=True)
+                return
+            self._encoder_probe_from_cache = from_cache
         self._encoder_capabilities = tuple(capabilities)
         self._encoder_inventory_ready = True
         if 'encoder_combo' not in self.__dict__:
@@ -13753,11 +24210,12 @@ class _SettingsPage(QWidget):
                 self.encoder_detection_lbl.text() + f' Saved '
                 f'{saved_encoder_label} is not verified for selected monitor; '
                 'initialization validates.')
-        if sys.platform == 'win32':
+        if sys.platform == 'win32' and any(
+                item.key != 'software' for item in self._encoder_capabilities):
             self.encoder_detection_lbl.setText(
                 self.encoder_detection_lbl.text() +
-                ' Probe is initialization-only on the default adapter; '
-                'availability is not a monitor capability guarantee.')
+                ' Hardware checked with GPU input for this monitor and capture preset; '
+                'game capture is validated when recording starts.')
         self._sync_encoder_controls(mark_dirty=False)
 
     def _sync_encoder_controls(self, *, mark_dirty: bool, refresh_clip=True):
@@ -13765,8 +24223,6 @@ class _SettingsPage(QWidget):
         encoder = (self.encoder_combo.currentData() or 'auto' if clip_loaded
                    else self.sm.get('encoder_pref', 'auto'))
         unverified_codec = False
-        if mark_dirty:
-            self._encoder_dirty = True
         if clip_loaded and refresh_clip:
             supported_codecs = available_codecs(self._encoder_capabilities, str(encoder))
             saved_codec = str(self.sm.get('codec_pref', 'auto'))
@@ -13804,11 +24260,10 @@ class _SettingsPage(QWidget):
         if clip_loaded:
             self.encoder_preset_row.setVisible(supports_presets)
             self.encoder_preset_combo.setEnabled(supports_presets)
-            if self._pending_encoder_preset is not None:
-                self.encoder_preset_combo.blockSignals(True)
-                self.encoder_preset_combo.setCurrentIndex(
-                    max(0, self.encoder_preset_combo.findData(preset)))
-                self.encoder_preset_combo.blockSignals(False)
+            self.encoder_preset_combo.blockSignals(True)
+            self.encoder_preset_combo.setCurrentIndex(
+                max(0, self.encoder_preset_combo.findData(preset)))
+            self.encoder_preset_combo.blockSignals(False)
             preset = int(self.encoder_preset_combo.currentData() or 4)
         if 'performance_encoder_section' in self.__dict__:
             self.performance_encoder_section.setVisible(supports_presets)
@@ -13818,48 +24273,58 @@ class _SettingsPage(QWidget):
                 max(0, self.performance_encoder_preset_combo.findData(preset)))
             self.performance_encoder_preset_combo.setEnabled(supports_presets)
             self.performance_encoder_preset_combo.blockSignals(False)
-        for name in ('encoder_apply_btn', 'performance_encoder_apply_btn'):
-            control = self.__dict__.get(name)
-            if control is not None and (self._encoder_dirty or self._pending_encoder_preset is not None):
-                control.setVisible(True)
+
+    @staticmethod
+    def _encoder_save_error_label():
+        label = QLabel('Video encoding settings could not be saved. Try again.')
+        label.setWordWrap(True)
+        set_theme_style(label, lambda: label_body(Colors.ERROR, Fonts.SIZE_BODY))
+        label.hide()
+        return label
 
     def _on_performance_encoder_preset_changed(self, index: int):
         self._pending_encoder_preset = int(
             self.performance_encoder_preset_combo.itemData(index) or 4)
         self._sync_encoder_controls(mark_dirty=True)
+        self._on_encoder_apply()
 
     def _on_encoder_setting_changed(self, _idx: int):
         self._pending_encoder_preset = int(self.encoder_preset_combo.currentData() or 4)
         self._sync_encoder_controls(mark_dirty=True)
+        self._on_encoder_apply()
 
     def _on_codec_setting_changed(self, _idx: int):
-        self._encoder_dirty = True
-        for name in ('encoder_apply_btn', 'performance_encoder_apply_btn'):
-            control = self.__dict__.get(name)
-            if control is not None:
-                control.setVisible(True)
+        self._on_encoder_apply()
 
     def _on_encoder_apply(self):
         clip_loaded = 'encoder_combo' in self.__dict__
-        encoder = str(self.encoder_combo.currentData() or 'auto' if clip_loaded
-                      else self.sm.get('encoder_pref', 'auto'))
-        codec = str(self.codec_combo.currentData() or 'auto' if clip_loaded
-                    else self.sm.get('codec_pref', 'auto'))
-        preset = (int(self.encoder_preset_combo.currentData() or 4) if clip_loaded
-                  else self._pending_encoder_preset)
+        clip_ready = clip_loaded and self.encoder_combo.isEnabled()
+        encoder = (self.encoder_combo.currentData() or 'auto' if clip_ready
+                   else self.sm.get('encoder_pref', 'auto'))
+        codec = (self.codec_combo.currentData() or 'auto' if clip_ready
+                 else self.sm.get('codec_pref', 'auto'))
+        preset = self._pending_encoder_preset
         if preset is None:
             preset = int(self.sm.get('encoder_preset', 4))
-        self.sm.set('encoder_pref', encoder)
-        self.sm.set('codec_pref', codec)
-        self.sm.set('encoder_preset', preset)
-        self.sm.save_settings()
+        values = {'encoder_pref': str(encoder), 'codec_pref': str(codec),
+                  'encoder_preset': preset}
         self._pending_encoder_preset = None
-        self._encoder_dirty = False
-        for name in ('encoder_apply_btn', 'performance_encoder_apply_btn'):
-            control = self.__dict__.get(name)
-            if control is not None:
-                control.setVisible(False)
-        self.encoder_config_changed.emit()
+        changed = any(self.sm.get(key, default) != values[key]
+                      for key, default in (('encoder_pref', 'auto'), ('codec_pref', 'auto'),
+                                           ('encoder_preset', 4)))
+        saved = not changed or _persist_setting_changes(self.sm, values)
+        for name in ('encoder_save_error', 'performance_encoder_save_error'):
+            label = self.__dict__.get(name)
+            if label is not None:
+                label.setVisible(not saved)
+        if not saved:
+            if clip_ready:
+                self._on_encoder_capabilities_ready(self._encoder_capabilities)
+            else:
+                self._sync_encoder_controls(mark_dirty=False)
+            return
+        if changed:
+            self.encoder_config_changed.emit()
 
     def _apply_styles(self):
         set_theme_style(self, lambda: (f'''
@@ -13884,12 +24349,14 @@ class _SettingsPage(QWidget):
                 border: none;
                 border-bottom: 2px solid transparent;
                 color: {Colors.TEXT_DIM};
-                font-size: {Fonts.SIZE_LABEL}px;
-                font-family: {Fonts.DISPLAY};
-                letter-spacing: {Fonts.TRACK_LABEL}px;
+                font-size: {Fonts.SIZE_BODY_L}px;
+                font-family: {Fonts.BODY};
                 font-weight: 400;
-                padding: 14px 20px 10px 20px;
-                min-width: 72px;
+                padding: 8px 10px;
+                min-width: 48px;
+            }}
+            QToolButton#settingsTabBtn:focus {{
+                border-bottom: 2px solid {Colors.ACCENT};
             }}
             QToolButton#settingsTabBtn:hover {{
                 background-color: {Colors.SURFACE_3};
@@ -13911,35 +24378,6 @@ class _SettingsPage(QWidget):
                 font-weight: 600;
             }}
             QPushButton#micRefreshBtn:hover {{
-                border-color: {Colors.ACCENT};
-                color: {Colors.ACCENT};
-            }}
-
-            QFrame#garyPanel {{
-                background-color: transparent;
-                border: none;
-            }}
-            QLabel#garyPreview {{
-                background-color: {Colors.BG};
-                border: 1px solid {Colors.BORDER_HI};
-                border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.TEXT_DIM};
-                font-family: {Fonts.DISPLAY};
-                font-size: {Fonts.SIZE_LABEL}px;
-                letter-spacing: 0px;
-            }}
-            QPushButton#garyImageButton {{
-                background-color: transparent;
-                border: 1px solid {Colors.BORDER_HI};
-                border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.TEXT};
-                font-family: {Fonts.DISPLAY};
-                font-size: {Fonts.SIZE_MICRO}px;
-                font-weight: 600;
-                letter-spacing: 0px;
-                padding: 5px 7px;
-            }}
-            QPushButton#garyImageButton:hover {{
                 border-color: {Colors.ACCENT};
                 color: {Colors.ACCENT};
             }}
@@ -14093,7 +24531,6 @@ def main():
     # font. This keeps Oswald reliable for dialogs and native fallbacks too.
     _load_fonts()
     apply_app_style(app)
-    _prewarm_heavy_modules()
 
     from core.instance_activation import InstanceActivationServer
     activation_server = InstanceActivationServer(parent=app)
@@ -14118,6 +24555,12 @@ def main():
         end_diagnostic_session(clean=True)
         return 1
     activation_server.activation_requested.connect(window.restore_main_window)
+    if sys.platform == 'win32':
+        # The uninstaller must reach the normal exit path even on a tray-only
+        # launch, where showing the main window has never created an HWND.
+        window.winId()
+    if not window._ultra_performance:
+        _prewarm_heavy_modules()
     if not background_start:
         if window._desired_maximized:
             window.showMaximized()
@@ -14136,11 +24579,15 @@ def main():
         return app.exec()
     finally:
         try:
+            # ``app.exec`` has ended, so a timer-driven admission transition
+            # needs the explicit bounded emergency path before teardown.
+            window._shutdown_forced = True
             window._perform_full_shutdown()
             activation_server.stop()
             instance_guard.release()
         finally:
-            end_diagnostic_session(clean=True)
+            end_diagnostic_session(
+                clean=not getattr(window, '_shutdown_uncertain_owner', False))
 
 
 if __name__ == '__main__':

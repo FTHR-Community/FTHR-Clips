@@ -7,7 +7,9 @@ Qt objects and can be scanned independently of the UI.
 from __future__ import annotations
 
 import os
+import re
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -16,6 +18,7 @@ from typing import Callable, Iterable
 from core.clip_files import (
     VIDEO_SUFFIXES,
     is_fthr_temporary_dir,
+    is_pending_restore_directory,
     is_library_media_path,
 )
 
@@ -23,6 +26,39 @@ from core.clip_files import (
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 DEFAULT_BATCH_SIZE = 128
 DEFAULT_MAX_WATCHED_DIRECTORIES = 256
+
+_CAPTURE_NAME = re.compile(
+    r'(?P<group>.+)_clip_from_\d{2}[A-Za-z]{3}\d{4}_\d{2}-\d{2}-\d{2}\.mp4', re.I)
+_SCREENSHOT_NAME = re.compile(r'screenshot_from_\d{8}_\d{6}_\d{6}(?:_\d+)?\.png', re.I)
+
+
+def recorded_media_details(path, file_identity, recorded_media=None, *, inspect_native=False):
+    """Return display-only capture evidence; never use this to authorize deletion.
+
+    Older captures predate the registry. Their generated names and embedded
+    capture UUID boxes still identify them after moving a library folder.
+    """
+    # Ordinary scans have no registry mapping; their caller already computed
+    # the canonical identity, so avoid a second realpath normalization.
+    known = (recorded_media.get(canonical_media_path(path))
+             if recorded_media else None)
+    if isinstance(known, Mapping) and known.get('identity') == file_identity:
+        group = known.get('group')
+        return True, group if isinstance(group, str) and group else Path(path).parent.name
+    match = _CAPTURE_NAME.fullmatch(Path(path).name)
+    if match:
+        group = match.group('group')
+        return True, 'Desktop' if group.casefold() == 'desktop' else group
+    if _SCREENSHOT_NAME.fullmatch(Path(path).name):
+        return True, None
+    if inspect_native and Path(path).suffix.casefold() == '.mp4':
+        from core.capture_highlights import CaptureHighlightError, read_capture_highlights
+        try:
+            if read_capture_highlights(path, expected_identity=file_identity) is not None:
+                return True, Path(path).parent.name
+        except (CaptureHighlightError, OSError, ValueError):
+            pass
+    return False, None
 
 
 def canonical_media_path(path: str | os.PathLike[str]) -> str:
@@ -51,8 +87,8 @@ def _is_reparse_or_link(entry: os.DirEntry[str]) -> bool:
     return bool(getattr(info, "st_file_attributes", 0) & _REPARSE_POINT)
 
 
-def _root_is_imported(path: str, imported_roots: tuple[str, ...]) -> bool:
-    identity = canonical_media_path(path)
+def _root_is_imported(identity: str, imported_roots: tuple[str, ...]) -> bool:
+    """Compare a path already canonicalized by the current scan."""
     return any(identity == root or identity.startswith(root + os.sep)
                for root in imported_roots)
 
@@ -68,6 +104,17 @@ class LibraryRecord:
     kind: str
     size: int
     mtime_ns: int
+    st_dev: int | None = None
+    st_ino: int | None = None
+    recorded: bool = False
+    recorded_group: str | None = None
+
+    @property
+    def file_identity(self) -> dict[str, int] | None:
+        values = (self.st_dev, self.st_ino, self.size, self.mtime_ns)
+        if not all(type(value) is int for value in values):
+            return None
+        return dict(zip(('st_dev', 'st_ino', 'size', 'mtime_ns'), values, strict=True))
 
     @property
     def mtime(self) -> float:
@@ -127,6 +174,8 @@ def scan_library(
     on_batch: Callable[[tuple[LibraryRecord, ...]], None] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_watched_directories: int = DEFAULT_MAX_WATCHED_DIRECTORIES,
+    recorded_media: Mapping | None = None,
+    active_output_paths: Iterable[str | os.PathLike[str]] = (),
 ) -> LibraryScanResult:
     """Discover media without following symlinks or Windows reparse points.
 
@@ -135,6 +184,9 @@ def scan_library(
     Callbacks run on the worker and must be lightweight and avoid Qt mutations.
     """
 
+    # Ownership is supplied by the live recorder, not inferred from names or
+    # missing metadata. After a crash, orphan files remain discoverable.
+    active_outputs = frozenset(canonical_media_path(path) for path in active_output_paths)
     primary = normalized_root(primary_root)
     raw_roots: list[tuple[str, bool]] = [(primary, False)]
     seen_roots = {canonical_media_path(primary)}
@@ -191,6 +243,8 @@ def scan_library(
         stack = [root]
         while stack and not cancelled():
             current = stack.pop()
+            if is_pending_restore_directory(current):
+                continue
             current_id = canonical_media_path(current)
             try:
                 info = os.stat(current, follow_symlinks=False)
@@ -239,6 +293,10 @@ def scan_library(
                     stats.candidate_files += 1
                     try:
                         file_info = entry.stat(follow_symlinks=False)
+                        # Windows DirEntry caches omit volume/file IDs. Only
+                        # accepted media candidates need the full stat evidence.
+                        if os.name == 'nt' and (not file_info.st_dev or not file_info.st_ino):
+                            file_info = os.stat(entry.path, follow_symlinks=False)
                         if not stat.S_ISREG(file_info.st_mode):
                             continue
                     except OSError:
@@ -246,11 +304,20 @@ def scan_library(
                         continue
                     display_path = os.path.abspath(os.path.normpath(entry.path))
                     identity = canonical_media_path(display_path)
+                    if identity in active_outputs:
+                        continue
                     suffix = Path(name).suffix.casefold()
                     kind = "video" if suffix in VIDEO_SUFFIXES else "image"
                     prior = records.get(identity)
                     imported_here = imported or _root_is_imported(
-                        display_path, imported_roots)
+                        identity, imported_roots)
+                    file_identity = {
+                        'st_dev': int(file_info.st_dev), 'st_ino': int(file_info.st_ino),
+                        'size': int(file_info.st_size), 'mtime_ns': int(file_info.st_mtime_ns)}
+                    recorded, recorded_group = recorded_media_details(
+                        display_path, file_identity, recorded_media,
+                        inspect_native=imported_here)
+                    imported_here = imported_here and not recorded
                     root_ids = (root_id,)
                     if prior is not None:
                         stats.duplicate_files += 1
@@ -261,7 +328,9 @@ def scan_library(
                         if prior.size == int(file_info.st_size) and prior.mtime_ns == int(file_info.st_mtime_ns):
                             records[identity] = LibraryRecord(
                                 prior.path, identity, root_ids, imported_here,
-                                prior.kind, prior.size, prior.mtime_ns)
+                                prior.kind, prior.size, prior.mtime_ns,
+                                int(file_info.st_dev), int(file_info.st_ino),
+                                recorded, recorded_group)
                             continue
                     record = LibraryRecord(
                         display_path,
@@ -271,6 +340,10 @@ def scan_library(
                         kind,
                         int(file_info.st_size),
                         int(file_info.st_mtime_ns),
+                        int(file_info.st_dev),
+                        int(file_info.st_ino),
+                        recorded,
+                        recorded_group,
                     )
                     records[identity] = record
                     if selected_for_filter(record) and on_batch is not None:

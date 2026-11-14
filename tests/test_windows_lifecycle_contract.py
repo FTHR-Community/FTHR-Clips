@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,8 +32,13 @@ def test_close_to_tray_and_explicit_exit_have_separate_paths():
 
 
 def test_capture_status_is_top_level_and_not_duplicated_inside_popups():
+    from main import MainWindow
+
     assert 'mc.addWidget(self.status_label)' in MAIN_SOURCE
-    assert "self._set_status('APPLYING SETTINGS', status_idle_qss())" in MAIN_SOURCE
+    assert 'self._set_status(self._capture_pending_text(), status_idle_qss())' in MAIN_SOURCE
+    assert MainWindow._capture_pending_text(SimpleNamespace()) == 'APPLYING SETTINGS'
+    restarting = SimpleNamespace(_engine_restart_requested=True)
+    assert MainWindow._capture_pending_text(restarting) == 'RESTARTING ENGINE'
     assert 'apply_state_lbl' not in MAIN_SOURCE
 
 

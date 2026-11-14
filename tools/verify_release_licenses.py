@@ -47,11 +47,8 @@ REQUIRED_TREE_FILES = (
     'licenses/Qt6-LICENSE.txt',
     'licenses/Qt6-SOURCE.txt',
     'licenses/Qt6-THIRD-PARTY-NOTICES.txt',
-    'licenses/Wayland-Protocols-NOTICES.txt',
-    'licenses/AppImage-type2-runtime-LICENSE.txt',
     'licenses/cffi-LICENSE.txt',
     'licenses/pycparser-LICENSE.txt',
-    'tools/appimage_tool_manifest.json',
     'tools/ffmpeg_manifest.json',
     'tools/generate_release_assets.py',
     'tools/qt_runtime_manifest.json',
@@ -90,7 +87,6 @@ QT_DLL_RE = re.compile(r'^Qt6([A-Za-z0-9_]+)\.dll$', re.I)
 QT_SO_RE = re.compile(r'^libQt6([A-Za-z0-9_]+)\.so(?:\..*)?$', re.I)
 REQUIRED_UI_RESOURCE_SOURCES = frozenset((
     'FTHR_UI/ui/qml/VideoPreview.qml',
-    'FTHR_UI/ui/qml/Snapshot.qml',
     'FTHR_UI/ui/qml/color.frag.qsb',
 ))
 
@@ -442,7 +438,7 @@ def check_qt_source_selection(root: Path, rep: Report) -> None:
             rep.ok(f'no {forbidden} package is present in the release lock')
 
     packaging_files = (
-        'requirements.in', 'FTHR.spec', 'FTHR_linux.spec', 'build_linux.sh',
+        'requirements.in', 'FTHR.spec',
     )
     stale: list[str] = []
     for rel in packaging_files:
@@ -914,7 +910,6 @@ def main() -> int:
         check_files(root, REQUIRED_TREE_FILES, rep, 'tree')
         check_project_license(root, rep, 'tree')
         check_manifest(root, rep)
-        check_linux_manifest(root, rep)
         check_python_sources(root, rep)
         check_qt_source_selection(root, rep)
         check_asset_manifest(root, rep)
@@ -923,20 +918,10 @@ def main() -> int:
             scan_dir(vendored, rep, 'vendored ffmpeg')
         else:
             rep.warn('no vendored ffmpeg directory (expected on a Linux checkout)')
-        vendored_linux = root / 'FTHRcapture_linux' / 'third_party' / 'ffmpeg'
-        if vendored_linux.is_dir():
-            scan_dir(vendored_linux, rep, 'vendored ffmpeg (linux)')
-            check_linux_ffmpeg_libs(vendored_linux, rep,
-                                    'vendored ffmpeg (linux)', manifest_root=root)
-            check_linux_engine(
-                root / 'FTHRcapture_linux' / 'build' / 'FTHRclips', rep)
-        else:
-            rep.warn('no vendored linux ffmpeg (run tools/fetch_third_party.py '
-                     '--ffmpeg-linux before a Linux release build)')
         if args.all:
             for cand, kind, platform in (
                     (root / 'dist' / 'FTHRClips', 'windows dist', 'windows'),
-                    (root / 'build' / 'AppDir', 'appdir', 'linux')):
+):
                 if cand.is_dir():
                     check_files(cand, REQUIRED_ARTIFACT_FILES, rep, kind)
                     check_project_license(cand, rep, kind)

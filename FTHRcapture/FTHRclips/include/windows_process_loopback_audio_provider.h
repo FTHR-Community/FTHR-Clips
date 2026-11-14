@@ -10,6 +10,7 @@
 #include "audio_source_model.h"
 #include "save_clip_task.h"
 #include "windows_audio_session_registry.h"
+#include "replay_pause_clock.h"
 
 #include <cstdint>
 #include <functional>
@@ -29,8 +30,11 @@ struct WindowsProcessLoopbackProviderConfig {
     // defined by one deterministic session group.
     bool include_process_tree = true;
     uint32_t retention_seconds = 30;
-    uint32_t bitrate_kbps = 128;
+    std::shared_ptr<ReplayStorage> replay_storage;
+    uint32_t bitrate_kbps = 320;
     AudioSourceMetadata source;
+    std::shared_ptr<ReplayPauseClock> replay_pause_clock;
+    AudioPacketSink packet_sink;
 };
 
 struct WindowsProcessLoopbackRuntimeInfo {
@@ -164,7 +168,10 @@ private:
 // no activation attempt, synthetic source, or per-app metadata is produced.
 class WindowsApplicationAudioSourceManager {
 public:
-    WindowsApplicationAudioSourceManager(uint64_t generation, uint32_t retention_seconds);
+    WindowsApplicationAudioSourceManager(uint64_t generation, uint32_t retention_seconds,
+        std::shared_ptr<ReplayPauseClock> replay_pause_clock = {}, AudioPacketSink packet_sink = {},
+        std::shared_ptr<ReplayStorage> replay_storage = {},
+        std::vector<std::string> excluded_identities = {});
     ~WindowsApplicationAudioSourceManager();
 
     WindowsApplicationAudioSourceManager(const WindowsApplicationAudioSourceManager&) = delete;
@@ -198,6 +205,7 @@ public:
         uint64_t restart_count = 0;
         int64_t largest_gap_100ns = 0;
         uint64_t source_limit_rejections = 0;
+        uint32_t failed_sources = 0;
     };
     RuntimeInfo runtime_info() const;
 

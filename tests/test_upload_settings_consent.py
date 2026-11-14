@@ -171,14 +171,13 @@ def test_failed_connection_test_emits_reason_for_bottom_error_bar(qapp):
     assert failures == ['Provider timed out']
 
 
-def test_auto_compress_setting_is_saved_with_upload_settings(qapp):
+def test_auto_compress_setting_is_saved_automatically(qtbot):
     manager = _Manager()
     widget = upload_ui.UploadSettingsWidget(manager)
 
+    qtbot.addWidget(widget)
     widget.auto_compress_check.setChecked(True)
-    widget._on_save()
-
-    assert manager.values['upload_auto_compress'] is True
+    qtbot.waitUntil(lambda: manager.get('upload_auto_compress') is True)
 
 
 def test_donation_buttons_open_official_provider_pages(qapp, monkeypatch):
@@ -326,3 +325,28 @@ def test_upload_ui_only_offers_supported_providers(qapp):
     assert [widget.provider_combo.itemData(i) for i in range(widget.provider_combo.count())] == [
         'catbox', 'vaultscope', 'custom', 'sftp']
     assert not hasattr(widget, 'lustful_panel')
+
+
+def test_upload_preferences_do_not_save_on_load_and_roll_back_on_failure(qtbot):
+    manager = _Manager()
+    manager.uploader_installed = True
+    manager.provider_versions['catbox'] = CATBOX_LEGAL_VERSION
+    manager.values['upload_enabled'] = True
+    attempts = []
+
+    def reject_save():
+        attempts.append(True)
+        return False
+
+    manager.save_settings = reject_save
+    widget = upload_ui.UploadSettingsWidget(manager)
+    qtbot.addWidget(widget)
+    assert not widget._save_timer.isActive()
+    assert attempts == []
+
+    widget.auto_compress_check.setChecked(True)
+    widget.interval_value.setCurrentIndex(3)
+    qtbot.waitUntil(lambda: not widget._save_error.isHidden())
+    assert attempts == [True]
+    assert manager.get('upload_auto_compress') is False
+    assert manager.get('upload_interval_value') == 5

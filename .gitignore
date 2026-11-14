@@ -176,3 +176,14 @@ FTHRClips_Roadmap.docx
 *.docx
 # Joke/scratch file left in the tree; safe to delete from disk.
 FTHRCLIPS.exe.txt
+
+# Windows branch publication boundaries
+/public_html/
+/plugins/
+/examples/plugins/
+/integrations/
+/AppDir/
+/FTHRcapture_linux/
+/build_linux.sh
+/FTHR_linux.spec
+*.AppImage

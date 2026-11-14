@@ -2,24 +2,58 @@
 
 from types import SimpleNamespace
 from pathlib import Path
+from functools import partial
 
 from core.clip_grouping import clip_group_for_source, sanitize_clip_folder_name
+from core.capture_session import (
+    SourceSnapshot,
+    bind_capture_session,
+    build_resolved_capture_request,
+)
+from core.capture_settings import CaptureConfig, CaptureConfigTracker
 import main as app_main
+from test_capture_admission_integration import _host as _admission_host
+
+
+def _bind_real_admission_helpers(host):
+    for name, descriptor in vars(app_main.MainWindow).items():
+        if not name.startswith('_admission_'):
+            continue
+        helper = getattr(app_main.MainWindow, name)
+        if isinstance(descriptor, staticmethod):
+            setattr(host, name, helper)
+        elif callable(helper):
+            setattr(host, name, partial(helper, host))
+    return host
 
 
 class _Settings:
     def __init__(self, **values):
-        self.values = values
+        self.settings = dict(values)
+        self.values = self.settings
         self.saved = 0
 
     def get(self, key, default=None):
-        return self.values.get(key, default)
+        return self.settings.get(key, default)
+
+    def set(self, key, value):
+        self.settings[key] = value
+
+    def storage_policy_for(self, root, *, strict=False):
+        from core.library_storage import policy_for_root
+
+        return policy_for_root(self, root, strict=strict)
 
     def update(self, values):
-        self.values.update(values)
+        self.settings.update(values)
 
     def save_settings(self):
         self.saved += 1
+
+    def read_capture_admission_policy(self):
+        from core.settings_manager import SettingsManager
+
+        return SettingsManager.read_capture_admission_policy(self)
 
 
 def test_minecraft_java_titles_share_one_future_group():
@@ -79,9 +113,11 @@ def test_manual_and_background_source_use_same_group():
     manual_group = clip_group_for_source(source)
     settings = _Settings(capture_mode='desktop', target_hwnd=0,
                          target_window_name='')
-    fake_main = SimpleNamespace(settings_manager=settings)
+    fake_main = _admission_host(settings)
     assert app_main.MainWindow._set_capture_window_source(
         fake_main, dict(source, hwnd=42))
+    assert fake_main._admission_policy.enabled is False
+    assert 'capture_admission_policy' not in settings.values
     background_group = settings.get('target_clip_group')
     assert manual_group == background_group == 'Minecraft'
 
@@ -144,8 +180,10 @@ def test_switching_to_desktop_clears_previous_group():
     settings = _Settings(capture_mode='window', target_hwnd=42,
                          target_window_name='Minecraft',
                          target_clip_group='Minecraft')
-    fake_main = SimpleNamespace(settings_manager=settings)
+    fake_main = _admission_host(settings)
     assert app_main.MainWindow._set_capture_desktop_source(fake_main)
+    assert fake_main._admission_policy.enabled is False
+    assert 'capture_admission_policy' not in settings.values
     assert settings.get('capture_mode') == 'desktop'
     assert settings.get('target_clip_group') == ''
 
@@ -164,6 +202,7 @@ def test_dynamic_title_does_not_rewrite_same_group_on_each_poll(monkeypatch):
 
     settings = _Settings(
         game_detection_enabled=True,
+        capture_source_authority='automatic',
         game_detection_blacklist=[],
         capture_mode='window',
         target_hwnd=42,
@@ -176,15 +215,20 @@ def test_dynamic_title_does_not_rewrite_same_group_on_each_poll(monkeypatch):
         title='Minecraft 1.21.4 - Multiplayer (',
         exe_path=r'C:\Java\bin\javaw.exe',
         exe_name='javaw.exe',
+        class_name='LWJGL',
     )
-    fake_main = SimpleNamespace(
-        settings_manager=settings,
-        _active_game_window=None,
-        _game_window_hwnd=lambda candidate: candidate.hwnd,
-    )
+    from core.source_authority import window_identity
+    settings.update({'target_window_identity': window_identity(window)})
+    fake_main = _admission_host(settings)
+    fake_main._active_game_window = None
+    fake_main.engine_process = SimpleNamespace(poll=lambda: None)
+    fake_main._game_window_hwnd = lambda candidate: candidate.hwnd
     monkeypatch.setattr(app_main, 'is_capture_window_valid', lambda _hwnd: True)
+    monkeypatch.setattr(app_main, 'get_window_info', lambda _hwnd, own_pid=None: window)
 
     app_main.MainWindow._handle_game_candidate(fake_main, window)
+    assert fake_main._admission_policy.enabled is False
+    assert 'capture_admission_policy' not in settings.values
 
     assert settings.get('target_window_name') == window.display_name
     assert settings.get('target_clip_group') == 'Minecraft'
@@ -212,14 +256,55 @@ def test_background_save_uses_persisted_group(monkeypatch, tmp_path):
         target_hwnd=42,
         target_window_name='Minecraft 1.21.4 - Multiplayer (',
         target_clip_group='Minecraft',
+        clips_directory=str(tmp_path),
+        storage_policies={},
     )
     bridge = _Bridge()
+    config = CaptureConfig(
+        fps=60, buffer_seconds=32, width=1920, height=1080,
+        bitrate_kbps=25_000, codec='h264', preset=4, monitor='',
+        scaling='stretch', audio_enabled=False)
+    source_identity = {
+        'hwnd': 42, 'pid': 321, 'exe_path': r'C:\Games\javaw.exe',
+        'class_name': 'MinecraftWindow', 'process_created': 9876,
+    }
+    accepted_request = build_resolved_capture_request(
+        request_token=1, purpose='clips',
+        source=SourceSnapshot(
+            source_mode='window', exe_path=source_identity['exe_path'],
+            live_identity=source_identity, authority='manual',
+            display_name='Minecraft 1.21.4 - Multiplayer (',
+            clip_group='Minecraft'),
+        capture_config=config, mic_gain_percent=100)
+    tracker = CaptureConfigTracker(active=config)
+    tracker.request(config)
+    accepted_token = tracker.begin_apply()
+    assert tracker.succeed(accepted_token)
+    accepted_session = bind_capture_session(
+        accepted_request, process_generation=1,
+        native_capture_generation=1, accepted_config_token=accepted_token)
+
+    class _Process:
+        def poll(self):
+            return None
+
+    live_window = SimpleNamespace(**source_identity)
+    monkeypatch.setattr(
+        app_main, 'get_window_info', lambda *_args, **_kwargs: live_window)
     fake_main = SimpleNamespace(
         _manual_record_state='idle',
         bridge=bridge,
+        engine_process=_Process(),
+        _engine_gen=1,
+        _engine_process_generation=1,
+        _capture_config=tracker,
+        _accepted_capture_session=accepted_session,
+        _shutdown_requested=False,
+        _shutdown_complete=False,
         _capture_health_snapshot=None,
         capture_card=SimpleNamespace(show_error=lambda: None),
         push_error=lambda *_args, **_kwargs: None,
+        _set_status=lambda *_args, **_kwargs: None,
         _last_save_request=0.0,
         _save_state=_SaveState(),
         settings_manager=settings,
@@ -235,8 +320,20 @@ def test_background_save_uses_persisted_group(monkeypatch, tmp_path):
         _pump_save_responses=lambda: None,
         _capture_health_log=SimpleNamespace(warning=lambda *_args: None),
     )
-    monkeypatch.setattr(
-        app_main, 'clips_directory_from', lambda _settings: tmp_path)
+    fake_main._storage_path_is_owned = (
+        app_main.MainWindow._storage_path_is_owned.__get__(fake_main))
+    fake_main._storage_admission = (
+        app_main.MainWindow._storage_admission.__get__(fake_main))
+    fake_main._accepted_session_owner_is_current = (
+        app_main.MainWindow._accepted_session_owner_is_current.__get__(
+            fake_main))
+    fake_main._camera_runtime_receipt_for_request = (
+        app_main.MainWindow._camera_runtime_receipt_for_request.__get__(
+            fake_main))
+    _bind_real_admission_helpers(fake_main)
+    bridge.get_status = lambda: {
+        'connected': True, 'capture_generation': 1,
+    }
     monkeypatch.setattr(app_main, 'emit_event', lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         app_main, 'evaluate_save_admission',

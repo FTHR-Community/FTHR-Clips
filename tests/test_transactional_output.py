@@ -75,4 +75,4 @@ def test_editor_failure_removes_staged_output_and_never_publishes_final(
 
 
 def test_alpha_volume_popup_exposes_master_only():
-    assert VolumePopup._SOURCES == [('master', 'MASTER')]
+    assert VolumePopup._SOURCES == [('master', 'Master')]

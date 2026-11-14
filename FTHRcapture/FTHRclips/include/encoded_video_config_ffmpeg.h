@@ -22,10 +22,8 @@ namespace fthr {
 
 AVCodecID ToAvCodecId(VideoCodec codec) noexcept;
 
-// Captured desktop frames are SDR full-range BGRA. Every replay backend
-// converts them to studio-range BT.709 YUV; publish that contract in the MP4
-// stream so players do not guess full range and lift the picture/exposure.
-void ApplySdrBt709ColorMetadata(AVCodecParameters* parameters) noexcept;
+// Declare the same limited-range color space as the compressed stream.
+void ApplyVideoColorMetadata(AVCodecParameters* parameters, bool hdr10) noexcept;
 
 // Publish the configured capture values instead of leaving FFmpeg/MP4 readers
 // to infer them from packet timing and payload size. The packet stream remains

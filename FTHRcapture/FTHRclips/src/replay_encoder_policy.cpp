@@ -1,4 +1,5 @@
 #include "replay_encoder.h"
+#include "windows_native_error.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -6,7 +7,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
-#include <dxgi.h>
+#include <dxgi1_2.h>
 
 #include <algorithm>
 #include <cctype>
@@ -130,6 +131,115 @@ EncoderVendor QueryD3D11DeviceVendor(ID3D11Device* device) noexcept {
     return SUCCEEDED(description_result)
         ? EncoderVendorFromPciVendorId(description.VendorId)
         : EncoderVendor::Software;
+}
+
+bool CreateD3D11DeviceForVendor(
+    EncoderVendor vendor,
+    ID3D11Device** device,
+    ID3D11DeviceContext** context,
+    std::string& diagnostic) {
+    if (!device || !context) return false;
+    *device = nullptr;
+    *context = nullptr;
+
+    IDXGIFactory1* factory = nullptr;
+    const HRESULT factory_status = CreateDXGIFactory1(
+        __uuidof(IDXGIFactory1),
+        reinterpret_cast<void**>(&factory));
+    if (FAILED(factory_status) || !factory) {
+        diagnostic = diagnostics::FormatHResultFailure(
+            "CreateDXGIFactory1(encoder adapter search)",
+            factory_status);
+        return false;
+    }
+
+    IDXGIAdapter1* matched_adapter = nullptr;
+    UINT matching_adapters = 0;
+    bool enumeration_failed = false;
+    for (UINT index = 0; ; ++index) {
+        IDXGIAdapter1* adapter = nullptr;
+        const HRESULT enumerated = factory->EnumAdapters1(
+            index, &adapter);
+        if (enumerated == DXGI_ERROR_NOT_FOUND) {
+            break;
+        }
+        if (FAILED(enumerated) || !adapter) {
+            diagnostic = diagnostics::FormatHResultFailure(
+                "IDXGIFactory1::EnumAdapters1(encoder adapter search)",
+                enumerated);
+            enumeration_failed = true;
+            if (adapter) adapter->Release();
+            break;
+        }
+        DXGI_ADAPTER_DESC1 description{};
+        const HRESULT description_status = adapter->GetDesc1(
+            &description);
+        if (FAILED(description_status)) {
+            diagnostic = diagnostics::FormatHResultFailure(
+                "IDXGIAdapter1::GetDesc1(encoder adapter search)",
+                description_status);
+            enumeration_failed = true;
+            adapter->Release();
+            break;
+        }
+        if (!(description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+            && EncoderVendorFromPciVendorId(description.VendorId)
+                == vendor) {
+            ++matching_adapters;
+            if (matching_adapters == 1) {
+                matched_adapter = adapter;
+                adapter = nullptr;
+            }
+        }
+        if (adapter) adapter->Release();
+    }
+    factory->Release();
+    if (matching_adapters > 1) {
+        if (matched_adapter) matched_adapter->Release();
+        diagnostic = "multiple matching hardware encoder adapters were "
+            "found; explicit adapter identity is required";
+        return false;
+    }
+    if (enumeration_failed || matching_adapters == 0 || !matched_adapter) {
+        if (matched_adapter) matched_adapter->Release();
+        if (diagnostic.empty()) {
+            diagnostic = "No matching hardware encoder adapter was found";
+        }
+        return false;
+    }
+
+    D3D_FEATURE_LEVEL feature_level{};
+    const HRESULT device_status = D3D11CreateDevice(
+        matched_adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
+        nullptr, 0, D3D11_SDK_VERSION,
+        device, &feature_level, context);
+    matched_adapter->Release();
+    if (FAILED(device_status)) {
+        if (*device) {
+            (*device)->Release();
+            *device = nullptr;
+        }
+        if (*context) {
+            (*context)->Release();
+            *context = nullptr;
+        }
+        diagnostic = diagnostics::FormatHResultFailure(
+            "D3D11CreateDevice(encoder adapter)", device_status);
+        return false;
+    }
+    if (!*device || !*context) {
+        if (*device) {
+            (*device)->Release();
+            *device = nullptr;
+        }
+        if (*context) {
+            (*context)->Release();
+            *context = nullptr;
+        }
+        diagnostic = "D3D11CreateDevice(encoder adapter) returned no device/context";
+        return false;
+    }
+    return true;
 }
 
 } // namespace fthr

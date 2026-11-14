@@ -3,9 +3,12 @@
 // This helper is intentionally separate from the production executable.  It
 // never creates the shared-memory mapping and never changes application/UI
 // settings.  A uses the pinned FFmpeg AMF API directly with D3D11 hardware
-// frames; B uses the production FfmpegAmfReplayEncoder conversion path; C
+// frames and the production single-texture pool; a-array is an optional legacy
+// array control. B uses the production FfmpegAmfReplayEncoder conversion path; C
 // starts CaptureEngine with an explicitly selected WGC monitor and saves a
 // real replay.  Every path requires an actually enumerated AMD adapter.
+// b-bgra/b-nv12 compare the production BGRA session and the explicit NV12
+// candidate with identical input patterns. No production setting is changed.
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -36,9 +39,11 @@ extern "C" {
 #include "continuous_recording_writer.h"
 #include "ffmpeg_amf_replay_encoder.h"
 #include "windows_monitor_resolver.h"
+#include "wgc_window_lifecycle.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cwchar>
 #include <cstdint>
 #include <cstring>
@@ -55,6 +60,7 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr UINT kAmdVendorId = 0x1002;
+constexpr int kProtocolVersion = 3;
 constexpr int kExitAmdRequired = 20;
 constexpr int kExitAmfUnavailable = 21;
 constexpr int kExitHarnessFailure = 22;
@@ -67,10 +73,10 @@ struct Options {
     std::filesystem::path output;
     std::wstring monitor_path;
     int adapter_index = 0;
-    uint32_t width = 640;
-    uint32_t height = 360;
-    uint32_t output_width = 960;
-    uint32_t output_height = 540;
+    uint32_t width = 1920;
+    uint32_t height = 1080;
+    uint32_t output_width = 1920;
+    uint32_t output_height = 1080;
     uint32_t fps = 60;
     uint32_t frames = 120;
     uint32_t warmup_seconds = 8;
@@ -158,8 +164,9 @@ bool ParseOptions(int argc, wchar_t** argv, Options& options) {
         }
     }
     if (options.mode.empty()
-        || (options.mode != L"probe" && options.mode != L"a"
-            && options.mode != L"b" && options.mode != L"c")) {
+        || (options.mode != L"probe" && options.mode != L"a" && options.mode != L"a-array"
+            && options.mode != L"b" && options.mode != L"b-bgra"
+            && options.mode != L"b-nv12" && options.mode != L"c")) {
         return false;
     }
     if (options.mode != L"probe" && options.output.empty()) return false;
@@ -220,6 +227,23 @@ bool CreateAmdD3D11(
         error = "D3D11CreateDevice(AMD adapter) failed";
         return false;
     }
+    ComPtr<IDXGIDevice> dxgi_device;
+    ComPtr<IDXGIAdapter> actual_adapter;
+    DXGI_ADAPTER_DESC actual_description{};
+    if (FAILED(device.As(&dxgi_device))
+        || FAILED(dxgi_device->GetAdapter(&actual_adapter))
+        || FAILED(actual_adapter->GetDesc(&actual_description))
+        || actual_description.VendorId != 0x1002
+        || actual_description.AdapterLuid.HighPart != adapter.description.AdapterLuid.HighPart
+        || actual_description.AdapterLuid.LowPart != adapter.description.AdapterLuid.LowPart) {
+        error = "created D3D11 device identity does not match the selected AMD adapter";
+        return false;
+    }
+    std::wcout << L"AMD_ISOLATION_DEVICE vendor=AMD adapter=\""
+               << actual_description.Description << L"\" adapter_luid_high="
+               << actual_description.AdapterLuid.HighPart << L" adapter_luid_low="
+               << actual_description.AdapterLuid.LowPart << L" device_identity=verified"
+               << std::endl;
     return true;
 }
 
@@ -245,6 +269,11 @@ std::vector<uint8_t> BuildPattern(
             const bool in_bar = x >= bar_x && x < bar_x + bar_width;
             if (in_bar || (bar_x + bar_width > width && x < (bar_x + bar_width) % width)) {
                 b = 235; g = 235; r = 235;
+            }
+            // Fixed range markers must not be occluded by the moving bar.
+            if (y >= height * 7u / 8u) {
+                constexpr uint8_t levels[] = {0, 64, 128, 255};
+                b = g = r = levels[std::min(3u, x * 4u / width)];
             }
             const size_t offset = (static_cast<size_t>(y) * width + x) * 4u;
             pixels[offset + 0] = b;
@@ -410,6 +439,7 @@ bool ConfigureDirectAmf(
     uint32_t width,
     uint32_t height,
     uint32_t fps,
+    bool array_control,
     AVBufferRef*& device_ctx,
     AVBufferRef*& frames_ctx,
     AVCodecContext*& codec,
@@ -444,7 +474,16 @@ bool ConfigureDirectAmf(
     frames->sw_format = AV_PIX_FMT_BGRA;
     frames->width = static_cast<int>(width);
     frames->height = static_cast<int>(height);
-    frames->initial_pool_size = 8;
+    if (array_control) {
+        // Keep the old layout only as an explicitly requested comparison.
+        frames->initial_pool_size = 8;
+    } else {
+        result = fthr::detail::InstallAmfSingleTexturePool(frames, device);
+        if (result < 0) {
+            error = "InstallAmfSingleTexturePool failed: " + ErrorString(result);
+            return false;
+        }
+    }
     result = av_hwframe_ctx_init(frames_ctx);
     if (result < 0) {
         error = "av_hwframe_ctx_init failed: " + ErrorString(result);
@@ -501,21 +540,49 @@ bool ConfigureDirectAmf(
     return true;
 }
 
+struct InputTextureEvidence {
+    D3D11_TEXTURE2D_DESC description{};
+    uint32_t slice = 0;
+};
+
+bool InspectInputTexture(
+    ID3D11Texture2D* texture, uint32_t slice, bool array_control,
+    InputTextureEvidence& evidence, std::string& error,
+    DXGI_FORMAT expected_format = DXGI_FORMAT_B8G8R8A8_UNORM) {
+    if (!texture) {
+        error = "AMF input texture is unavailable";
+        return false;
+    }
+    texture->GetDesc(&evidence.description);
+    evidence.slice = slice;
+    const auto& desc = evidence.description;
+    if (desc.ArraySize != (array_control ? 8u : 1u)
+        || desc.MipLevels != 1 || slice >= desc.ArraySize
+        || desc.Format != expected_format || desc.SampleDesc.Count != 1) {
+        error = "actual AMF input texture does not match requested layout/format";
+        return false;
+    }
+    return true;
+}
+
 int RunDirectA(const Options& options, const AmdAdapter& adapter) {
+    const bool array_control = options.mode == L"a-array";
+    const char* stage = array_control ? "A_ARRAY" : "A";
+    const wchar_t* wide_stage = array_control ? L"A_ARRAY" : L"A";
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     std::string error;
     if (!CreateAmdD3D11(adapter, device, context, error)) {
-        std::cerr << "AMD_ISOLATION_FAILURE stage=A reason=" << error << std::endl;
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason=" << error << std::endl;
         return kExitHarnessFailure;
     }
     AVBufferRef* device_ctx = nullptr;
     AVBufferRef* frames_ctx = nullptr;
     AVCodecContext* codec = nullptr;
     if (!ConfigureDirectAmf(
-            device.Get(), options.width, options.height, options.fps,
+            device.Get(), options.width, options.height, options.fps, array_control,
             device_ctx, frames_ctx, codec, error)) {
-        std::cerr << "AMD_ISOLATION_FAILURE stage=A reason=" << error << std::endl;
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason=" << error << std::endl;
         avcodec_free_context(&codec);
         av_buffer_unref(&frames_ctx);
         av_buffer_unref(&device_ctx);
@@ -524,7 +591,7 @@ int RunDirectA(const Options& options, const AmdAdapter& adapter) {
     }
     const auto extradata = BuildAvccExtradata(codec);
     if (extradata.empty()) {
-        std::cerr << "AMD_ISOLATION_FAILURE stage=A reason=missing_avcC_extradata"
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason=missing_avcC_extradata"
                   << std::endl;
         avcodec_free_context(&codec);
         av_buffer_unref(&frames_ctx);
@@ -542,7 +609,7 @@ int RunDirectA(const Options& options, const AmdAdapter& adapter) {
     video_config.codec_extradata = extradata;
     fthr::ContinuousRecordingWriter writer;
     if (!writer.Start(options.output, video_config)) {
-        std::cerr << "AMD_ISOLATION_FAILURE stage=A reason=writer_start_failed "
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason=writer_start_failed "
                   << writer.LastError() << std::endl;
         avcodec_free_context(&codec);
         av_buffer_unref(&frames_ctx);
@@ -552,7 +619,7 @@ int RunDirectA(const Options& options, const AmdAdapter& adapter) {
     AVFrame* frame = av_frame_alloc();
     AVPacket* packet = av_packet_alloc();
     if (!frame || !packet) {
-        std::cerr << "AMD_ISOLATION_FAILURE stage=A reason=ffmpeg_alloc_failed"
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason=ffmpeg_alloc_failed"
                   << std::endl;
         writer.Stop();
         av_frame_free(&frame);
@@ -563,6 +630,7 @@ int RunDirectA(const Options& options, const AmdAdapter& adapter) {
         return kExitHarnessFailure;
     }
     uint64_t packet_count = 0;
+    InputTextureEvidence input_evidence;
     int64_t first_pts = -1;
     int64_t last_pts = -1;
     auto drain = [&]() -> bool {
@@ -605,7 +673,9 @@ int RunDirectA(const Options& options, const AmdAdapter& adapter) {
     bool success = true;
     for (uint32_t index = 0; index < options.frames && success; ++index) {
         av_frame_unref(frame);
-        const int allocation = av_hwframe_get_buffer(frames_ctx, frame, 0);
+        const int allocation = array_control
+            ? av_hwframe_get_buffer(frames_ctx, frame, 0)
+            : fthr::detail::AcquireAmfInputFrame(frames_ctx, frame);
         if (allocation < 0) {
             error = "av_hwframe_get_buffer failed: " + ErrorString(allocation);
             success = false;
@@ -614,6 +684,11 @@ int RunDirectA(const Options& options, const AmdAdapter& adapter) {
         auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
         const UINT subresource = static_cast<UINT>(
             reinterpret_cast<uintptr_t>(frame->data[1]));
+        if (!InspectInputTexture(
+                texture, subresource, array_control, input_evidence, error)) {
+            success = false;
+            break;
+        }
         const auto pixels = BuildPattern(options.width, options.height, index);
         context->UpdateSubresource(
             texture, subresource, nullptr, pixels.data(), options.width * 4u, 0);
@@ -657,14 +732,18 @@ int RunDirectA(const Options& options, const AmdAdapter& adapter) {
             error = "AMF direct PTS coverage did not reach submitted frame range";
         }
         if (!stopped && error.empty()) error = writer.LastError();
-        std::cerr << "AMD_ISOLATION_FAILURE stage=A reason=" << error << std::endl;
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason=" << error << std::endl;
         avcodec_free_context(&codec);
         av_buffer_unref(&frames_ctx);
         av_buffer_unref(&device_ctx);
         return kExitHarnessFailure;
     }
     const auto& description = adapter.description;
-    std::wcout << L"AMD_ISOLATION stage=A status=pass vendor=AMD backend=ffmpeg-amf"
+    std::wcout << L"AMD_ISOLATION stage=" << wide_stage
+               << L" status=pass vendor=AMD backend=ffmpeg-amf protocol=" << kProtocolVersion
+               << L" input_layout=" << (array_control ? L"texture_array" : L"single_texture")
+               << L" input_format=BGRA input_array_size=" << input_evidence.description.ArraySize
+               << L" input_slice=" << input_evidence.slice
                << L" codec=h264_amf fps=" << options.fps
                << L" mode=direct_gpu adapter=\"" << description.Description
                  << L"\" adapter_luid_high=" << description.AdapterLuid.HighPart
@@ -680,16 +759,48 @@ int RunDirectA(const Options& options, const AmdAdapter& adapter) {
     return 0;
 }
 
+struct StageTimings {
+    using Clock = std::chrono::steady_clock;
+    std::vector<double> upload, prepare, encode;
+    static double Milliseconds(Clock::time_point from, Clock::time_point to) {
+        return std::chrono::duration<double, std::milli>(to - from).count();
+    }
+    static double Percentile(std::vector<double> values, double quantile) {
+        if (values.empty()) return 0.0;
+        std::sort(values.begin(), values.end());
+        const size_t index = static_cast<size_t>(std::ceil(quantile * values.size())) - 1;
+        return values[std::min(index, values.size() - 1)];
+    }
+    void Print(uint32_t warmup, uint32_t submitted, double total_ms) const {
+        std::wcout << L" timing_scope=cpu_api_wall warmup_frames=" << warmup
+                   << L" measured_frames=" << prepare.size()
+                   << L" submitted_frames=" << submitted << L" end_to_end_ms=" << total_ms;
+        const auto print = [](const wchar_t* label, const std::vector<double>& samples) {
+            std::wcout << L' ' << label << L"_p50_ms=" << Percentile(samples, .50)
+                       << L' ' << label << L"_p95_ms=" << Percentile(samples, .95)
+                       << L' ' << label << L"_p99_ms=" << Percentile(samples, .99);
+        };
+        print(L"upload", upload);
+        print(L"prepare", prepare);
+        print(L"encode", encode);
+    }
+};
+
 int RunProductionB(const Options& options, const AmdAdapter& adapter) {
+    const bool nv12 = options.mode == L"b-nv12";
+    const bool comparison = options.mode == L"b-bgra" || nv12;
+    const char* stage = nv12 ? "B_NV12" : comparison ? "B_BGRA" : "B";
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     std::string error;
     if (!CreateAmdD3D11(adapter, device, context, error)) {
-        std::cerr << "AMD_ISOLATION_FAILURE stage=B reason=" << error << std::endl;
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason=" << error << std::endl;
         return kExitHarnessFailure;
     }
     fthr::ContinuousRecordingWriter writer;
-    fthr::FfmpegAmfReplayEncoder encoder(fthr::VideoCodec::H264);
+    fthr::FfmpegAmfReplayEncoder encoder(fthr::VideoCodec::H264,
+        nv12 ? fthr::detail::CreateNv12AmfComparisonSession()
+             : fthr::detail::CreateProductionAmfCodecSession());
     fthr::EncoderConfig config;
     config.src_width = options.width;
     config.src_height = options.height;
@@ -713,12 +824,19 @@ int RunProductionB(const Options& options, const AmdAdapter& adapter) {
                 }
                 ++packet_count;
             }, false)) {
-        std::cerr << "AMD_ISOLATION_FAILURE stage=B reason="
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason="
                   << encoder.GetLastError() << std::endl;
         return kExitHarnessFailure;
     }
+    InputTextureEvidence input_evidence;
+    if (!InspectInputTexture(
+            encoder.GetCurrentInputTexture(), encoder.GetCurrentInputSubresource(),
+            false, input_evidence, error, nv12 ? DXGI_FORMAT_NV12 : DXGI_FORMAT_B8G8R8A8_UNORM)) {
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason=" << error << std::endl;
+        return kExitHarnessFailure;
+    }
     if (!writer.Start(options.output, encoder.GetVideoConfig())) {
-        std::cerr << "AMD_ISOLATION_FAILURE stage=B reason=writer_start_failed "
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason=writer_start_failed "
                   << writer.LastError() << std::endl;
         encoder.Shutdown();
         return kExitHarnessFailure;
@@ -728,7 +846,7 @@ int RunProductionB(const Options& options, const AmdAdapter& adapter) {
     if (!CreateSourceTexture(
             device.Get(), options.width, options.height, first_pattern,
             source, error)) {
-        std::cerr << "AMD_ISOLATION_FAILURE stage=B reason=" << error << std::endl;
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason=" << error << std::endl;
         encoder.Shutdown();
         writer.Stop();
         return kExitHarnessFailure;
@@ -737,25 +855,43 @@ int RunProductionB(const Options& options, const AmdAdapter& adapter) {
     LARGE_INTEGER start{};
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&start);
+    StageTimings timings;
+    const uint32_t timing_warmup = std::min<uint32_t>(12, options.frames / 4);
+    timings.upload.reserve(options.frames - timing_warmup);
+    timings.prepare.reserve(options.frames - timing_warmup);
+    timings.encode.reserve(options.frames - timing_warmup);
+    const auto pipeline_start = StageTimings::Clock::now();
     bool success = true;
     for (uint32_t index = 0; index < options.frames; ++index) {
         const auto pixels = BuildPattern(options.width, options.height, index);
+        const auto upload_start = StageTimings::Clock::now();
         context->UpdateSubresource(
             source.Get(), 0, nullptr, pixels.data(), options.width * 4u, 0);
+        const auto upload_end = StageTimings::Clock::now();
         const int64_t qpc = start.QuadPart
             + static_cast<int64_t>(index)
                 * frequency.QuadPart / static_cast<int64_t>(options.fps);
-        if (!encoder.PrepareGpuFrame(source.Get(), 0)
-            || !encoder.EncodeFrame(qpc)) {
-            std::cerr << "AMD_ISOLATION_FAILURE stage=B frame=" << index
+        const bool prepared = encoder.PrepareGpuFrame(source.Get(), 0);
+        const auto prepare_end = StageTimings::Clock::now();
+        const bool encoded = prepared && encoder.EncodeFrame(qpc);
+        const auto encode_end = StageTimings::Clock::now();
+        if (!prepared || !encoded) {
+            std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " frame=" << index
                       << " reason=" << encoder.GetLastError() << std::endl;
             success = false;
             break;
         }
+        if (index >= timing_warmup) {
+            timings.upload.push_back(StageTimings::Milliseconds(upload_start, upload_end));
+            timings.prepare.push_back(StageTimings::Milliseconds(upload_end, prepare_end));
+            timings.encode.push_back(StageTimings::Milliseconds(prepare_end, encode_end));
+        }
     }
     const auto active = encoder.GetActiveEncoderInfo();
+    const bool direct_bgra_copy = encoder.UsesDirectBgraCopy();
     encoder.Shutdown();
     const bool stopped = writer.Stop();
+    const double pipeline_ms = StageTimings::Milliseconds(pipeline_start, StageTimings::Clock::now());
     if (!success || !stopped || writer.HasFailed() || writer_push_failed
         || packet_count < options.frames || first_pts < 0
         || last_pts < static_cast<int64_t>(options.frames - 1)) {
@@ -768,13 +904,27 @@ int RunProductionB(const Options& options, const AmdAdapter& adapter) {
                    || last_pts < static_cast<int64_t>(options.frames - 1))) {
             error = "production AMF PTS coverage did not reach submitted frame range";
         }
-        std::cerr << "AMD_ISOLATION_FAILURE stage=B reason="
+        std::cerr << "AMD_ISOLATION_FAILURE stage=" << stage << " reason="
                   << (error.empty() ? writer.LastError() : error) << std::endl;
         return kExitHarnessFailure;
     }
-    std::wcout << L"AMD_ISOLATION stage=B status=pass vendor=AMD backend=ffmpeg-amf"
+    LARGE_INTEGER driver_version{};
+    const bool driver_known = SUCCEEDED(adapter.adapter->CheckInterfaceSupport(
+        __uuidof(IDXGIDevice), &driver_version));
+    std::wcout << L"AMD_ISOLATION stage=" << (nv12 ? L"B_NV12" : comparison ? L"B_BGRA" : L"B")
+               << L" status=pass vendor=AMD backend=ffmpeg-amf"
+               << L" protocol=" << kProtocolVersion
+               << L" input_layout=single_texture input_format=" << (nv12 ? L"NV12" : L"BGRA")
+               << L" input_array_size=" << input_evidence.description.ArraySize
+               << L" input_slice=" << input_evidence.slice
                << L" codec=h264_amf fps=" << options.fps
-               << L" mode=production_transform adapter=\""
+               << L" mode=" << (comparison ? L"comparison_transform" : L"production_transform")
+               << L" gpu_preparation=" << (direct_bgra_copy ? L"direct_bgra_copy" : L"video_processor_copy")
+               << L" color_conversion=" << (nv12 ? L"bt709_full_to_studio" : L"production_bgra")
+               << L" pattern=quadrants_gray_bar_v2 bitrate_kbps=8000 driver_version=";
+    if (driver_known) std::wcout << driver_version.QuadPart;
+    else std::wcout << L"unavailable";
+    std::wcout << L" adapter=\""
                << adapter.description.Description << L"\" adapter_luid_high="
                << adapter.description.AdapterLuid.HighPart
                  << L" adapter_luid_low=" << adapter.description.AdapterLuid.LowPart
@@ -785,7 +935,9 @@ int RunProductionB(const Options& options, const AmdAdapter& adapter) {
                << L" packets=" << packet_count << L" first_pts=" << first_pts
                << L" last_pts=" << last_pts << L" active_name=\""
                << std::wstring(active.name.begin(), active.name.end())
-               << L"\"" << std::endl;
+               << L"\"";
+    timings.Print(timing_warmup, options.frames, pipeline_ms);
+    std::wcout << std::endl;
     return 0;
 }
 
@@ -875,6 +1027,7 @@ int RunCaptureC(
         && capability.encoder_vendor == fthr::EncoderVendor::Amd
         && capability.same_adapter;
     std::cout << "AMD_ISOLATION stage=C status=initialized vendor=AMD"
+              << " protocol=" << kProtocolVersion << " input_layout=single_texture"
               << " backend=ffmpeg-amf codec=h264 fps=" << options.fps
               << " mode=real_wgc_saveclip capture_backend="
               << engine.GetStartupCaptureBackend()
@@ -928,6 +1081,7 @@ int RunCaptureC(
         return kExitHarnessFailure;
     }
     std::cout << "AMD_ISOLATION stage=C status=transport_decode_pass_content_pending vendor=AMD"
+              << " protocol=" << kProtocolVersion << " input_layout=single_texture"
               << " backend=ffmpeg-amf codec=h264 fps=" << options.fps
               << " mode=real_wgc_saveclip capture_backend=WGC_MONITOR"
               << " target_width=" << options.output_width
@@ -945,15 +1099,20 @@ int RunCaptureC(
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    const fthr::wgc::WinRtApartmentGuard winrt_apartment;
+    if (!winrt_apartment.Succeeded()) {
+        std::cerr << "AMD_ISOLATION_FAILURE api=RoInitialize(RO_INIT_MULTITHREADED)"
+                  << " hresult=0x" << std::hex
+                  << static_cast<uint32_t>(winrt_apartment.Result())
+                  << std::dec << std::endl;
+        return kExitHarnessFailure;
+    }
     Options options;
     if (!ParseOptions(argc, argv, options)) {
-        std::cerr << "usage: --mode probe|a|b|c --output PATH [--monitor-path PATH]"
+        std::cerr << "usage: --mode probe|a|a-array|b|b-bgra|b-nv12|c --output PATH [--monitor-path PATH]"
                   << " [--adapter-index N] [--width N --height N --output-width N"
                   << " --output-height N --fps N --frames N]" << std::endl;
         return kExitHarnessFailure;
-    }
-    if (options.mode == L"c") {
-        winrt::init_apartment(winrt::apartment_type::multi_threaded);
     }
     if (options.mode != L"probe") {
         std::error_code output_error;
@@ -977,6 +1136,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (options.mode == L"probe") {
         std::cout << "AMD_ISOLATION stage=probe status=pass vendor=AMD"
+                  << " protocol=" << kProtocolVersion
                   << " backend=ffmpeg-amf adapter_count=" << adapters.size()
                   << std::endl;
         return 0;
@@ -988,8 +1148,9 @@ int wmain(int argc, wchar_t** argv) {
         return kExitAmdRequired;
     }
     const auto& adapter = adapters[static_cast<size_t>(options.adapter_index)];
-    if (options.mode == L"a") return RunDirectA(options, adapter);
-    if (options.mode == L"b") return RunProductionB(options, adapter);
+    if (options.mode == L"a" || options.mode == L"a-array") return RunDirectA(options, adapter);
+    if (options.mode == L"b" || options.mode == L"b-bgra" || options.mode == L"b-nv12")
+        return RunProductionB(options, adapter);
     if (options.mode == L"c") return RunCaptureC(options, adapters);
     std::cerr << "AMD_ISOLATION_FAILURE reason=unknown_mode" << std::endl;
     return kExitHarnessFailure;

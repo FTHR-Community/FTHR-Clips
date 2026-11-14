@@ -24,6 +24,7 @@ def test_extract_returns_frames_in_window():
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     buf = _encode(frame)
     r._lock.acquire()
+    r._running = True
     r._chunks.append((now - 2.0, buf))
     r._chunks.append((now - 1.0, buf))
     r._chunks.append((now - 0.0, buf))
@@ -39,6 +40,7 @@ def test_extract_respects_time_window():
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     buf = _encode(frame)
     r._lock.acquire()
+    r._running = True
     r._chunks.append((now - 10.0, buf))  # outside 5s window
     r._chunks.append((now - 2.0,  buf))  # inside
     r._chunks.append((now - 1.0,  buf))  # inside

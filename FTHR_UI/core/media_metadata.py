@@ -149,6 +149,54 @@ def parse_ffprobe_video_metadata(
     )
 
 
+def parse_ffprobe_video_presentation_duration(
+        payload: str | Mapping[str, Any],
+) -> float | None:
+    """Read video-stream presentation duration, never audio/container length.
+
+    FFprobe's MP4 demuxer applies edit-list timing to the stream duration;
+    negative decoder-preroll timestamps therefore do not extend this value.
+    Missing or invalid video duration remains explicitly unknown.
+    """
+    try:
+        document = json.loads(payload) if isinstance(payload, str) else payload
+    except (TypeError, json.JSONDecodeError):
+        # Invalid probe JSON cannot establish a trustworthy presentation span.
+        return None
+    if not isinstance(document, Mapping):
+        return None
+    streams = document.get('streams')
+    if not isinstance(streams, list):
+        return None
+    video = next(
+        (stream for stream in streams
+         if isinstance(stream, Mapping) and stream.get('codec_type') == 'video'),
+        None,
+    )
+    return _positive_float(video.get('duration')) if video is not None else None
+
+
+def probe_video_presentation_duration(
+        media_path: str | os.PathLike[str], *, timeout_seconds: float = 4.0,
+) -> float | None:
+    """Run one bounded FFprobe query for the first video stream duration."""
+    try:
+        command = [
+            get_ffprobe_exe(), '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=codec_type,duration,start_time',
+            '-of', 'json', os.fspath(media_path),
+        ]
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout_seconds,
+            check=False, **_NO_WINDOW)
+    except (FFmpegUnavailable, OSError, subprocess.SubprocessError):
+        # A missing tool, inaccessible file, or timeout yields unknown duration.
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_ffprobe_video_presentation_duration(result.stdout)
+
+
 def probe_video_metadata(
         media_path: str | os.PathLike[str], *, timeout_seconds: float = 4.0,
         cancelled: threading.Event | None = None,
@@ -234,31 +282,40 @@ def evaluate_physical_video_timeline(
     Nominal FPS can conceal missing intervals that a CFR repair would otherwise
     expand into a misleading clip.
     """
+    bounded, _ = _evaluate_video_packet_timeline(packets, expected_fps)
+    return bounded
+
+
+def _evaluate_video_packet_timeline(
+        packets: list[Mapping[str, Any]], expected_fps: float,
+) -> tuple[bool | None, bool]:
+    """Return boundedness and whether strictly increasing PTS have a large gap."""
 
     if (not math.isfinite(expected_fps)
             or expected_fps <= 0
             or expected_fps > 1000
             or not packets):
-        return None
+        return None, False
     pts = []
     for packet in packets:
         # Decoder-preroll packets may legitimately have negative PTS values;
         # only finiteness and ordering are relevant to physical gaps.
         value = _finite_float(packet.get('pts_time'))
         if value is None:
-            return None
+            return None, False
         pts.append(value)
     if len(pts) < 2:
         # Older FFprobe builds may not expose packet PTS. Duration evidence is
         # still useful, but it cannot prove a physical timeline either way.
-        return None
+        return None, False
     gaps = [right - left for left, right in zip(pts, pts[1:], strict=False)]
-    if any(gap <= 0 for gap in gaps):
-        return False
+    if any(not math.isfinite(gap) or gap <= 0 for gap in gaps):
+        return False, False
     largest_gap = max(gaps)
     expected_duration = 1.0 / expected_fps
     max_bounded_gap = max(0.250, expected_duration * 4.0)
-    return math.isfinite(largest_gap) and largest_gap <= max_bounded_gap
+    bounded = largest_gap <= max_bounded_gap
+    return bounded, not bounded
 
 
 def probe_video_physical_timeline(
@@ -280,6 +337,7 @@ class VideoCfrProbeEvidence:
 
     cfr: bool | None
     physical_timeline_bounded: bool | None
+    has_large_forward_gap: bool = False
 
 
 _timing_cache: OrderedDict[tuple, VideoCfrProbeEvidence] = OrderedDict()
@@ -342,17 +400,21 @@ def _probe_video_cfr_evidence(
 
     expected_duration = 1.0 / expected_fps
     tolerance = max(0.00005, expected_duration * 0.002)
-    physical_timeline = evaluate_physical_video_timeline(packets, expected_fps)
+    physical_timeline, has_large_forward_gap = _evaluate_video_packet_timeline(
+        packets, expected_fps)
     for packet in packets:
         duration = _positive_float(packet.get('duration_time'))
         if duration is None:
-            return VideoCfrProbeEvidence(None, physical_timeline)
+            return VideoCfrProbeEvidence(None, physical_timeline,
+                                         has_large_forward_gap)
         if abs(duration - expected_duration) > tolerance:
-            return VideoCfrProbeEvidence(False, physical_timeline)
+            return VideoCfrProbeEvidence(False, physical_timeline,
+                                         has_large_forward_gap)
 
     # Nominal durations without packet PTS cannot prove a healthy CFR stream.
     if physical_timeline is not True:
-        return VideoCfrProbeEvidence(physical_timeline, physical_timeline)
+        return VideoCfrProbeEvidence(physical_timeline, physical_timeline,
+                                     has_large_forward_gap)
     return VideoCfrProbeEvidence(True, True)
 
 

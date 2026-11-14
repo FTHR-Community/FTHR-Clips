@@ -54,6 +54,7 @@ namespace fthr {
 
 
     struct SaveClipTask {
+        std::shared_ptr<const bool> replay_save_lease;
         std::wstring output_path;
         uint32_t     duration_seconds = 0;
 
@@ -89,6 +90,7 @@ namespace fthr {
         // above are converted to one Default Mix only while older callers
         // remain in the tree.
         std::vector<EncodedAudioTrack> encoded_audio_tracks;
+        std::vector<std::string> audio_warnings;
         // Native Windows saves are assembled from source packets first. The
         // UI's combined-mode finalizer collapses those streams after commit.
         bool separate_audio_enabled = false;

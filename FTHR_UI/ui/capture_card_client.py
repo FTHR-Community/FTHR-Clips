@@ -4,6 +4,7 @@ Line-delimited stdin commands keep its Qt event loop independent of
 main-process finalization and library scans.
 """
 
+import math
 import os
 import sys
 import subprocess
@@ -34,7 +35,11 @@ class CaptureCardClient:
             settings_manager.get('capture_card_enabled', True)
             if settings_manager is not None else True)
         self._proc: subprocess.Popen | None = None
-        self._launch()
+        self._visuals_suspended = (
+            settings_manager is not None
+            and settings_manager.get('ultra_performance_mode', False) is True)
+        if not self._visuals_suspended:
+            self._launch()
 
     def _launch(self):
         try:
@@ -64,6 +69,11 @@ class CaptureCardClient:
 
     def restart(self):
         """Replace the card helper without waiting for its exit on the UI thread."""
+        self._retire()
+        if not self._visuals_suspended:
+            self._launch()
+
+    def _retire(self):
         retired = self._proc
         self._proc = None
         if retired and retired.poll() is None:
@@ -81,20 +91,37 @@ class CaptureCardClient:
 
             threading.Thread(
                 target=reap, daemon=True, name='fthr-card-reaper').start()
-        self._launch()
 
     def set_visuals_enabled(self, enabled: bool) -> None:
         """Enable or disable the card visuals without muting notification sounds."""
         self._visuals_enabled = bool(enabled)
         self._send(f'visuals|{1 if self._visuals_enabled else 0}')
 
+    def set_visuals_suspended(self, suspended: bool) -> None:
+        if suspended == self._visuals_suspended:
+            return
+        self._visuals_suspended = suspended
+        self._retire()
+        if not suspended:
+            self._visuals_enabled = bool(
+                self._sm.get('capture_card_enabled', True) if self._sm else True)
+            self._launch()
+
     def _send(self, cmd: str) -> None:
+        event = cmd.split('|', 1)[0]
+        if getattr(self, '_visuals_suspended', False):
+            if event == 'background_hide' and self._proc is None:
+                return
+            # Ultra mode stays lazy, but capture confirmations must still reach
+            # the detached helper, including while the main app is hidden.
+            if event not in {'clip', 'saving', 'screenshot', 'recording_saved', 'error',
+                             'prompt', 'upload_failed', 'visuals', 'background_hide'}:
+                return
         if self._sm is not None:
-            event = cmd.split('|', 1)[0]
             if event not in {'visuals', 'background_hide', 'quit', 'startup'}:
                 mode = self._sm.get('capture_card_mode', None)
                 if mode is not None:
-                    capture = event in {'clip', 'screenshot', 'recording_saved', 'error'}
+                    capture = event in {'clip', 'saving', 'screenshot', 'recording_saved', 'error'}
                     detection = event in {'prompt', 'capturing'}
                     visible = (mode == 'all' or (mode == 'capture' and capture)
                                or (mode == 'detection' and detection))
@@ -119,6 +146,7 @@ class CaptureCardClient:
                     try:
                         failed.terminate()
                     except Exception:
+                        # The failed helper may already have exited. Continue to the bounded retry.
                         pass
                 if attempt == 1:
                     return
@@ -138,10 +166,21 @@ class CaptureCardClient:
             return ''
         return f'|{value}'
 
-    def show_clip(self, duration_s: int, fps: int, resolution: str,
+    def show_captured(self, duration_s: float | None = None,
+                      fps: int | None = None, resolution: str = '') -> None:
+        if duration_s is None or fps is None:
+            self._send('captured')
+            return
+        self._send(f'captured|{duration_s}|{fps}|{self._field(resolution)}')
+
+    def show_saving(self) -> None:
+        self._send('saving')
+
+    def show_clip(self, duration_s: float | None, fps: int, resolution: str,
                   hold_duration_ms: int | None = None) -> None:
+        duration = '' if duration_s is None else str(duration_s)
         self._send(
-            f'clip|{duration_s}|{fps}|{self._field(resolution)}'
+            f'clip|{duration}|{fps}|{self._field(resolution)}'
             f'{self._hold_suffix(hold_duration_ms)}')
 
     def show_screenshot(self, hold_duration_ms: int | None = None) -> None:
@@ -166,10 +205,20 @@ class CaptureCardClient:
             f'{self._hold_suffix(hold_duration_ms)}')
 
     def show_recording_saved(self, filename: str = '',
-                             hold_duration_ms: int | None = None) -> None:
+                             hold_duration_ms: int | None = None, *,
+                             duration_seconds: float | None = None) -> None:
+        suffix = self._hold_suffix(hold_duration_ms)
+        try:
+            duration = (float(duration_seconds)
+                        if type(duration_seconds) in (int, float) else None)
+        except (ValueError, OverflowError):
+            duration = None
+        if duration is not None and math.isfinite(duration) and duration >= 0:
+            # The third field remains hold_ms. Keep its empty slot for default hold.
+            suffix = f'{suffix or "|"}|{duration}'
         self._send(
             f'recording_saved|{self._field(filename)}'
-            f'{self._hold_suffix(hold_duration_ms)}')
+            f'{suffix}')
 
     def play_startup(self) -> None:
         self._send('startup')
@@ -208,6 +257,7 @@ class CaptureCardClient:
             # every normal shutdown to wait for the timeout.
             proc.stdin.close()
         except (BrokenPipeError, OSError, ValueError):
+            # A closed pipe cannot accept quit. The bounded wait below handles shutdown.
             pass
         try:
             proc.wait(timeout=0.75)

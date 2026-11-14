@@ -3,6 +3,9 @@
 // 48 kHz float32 stereo mix. Never call from Qt UI or audio pull callbacks.
 
 #include "ffmpeg_playback_bridge.h"
+#include "audio_gain_ramp.h"
+#include "audio_stream_timing.h"
+#include "ffmpeg_audio_filter.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -24,6 +27,8 @@ extern "C" {
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -34,7 +39,7 @@ namespace {
 
 constexpr int kSampleRate = 48'000;
 constexpr int kChannels = 2;
-constexpr float kLimiterCeiling = 0.98f;
+constexpr float kLimiterCeiling = 1.0f;
 // A seek cuts the old endpoint at an arbitrary waveform value.  Ramp only the
 // first 2.7 ms of replacement PCM so the discontinuity cannot become a click;
 // this is far below an AAC frame and does not create perceptible seek lag.
@@ -88,6 +93,12 @@ struct DecoderState {
     bool input_eof = false;
     bool flushed = false;
     bool failed = false;
+    bool unavailable = false;
+    fthr::AudioGainRamp gain;
+    std::string processing = "anull";
+    std::unique_ptr<FthrAudioFilter> filter;
+    int64_t first_sample_hint = std::numeric_limits<int64_t>::min();
+    int64_t last_sample_hint = -1;
 
     ~DecoderState() {
         swr_free(&resampler);
@@ -101,6 +112,28 @@ struct DecoderState {
 
 class Mixer {
 public:
+    bool unlimited_output = false;
+    std::function<int(float*, int, const float*, int, float)> external_pull;
+    std::string output_filter;
+    float output_peak = 0.0f;
+
+    bool SetProcessing(int index, const char* text, std::string& error) {
+        if (index < 0 || index >= static_cast<int>(decoders_.size()) || !text) return false;
+        auto& decoder = *decoders_[index];
+        decoder.processing = text;
+        if (decoder.unavailable || decoder.processing == "anull") return true;
+        decoder.filter = std::make_unique<FthrAudioFilter>();
+        if (!decoder.filter->Open(decoder.processing)) {
+            error = "could not configure source processing";
+            return false;
+        }
+        return true;
+    }
+
+    bool ResetExternalClock(std::string& error) {
+        if (tempo_active_) return ConfigureTempo(tempo_rate_, error);
+        return true;
+    }
     ~Mixer() {
         ResetTempo();
         av_frame_free(&frame_);
@@ -110,7 +143,7 @@ public:
 
     bool Open(const char* path, const int* stream_indexes, const int stream_count,
               std::string& error) {
-        if (!path || !*path || !stream_indexes || stream_count < 1 || stream_count > 16) {
+        if (!path || !*path || !stream_indexes || stream_count < 1 || stream_count > 64) {
             error = "invalid playback stream selection";
             return false;
         }
@@ -138,19 +171,19 @@ public:
             AVRational{1, kSampleRate});
         for (int input_index = 0; input_index < stream_count; ++input_index) {
             const int stream_index = stream_indexes[input_index];
+            auto decoder = std::make_unique<DecoderState>();
             if (stream_index < 0 || stream_index >= static_cast<int>(format_->nb_streams)) {
+                decoder->failed = decoder->unavailable = true;
+                decoders_.push_back(std::move(decoder));
                 continue;
             }
             AVStream* stream = format_->streams[stream_index];
-            if (stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
-            if (std::any_of(decoders_.begin(), decoders_.end(),
-                            [stream_index](const auto& decoder) {
-                                return decoder->stream_index == stream_index;
-                            })) {
+            if (stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO
+                    || !ConfigureDecoder(*decoder, stream_index, *stream, error)) {
+                decoder->failed = decoder->unavailable = true;
+                decoders_.push_back(std::move(decoder));
                 continue;
             }
-            auto decoder = std::make_unique<DecoderState>();
-            if (!ConfigureDecoder(*decoder, stream_index, *stream, error)) continue;
             if (seek_stream_index_ < 0
                     || (stream->start_time != AV_NOPTS_VALUE
                         && (seek_start_time_ == AV_NOPTS_VALUE
@@ -162,7 +195,7 @@ public:
             }
             decoders_.push_back(std::move(decoder));
         }
-        if (decoders_.empty()) {
+        if (seek_stream_index_ < 0) {
             if (error.empty()) error = "no selected audio stream could be decoded";
             return false;
         }
@@ -179,6 +212,12 @@ public:
                          std::string& error) {
         const float rate = std::clamp(requested_rate, 0.25f, 2.0f);
         const bool enabled = preserve_pitch && std::abs(rate - 1.0f) > 1e-6f;
+        if (!output_filter.empty()) {
+            if (tempo_active_ && tempo_rate_ == rate && tempo_preserve_pitch_ == preserve_pitch)
+                return true;
+            tempo_preserve_pitch_ = preserve_pitch;
+            return ConfigureTempo(rate, error);
+        }
         if (!enabled) {
             ResetTempo();
             tempo_rate_ = rate;
@@ -197,6 +236,7 @@ public:
 
     int Pull(float* output, const int requested_frames,
              const float* gains, const int gain_count, const float master_gain) {
+        output_peak = 0.0f;
         if (!tempo_active_) {
             return PullSource(output, requested_frames, gains, gain_count, master_gain);
         }
@@ -205,41 +245,49 @@ public:
 
     int PullSource(float* output, const int requested_frames,
                    const float* gains, const int gain_count, const float master_gain) {
+        if (external_pull) return external_pull(output, requested_frames, gains, gain_count, master_gain);
         if (!output || requested_frames <= 0 || gain_count != static_cast<int>(decoders_.size())) {
             return -1;
         }
         const int64_t first = cursor_sample_;
-        const int64_t end = first + requested_frames;
+        int64_t end = first + requested_frames;
+        for (auto& decoder : decoders_)
+            if (decoder->last_sample_hint >= 0 && first >= decoder->last_sample_hint)
+                FlushDecoder(*decoder);
+        if (std::all_of(decoders_.begin(), decoders_.end(), [](const auto& decoder) {
+                return decoder->input_eof || decoder->failed;
+            })) input_eof_ = true;
         if (!DecodeUntil(end)) return -1;
+        if (std::all_of(decoders_.begin(), decoders_.end(), [](const auto& decoder) {
+                return decoder->input_eof || decoder->failed;
+            })) input_eof_ = true;
 
-        bool has_pcm_at_or_after_cursor = false;
-        for (const auto& decoder : decoders_) {
-            for (const Segment& segment : decoder->segments) {
-                if (segment.LastSampleExclusive() > first) {
-                    has_pcm_at_or_after_cursor = true;
-                    break;
-                }
-            }
-            if (has_pcm_at_or_after_cursor) break;
+        int produced_frames = requested_frames;
+        if (input_eof_) {
+            int64_t last_sample = first;
+            for (const auto& decoder : decoders_)
+                for (const Segment& segment : decoder->segments)
+                    last_sample = std::max(last_sample, segment.LastSampleExclusive());
+            end = std::min(end, last_sample);
+            produced_frames = static_cast<int>(end - first);
+            if (produced_frames <= 0) return 0;
         }
-        if (input_eof_ && !has_pcm_at_or_after_cursor) return 0;
 
-        std::fill(output, output + static_cast<size_t>(requested_frames) * kChannels, 0.0f);
-        int active_sources = 0;
-        for (int index = 0; index < gain_count; ++index) {
-            active_sources += std::abs(gains[index]) > 1e-6f && !decoders_[index]->failed;
-        }
-        const float headroom = 1.0f / std::sqrt(static_cast<float>(std::max(1, active_sources)));
-
+        std::fill(output, output + static_cast<size_t>(produced_frames) * kChannels, 0.0f);
         for (int index = 0; index < gain_count; ++index) {
             // Application stems use a reversible delta against the hidden
             // desktop base, so their gain legitimately ranges from -1 to 0.
             const float gain = std::clamp(gains[index], -2.0f, 2.0f);
-            if (gain == 0.0f) continue;
-            MixDecoder(*decoders_[index], first, end, gain, output);
+            auto& decoder = *decoders_[index];
+            decoder.gain.SetTarget(gain);
+            std::vector<float> ramp(produced_frames);
+            for (auto& value : ramp) value = decoder.gain.Next();
+            MixDecoder(decoder, first, end, ramp.data(), output);
         }
         const float master = std::clamp(master_gain, 0.0f, 1.0f);
-        for (int frame = 0; frame < requested_frames; ++frame) {
+        master_ramp_.SetTarget(master);
+        for (int frame = 0; frame < produced_frames; ++frame) {
+            const float master_value = master_ramp_.Next();
             float seek_gain = 1.0f;
             if (seek_fade_remaining_ > 0) {
                 seek_gain = static_cast<float>(
@@ -248,13 +296,14 @@ public:
             }
             for (int channel = 0; channel < kChannels; ++channel) {
                 const size_t sample = static_cast<size_t>(frame) * kChannels + channel;
-                output[sample] = std::clamp(output[sample] * headroom,
-                                            -kLimiterCeiling, kLimiterCeiling)
-                    * master * seek_gain;
+                const float value = output[sample] * master_value;
+                output_peak = std::max(output_peak, std::abs(value));
+                output[sample] = (unlimited_output || !output_filter.empty() ? value :
+                    std::clamp(value, -kLimiterCeiling, kLimiterCeiling)) * seek_gain;
             }
         }
         cursor_sample_ = end;
-        return requested_frames;
+        return produced_frames;
     }
 
     bool Seek(const int64_t position_ms, std::string& error) {
@@ -276,12 +325,17 @@ public:
             error = "could not seek clip audio: " + ErrorText(result);
             return false;
         }
-        avformat_flush(format_);
+        // av_seek_frame already flushes the demuxer and restores timestamp
+        // state at the seek position. A second avformat_flush resets WAV's
+        // sample timestamps to zero, making every post-seek packet look old.
         cursor_sample_ = av_rescale_q(clamped_ms, AVRational{1, 1000},
                                       AVRational{1, kSampleRate});
         seek_fade_remaining_ = kSeekFadeFrames;
+        master_ramp_.Reset();
         input_eof_ = false;
         for (const auto& decoder : decoders_) {
+            if (decoder->unavailable) continue;
+            decoder->gain.Reset();
             avcodec_flush_buffers(decoder->codec);
             swr_close(decoder->resampler);
             if (swr_init(decoder->resampler) < 0) {
@@ -294,12 +348,23 @@ public:
             decoder->input_eof = false;
             decoder->flushed = false;
             decoder->failed = false;
+            if (decoder->filter && !decoder->filter->Open(decoder->processing)) {
+                error = "could not reset source processing after seek";
+                return false;
+            }
         }
         if (tempo_active_ && !ConfigureTempo(tempo_rate_, error)) return false;
         return true;
     }
 
     [[nodiscard]] bool IsEof() const { return input_eof_; }
+    [[nodiscard]] int64_t BufferedFrames() const {
+        int64_t count = 0;
+        for (const auto& decoder : decoders_)
+            for (const auto& segment : decoder->segments)
+                count += static_cast<int64_t>(segment.samples.size() / kChannels);
+        return count;
+    }
     [[nodiscard]] bool SourceFailed(const int source_ordinal) const {
         return source_ordinal < 0 || source_ordinal >= static_cast<int>(decoders_.size())
             || decoders_[source_ordinal]->failed;
@@ -320,80 +385,29 @@ private:
     }
 
     bool ConfigureTempo(const float rate, std::string& error) {
+        const bool preserve = tempo_preserve_pitch_;
         ResetTempo();
-        tempo_graph_ = avfilter_graph_alloc();
-        if (!tempo_graph_) {
-            error = "could not allocate pitch-preserving audio filter";
-            return false;
-        }
-        const AVFilter* buffer = avfilter_get_by_name("abuffer");
-        const AVFilter* atempo = avfilter_get_by_name("atempo");
-        const AVFilter* sink = avfilter_get_by_name("abuffersink");
-        if (!buffer || !atempo || !sink) {
-            error = "FFmpeg build does not provide the atempo audio filter";
-            ResetTempo();
-            return false;
-        }
-
-        const char* source_args =
-            "time_base=1/48000:sample_rate=48000:sample_fmt=flt:channel_layout=0x3";
-        int result = avfilter_graph_create_filter(
-            &tempo_source_, buffer, "fthr_tempo_source", source_args, nullptr, tempo_graph_);
-        if (result < 0) {
-            error = "could not create pitch-preserving audio source: " + ErrorText(result);
-            ResetTempo();
-            return false;
-        }
-
-        std::vector<float> stages;
-        float remaining = rate;
-        while (remaining < 0.5f - 1e-6f) {
-            stages.push_back(0.5f);
-            remaining /= 0.5f;
-        }
-        while (remaining > 2.0f + 1e-6f) {
-            stages.push_back(2.0f);
-            remaining /= 2.0f;
-        }
-        if (std::abs(remaining - 1.0f) > 1e-6f) stages.push_back(remaining);
-        if (stages.empty()) {
-            error = "pitch-preserving filter received an invalid playback rate";
-            ResetTempo();
-            return false;
-        }
-
-        AVFilterContext* previous = tempo_source_;
-        for (size_t index = 0; index < stages.size(); ++index) {
-            char name[48]{};
-            char args[64]{};
-            std::snprintf(name, sizeof(name), "fthr_atempo_%zu", index);
-            std::snprintf(args, sizeof(args), "tempo=%.9g", stages[index]);
-            AVFilterContext* stage = nullptr;
-            result = avfilter_graph_create_filter(
-                &stage, atempo, name, args, nullptr, tempo_graph_);
-            if (result < 0) {
-                error = "could not configure pitch-preserving audio: " + ErrorText(result);
-                ResetTempo();
-                return false;
+        std::string chain = output_filter.empty() ? "anull" : output_filter;
+        if (std::abs(rate - 1.0f) > 1e-6f) {
+            if (preserve) {
+                float remaining = rate;
+                while (remaining < 0.5f) { chain += ",atempo=0.5"; remaining /= 0.5f; }
+                chain += ",atempo=" + std::to_string(remaining);
+            } else {
+                chain += ",asetrate=" + std::to_string(static_cast<int>(kSampleRate * rate))
+                    + ",aresample=48000";
             }
-            result = avfilter_link(previous, 0, stage, 0);
-            if (result < 0) {
-                error = "could not configure pitch-preserving audio: " + ErrorText(result);
-                ResetTempo();
-                return false;
-            }
-            previous = stage;
         }
-        result = avfilter_graph_create_filter(
-            &tempo_sink_, sink, "fthr_tempo_sink", nullptr, nullptr, tempo_graph_);
-        if (result >= 0) result = avfilter_link(previous, 0, tempo_sink_, 0);
-        if (result >= 0) result = avfilter_graph_config(tempo_graph_, nullptr);
-        if (result < 0) {
-            error = "could not finalize pitch-preserving audio: " + ErrorText(result);
-            ResetTempo();
+        FthrAudioFilter filter;
+        if (!filter.Open(chain)) {
+            error = "could not configure shared audio output processing";
             return false;
         }
+        tempo_graph_ = filter.graph; filter.graph = nullptr;
+        tempo_source_ = filter.source; tempo_sink_ = filter.sink;
         tempo_active_ = true;
+        tempo_rate_ = rate;
+        tempo_preserve_pitch_ = preserve;
         return true;
     }
 
@@ -495,12 +509,12 @@ private:
                 continue;
             }
 
-            // Feed a little more than one endpoint block. The atempo filter
-            // has an internal overlap window, so this keeps a fast seek
-            // responsive without creating a long stale-audio runway.
-            std::vector<float> source(static_cast<size_t>(2048) * kChannels);
+            // Time stretching needs its overlap window. At normal speed keep
+            // DSP frames short so a gain edit reaches the limiter promptly.
+            const int feed_frames = std::abs(tempo_rate_ - 1.0f) < 1e-6f ? 512 : 2048;
+            std::vector<float> source(static_cast<size_t>(feed_frames) * kChannels);
             const int source_frames = PullSource(
-                source.data(), 2048, gains, gain_count, master_gain);
+                source.data(), feed_frames, gains, gain_count, master_gain);
             if (source_frames < 0) return -1;
             if (source_frames == 0) {
                 tempo_input_eof_ = true;
@@ -544,6 +558,14 @@ private:
         }
         decoder.stream_index = stream_index;
         decoder.time_base = stream.time_base;
+        if (stream.start_time != AV_NOPTS_VALUE)
+            decoder.first_sample_hint = av_rescale_q(stream.start_time, stream.time_base,
+                AVRational{1, kSampleRate}) - container_origin_sample_;
+        if (const auto* tag = av_dict_get(stream.metadata, "handler_name", nullptr, 0)) {
+            const auto timing = fthr::AudioSourceTiming(tag->value);
+            if (timing.first >= 0) decoder.first_sample_hint = timing.first;
+            decoder.last_sample_hint = timing.last;
+        }
         return true;
     }
 
@@ -558,9 +580,11 @@ private:
             }
             if (result < 0) return false;
             for (const auto& decoder : decoders_) {
-                if (decoder->stream_index == packet_->stream_index) {
+                if (!decoder->failed && !decoder->input_eof
+                        && decoder->stream_index == packet_->stream_index) {
                     if (!SendPacket(*decoder, packet_)) decoder->failed = true;
-                    break;
+                    if (decoder->last_sample_hint >= 0 && decoder->decoded_until >= decoder->last_sample_hint)
+                        FlushDecoder(*decoder);
                 }
             }
             av_packet_unref(packet_);
@@ -576,6 +600,7 @@ private:
         return std::all_of(decoders_.begin(), decoders_.end(),
                            [target_sample](const auto& decoder) {
                                return decoder->input_eof || decoder->failed
+                                   || decoder->first_sample_hint >= target_sample
                                    || decoder->decoded_until >= target_sample;
                            });
     }
@@ -608,6 +633,10 @@ private:
                     AppendSegment(decoder, decoder.fallback_next_sample, std::move(tail));
                 }
             }
+            if (decoder.filter && !decoder.failed) {
+                if (decoder.filter->Send(nullptr, 0, 0) < 0) decoder.failed = true;
+                else DrainSourceFilter(decoder);
+            }
         }
     }
 
@@ -616,6 +645,7 @@ private:
             const int result = avcodec_receive_frame(decoder.codec, frame_);
             if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return true;
             if (result < 0) return false;
+            const int64_t resample_delay = swr_get_delay(decoder.resampler, kSampleRate);
             const int capacity = ResampleCapacity(
                 swr_get_delay(decoder.resampler, decoder.codec->sample_rate) + frame_->nb_samples,
                 decoder.codec->sample_rate);
@@ -631,10 +661,19 @@ private:
             converted.resize(static_cast<size_t>(samples) * kChannels);
             int64_t source_timestamp = frame_->best_effort_timestamp;
             if (source_timestamp == AV_NOPTS_VALUE) source_timestamp = frame_->pts;
-            const int64_t first = source_timestamp == AV_NOPTS_VALUE
+            int64_t first = source_timestamp == AV_NOPTS_VALUE
                 ? decoder.fallback_next_sample
                 : av_rescale_q(source_timestamp, decoder.time_base,
-                               AVRational{1, kSampleRate}) - container_origin_sample_;
+                               AVRational{1, kSampleRate}) - container_origin_sample_
+                    - resample_delay;
+            // SWR retains fractional-rate filter history. Its next output
+            // starts before this input frame's PTS; ignoring that delay puts
+            // a gap into every 44.1 kHz frame. Absorb a one-sample rounding
+            // difference while preserving actual timestamp discontinuities.
+            if (decoder.decoded_until != std::numeric_limits<int64_t>::min()
+                    && std::abs(first - decoder.fallback_next_sample) <= 1) {
+                first = decoder.fallback_next_sample;
+            }
             av_frame_unref(frame_);
             AppendSegment(decoder, first, std::move(converted));
         }
@@ -645,12 +684,33 @@ private:
         const int64_t frames = static_cast<int64_t>(samples.size() / kChannels);
         if (frames == 0) return;
         decoder.fallback_next_sample = first + frames;
+        if (decoder.filter) {
+            if (decoder.filter->Send(samples.data(), static_cast<int>(frames), first) < 0) {
+                decoder.failed = true;
+                return;
+            }
+            DrainSourceFilter(decoder);
+            return;
+        }
         decoder.decoded_until = std::max(decoder.decoded_until, first + frames);
         decoder.segments.push_back(Segment{first, std::move(samples)});
     }
 
+    void DrainSourceFilter(DecoderState& decoder) {
+        while (true) {
+            std::vector<float> samples;
+            int64_t pts = 0;
+            const int result = decoder.filter->Read(samples, pts);
+            if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return;
+            if (result < 0) { decoder.failed = true; return; }
+            const int64_t frames = static_cast<int64_t>(samples.size() / kChannels);
+            decoder.decoded_until = std::max(decoder.decoded_until, pts + frames);
+            decoder.segments.push_back(Segment{pts, std::move(samples)});
+        }
+    }
+
     void MixDecoder(DecoderState& decoder, const int64_t first,
-                    const int64_t end, const float gain, float* output) {
+                    const int64_t end, const float* gains, float* output) {
         while (!decoder.segments.empty()
                && decoder.segments.front().LastSampleExclusive() <= first) {
             decoder.segments.pop_front();
@@ -663,7 +723,8 @@ private:
             const size_t output_offset = static_cast<size_t>(overlap_first - first) * kChannels;
             const size_t sample_count = static_cast<size_t>(overlap_end - overlap_first) * kChannels;
             for (size_t sample = 0; sample < sample_count; ++sample) {
-                output[output_offset + sample] += segment.samples[source_offset + sample] * gain;
+                output[output_offset + sample] += segment.samples[source_offset + sample]
+                    * gains[(output_offset + sample) / kChannels];
             }
         }
     }
@@ -680,6 +741,7 @@ private:
     int64_t cursor_sample_ = 0;
     int seek_fade_remaining_ = 0;
     bool input_eof_ = false;
+    fthr::AudioGainRamp master_ramp_;
     AVFilterGraph* tempo_graph_ = nullptr;
     AVFilterContext* tempo_source_ = nullptr;
     AVFilterContext* tempo_sink_ = nullptr;
@@ -698,7 +760,158 @@ private:
 
 struct FTHRPlaybackMixer {
     Mixer mixer;
+    fthr::AudioGainRamp master_ramp;
+    struct Input {
+        std::string path;
+        std::unique_ptr<Mixer> decoder;
+        std::vector<int> indexes;
+        std::vector<int> ordinals;
+    };
+    std::vector<Input> inputs;
+    int source_count = 0;
+    bool eof = false;
+
+    int Pull(float* output, int frames, const float* gains, int count, float master) {
+        return mixer.Pull(output, frames, gains, count, master);
+    }
+
+    int PullInputs(float* output, int frames, const float* gains, int count, float master) {
+        if (!output || !gains || frames < 1 || frames > kSampleRate || count != source_count)
+            return -1;
+        std::fill(output, output + static_cast<size_t>(frames) * kChannels, 0.0f);
+        std::vector<float> block(static_cast<size_t>(frames) * kChannels);
+        int produced = 0;
+        for (auto& input : inputs) {
+            std::vector<float> selected;
+            for (int ordinal : input.ordinals) selected.push_back(gains[ordinal]);
+            const int read = input.decoder->Pull(block.data(), frames,
+                selected.data(), static_cast<int>(selected.size()), 1.0f);
+            if (read < 0) return -1;
+            produced = std::max(produced, read);
+            for (int index = 0; index < read * kChannels; ++index) output[index] += block[index];
+        }
+        master_ramp.SetTarget(std::clamp(master, 0.0f, 1.0f));
+        for (int frame = 0; frame < produced; ++frame) {
+            const float gain = master_ramp.Next();
+            for (int channel = 0; channel < kChannels; ++channel) {
+                auto& value = output[frame * kChannels + channel];
+                value *= gain;
+                mixer.output_peak = std::max(mixer.output_peak, std::abs(value));
+                if (mixer.output_filter.empty())
+                    value = std::clamp(value, -kLimiterCeiling, kLimiterCeiling);
+            }
+        }
+        eof = produced == 0;
+        return produced;
+    }
+
+    bool Seek(int64_t position, std::string& error) {
+        if (inputs.empty()) return mixer.Seek(position, error);
+        eof = false;
+        master_ramp.Reset();
+        for (auto& input : inputs) {
+            if (!input.decoder->Seek(position, error)) return false;
+        }
+        return mixer.ResetExternalClock(error);
+    }
+
+    bool SetPlaybackRate(float rate, bool preserve_pitch, std::string& error) {
+        // Stretch the complete mix once, matching export. Stretching each
+        // input independently chooses different WSOLA windows for each source.
+        return mixer.SetPlaybackRate(rate, preserve_pitch, error);
+    }
+
+    bool SourceFailed(int ordinal) const {
+        if (inputs.empty()) return mixer.SourceFailed(ordinal);
+        for (const auto& input : inputs) {
+            for (size_t index = 0; index < input.ordinals.size(); ++index) {
+                if (input.ordinals[index] == ordinal)
+                    return input.decoder->SourceFailed(static_cast<int>(index));
+            }
+        }
+        return true;
+    }
 };
+
+extern "C" int fthr_playback_configure_dsp(FTHRPlaybackMixer* handle,
+    const char* const* source_filters, int count, const char* output_filter,
+    char* error_text, size_t error_capacity) {
+    if (!handle || !source_filters || !output_filter || std::strlen(output_filter) > 4096)
+        return 0;
+    std::string error;
+    if (handle->inputs.empty()) {
+        for (int index = 0; index < count; ++index) {
+            if (!handle->mixer.SetProcessing(index, source_filters[index], error)) {
+                WriteError(error_text, error_capacity, error); return 0;
+            }
+        }
+    } else {
+        if (count != handle->source_count) return 0;
+        for (auto& input : handle->inputs) {
+            for (size_t index = 0; index < input.ordinals.size(); ++index) {
+                if (!input.decoder->SetProcessing(static_cast<int>(index),
+                        source_filters[input.ordinals[index]], error)) {
+                    WriteError(error_text, error_capacity, error); return 0;
+                }
+            }
+        }
+    }
+    handle->mixer.output_filter = output_filter;
+    if (!handle->mixer.SetPlaybackRate(1.0f, true, error)) {
+        WriteError(error_text, error_capacity, error); return 0;
+    }
+    return 1;
+}
+
+extern "C" float fthr_playback_output_peak(const FTHRPlaybackMixer* handle) {
+    return handle ? handle->mixer.output_peak : 0.0f;
+}
+
+extern "C" int64_t fthr_playback_buffered_frames(const FTHRPlaybackMixer* handle) {
+    if (!handle) return 0;
+    int64_t total = handle->mixer.BufferedFrames();
+    for (const auto& input : handle->inputs) total += input.decoder->BufferedFrames();
+    return total;
+}
+
+extern "C" FTHRPlaybackMixer* fthr_playback_open_sources(
+    const char* const* paths, const int* stream_indexes, const int stream_count,
+    char* error_text, const size_t error_text_capacity) {
+    if (!paths || !stream_indexes || stream_count < 1 || stream_count > 64) {
+        WriteError(error_text, error_text_capacity, "invalid imported audio selection");
+        return nullptr;
+    }
+    auto handle = std::make_unique<FTHRPlaybackMixer>();
+    handle->source_count = stream_count;
+    for (int index = 0; index < stream_count; ++index) {
+        if (!paths[index] || !*paths[index]) {
+            WriteError(error_text, error_text_capacity, "missing local audio path");
+            return nullptr;
+        }
+        auto found = std::find_if(handle->inputs.begin(), handle->inputs.end(),
+            [&](const auto& input) { return input.path == paths[index]; });
+        if (found == handle->inputs.end()) {
+            handle->inputs.push_back({paths[index], std::make_unique<Mixer>(), {}, {}});
+            found = std::prev(handle->inputs.end());
+        }
+        found->indexes.push_back(stream_indexes[index]);
+        found->ordinals.push_back(index);
+    }
+    for (auto& input : handle->inputs) {
+        std::string error;
+        input.decoder->unlimited_output = true;
+        if (!input.decoder->Open(input.path.c_str(), input.indexes.data(),
+                static_cast<int>(input.indexes.size()), error)) {
+            WriteError(error_text, error_text_capacity, error);
+            return nullptr;
+        }
+    }
+    handle->mixer.external_pull = [owner = handle.get()](
+            float* output, int frames, const float* gains, int count, float master) {
+        return owner->PullInputs(output, frames, gains, count, master);
+    };
+    return handle.release();
+}
 
 extern "C" FTHRPlaybackMixer* fthr_playback_open(
     const char* media_path_utf8, const int* stream_indexes, const int stream_count,
@@ -716,7 +929,7 @@ extern "C" int fthr_playback_pull(
     FTHRPlaybackMixer* mixer, float* interleaved_float_stereo, const int frame_count,
     const float* gains, const int gain_count, const float master_gain) {
     if (!mixer) return -1;
-    return mixer->mixer.Pull(interleaved_float_stereo, frame_count, gains, gain_count, master_gain);
+    return mixer->Pull(interleaved_float_stereo, frame_count, gains, gain_count, master_gain);
 }
 
 extern "C" int fthr_playback_set_playback_rate(
@@ -727,7 +940,7 @@ extern "C" int fthr_playback_set_playback_rate(
         return 0;
     }
     std::string error;
-    if (!mixer->mixer.SetPlaybackRate(playback_rate, preserve_pitch != 0, error)) {
+    if (!mixer->SetPlaybackRate(playback_rate, preserve_pitch != 0, error)) {
         WriteError(error_text, error_text_capacity, error);
         return 0;
     }
@@ -742,7 +955,7 @@ extern "C" int fthr_playback_seek(
         return 0;
     }
     std::string error;
-    if (!mixer->mixer.Seek(position_milliseconds, error)) {
+    if (!mixer->Seek(position_milliseconds, error)) {
         WriteError(error_text, error_text_capacity, error);
         return 0;
     }
@@ -750,12 +963,12 @@ extern "C" int fthr_playback_seek(
 }
 
 extern "C" int fthr_playback_is_eof(const FTHRPlaybackMixer* mixer) {
-    return mixer && mixer->mixer.IsEof() ? 1 : 0;
+    return mixer && (mixer->inputs.empty() ? mixer->mixer.IsEof() : mixer->eof) ? 1 : 0;
 }
 
 extern "C" int fthr_playback_source_failed(
     const FTHRPlaybackMixer* mixer, const int source_ordinal) {
-    return mixer && mixer->mixer.SourceFailed(source_ordinal) ? 1 : 0;
+    return mixer && mixer->SourceFailed(source_ordinal) ? 1 : 0;
 }
 
 extern "C" void fthr_playback_close(FTHRPlaybackMixer* mixer) {

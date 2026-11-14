@@ -3,6 +3,9 @@ sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.par
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import time
+import threading
+
+import pytest
 
 from unittest.mock import patch, MagicMock
 
@@ -183,7 +186,7 @@ def test_upload_waits_for_real_final_ready_state(qapp, tmp_path):
     clip.write_bytes(b'base')
     registry.engine_committed(str(clip), needs_finalization=True)
     uploaded = []
-    um._do_single_upload = lambda path: (uploaded.append(path) or (True, 'ok'))
+    um._do_single_upload = lambda path, *, cleanup_candidates=None: (uploaded.append(path) or (True, 'ok'))
     um.start()
     try:
         um.enqueue_upload(str(clip))
@@ -215,7 +218,7 @@ def test_failed_finalization_never_uploads(qapp, tmp_path):
     clip = tmp_path / 'clip.mp4'
     registry.engine_committed(str(clip), needs_finalization=True)
     uploaded = []
-    um._do_single_upload = lambda path: (uploaded.append(path) or (True, 'ok'))
+    um._do_single_upload = lambda path, *, cleanup_candidates=None: (uploaded.append(path) or (True, 'ok'))
     um.start()
     try:
         um.enqueue_upload(str(clip))
@@ -225,3 +228,126 @@ def test_failed_finalization_never_uploads(qapp, tmp_path):
         assert uploaded == []
     finally:
         um.stop()
+
+
+@pytest.fixture
+def admission_uploader(qapp, monkeypatch):
+    from core.clip_readiness import ClipReadinessRegistry
+    from core.upload_manager import UploadManager
+
+    settings = MagicMock()
+    settings.get.side_effect = lambda key, default=None: {
+        'upload_enabled': True, 'upload_mode': 'manual',
+    }.get(key, default)
+    registry = ClipReadinessRegistry()
+    manager = UploadManager(settings, registry)
+    monkeypatch.setattr(manager, 'is_enabled', lambda: True)
+    monkeypatch.setattr(manager, 'is_uploaded', lambda _: False)
+    yield manager, registry
+    manager.stop()
+
+
+@pytest.mark.parametrize('compressed', [False, True])
+def test_upload_claims_exclude_canonical_aliases_and_release_after_worker(
+        admission_uploader, monkeypatch, tmp_path, compressed):
+    manager, registry = admission_uploader
+    source, other = tmp_path / 'source.mp4', tmp_path / 'other.mp4'
+    source.write_bytes(b'complete')
+    (tmp_path / 'sub').mkdir()
+    alias = str(tmp_path / 'sub' / '..' / source.name)
+    enqueue = manager.enqueue_compressed_upload if compressed else manager.enqueue_upload
+    assert manager.begin_local_mutations([source])
+    assert not manager.begin_local_mutations([alias, other])
+    assert manager.begin_local_mutations([other])
+    enqueue(alias)
+    assert manager._queue.empty()
+    manager.end_local_mutations([alias, other])
+
+    entered, release = threading.Event(), threading.Event()
+
+    def upload(path, *, cleanup_candidates=None):
+        entered.set()
+        assert release.wait(3)
+        return True, 'synthetic upload'
+
+    method = '_compress_then_upload' if compressed else '_do_single_upload'
+    monkeypatch.setattr(manager, method, upload)
+    enqueue(str(source))
+    enqueue(alias)
+    assert manager._queue.qsize() == 1
+    assert not manager.begin_local_mutations([alias])
+    try:
+        manager.start()
+        assert entered.wait(2)
+        assert not manager.begin_local_mutations([source])
+    finally:
+        release.set()
+        manager.stop()
+    assert manager.begin_local_mutations([alias])
+    manager.end_local_mutations([source])
+
+
+@pytest.mark.parametrize('gate', ['manager', 'registry'])
+@pytest.mark.parametrize('compressed', [False, True])
+def test_startup_gate_holds_preexisting_signalled_upload_without_launching_plugin(
+        admission_uploader, monkeypatch, tmp_path, gate, compressed):
+    manager, registry = admission_uploader
+    source = tmp_path / 'source.mp4'
+    source.write_bytes(b'complete')
+    assert registry.event_for(source).is_set()
+    enqueue = manager.enqueue_compressed_upload if compressed else manager.enqueue_upload
+    enqueue(str(source))
+    gated = manager if gate == 'manager' else registry
+    gated.set_initializing(True)
+    uploaded = threading.Event()
+    monkeypatch.setattr(manager, '_compress_then_upload' if compressed else '_do_single_upload',
+                        lambda _, *, cleanup_candidates=None: (uploaded.set() or True, 'synthetic upload'))
+    manager.start()
+    try:
+        assert not uploaded.wait(0.2)
+        assert not manager.begin_local_mutations([source])
+        gated.set_initializing(False)
+        assert uploaded.wait(2)
+    finally:
+        gated.set_initializing(False)
+        manager.stop()
+
+
+@pytest.mark.parametrize('compressed', [False, True])
+def test_startup_rejects_new_upload_and_compression_admission(
+        admission_uploader, tmp_path, compressed):
+    manager, registry = admission_uploader
+    source = tmp_path / 'source.mp4'
+    source.write_bytes(b'complete')
+    manager.set_initializing(True)
+    enqueue = manager.enqueue_compressed_upload if compressed else manager.enqueue_upload
+    enqueue(str(source))
+    assert manager._queue.empty()
+    assert not manager.begin_local_mutations([source])
+    manager.set_initializing(False)
+    assert manager.begin_local_mutations([source])
+    manager.end_local_mutations([source])
+
+
+def test_recovery_blocked_upload_releases_claim_and_does_not_starve_next_clip(
+        admission_uploader, monkeypatch, tmp_path, qtbot):
+    manager, registry = admission_uploader
+    blocked, ready = tmp_path / 'blocked.mp4', tmp_path / 'ready.mp4'
+    for path in (blocked, ready):
+        path.write_bytes(b'complete')
+        assert registry.event_for(path).is_set()
+    registry.set_recovery_paths([blocked])
+    uploaded, finished = [], []
+    monkeypatch.setattr(manager, '_do_single_upload',
+                        lambda path, *, cleanup_candidates=None: (uploaded.append(path) or True, 'synthetic upload'))
+    manager.upload_finished.connect(lambda *args: finished.append(args))
+    manager.enqueue_upload(str(blocked))
+    manager.enqueue_upload(str(ready))
+    manager.start()
+    qtbot.waitUntil(lambda: len(finished) == 2, timeout=2500)
+
+    assert uploaded == [str(ready)]
+    assert finished[0][0:2] == (str(blocked), False)
+    assert finished[1][0:2] == (str(ready), True)
+    assert manager.begin_local_mutations([blocked, ready])
+    manager.end_local_mutations([blocked, ready])

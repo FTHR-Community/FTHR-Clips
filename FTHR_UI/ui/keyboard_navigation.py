@@ -12,7 +12,7 @@ from core.navigation_bindings import (
     BINDING_DEFINITIONS, binding_tokens, normalize_binding,
 )
 from ui.style import (
-    Colors, Fonts, button_outline_qss, checkbox_qss, label_body, scrollbar_qss, set_theme_style,
+    Colors, Fonts, Sizes, button_outline_qss, checkbox_qss, label_body, scrollbar_qss, set_theme_style,
 )
 
 
@@ -223,6 +223,7 @@ class BindingButton(QPushButton):
         if self._capture_manager is not None:
             self._capture_manager.begin_input_capture()
         self.error_label.clear()
+        self.error_label.hide()
         self.setText('Press shortcut…')
         self.setFocus()
         self.grabKeyboard()
@@ -247,6 +248,7 @@ class BindingButton(QPushButton):
                         self.bindings.set(self.action, normalize_binding('+'.join(self._keys)))
                     except ValueError as error:
                         self.error_label.setText(str(error))
+                        self.error_label.show()
                     self._stop_recording()
             event.accept()
             return True
@@ -280,8 +282,16 @@ class KeyboardShortcutSettings(QScrollArea):
         page = QWidget()
         set_theme_style(self, lambda: (
             f'QScrollArea {{ background: {Colors.BG}; border: none; }}' + scrollbar_qss()))
-        set_theme_style(page, lambda: f'QWidget {{ background: {Colors.BG}; }}')
+        page.setObjectName('shortcutSettingsPage')
+        set_theme_style(page, lambda: f'QWidget#shortcutSettingsPage {{ background: {Colors.BG}; }}')
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_4)
+        layout.setSpacing(Sizes.SPACE_2)
+        from ui.settings_layout import folded_settings_section
+        root_layout = layout
+        root_layout.setSpacing(12)
+        overview, layout = folded_settings_section('Using shortcuts', expanded=True)
+        root_layout.addWidget(overview)
         beta = QLabel('Beta')
         set_theme_style(beta, lambda: label_body(Colors.ACCENT, Fonts.SIZE_BODY_L))
         layout.addWidget(beta)
@@ -303,22 +313,20 @@ class KeyboardShortcutSettings(QScrollArea):
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
         set_theme_style(self.error_label, lambda: label_body(Colors.DELETE, Fonts.SIZE_BODY))
-        layout.addWidget(self.error_label)
+        root_layout.addWidget(self.error_label)
+        self.error_label.hide()
         self.buttons = {}
         group = None
         for action, label, _, _, section in BINDING_DEFINITIONS:
             if group != section:
-                header = QLabel(section)
-                set_theme_style(header, lambda: (
-                    label_body(Colors.ACCENT, Fonts.SIZE_BODY_L) + 'font-weight: 600;'))
-                layout.addSpacing(14)
-                layout.addWidget(header)
+                folded, group_layout = folded_settings_section(section)
+                root_layout.addWidget(folded)
                 check = QCheckBox(f'Enable {section.lower()} shortcuts')
                 set_theme_style(check, checkbox_qss)
                 check.setChecked(bindings.categories[section])
                 check.toggled.connect(lambda enabled, category=section: bindings.set_category_enabled(category, enabled))
                 self.category_checks[section] = check
-                layout.addWidget(check)
+                group_layout.addWidget(check)
                 group = section
             row = QHBoxLayout()
             label_widget = QLabel(label)
@@ -333,13 +341,13 @@ class KeyboardShortcutSettings(QScrollArea):
             clear.setAccessibleName(f'Clear shortcut: {label}')
             clear.clicked.connect(lambda _checked=False, key=action: bindings.set(key, ''))
             row.addWidget(clear)
-            layout.addLayout(row)
+            group_layout.addLayout(row)
         reset = QPushButton('Restore default shortcuts')
         set_theme_style(reset, button_outline_qss)
         reset.clicked.connect(bindings.reset)
-        layout.addSpacing(18)
-        layout.addWidget(reset, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addStretch()
+        root_layout.addSpacing(8)
+        root_layout.addWidget(reset, 0, Qt.AlignmentFlag.AlignLeft)
+        root_layout.addStretch()
         self.setWidget(page)
         bindings.changed.connect(self._refresh_enabled)
         self._refresh_enabled()

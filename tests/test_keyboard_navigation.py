@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QDialog, QLineEdit, QPushButton,
@@ -261,12 +261,23 @@ def test_settings_categories_wrap_without_item_navigation(
     }, lambda: {'application', 'main', 'settings'})
     page.resize(1100, 720)
     page.show()
+    last_category = page._top_categories[-1]
+    assert [button.text() for button in page._tab_buttons if not button.isHidden()] == [
+        'General', 'Clip', 'Audio', 'Visuals', 'Customize', 'Performance', 'Shortcuts', 'Plugins', 'Storage']
     QTest.keyClick(page, Qt.Key.Key_Left, Qt.KeyboardModifier.ShiftModifier)
-    qtbot.waitUntil(lambda: page.stack.currentIndex() == 6)
-    assert page.stack._slide._horizontal
-    assert page.stack._slide._direction == -1
-    assert page._tab_buttons[6].isChecked()
+    qtbot.waitUntil(lambda: page.stack.currentIndex() == last_category)
+    assert page._tab_buttons[last_category].isChecked()
+    shortcuts_category = next(
+        index for index, button in enumerate(page._tab_buttons)
+        if button.text() == 'Shortcuts')
+    page._tab_buttons[shortcuts_category].click()
+    qtbot.waitUntil(lambda: page.stack.currentIndex() == shortcuts_category)
+    assert page._tab_buttons[shortcuts_category].isChecked()
     assert page.stack.currentWidget() is page.shortcut_settings
+    from ui.customize_page import _AccordionSection
+    for section in page.shortcut_settings.findChildren(_AccordionSection):
+        section.expand()
+    qtbot.wait(20)
     items = list(page.shortcut_settings.buttons.values())
     items[0].setFocus()
     QTest.keyClick(items[0], Qt.Key.Key_Tab)
@@ -275,10 +286,10 @@ def test_settings_categories_wrap_without_item_navigation(
     QTest.keyClick(items[0], Qt.Key.Key_Return)
     assert not items[0]._recording
     assert items[0].hasFocus()
-    QTest.keyClick(items[0], Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+    page._tab_buttons[last_category].click()
+    qtbot.waitUntil(lambda: page.stack.currentIndex() == last_category)
+    QTest.keyClick(page, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
     qtbot.waitUntil(lambda: page.stack.currentIndex() == 0)
-    assert page.stack._slide._horizontal
-    assert page.stack._slide._direction == 1
     assert page._tab_buttons[0].isChecked()
     assert navigation.parent() is page
 
@@ -304,6 +315,16 @@ def test_adjacent_clips_follow_the_full_virtual_library(qtbot, monkeypatch, tmp_
         paths = grid.navigation_paths()
         assert len(paths) == 220
         assert paths[-1] not in grid._thumb_widgets
+
+        def _final_canvas_laid_out():
+            bottom = max(canvas.mapTo(grid, QPoint(0, canvas.height())).y()
+                         for canvas in grid._virtual_sections.values())
+            return (bottom + grid.layout.contentsMargins().bottom()
+                    <= scroll.verticalScrollBar().maximum() + scroll.viewport().height())
+
+        # The final 220-record scan can follow a 128-record partial publish
+        # before Qt updates the scroll range. Wait for its visible geometry.
+        qtbot.waitUntil(_final_canvas_laid_out)
         scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
         qtbot.waitUntil(lambda: paths[-1] in grid._thumb_widgets)
         assert len(grid._thumb_widgets) <= clip_grid._MAX_MATERIALIZED_CARDS

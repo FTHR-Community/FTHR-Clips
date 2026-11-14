@@ -219,6 +219,189 @@ def test_scroll_card_creation_yields_and_completes_next_frame(qapp, qtbot, tmp_p
     grid._update_virtualized_cards()
     assert len(grid._thumb_widgets) == 2
     grid._scrolling = False
-    grid._update_virtualized_cards()
+    # Initial materialization is budgeted too; drain the existing coalesced
+    # timer path instead of allowing one unbounded callback after scrolling.
+    for _ in range(len(paths) + 2):
+        grid._virtual_update_timer.stop()
+        grid._update_virtualized_cards()
+        if set(grid._thumb_widgets) == set(paths):
+            break
     assert set(grid._thumb_widgets) == set(paths)
+    grid.shutdown()
+
+
+def test_resize_virtual_conversion_adopts_active_rename_card(
+        qapp, qtbot, tmp_path, monkeypatch):
+    """A resize must preserve an active rename editor and its focus."""
+    from PySide6.QtWidgets import QScrollArea
+
+    grid = make_grid(tmp_path, monkeypatch)
+    monkeypatch.setattr(grid, '_start_thumbnail_worker', lambda *_: None)
+    paths = []
+    for index in range(20):
+        path = tmp_path / f'clip-{index:02}.mp4'
+        path.touch()
+        paths.append(str(path))
+
+    grid._add_section('date', paths, 0)
+    grid._records = {path: None for path in paths}
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(grid)
+    scroll.resize(1100, 600)
+    qtbot.addWidget(scroll)
+    scroll.show()
+    qtbot.wait(30)
+
+    editing = grid._thumb_widgets[paths[0]]
+    editing._begin_rename()
+    editing.title_edit.setText('draft survives resize')
+    editing.title_edit.setFocus()
+    assert editing.title_edit.hasFocus()
+    old_parent = editing.parentWidget()
+    old_generation = editing._library_generation
+
+    monkeypatch.setattr(grid, '_virtual_card_budget', lambda *_: 10)
+    grid._virtual_update_timer.stop()
+    grid._update_virtualized_cards()
+    qapp.processEvents()
+
+    assert not grid._section_grids
+    assert all(grid._thumb_widgets[path] is not None for path in paths[:3])
+    assert editing.parentWidget() is old_parent
+    assert editing._editing_name
+    assert editing.title_edit.text() == 'draft survives resize'
+    assert editing.title_edit.hasFocus()
+    assert editing._library_generation is old_generation
+    editing._cancel_rename()
+    grid.shutdown()
+
+
+def test_resize_virtual_conversion_adopts_mutating_popup_card(
+        qapp, qtbot, tmp_path, monkeypatch):
+    """An active mutation and its popup survive eager-to-virtual conversion."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu, QScrollArea, QApplication
+
+    grid = make_grid(tmp_path, monkeypatch)
+    monkeypatch.setattr(grid, '_start_thumbnail_worker', lambda *_: None)
+    paths = []
+    for index in range(20):
+        path = tmp_path / f'clip-{index:02}.mp4'
+        path.touch()
+        paths.append(str(path))
+    grid._add_section('date', paths, 0)
+    grid._records = {path: None for path in paths}
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(grid)
+    scroll.resize(1100, 600)
+    qtbot.addWidget(scroll)
+    scroll.show()
+    qtbot.wait(30)
+
+    card = grid._thumb_widgets[paths[2]]
+    token = object()
+    card._mutation_busy = True
+    card._mutation_token = token
+    menu = QMenu(card)
+    menu.addAction('Still open')
+    menu.popup(card.mapToGlobal(QPoint(4, 4)))
+    qtbot.wait(10)
+    assert QApplication.activePopupWidget() is menu
+    old_parent = card.parentWidget()
+
+    monkeypatch.setattr(grid, '_virtual_card_budget', lambda *_: 10)
+    grid._virtual_update_timer.stop()
+    grid._update_virtualized_cards()
+    qapp.processEvents()
+
+    assert QApplication.activePopupWidget() is menu
+    assert grid._thumb_widgets[paths[2]] is card
+    assert card.parentWidget() is old_parent
+    assert card._mutation_busy
+    assert card._mutation_token is token
+    point = card.geometry().center()
+    hit = card.parentWidget().childAt(point)
+    assert hit is card or card.isAncestorOf(hit)
+
+    menu.close()
+    card._mutation_busy = False
+    grid.shutdown()
+
+
+def test_virtual_target_budget_prioritizes_visible_paths_globally(
+        qapp, qtbot, tmp_path, monkeypatch):
+    """Overscan from one section cannot consume the 96-card global target."""
+    from PySide6.QtWidgets import QScrollArea, QWidget
+    from ui import clip_grid
+
+    grid = make_grid(tmp_path, monkeypatch)
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(grid)
+    scroll.resize(1100, 600)
+    scroll.show()
+    qtbot.wait(20)
+
+    canvases = {key: QWidget(grid._sections_host) for key in ('old', 'new')}
+    grid._virtual_sections = canvases
+    grid._section_files = {key: [] for key in canvases}
+    grid._records = {str(index): None for index in range(200)}
+    visible = {
+        'old': [(f'old-visible-{index}', 0, index) for index in range(2)],
+        'new': [(f'new-visible-{index}', 0, index) for index in range(2)],
+    }
+    overscan = {
+        'old': [(f'old-overscan-{index}', 1, index) for index in range(100)],
+        'new': [(f'new-overscan-{index}', 1, index) for index in range(100)],
+    }
+    stale = [path for path, _row, _col in overscan['old'][:96]]
+    grid._thumb_widgets = {path: object() for path in stale}
+    grid._card_virtual_sections = {path: 'old' for path in stale}
+    scheduled = []
+    materialized = []
+    positioned = []
+    released = []
+
+    def plan(key, _viewport, *, include_overscan=True):
+        return (visible if not include_overscan else overscan)[key]
+
+    monkeypatch.setattr(grid, '_virtual_section_plan', plan)
+    monkeypatch.setattr(grid, '_set_virtual_canvas_height', lambda *_: None)
+    def release(path):
+        released.append(path)
+        grid._thumb_widgets.pop(path, None)
+        grid._card_virtual_sections.pop(path, None)
+
+    monkeypatch.setattr(grid, '_release_virtual_card', release)
+
+    def materialize(key, wanted, **_kwargs):
+        if _kwargs.get('create_missing', True):
+            for item in wanted:
+                path = item[0]
+                scheduled.append((key, path))
+                if path not in grid._thumb_widgets:
+                    assert len(grid._thumb_widgets) < clip_grid._MAX_MATERIALIZED_CARDS
+                    grid._thumb_widgets[path] = object()
+                    materialized.append((key, path))
+        else:
+            positioned.extend((key, item[0]) for item in wanted)
+        return True
+
+    monkeypatch.setattr(grid, '_materialize_virtual_section', materialize)
+    grid._virtual_update_timer.stop()
+    grid._update_virtualized_cards()
+
+    expected_visible = [item[0] for key in ('old', 'new') for item in visible[key]]
+    assert [path for _key, path in scheduled[:4]] == expected_visible
+    assert len(scheduled) == clip_grid._MAX_MATERIALIZED_CARDS
+    assert [path for _key, path in materialized] == expected_visible
+    positioned_paths = [path for _key, path in positioned]
+    assert len(positioned_paths) == clip_grid._MAX_MATERIALIZED_CARDS
+    assert len(set(positioned_paths)) == len(positioned_paths)
+    assert set(expected_visible).issubset(positioned_paths)
+    assert released == stale[92:]
+    assert not any(path.startswith('new-overscan') for _key, path in materialized[:4])
+
     grid.shutdown()

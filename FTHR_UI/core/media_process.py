@@ -194,22 +194,16 @@ def _run_media_process(command, cancel_event, *, timeout_seconds,
     try:
         if on_stdout is not None:
             return _stream_media_process(process, cancel_event, deadline, on_stdout)
-        while True:
-            if cancel_event.is_set() or time.monotonic() >= deadline:
-                return None
-            try:
-                stdout, stderr = process.communicate(timeout=0.1)
-                # Keep diagnostics bounded even if an encoder is unusually
-                # verbose; stdout is the thumbnail/probe payload and has a
-                # separate media-size guard below.
-                return process.returncode or 0, stdout, stderr[-32_768:]
-            except subprocess.TimeoutExpired:
-                continue
+        stdout = bytearray()
+        result = _stream_media_process(process, cancel_event, deadline, stdout.extend)
+        if result is None:
+            return None
+        return result[0], bytes(stdout), result[2]
     finally:
         # Always perform the reap path.  A non-None poll result can still be
         # an unreaped child, and this is the last point before ownership is
         # removed from the register.
         try:
-            _stop_owned_process(process, drain=on_stdout is None)
+            _stop_owned_process(process, drain=False)
         finally:
             _media_process_finished(process)

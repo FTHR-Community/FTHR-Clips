@@ -5,7 +5,7 @@ from PySide6.QtCore import QTimer, QUrl, Qt, QSize
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget,
-    QListWidgetItem, QWidget, QProgressBar, QSizePolicy,
+    QListWidgetItem, QWidget, QProgressBar, QSizePolicy, QPlainTextEdit,
 )
 
 from core.export_queue import tasks
@@ -25,9 +25,9 @@ class _ExportJobRow(QWidget):
         row.setSpacing(16)
         copy = QVBoxLayout()
         copy.setSpacing(3)
-        self.name = QLabel(Path(task.source).name)
+        self.name = QLabel(getattr(task, 'label', None) or Path(task.source).name)
         self.name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.name.setToolTip(Path(task.source).name)
+        self.name.setToolTip(getattr(task, 'label', None) or Path(task.source).name)
         set_theme_style(self.name, lambda: (
             f'color: {Colors.TEXT}; font: 14px {Fonts.DISPLAY}; background: transparent;'))
         self.status = QLabel()
@@ -93,7 +93,10 @@ class ExportJobsDialog(FthrDialog):
         self.open_button = QPushButton('Open output folder')
         self.open_button.clicked.connect(self.open_selected)
         row.addWidget(self.open_button)
-        for button in (self.cancel_button, self.open_button):
+        self.details_button = QPushButton('Details')
+        self.details_button.clicked.connect(self.show_details)
+        row.addWidget(self.details_button)
+        for button in (self.cancel_button, self.open_button, self.details_button):
             set_theme_style(button, button_primary_qss)
         self.timer = QTimer(self)
         self.timer.setInterval(500)
@@ -142,6 +145,7 @@ class ExportJobsDialog(FthrDialog):
         task = self.selected()
         self.cancel_button.setEnabled(task is not None and not task.done)
         self.open_button.setEnabled(task is not None)
+        self.details_button.setEnabled(task is not None and bool(task.detail))
 
     def cancel_selected(self):
         task = self.selected()
@@ -150,10 +154,30 @@ class ExportJobsDialog(FthrDialog):
             task.status = 'Cancelling'
         self.refresh()
 
+    def show_details(self):
+        task = self.selected()
+        if task is not None and task.detail:
+            dialog = FthrDialog('Export details', self, width=680)
+            text = QPlainTextEdit(dialog)
+            text.setReadOnly(True)
+            text.setAccessibleName('Export result details')
+            text.setPlainText(task.detail)
+            text.setFixedHeight(320)
+            set_theme_style(text, lambda: (
+                f'QPlainTextEdit {{ color: {Colors.TEXT}; background: {Colors.SURFACE_1}; '
+                f'border: 1px solid {Colors.BORDER}; font: 12px {Fonts.DISPLAY}; }}'))
+            dialog.body_layout.addWidget(text)
+            close = QPushButton('Close')
+            set_theme_style(close, button_primary_qss)
+            close.clicked.connect(dialog.accept)
+            dialog.action_layout.addStretch()
+            dialog.action_layout.addWidget(close)
+            dialog.exec()
+
     def open_selected(self):
         task = self.selected()
         if task:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(task.output).parent)))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(task.output) if task.quality == 'originals' else Path(task.output).parent)))
 
 
 def show_export_jobs():

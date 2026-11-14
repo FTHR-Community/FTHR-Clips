@@ -76,7 +76,8 @@ def test_filtered_record_count_path_skips_ordering():
         "new": _record("new", mtime_ns=30),
         "old": _record("old", mtime_ns=10),
     }
-    grid = SimpleNamespace(_records=records, _filter="all", _sort="newest")
+    grid = SimpleNamespace(
+        _records=records, _filter="all", _sort="newest", _album_id=None)
 
     assert clip_grid.ClipGrid._filtered_records(grid, ordered=False) == list(records.values())
     assert [record.path for record in clip_grid.ClipGrid._filtered_records(grid)] == ["new", "old"]
@@ -112,7 +113,7 @@ def test_watcher_sync_only_adds_and_removes_directory_delta(monkeypatch, tmp_pat
             return True
 
     watcher = Watcher((str(keep), str(remove)))
-    grid = SimpleNamespace(_shutdown_started=False, _watcher=watcher)
+    grid = SimpleNamespace(_shutdown_started=False, _scanning_started=True, _watcher=watcher)
     checked_directories = []
     original_isdir = clip_grid.os.path.isdir
 

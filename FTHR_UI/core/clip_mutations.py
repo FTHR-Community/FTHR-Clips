@@ -2,11 +2,33 @@
 from __future__ import annotations
 
 import json
+import ctypes
+import errno
 import os
 import re
+import sys
 from pathlib import Path
 
 from core.audio_manifest import manifest_path_for
+
+
+def rename_no_replace(source, destination) -> None:
+    """Atomic no-replace rename; never emulate it with an existence check."""
+    if sys.platform == 'win32':
+        os.rename(source, destination)
+        return
+    if sys.platform.startswith('linux'):
+        libc = ctypes.CDLL(None, use_errno=True)
+        native = getattr(libc, 'renameat2', None)
+        if native is None:
+            raise OSError(errno.ENOTSUP, 'atomic no-replace rename is unavailable')
+        native.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        native.restype = ctypes.c_int
+        if native(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code), os.fspath(destination))
+        return
+    raise OSError(errno.ENOTSUP, 'atomic no-replace rename is unsupported on this platform')
 
 
 def renamed_clip_path(path: str, name: str) -> str:

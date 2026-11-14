@@ -1,14 +1,11 @@
 """A persistent editor window whose per-clip resources can be replaced."""
 
 from pathlib import Path
-import time
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import QDialog, QMessageBox, QPushButton, QVBoxLayout
 
 from ui.clip_viewer import ClipViewer
-from ui.shell_transitions import SnapshotSlide
-from ui.motion import reduce_motion
 from ui.style import set_theme_style
 
 
@@ -23,8 +20,6 @@ class ClipEditorWindow(QDialog):
     def __init__(self, clip_path, bridge, parent=None, *, session_state=None, **options):
         super().__init__(parent)
         self._page = None
-        self._clip_slide = None
-        self._last_navigation_at = None
         self._bridge = bridge
         self._options = options
         self._native_style_applied = False
@@ -53,8 +48,28 @@ class ClipEditorWindow(QDialog):
             return getattr(page, name)
         raise AttributeError(name)
 
+    def _prepare_page_details(self, page):
+        flush = getattr(page, '_flush_clip_details', None)
+        if not callable(flush):
+            return True
+        try:
+            if flush() is False:
+                return False
+            if any(getattr(page, name, None) is not None
+                   and getattr(page, name).isModified()
+                   for name in ('_tag_edit', '_desc_edit')):
+                raise OSError('The clip details could not be saved')
+        except (OSError, TypeError, ValueError) as error:
+            warn = getattr(page, '_warn_clip_details_error', None)
+            if callable(warn):
+                warn(error)
+            return False
+        return True
+
     def replace_clip(self, clip_path, *, session_state=None, autoplay=True,
-                     navigation_step=0, **options):
+                     **options):
+        if getattr(self._page, '_trash_pending_token', None) is not None:
+            return False
         self._idle_memory_timer.stop()
         previous = self._page
         worker = getattr(previous, '_export_thread', None)
@@ -62,15 +77,8 @@ class ClipEditorWindow(QDialog):
             QMessageBox.information(self, 'Export in progress',
                                     'Finish or cancel the export before switching clips.')
             return False
-        now = time.monotonic()
-        rapid_navigation = (self._last_navigation_at is not None
-                            and now - self._last_navigation_at < .25)
-        self._last_navigation_at = now if navigation_step else None
-        # Preserve single-step motion, but never recapture a desktop-sized
-        # image for every keypress in a browsing burst. Each clip still opens.
-        self._finish_clip_slide()
-        outgoing = (self.grab() if navigation_step and not rapid_navigation and self.isVisible()
-                    and not reduce_motion(previous) else None)
+        if previous is not None and not self._prepare_page_details(previous):
+            return False
         self.setUpdatesEnabled(False)
         replacement_error = None
         settings = {**self._options, **options}
@@ -117,55 +125,44 @@ class ClipEditorWindow(QDialog):
             QMessageBox.warning(self, 'Could not open clip', replacement_error)
             self.update()
             return False
-        if outgoing is not None:
-            self._content.activate()
-            page.layout().activate()
-            self._clip_slide = SnapshotSlide(
-                self, outgoing, page, 1 if navigation_step > 0 else -1,
-                horizontal=True,
-            )
-            self._clip_slide.show()
-            self._clip_slide.raise_()
-            self._clip_slide.animation.finished.connect(self._finish_clip_slide)
-            self._clip_slide.animation.start()
         self.update()
         return True
 
-    def _finish_clip_slide(self):
-        if self._clip_slide is not None:
-            self._clip_slide.animation.stop()
-            self._clip_slide.hide()
-            self._clip_slide.release_snapshots()
-            self._clip_slide.deleteLater()
-            self._clip_slide = None
-
     def resizeEvent(self, event):
-        self._finish_clip_slide()
         super().resizeEvent(event)
         self._content.invalidate()
         self._content.activate()
 
     def hideEvent(self, event):
-        self._finish_clip_slide()
         self._idle_memory_timer.start()
         super().hideEvent(event)
 
     def _release_idle_memory(self):
-        if not self.isVisible() and self._clip_slide is None and self._page is not None:
+        if not self.isVisible() and self._page is not None:
             self._page.release_idle_ui_resources()
+
+    def done(self, result):
+        if getattr(self._page, '_trash_pending_token', None) is not None:
+            return
+        super().done(result)
 
     def _page_finished(self, result):
         self.done(result)
 
     def _close(self):
+        if getattr(self._page, '_trash_pending_token', None) is not None:
+            return False
         self._page._close()
 
     def _teardown_player(self, **options):
-        self._finish_clip_slide()
         if self._page is not None:
             self._page._teardown_player(**options)
 
     def reject(self):
+        if getattr(self._page, '_trash_pending_token', None) is not None:
+            return False
+        if self._page is not None and not self._prepare_page_details(self._page):
+            return False
         worker = getattr(self._page, '_export_thread', None)
         if worker is not None and worker.is_alive():
             self._page._close()
@@ -174,13 +171,22 @@ class ClipEditorWindow(QDialog):
         super().reject()
 
     def accept(self):
+        if getattr(self._page, '_trash_pending_token', None) is not None:
+            return False
+        if self._page is not None and not self._prepare_page_details(self._page):
+            return False
         self._teardown_player()
         super().accept()
+        return True
 
     def closeEvent(self, event):
+        event.ignore()
+        if getattr(self._page, '_trash_pending_token', None) is not None:
+            return
+        if self._page is not None and not self._prepare_page_details(self._page):
+            return
         worker = getattr(self._page, '_export_thread', None)
         if worker is not None and worker.is_alive():
-            event.ignore()
             self._page._close()
             return
         self._teardown_player(wait_for_workers=False)

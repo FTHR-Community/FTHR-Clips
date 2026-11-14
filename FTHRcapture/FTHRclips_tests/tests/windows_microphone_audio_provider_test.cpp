@@ -1,10 +1,13 @@
+#include "audio_device_tracks.h"
 #include "audio_timeline.h"
 #include "audio_signal_metrics.h"
+#include "capture_engine.h"
 #include "windows_microphone_audio_provider.h"
 
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 
 namespace {
 
@@ -73,7 +76,54 @@ void ExplicitEndpointIdentityIsNotManifestIdentity() {
         "a selected endpoint is runtime-only while the portable source remains semantic");
 }
 
-void TimelineContinuityBoundsGapAndOverlap() {
+void NamedRenderTrackParserRejectsInjectionAndKeepsTheTrackCap() {
+    const auto valid = fthr::ParseAudioDeviceTracks(
+        "Speakers A;endpoint-a|Speakers B;endpoint-b");
+    CheckMicrophone(valid.size() == 2
+            && valid[0].name == "Speakers A"
+            && valid[0].endpoint_id == L"endpoint-a"
+            && valid[1].endpoint_id == L"endpoint-b",
+        "named render tracks preserve bounded names and explicit endpoint identities");
+
+    const auto malformed = fthr::ParseAudioDeviceTracks(
+        "good;endpoint-a;injected|bad|nul;endpoint-c");
+    CheckMicrophone(malformed.size() == 1
+            && malformed[0].endpoint_id == L"endpoint-c",
+        "malformed separators are rejected without injecting additional tracks");
+
+    std::string embedded_nul = "nul;endpoint-c";
+    embedded_nul.insert(9, 1, '\0');
+    CheckMicrophone(fthr::ParseAudioDeviceTracks(embedded_nul).empty(),
+        "embedded NULs cannot add a hidden endpoint track");
+
+    const auto duplicate = fthr::ParseAudioDeviceTracks(
+        "first;endpoint-a|duplicate;endpoint-a|second;endpoint-b");
+    CheckMicrophone(duplicate.size() == 2
+            && duplicate[0].name == "first"
+            && duplicate[1].name == "second",
+        "duplicate render endpoints are admitted only once");
+
+    const auto capped = fthr::ParseAudioDeviceTracks(
+        "a;one|b;two|c;three|d;four|e;five");
+    CheckMicrophone(capped.size() == fthr::kMaxAudioDeviceTracks,
+        "named render tracks are capped at the native maximum");
+}
+
+void ApplicationTrackFlagPreservesLegacyAndExplicitOverrides() {
+    fthr::CaptureConfig legacy;
+    legacy.separate_audio_enabled = true;
+    CheckMicrophone(legacy.ResolvedApplicationAudioTracksEnabled(),
+        "direct native callers retain separate-audio application tracks by default");
+
+    legacy.application_audio_tracks_enabled = false;
+    CheckMicrophone(!legacy.ResolvedApplicationAudioTracksEnabled(),
+        "an explicit application-track false disables the legacy default");
+
+    legacy.application_audio_tracks_enabled = true;
+    CheckMicrophone(legacy.ResolvedApplicationAudioTracksEnabled(),
+        "an explicit application-track true remains enabled");
+}
+ void TimelineContinuityBoundsGapAndOverlap() {
     const auto first = fthr::ReconcileAudioTimelinePacket(
         0, 10'000'000, 480, 48000);
     CheckMicrophone(first.silence_frames == 0 && first.skip_input_frames == 0
@@ -200,6 +250,8 @@ int RunWindowsMicrophoneAudioProviderTests() {
     EncoderDelayStaysSignedInManifestTimeline();
     DriftCorrectionIsSmallAndBounded();
     ExplicitEndpointIdentityIsNotManifestIdentity();
+    NamedRenderTrackParserRejectsInjectionAndKeepsTheTrackCap();
+    ApplicationTrackFlagPreservesLegacyAndExplicitOverrides();
     TimelineContinuityBoundsGapAndOverlap();
     ProcessingDiagnosticsUseExplicitTimestampAndBufferThresholds();
     InputGainPreservesIntentionalOverRangeSemantics();

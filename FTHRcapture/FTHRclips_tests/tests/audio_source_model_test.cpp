@@ -44,11 +44,11 @@ void ActivityGatingAndIntervalSelectionAreDeterministic() {
     CheckAudio(registry.Discover(silent), "a second source is discovered");
 
     CheckAudio(registry.ObserveActivity(valorant.identity.id, 0.011f, 100)
-                   == fthr::AudioSourceAdmission::RejectedAtCapacity,
-        "one loud block does not beat hysteresis");
+                   == fthr::AudioSourceAdmission::Accepted,
+        "the first nonzero block is retained without an admission fade-in");
     CheckAudio(registry.ObserveActivity(valorant.identity.id, 0.011f, 200)
                    == fthr::AudioSourceAdmission::Accepted,
-        "two loud blocks admit a meaningful source");
+        "continued audio remains admitted");
     CheckAudio(registry.SourcesForInterval(0, 250).size() == 1,
         "active app appears in its clip interval");
     CheckAudio(registry.SourcesForInterval(300, 400).empty(),
@@ -349,6 +349,29 @@ void NativeManifestBindsTheTemporaryMediaWithoutPrivatePaths() {
                        != std::string::npos
                    && content.find("C:\\\\") == std::string::npos,
         "native manifest maps Default Mix plus an actual application stem without private paths");
+    manifest.close();
+    track.source.identity.type = fthr::AudioSourceType::Microphone;
+    track.source.identity.display_name = "Microphone";
+    track.source.format = {48000, 2, "flt", "pcm_f32le"};
+    track.source.input_gain_percent = 175;
+    track.source.mono = true;
+    track.snapshot.format = track.source.format;
+    track.snapshot.codec_extradata.clear();
+    track.snapshot.packets.front().data.assign(1024 * 2 * 4, 0);
+    CheckAudio(fthr::WriteClipAudioManifest(media_final, media_partial, manifest_partial,
+        transaction_id, {track}, &error, {"source_limit_reached"}),
+        "lossless microphone manifest accepts raw PCM without AAC extradata");
+    std::ifstream raw_manifest(manifest_partial, std::ios::binary);
+    const std::string raw_content((std::istreambuf_iterator<char>(raw_manifest)),
+                                  std::istreambuf_iterator<char>());
+    CheckAudio(raw_content.find("\"codec\":\"pcm_f32le\"") != std::string::npos
+        && raw_content.find("\"gain_percent\":175,\"mono\":true") != std::string::npos
+        && raw_content.find("source_limit_reached") != std::string::npos,
+        "dry processing defaults and capture failures survive native manifest serialization");
+    raw_manifest.close();
+    CheckAudio(fthr::WriteClipAudioManifest(media_final, media_partial, manifest_partial,
+        transaction_id, {}, &error, {"microphone_unavailable", "system_audio_failed"}),
+        "an audio failure is recorded even when no source could be saved");
     std::filesystem::remove(media_partial, filesystem_error);
     std::filesystem::remove(manifest_partial, filesystem_error);
     std::filesystem::remove(directory, filesystem_error);

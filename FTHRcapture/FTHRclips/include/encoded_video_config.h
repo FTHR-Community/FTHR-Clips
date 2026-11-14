@@ -48,6 +48,7 @@ struct EncodedVideoConfig {
     EncodedPacketFormat packet_format =
         EncodedPacketFormat::LengthPrefixedNalUnits;
     std::vector<uint8_t> codec_extradata;
+    bool hdr10 = false;
 
     friend bool operator==(
         const EncodedVideoConfig& left,
@@ -62,7 +63,8 @@ struct EncodedVideoConfig {
                 == right.max_keyframe_interval_frames
             && left.max_b_frames == right.max_b_frames
             && left.packet_format == right.packet_format
-            && left.codec_extradata == right.codec_extradata;
+            && left.codec_extradata == right.codec_extradata
+            && left.hdr10 == right.hdr10;
     }
 };
 

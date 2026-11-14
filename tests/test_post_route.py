@@ -4,7 +4,9 @@ Concurrent routes could release an uploader while another still writes.
 Import the route selector directly; importing main.py creates no window.
 """
 
+import ast
 import itertools
+import os
 import sys
 import threading
 from pathlib import Path
@@ -92,18 +94,22 @@ def test_keyboard_only_finalization_starts_the_completion_worker():
 
     scheduled = []
     worker = object()
+    capture_job = object()
     host = SimpleNamespace(
         settings_manager=_Settings(),
         _allow_completed_clip_pipeline=lambda _path, _ready=None: True,
         _finalize_clip_worker=worker,
-        _spawn_mux_thread=lambda target, args: scheduled.append((target, args)),
+        _spawn_mux_thread=lambda target, args, *, capture_job=None:
+        scheduled.append((target, args, capture_job)),
     )
 
     MainWindow._finalize_clip(
-        host, 'keyboard-only.mp4', 30, 100.0, threading.Event(), None)
+        host, 'keyboard-only.mp4', 30, 100.0, threading.Event(), None,
+        capture_job=capture_job)
 
     assert len(scheduled) == 1
     assert scheduled[0][0] is worker
+    assert scheduled[0][2] is capture_job
 
 
 def test_keyboard_compositor_cannot_deadlock_on_an_unread_error_pipe():
@@ -169,10 +175,43 @@ def test_completion_handler_dispatches_one_route_only():
     dispatch = body[body.index('args = ('):]
 
     assert dispatch.count('self._mux_mic_into_clip(') == 1
-    assert 'self._mux_mic_into_clip(*args, audio_mode=audio_mode)' in dispatch
+    assert 'self._mux_mic_into_clip(*args, audio_mode=audio_mode' in dispatch
+    assert 'capture_job=capture_job' in dispatch
     assert 'self._mux_multiband_into_clip(' not in dispatch
     assert dispatch.count('self._finalize_clip(') == 1
-    assert dispatch.index("if route == 'mic'") < dispatch.index('else:')
+
+    tree = ast.parse(src)
+    handler = next(node for node in ast.walk(tree)
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and node.name == '_on_clip_written')
+
+    def _route_test(node):
+        return (
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name)
+            and node.left.id == 'route'
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.Eq)
+            and len(node.comparators) == 1
+            and isinstance(node.comparators[0], ast.Constant)
+            and node.comparators[0].value == 'mic'
+        )
+
+    route_ifs = [node for node in ast.walk(handler)
+                 if isinstance(node, ast.If) and _route_test(node.test)]
+    assert len(route_ifs) == 1
+    route_if = route_ifs[0]
+
+    def _direct_self_calls(statements):
+        return [statement.value.func.attr for statement in statements
+                if (isinstance(statement, ast.Expr)
+                    and isinstance(statement.value, ast.Call)
+                    and isinstance(statement.value.func, ast.Attribute)
+                    and isinstance(statement.value.func.value, ast.Name)
+                    and statement.value.func.value.id == 'self')]
+
+    assert _direct_self_calls(route_if.body) == ['_mux_mic_into_clip']
+    assert _direct_self_calls(route_if.orelse) == ['_finalize_clip']
 
 
 def test_readiness_is_registered_before_incremental_library_update():
@@ -298,6 +337,7 @@ def test_finalizer_cfr_gate_normalizes_once_and_releases_ready_event(
     Path(clip_path).write_bytes(b'valid-final-payload')
     normalized: list[str] = []
     published: list[str] = []
+    published_identities: list[dict[str, int] | None] = []
     completed: list[str] = []
 
     class _Readiness:
@@ -319,13 +359,18 @@ def test_finalizer_cfr_gate_normalizes_once_and_releases_ready_event(
         def emit(callback):
             callback()
 
+    def _publish_final_clip(path, _duration, *, expected_identity=None):
+        published.append(path)
+        published_identities.append(
+            None if expected_identity is None else dict(expected_identity))
+
     ready = threading.Event()
     host = SimpleNamespace(
         _mux_threads=[],
         _clip_readiness=_Readiness(),
         _ui_call=_UiCall(),
         _normalize_clip_to_cfr=lambda path: normalized.append(path),
-        _publish_final_clip=lambda path, _duration: published.append(path),
+        _publish_final_clip=_publish_final_clip,
         _record_finalization_warning=lambda *_args: None,
     )
     host._complete_clip_finalization = lambda path, duration, **kwargs: (
@@ -345,6 +390,13 @@ def test_finalizer_cfr_gate_normalizes_once_and_releases_ready_event(
         'the finalizer must not normalize the same clip twice')
     assert completed == [clip_path]
     assert published == [clip_path]
+    first_identity = os.stat(clip_path, follow_symlinks=False)
+    assert published_identities == [{
+        'st_dev': int(first_identity.st_dev),
+        'st_ino': int(first_identity.st_ino),
+        'size': int(first_identity.st_size),
+        'mtime_ns': int(first_identity.st_mtime_ns),
+    }]
 
     no_ready_clip = str(tmp_path / 'finalizer-no-ready.mp4')
     Path(no_ready_clip).write_bytes(b'valid-final-payload')
@@ -358,6 +410,18 @@ def test_finalizer_cfr_gate_normalizes_once_and_releases_ready_event(
         'the no-ready finalizer path must also normalize exactly once')
     assert completed == [clip_path, no_ready_clip]
     assert published == [clip_path, no_ready_clip]
+    second_identity = os.stat(no_ready_clip, follow_symlinks=False)
+    assert published_identities == [{
+        'st_dev': int(first_identity.st_dev),
+        'st_ino': int(first_identity.st_ino),
+        'size': int(first_identity.st_size),
+        'mtime_ns': int(first_identity.st_mtime_ns),
+    }, {
+        'st_dev': int(second_identity.st_dev),
+        'st_ino': int(second_identity.st_ino),
+        'size': int(second_identity.st_size),
+        'mtime_ns': int(second_identity.st_mtime_ns),
+    }]
 
 
 def test_sparse_source_gate_runs_before_overlay_or_crop(
@@ -444,7 +508,8 @@ def test_source_probe_exception_fails_closed_before_worker_or_cfr(
     assert failures[0][0] == clip_path
     assert 'validation failed' in failures[0][1]
     assert warnings
-    assert completions == [(clip_path, {'already_normalized': True})]
+    assert completions == [(clip_path, {
+        'already_normalized': True, 'capture_job': None})]
 
 
 def test_inconclusive_cfr_repair_uses_bounded_background_ffmpeg_invocation(
@@ -488,7 +553,13 @@ def test_inconclusive_cfr_repair_uses_bounded_background_ffmpeg_invocation(
     monkeypatch.setattr(main_module.subprocess, 'run', _run)
 
     host = SimpleNamespace(_clip_readiness=_Readiness())
+    host._replace_finalization_output = (
+        lambda source, destination:
+        MainWindow._replace_finalization_output(host, source, destination))
+    host._rebind_manifest_after_owned_replace = (
+        lambda path: MainWindow._rebind_manifest_after_owned_replace(host, path))
     assert MainWindow._normalize_clip_to_cfr(host, str(clip_path))
+    assert clip_path.read_bytes() == b'cfr-output'
 
     assert len(commands) == 1
     command, options = commands[0]
@@ -512,11 +583,76 @@ def test_only_one_call_site_starts_post_processing():
     else — not from the submit path, which is where it used to live."""
     src = (Path(__file__).resolve().parent.parent / 'FTHR_UI' / 'main.py'
            ).read_text(encoding='utf-8', errors='replace')
-    for call in ('self._mux_mic_into_clip(', 'self._finalize_clip('):
-        assert src.count(call) == 1, (
-            f'{call} is invoked from more than one place — a clip could be '
-            f'post-processed twice')
     assert src.count('self.upload_manager.notify_clip_saved(') == 1
+
+    tree = ast.parse(src)
+
+    class _CallOwners(ast.NodeVisitor):
+        def __init__(self):
+            self.owner = None
+            self.calls = {'_mux_mic_into_clip': [], '_finalize_clip': []}
+
+        def visit_FunctionDef(self, node):
+            previous = self.owner
+            self.owner = node.name
+            self.generic_visit(node)
+            self.owner = previous
+
+        def visit_AsyncFunctionDef(self, node):
+            previous = self.owner
+            self.owner = node.name
+            self.generic_visit(node)
+            self.owner = previous
+
+        def visit_Call(self, node):
+            function = node.func
+            if (isinstance(function, ast.Attribute)
+                    and isinstance(function.value, ast.Name)
+                    and function.value.id == 'self'
+                    and function.attr in self.calls):
+                self.calls[function.attr].append(self.owner)
+            self.generic_visit(node)
+
+    owners = _CallOwners()
+    owners.visit(tree)
+    assert sorted(owners.calls['_mux_mic_into_clip']) == [
+        '_on_clip_written']
+    assert sorted(owners.calls['_finalize_clip']) == [
+        '_mux_mic_into_clip', '_on_clip_written']
+
+    mic_handler = next(node for node in ast.walk(tree)
+                       if isinstance(node, (ast.FunctionDef,
+                                             ast.AsyncFunctionDef))
+                       and node.name == '_mux_mic_into_clip')
+
+    def _combined_audio_test(node):
+        return (
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name)
+            and node.left.id == 'audio_mode'
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.Eq)
+            and len(node.comparators) == 1
+            and isinstance(node.comparators[0], ast.Name)
+            and node.comparators[0].id == 'AUDIO_CAPTURE_MODE_COMBINED'
+        )
+
+    audio_ifs = [node for node in ast.walk(mic_handler)
+                 if isinstance(node, ast.If)
+                 and _combined_audio_test(node.test)]
+    assert len(audio_ifs) == 1
+    audio_if = audio_ifs[0]
+
+    def _direct_self_calls(statements):
+        return [statement.value.func.attr for statement in statements
+                if (isinstance(statement, ast.Expr)
+                    and isinstance(statement.value, ast.Call)
+                    and isinstance(statement.value.func, ast.Attribute)
+                    and isinstance(statement.value.func.value, ast.Name)
+                    and statement.value.func.value.id == 'self')]
+
+    assert '_finalize_clip' not in _direct_self_calls(audio_if.body)
+    assert _direct_self_calls(audio_if.orelse) == ['_finalize_clip']
 
 
 def test_partial_file_cannot_enter_post_processing():
@@ -556,3 +692,57 @@ def test_valid_vfr_is_preserved_and_sparse_replay_is_rejected(
     assert MainWindow._normalize_clip_to_cfr(host, str(clip)) is expected
     assert bool(failures) is (not expected)
     assert clip.read_bytes() == b'original-video-and-audio'
+
+
+@pytest.mark.parametrize('enabled, timestamps, accepted', [
+    (False, [0.0, 0.02, 0.72], False),
+    (True, [0.0, 0.02, 0.72], True),
+    (True, [0.0, 0.72, 0.70], False),
+    (True, [0.0, 0.72, 0.72], False),
+    (True, [0.0, 0.72, None], False),
+])
+def test_replay_gap_policy_applies_at_both_worker_timing_gates(
+        tmp_path, monkeypatch, enabled, timestamps, accepted):
+    from core import media_metadata
+    from core.clip_readiness import ClipReadinessState
+
+    clip = str(tmp_path / 'replay.mp4')
+    Path(clip).write_bytes(b'original packets')
+    monkeypatch.setattr(main_module, 'probe_video_metadata', lambda _: (
+        SimpleNamespace(average_fps=60.0, fps_source='fthr_frame_rate')))
+    monkeypatch.setattr(media_metadata, '_probe_video_packets', lambda *_, **__: [
+        {'pts_time': pts, 'duration_time': 0.02} for pts in timestamps])
+    monkeypatch.setattr(main_module.subprocess, 'run',
+                        lambda *_, **__: pytest.fail('unexpected CFR transcode'))
+    failures = []
+    visual_args = []
+    ready = threading.Event()
+    identity = main_module.media_identity(clip)
+    host = SimpleNamespace(
+        _mux_threads=[],
+        _clip_readiness=SimpleNamespace(
+            state=lambda _: ClipReadinessState.READY,
+            finalization_failed=lambda path, *_args, **_kw: failures.append(path)),
+        _complete_clip_finalization=lambda *_args, **_kw: None,
+        _persist_capture_highlights_worker=lambda *_args: None,
+        _record_finalization_warning=lambda *_args: None,
+        # Mutable settings have already flipped while this job finalizes.
+        settings_manager={'allow_replay_gaps': not enabled},
+    )
+    host._normalize_clip_to_cfr = MainWindow._normalize_clip_to_cfr.__get__(host)
+
+    def run_visual_stage(path, _duration, _end_time, gate, _crop):
+        visual_args.extend(MainWindow._cfr_video_args(path))
+        gate.set()
+
+    worker = MainWindow._spawn_mux_thread(
+        host, run_visual_stage, (clip, 30, 0.0, ready, None),
+        capture_job={'allow_replay_gaps': enabled, 'owned_identity': identity,
+                     'initial_identity': identity})
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert ready.is_set()
+    assert failures == ([] if accepted else [clip])
+    assert visual_args == (['-fps_mode', 'passthrough', '-enc_time_base', 'demux']
+                           if accepted else [])
+    assert Path(clip).read_bytes() == b'original packets'

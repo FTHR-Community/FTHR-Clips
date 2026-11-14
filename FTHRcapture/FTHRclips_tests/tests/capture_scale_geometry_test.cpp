@@ -20,17 +20,20 @@ void StretchAndFit() {
     Check(geometry.destination.left == 0 && geometry.destination.top == 0
         && geometry.destination.width == 1920 && geometry.destination.height == 1080,
         "stretch fills the target");
+    Check(!geometry.RequiresLetterboxing(), "stretch needs no letterbox bars");
 
     Check(fthr::BuildCaptureScaleGeometry(2560, 1440, 1920, 1080, true, geometry),
         "16:9 fit resolves");
     Check(geometry.destination.width == 1920 && geometry.destination.height == 1080,
         "same aspect fit has no bars");
+    Check(!geometry.RequiresLetterboxing(), "same-aspect FIT needs no letterbox bars");
 
     Check(fthr::BuildCaptureScaleGeometry(1920, 1080, 1080, 1080, true, geometry),
         "landscape to square fit resolves");
     Check(geometry.destination.left == 0 && geometry.destination.top == 236
         && geometry.destination.width == 1080 && geometry.destination.height == 606,
         "square fit is centered with even letterbox bars");
+    Check(geometry.RequiresLetterboxing(), "different-aspect FIT needs letterbox bars");
 }
 
 void ExactTargetGeometriesAndQuadrants() {

@@ -309,7 +309,7 @@ struct WindowsMicrophoneAudioProvider::Impl {
             return false;
         }
         ComPtr<IMMDevice> device;
-        if (config.use_default_endpoint) {
+        if (config.use_default_endpoint && !config.loopback) {
             hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
         } else if (!config.endpoint_id.empty()) {
             hr = enumerator->GetDevice(config.endpoint_id.c_str(), &device);
@@ -317,7 +317,7 @@ struct WindowsMicrophoneAudioProvider::Impl {
             hr = E_INVALIDARG;
         }
         if (FAILED(hr) || !device) {
-            SetError(config.use_default_endpoint
+            SetError(config.use_default_endpoint && !config.loopback
                 ? "default microphone is unavailable " + HrText(hr)
                 : "selected microphone is unavailable; it was not replaced " + HrText(hr));
             return false;
@@ -354,8 +354,10 @@ struct WindowsMicrophoneAudioProvider::Impl {
             SetError("microphone sample event creation failed");
             return false;
         }
+        const DWORD stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+            | (config.loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0);
         hr = session->audio_client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, session->format, nullptr);
+            stream_flags, 0, 0, session->format, nullptr);
         if (SUCCEEDED(hr)) hr = session->audio_client->SetEventHandle(session->sample_event);
         if (SUCCEEDED(hr)) hr = session->audio_client->GetService(IID_PPV_ARGS(&session->capture_client));
         if (FAILED(hr)) {
@@ -383,23 +385,35 @@ struct WindowsMicrophoneAudioProvider::Impl {
         }
         auto new_ring = std::make_unique<EncodedAudioPacketRing>(
             config.source.identity.id, config.generation,
-            AudioSourceFormat{kCanonicalAudioSampleRate, kCanonicalAudioChannels, "fltp"},
-            config.retention_seconds);
+            AudioSourceFormat{kCanonicalAudioSampleRate, kCanonicalAudioChannels, "flt", "pcm_f32le"},
+            config.retention_seconds, config.replay_storage);
         auto new_encoder = std::make_unique<AudioEncoder>();
         const auto replay_origin = config.replay_pause_clock
             ? config.replay_pause_clock->Map(qpc_100ns) : qpc_100ns;
         if (!new_encoder->Initialize(kCanonicalAudioSampleRate, kCanonicalAudioChannels,
                 config.bitrate_kbps,
-                [packet_ring = new_ring.get(), clock = config.replay_pause_clock,
+                [this, packet_ring = new_ring.get(), clock = config.replay_pause_clock,
                  qpc_100ns, replay_origin](const uint8_t* data, uint32_t size, int64_t pts) {
+                    const int64_t duration = size / (kCanonicalAudioChannels * sizeof(float));
                     if (clock) {
                         const auto mapped = clock->MapAudio(
-                            qpc_100ns, replay_origin, pts, 1024, kCanonicalAudioSampleRate);
+                            qpc_100ns, replay_origin, pts, duration, kCanonicalAudioSampleRate);
                         if (!mapped) return;
                         pts = *mapped;
                     }
-                    packet_ring->Push({std::vector<uint8_t>(data, data + size), pts, 1024});
-                })) {
+                    if (!packet_ring->Push({std::vector<uint8_t>(data, data + size), pts, duration})) {
+                        failed.store(true, std::memory_order_release);
+                        SetError("Lossless microphone spool failed or exceeded its memory/disk budget");
+                    }
+                    if (config.packet_sink) {
+                        auto source = config.source;
+                        source.input_gain_percent = static_cast<uint32_t>(std::clamp(
+                            std::round(config.input_gain * 100.0f), 0.0f, 200.0f));
+                        source.mono = config.downmix_mono;
+                        config.packet_sink(source, data, size,
+                            AudioSamplePositionToTimeline100ns(replay_origin, pts, kCanonicalAudioSampleRate), duration);
+                    }
+                }, 0, true)) {
             SetError("microphone AAC encoder initialization failed");
             return false;
         }
@@ -577,12 +591,8 @@ struct WindowsMicrophoneAudioProvider::Impl {
         if (!session->converted.empty()) {
             // Preserve the canonical stereo ABI: mono is duplicated to both
             // channels so voice is centered in combined and separate tracks.
-            if (config.downmix_mono) {
-                DownmixWindowsMicrophoneToMono(session->converted.data(),
-                    session->converted.size());
-            }
-            ApplyWindowsMicrophoneInputGain(session->converted.data(),
-                session->converted.size(), config.input_gain);
+            // Store the dry canonical float stream. Gain and mono are edit
+            // instructions carried in the manifest, never burned into masters.
             const uint32_t converted = static_cast<uint32_t>(
                 session->converted.size() / kCanonicalAudioChannels);
             encoder_input_metrics.Observe(session->converted.data(), converted,
@@ -611,12 +621,51 @@ struct WindowsMicrophoneAudioProvider::Impl {
         return true;
     }
 
+    bool FillIdleSilence() {
+        if (!config.loopback || !encoder || next_timeline_100ns == 0) return true;
+        const uint64_t now = CurrentAudioTimeline100ns();
+        constexpr uint64_t kMargin100ns = 3'000'000ULL;
+        constexpr uint64_t kTicksPerSecond = 10'000'000ULL;
+        constexpr uint64_t kMaxFramesPerFill =
+            static_cast<uint64_t>(kCanonicalAudioSampleRate) * 2ULL;
+        if (now <= next_timeline_100ns
+                || next_timeline_100ns > UINT64_MAX - kMargin100ns
+                || now <= next_timeline_100ns + kMargin100ns) {
+            return true;
+        }
+        const uint64_t gap = now - (next_timeline_100ns + kMargin100ns);
+        const uint64_t whole_seconds = gap / kTicksPerSecond;
+        uint64_t frames = 0;
+        if (whole_seconds >= kMaxFramesPerFill
+                / static_cast<uint64_t>(kCanonicalAudioSampleRate)) {
+            frames = kMaxFramesPerFill;
+        } else {
+            frames = whole_seconds
+                * static_cast<uint64_t>(kCanonicalAudioSampleRate);
+            const uint64_t fractional = (gap % kTicksPerSecond)
+                * static_cast<uint64_t>(kCanonicalAudioSampleRate)
+                / kTicksPerSecond;
+            frames = std::min(kMaxFramesPerFill, frames + fractional);
+        }
+        if (frames == 0) return true;
+        if (!SubmitCanonicalSilence(static_cast<uint32_t>(frames))) return false;
+        const uint64_t advance = frames * kTicksPerSecond
+            / static_cast<uint64_t>(kCanonicalAudioSampleRate);
+        if (UINT64_MAX - next_timeline_100ns < advance)
+            next_timeline_100ns = UINT64_MAX;
+        else
+            next_timeline_100ns += advance;
+        return true;
+    }
     HRESULT CaptureSession(MicrophoneSession* session) {
         while (!StopRequested()) {
             HANDLE waits[] = {stop_event, session->sample_event};
             const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, kCaptureWaitMs);
             if (wait == WAIT_OBJECT_0) return S_FALSE;
-            if (wait == WAIT_TIMEOUT) continue;
+            if (wait == WAIT_TIMEOUT) {
+                if (config.loopback && !FillIdleSilence()) return E_FAIL;
+                continue;
+            }
             if (wait != WAIT_OBJECT_0 + 1) return E_FAIL;
             UINT32 packet_frames = 0;
             HRESULT hr = session->capture_client->GetNextPacketSize(&packet_frames);
@@ -824,6 +873,9 @@ std::optional<EncodedAudioTrack> WindowsMicrophoneAudioProvider::TakeTrackForInt
         range.start_pts_samples, range.end_pts_samples);
     if (!snapshot.valid()) return std::nullopt;
     source.format = snapshot.format;
+    source.input_gain_percent = static_cast<uint32_t>(std::clamp(
+        std::round(impl_->config.input_gain * 100.0f), 0.0f, 200.0f));
+    source.mono = impl_->config.downmix_mono;
     source.state.admitted = true;
     source.state.active_in_generation = !impl_->failed.load(std::memory_order_acquire);
     source.state.health = impl_->failed.load(std::memory_order_acquire)

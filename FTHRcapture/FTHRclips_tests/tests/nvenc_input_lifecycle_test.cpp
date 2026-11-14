@@ -1,4 +1,5 @@
 #include "nvenc_input_lifecycle.h"
+#include "nvenc_buffer_policy.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -16,6 +17,15 @@ void Require(bool condition, const char* message) {
 
 int RunNvencInputLifecycleTests() {
     int checks = 0;
+
+    Require(fthr::NvencAsyncBufferCount(1, false, 32) == 4,
+        "no-B-frame replay must use four slots and ignore disabled lookahead depth"); ++checks;
+    Require(fthr::NvencAsyncBufferCount(0, false, 0) == 4,
+        "intra-only encoding must retain the four-slot async minimum"); ++checks;
+    Require(fthr::NvencAsyncBufferCount(3, false, 0) == 6,
+        "B-frame reordering must receive extra slots"); ++checks;
+    Require(fthr::NvencAsyncBufferCount(3, true, 16) == 22,
+        "enabled lookahead must not exhaust the pool before output is ready"); ++checks;
 
     fthr::NvencInputSlotLifecycle slot;
     Require(slot.OnMapped(), "available slot must map"); ++checks;

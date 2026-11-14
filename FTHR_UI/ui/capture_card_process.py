@@ -4,6 +4,7 @@ CaptureCardClient sends UTF-8, pipe-delimited commands on stdin.
 See handle() for command names, fields, and optional hold durations.
 """
 
+import math
 import sys
 import os
 
@@ -12,6 +13,14 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
+# Direct card-process launches must receive the same early process guard.  The
+# frozen main entry point and the PyInstaller runtime hook also call this
+# policy; the operation is idempotent, so the normal --card-process route is
+# safe when it imports this module after the guard has already run.
+if __name__ == '__main__':
+    from core.windows_startup import apply_startup_policy
+    _CARD_STARTUP_POLICY_RESULT = apply_startup_policy()
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QThread, Signal
@@ -64,12 +73,29 @@ def main():
         elif cmd.startswith('screenshot'):
             parts = cmd.split('|', 1)
             card.show_screenshot(**optional_hold(parts, 1))
+        elif cmd == 'captured':
+            card.show_captured()
+        elif cmd.startswith('captured|'):
+            parts = cmd.split('|', 3)
+            if len(parts) == 4:
+                try:
+                    seconds = float(parts[1])
+                    fps = int(parts[2])
+                    if math.isfinite(seconds) and seconds >= 0 and fps > 0:
+                        card.show_captured(seconds, fps, parts[3])
+                except (ValueError, OverflowError):
+                    pass
+        elif cmd == 'saving':
+            card.show_saving()
         elif cmd.startswith('clip|'):
             parts = cmd.split('|', 4)
             if len(parts) >= 4:
                 try:
+                    seconds = float(parts[1]) if parts[1] else None
+                    if seconds is not None and (not math.isfinite(seconds) or seconds < 0):
+                        seconds = None
                     card.show_clip(
-                        int(parts[1]), int(parts[2]), parts[3],
+                        seconds, int(parts[2]), parts[3],
                         **optional_hold(parts, 4))
                 except ValueError:
                     pass
@@ -82,10 +108,19 @@ def main():
             detail = parts[1] if len(parts) > 1 else ''
             card.show_upload_failed(detail, **optional_hold(parts, 2))
         elif cmd.startswith('recording_saved'):
-            parts = cmd.split('|', 2)
+            parts = cmd.split('|', 3)
             filename = parts[1] if len(parts) > 1 else ''
+            duration = {}
+            if len(parts) > 3:
+                try:
+                    seconds = float(parts[3])
+                    if math.isfinite(seconds) and seconds >= 0:
+                        duration = {'duration_seconds': seconds}
+                except (ValueError, OverflowError):
+                    # Invalid optional timing leaves the saved-file notification intact.
+                    pass
             card.show_recording_saved(
-                filename, **optional_hold(parts, 2))
+                filename, **optional_hold(parts, 2), **duration)
         elif cmd.startswith('upload'):
             parts = cmd.split('|', 2)
             filename = parts[1] if len(parts) > 1 else ''

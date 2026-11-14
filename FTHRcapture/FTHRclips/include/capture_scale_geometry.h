@@ -20,6 +20,11 @@ struct CaptureScaleGeometry {
     CaptureScaleRect destination;
     bool fit = false;
 
+    bool RequiresLetterboxing() const noexcept {
+        return fit && (destination.width != target_width
+            || destination.height != target_height);
+    }
+
     bool valid() const noexcept {
         return source_width >= 2 && source_height >= 2
             && target_width >= 2 && target_height >= 2

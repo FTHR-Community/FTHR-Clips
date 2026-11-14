@@ -7,7 +7,6 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'FTHR_UI'))
 
-from PySide6.QtWidgets import QLayout
 from PySide6.QtWidgets import QLabel
 
 from core.settings_manager import SettingsManager
@@ -37,11 +36,13 @@ def test_source_popup_is_constrained_to_visible_content(
     popup = SourcePopup(_MemorySettings(capture_mode='desktop'))
     qtbot.addWidget(popup)
 
-    assert popup.layout().sizeConstraint() == QLayout.SizeConstraint.SetMinimumSize
+    popup.show()
+    qtbot.waitExposed(popup)
+    assert popup.width() == 320
 
     popup.mode_combo.setCurrentIndex(1)
     popup._fit_to_visible_content()
-    assert popup.width() >= 300
+    assert popup.width() == 320
     assert popup.height() == popup.sizeHint().height()
 
 

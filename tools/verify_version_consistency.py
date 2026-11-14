@@ -129,9 +129,7 @@ def main() -> int:
     print()
     print('Files that must DERIVE the version:')
     check_no_hardcoded(rep, 'FTHR_UI/main.py', 'UI')
-    check_no_hardcoded(rep, 'build_linux.sh', 'AppImage build')
     check_no_hardcoded(rep, 'FTHR.spec', 'Windows spec')
-    check_no_hardcoded(rep, 'FTHR_linux.spec', 'Linux spec')
 
     print()
     print('Built artefacts (informational — absent in a clean checkout):')
@@ -141,16 +139,6 @@ def main() -> int:
                f'(version resource not read here — check Explorer -> Details)')
     else:
         rep.skip('no dist/ bundle to inspect')
-
-    appimages = sorted(ROOT.glob('FTHRClips-*-x86_64.AppImage'))
-    if appimages:
-        for img in appimages:
-            if EXPECTED in img.name:
-                rep.ok(f'AppImage filename: {img.name}')
-            else:
-                rep.fail(f'AppImage filename {img.name} does not carry {EXPECTED}')
-    else:
-        rep.skip('no AppImage to inspect')
 
     print()
     if rep.failed:

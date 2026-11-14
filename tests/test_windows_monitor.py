@@ -4,6 +4,7 @@ from core.windows_monitor import (
     MonitorSelectionState,
     build_monitor_choices,
     default_windows_monitor_path,
+    format_monitor_choice_label,
     normalize_monitor_device_path,
     resolve_monitor_selection,
     validate_engine_monitor_argument,
@@ -29,6 +30,361 @@ def test_monitor_choices_use_normalized_stable_device_paths():
     assert choices[0].gdi_name == r"\\.\DISPLAY2"
     assert (choices[0].x, choices[0].y,
             choices[0].width, choices[0].height) == (-2560, 0, 2560, 1080)
+
+
+def test_monitor_label_contains_display_number_resolution_refresh_and_primary():
+    from core.windows_monitor import MonitorChoice
+
+    label = format_monitor_choice_label(MonitorChoice(
+        r'\\.\DISPLAY2', 'AOC 24G2', r'\\?\display#a', False,
+        width=1920, height=1080, refresh_rate=59.94), 99)
+
+    assert label == 'AOC 24G2 · Display 2 · 1920×1080 @ 59.94 Hz'
+
+
+def test_monitor_label_uses_qt_fallback_only_for_missing_native_fields():
+    from core.windows_monitor import MonitorChoice
+
+    choice = MonitorChoice(
+        r'\\.\DISPLAY1', 'Generic PnP Monitor', r'\\?\display#a', True,
+        width=0, height=0, refresh_rate=0.0)
+    assert format_monitor_choice_label(
+        choice, 1, fallback_width=2560, fallback_height=1440,
+        fallback_refresh_rate=144.0,
+    ) == 'Generic PnP Monitor · Display 1 · 2560×1440 @ 144 Hz · Primary'
+
+
+def test_display_config_refresh_requires_a_valid_rational():
+    import core.windows_monitor as windows_monitor
+
+    rational = windows_monitor._DisplayConfigRational(Numerator=5994,
+                                                       Denominator=100)
+    assert windows_monitor._valid_display_config_refresh_rate(rational) == 59.94
+    rational.Denominator = 0
+    assert windows_monitor._valid_display_config_refresh_rate(rational) == 0.0
+
+
+def test_monitor_label_rejects_non_finite_native_rate_before_qt_fallback():
+    from core.windows_monitor import MonitorChoice
+
+    choice = MonitorChoice(
+        r'\\.\DISPLAY1', 'Panel', r'\\?\display#a', False,
+        width=1920, height=1080, refresh_rate=float('nan'))
+    assert '59.94 Hz' in format_monitor_choice_label(
+        choice, 1, fallback_refresh_rate=59.94)
+    choice = MonitorChoice(
+        r'\\.\DISPLAY1', 'Panel', r'\\?\display#a', False,
+        width=1920, height=1080, refresh_rate=float('inf'))
+    assert '59.94 Hz' in format_monitor_choice_label(
+        choice, 1, fallback_refresh_rate=59.94)
+
+
+class _DisplayConfigFakeFunction:
+    def __init__(self, callback):
+        self._callback = callback
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args):
+        return self._callback(*args)
+
+
+def _display_config_path(source_id, target_id, numerator=14400,
+                         denominator=100):
+    import core.windows_monitor as windows_monitor
+
+    path = windows_monitor._DisplayConfigPathInfo()
+    path.sourceInfo.adapterId.LowPart = 7
+    path.sourceInfo.adapterId.HighPart = 0
+    path.sourceInfo.id = source_id
+    path.targetInfo.adapterId.LowPart = 7
+    path.targetInfo.adapterId.HighPart = 0
+    path.targetInfo.id = target_id
+    path.targetInfo.refreshRate.Numerator = numerator
+    path.targetInfo.refreshRate.Denominator = denominator
+    path.flags = 1
+    return path
+
+
+def _fake_display_config_user32(paths, names, *, target_status=None,
+                                source_status=None, query_statuses=None,
+                                actual_counts=None):
+    import ctypes
+    import core.windows_monitor as windows_monitor
+
+    target_status = dict(target_status or {})
+    source_status = dict(source_status or {})
+    query_statuses = list(query_statuses or [0])
+    actual_paths, actual_modes = actual_counts or (len(paths), len(paths))
+    query_calls = []
+    source_names = {
+        int(path.sourceInfo.id): names[int(path.targetInfo.id)][0]
+        for path in paths
+    }
+
+    def get_sizes(_flags, path_count, mode_count):
+        path_count._obj.value = len(paths)
+        mode_count._obj.value = len(paths)
+        return 0
+
+    def query(_flags, path_count, path_array, mode_count, _mode_array,
+              _topology):
+        query_calls.append(True)
+        status = query_statuses[min(len(query_calls) - 1,
+                                    len(query_statuses) - 1)]
+        path_count._obj.value = actual_paths
+        mode_count._obj.value = actual_modes
+        if status == 0:
+            for index, path in enumerate(paths):
+                if index < len(path_array):
+                    path_array[index] = path
+        return status
+
+    def get_info(header_pointer):
+        header = header_pointer._obj
+        if header.type == windows_monitor._DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME:
+            status = source_status.get(int(header.id), 0)
+            if status:
+                return status
+            info = ctypes.cast(
+                header_pointer,
+                ctypes.POINTER(windows_monitor._DisplayConfigSourceDeviceName),
+            ).contents
+            info.viewGdiDeviceName = source_names[header.id]
+            return 0
+        if header.type == windows_monitor._DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME:
+            info = ctypes.cast(
+                header_pointer,
+                ctypes.POINTER(windows_monitor._DisplayConfigTargetDeviceName),
+            ).contents
+            status = target_status.get(int(header.id), 0)
+            if status:
+                return status
+            info.monitorFriendlyDeviceName = names[header.id][1]
+            info.monitorDevicePath = names[header.id][2]
+            return 0
+        return 87
+
+    return type('_FakeUser32', (), {
+        'GetDisplayConfigBufferSizes': _DisplayConfigFakeFunction(get_sizes),
+        'QueryDisplayConfig': _DisplayConfigFakeFunction(query),
+        'DisplayConfigGetDeviceInfo': _DisplayConfigFakeFunction(get_info),
+    })(), query_calls
+
+
+def test_display_config_joins_two_targets_with_native_name_hz_and_path(
+        monkeypatch):
+    import core.windows_monitor as windows_monitor
+
+    paths = [_display_config_path(1, 101, 14400, 100),
+             _display_config_path(2, 102, 5994, 100)]
+    names = {
+        101: (r'\\.\DISPLAY1', '27G2G8', r'\\?\DISPLAY#A'),
+        102: (r'\\.\DISPLAY2', 'LG ULTRAWIDE', r'\\?\DISPLAY#B'),
+    }
+    fake, _calls = _fake_display_config_user32(paths, names)
+    monitor_specs = {
+        101: (r'\\.\DISPLAY1', 0, 0, 1920, 1080, True,
+              r'\\?\DISPLAY#A'),
+        102: (r'\\.\DISPLAY2', 1920, 0, 2560, 1080, False,
+              r'\\?\DISPLAY#B'),
+    }
+
+    def get_monitor_info(monitor, info_pointer):
+        info = info_pointer._obj
+        gdi_name, x, y, width, height, primary, _path = monitor_specs[monitor]
+        info.szDevice = gdi_name
+        info.rcMonitor.left, info.rcMonitor.top = x, y
+        info.rcMonitor.right, info.rcMonitor.bottom = x + width, y + height
+        info.dwFlags = 1 if primary else 0
+        return 1
+
+    def enum_monitors(_dc, _clip, callback, _data):
+        callback(101, None, None, 0)
+        callback(102, None, None, 0)
+        return 1
+
+    def enum_devices(gdi_name, index, device_pointer, _flags):
+        if index != 0:
+            return 0
+        device = device_pointer._obj
+        for spec in monitor_specs.values():
+            if spec[0].casefold() == str(gdi_name).casefold():
+                device.DeviceString = 'Generic PnP Monitor'
+                device.DeviceID = spec[6]
+                device.StateFlags = 1
+                return 1
+        return 0
+
+    fake.GetMonitorInfoW = _DisplayConfigFakeFunction(get_monitor_info)
+    fake.EnumDisplayMonitors = _DisplayConfigFakeFunction(enum_monitors)
+    fake.EnumDisplayDevicesW = _DisplayConfigFakeFunction(enum_devices)
+    monkeypatch.setattr(windows_monitor.ctypes, 'WinDLL',
+                        lambda *_a, **_k: fake, raising=False)
+    monkeypatch.setattr(windows_monitor.ctypes, 'WINFUNCTYPE',
+                        lambda *_a: (lambda callback: callback), raising=False)
+    records = windows_monitor.enumerate_windows_monitor_records()
+    metadata = windows_monitor._enumerate_display_config_metadata()
+
+    assert [(item.gdi_name, item.friendly_name, item.device_path,
+              item.refresh_rate) for item in metadata] == [
+        (r'\\.\display1', '27G2G8', r'\\?\display#a', 144.0),
+        (r'\\.\display2', 'LG ULTRAWIDE', r'\\?\display#b', 59.94),
+    ]
+    choices = windows_monitor.build_monitor_choices(records)
+    assert [(choice.friendly_name, choice.refresh_rate,
+             choice.width, choice.height) for choice in choices] == [
+        ('27G2G8', 144.0, 1920, 1080),
+        ('LG ULTRAWIDE', 59.94, 2560, 1080),
+    ]
+    assert [choice.device_path for choice in choices] == [
+        r'\\?\display#a', r'\\?\display#b']
+    assert choices[0].primary is True and choices[1].primary is False
+
+
+def test_display_config_missing_api_or_target_name_returns_safe_fallback(
+        monkeypatch):
+    import core.windows_monitor as windows_monitor
+
+    class _MissingApi:
+        pass
+
+    monkeypatch.setattr(windows_monitor.ctypes, 'WinDLL',
+                        lambda *_a, **_k: _MissingApi(), raising=False)
+    assert windows_monitor._enumerate_display_config_metadata() == []
+
+    path = _display_config_path(1, 101)
+    fake, _calls = _fake_display_config_user32(
+        [path], {101: (r'\\.\DISPLAY1', 'Ignored', r'\\?\DISPLAY#A')},
+        target_status={101: 5})
+    monkeypatch.setattr(windows_monitor.ctypes, 'WinDLL',
+                        lambda *_a, **_k: fake, raising=False)
+    assert windows_monitor._enumerate_display_config_metadata() == []
+
+
+def test_display_config_retries_resize_three_times_and_rejects_fourth(
+        monkeypatch):
+    import core.windows_monitor as windows_monitor
+
+    path = _display_config_path(1, 101)
+    names = {101: (r'\\.\DISPLAY1', 'Panel', r'\\?\DISPLAY#A')}
+    fake, calls = _fake_display_config_user32(
+        [path], names, query_statuses=[122, 122, 0])
+    monkeypatch.setattr(windows_monitor.ctypes, 'WinDLL',
+                        lambda *_a, **_k: fake, raising=False)
+    metadata = windows_monitor._enumerate_display_config_metadata()
+    assert len(calls) == 3 and len(metadata) == 1
+
+    fake, calls = _fake_display_config_user32(
+        [path], names, query_statuses=[122, 122, 122, 0])
+    monkeypatch.setattr(windows_monitor.ctypes, 'WinDLL',
+                        lambda *_a, **_k: fake, raising=False)
+    assert windows_monitor._enumerate_display_config_metadata() == []
+    assert len(calls) == 3
+
+
+def test_display_config_rejects_count_overruns(monkeypatch):
+    import core.windows_monitor as windows_monitor
+
+    path = _display_config_path(1, 101)
+    names = {101: (r'\\.\DISPLAY1', 'Panel', r'\\?\DISPLAY#A')}
+    fake, _calls = _fake_display_config_user32(
+        [path], names, actual_counts=(2, 1))
+    monkeypatch.setattr(windows_monitor.ctypes, 'WinDLL',
+                        lambda *_a, **_k: fake, raising=False)
+    assert windows_monitor._enumerate_display_config_metadata() == []
+
+def test_display_config_mirror_with_failed_target_stays_ambiguous(
+        monkeypatch):
+    import core.windows_monitor as windows_monitor
+
+    paths = [_display_config_path(1, 101), _display_config_path(1, 102)]
+    names = {
+        101: (r'\\.\DISPLAY1', 'Panel A', r'\\?\DISPLAY#A'),
+        102: (r'\\.\DISPLAY1', 'Panel B', r'\\?\DISPLAY#B'),
+    }
+    fake, _calls = _fake_display_config_user32(
+        paths, names, target_status={102: 5})
+    monkeypatch.setattr(windows_monitor.ctypes, 'WinDLL',
+                        lambda *_a, **_k: fake, raising=False)
+    assert windows_monitor._enumerate_display_config_metadata() == []
+
+
+def test_display_config_mirror_with_failed_source_name_stays_ambiguous(
+        monkeypatch):
+    import core.windows_monitor as windows_monitor
+
+    paths = [_display_config_path(1, 101), _display_config_path(2, 102)]
+    names = {
+        101: (r'\\.\DISPLAY1', 'Panel A', r'\\?\DISPLAY#A'),
+        102: (r'\\.\DISPLAY1', 'Panel B', r'\\?\DISPLAY#B'),
+    }
+    fake, _calls = _fake_display_config_user32(
+        paths, names, source_status={2: 5})
+    monkeypatch.setattr(windows_monitor.ctypes, 'WinDLL',
+                        lambda *_a, **_k: fake, raising=False)
+    assert windows_monitor._enumerate_display_config_metadata() == []
+
+
+def test_display_config_mirror_with_blank_source_name_falls_back(monkeypatch):
+    import core.windows_monitor as windows_monitor
+
+    paths = [_display_config_path(1, 101), _display_config_path(1, 102)]
+    for source_name in ('', '   '):
+        names = {
+            101: (source_name, 'Panel A', r'\\?\DISPLAY#A'),
+            102: (source_name, 'Panel B', r'\\?\DISPLAY#B'),
+        }
+        fake, _calls = _fake_display_config_user32(paths, names)
+        monkeypatch.setattr(windows_monitor.ctypes, 'WinDLL',
+                            lambda *_a, _fake=fake, **_k: _fake, raising=False)
+        assert windows_monitor._enumerate_display_config_metadata() == []
+
+
+def test_display_config_mismatch_keeps_legacy_record_and_stable_path(
+        monkeypatch):
+    import core.windows_monitor as windows_monitor
+
+    path = _display_config_path(1, 101)
+    fake, _calls = _fake_display_config_user32(
+        [path], {101: (r'\\.\DISPLAY1', 'Wrong target',
+                       r'\\?\DISPLAY#OTHER')})
+
+    def get_monitor_info(_monitor, info_pointer):
+        info = info_pointer._obj
+        info.szDevice = r'\\.\DISPLAY1'
+        info.rcMonitor.left, info.rcMonitor.top = 0, 0
+        info.rcMonitor.right, info.rcMonitor.bottom = 1920, 1080
+        info.dwFlags = 1
+        return 1
+
+    def enum_monitors(_dc, _clip, callback, _data):
+        callback(101, None, None, 0)
+        return 1
+
+    def enum_devices(gdi_name, index, device_pointer, _flags):
+        if index != 0:
+            return 0
+        device = device_pointer._obj
+        device.DeviceString = 'Generic PnP Monitor'
+        device.DeviceID = r'\\?\DISPLAY#A'
+        device.StateFlags = 1
+        return 1
+
+    fake.GetMonitorInfoW = _DisplayConfigFakeFunction(get_monitor_info)
+    fake.EnumDisplayMonitors = _DisplayConfigFakeFunction(enum_monitors)
+    fake.EnumDisplayDevicesW = _DisplayConfigFakeFunction(enum_devices)
+    monkeypatch.setattr(windows_monitor.ctypes, 'WinDLL',
+                        lambda *_a, **_k: fake, raising=False)
+    monkeypatch.setattr(windows_monitor.ctypes, 'WINFUNCTYPE',
+                        lambda *_a: (lambda callback: callback), raising=False)
+
+    records = windows_monitor.enumerate_windows_monitor_records()
+
+    assert len(records) == 1
+    assert records[0].friendly_name == 'Generic PnP Monitor'
+    assert records[0].monitor_device_path == r'\\?\DISPLAY#A'
+    assert records[0].refresh_rate == 0.0
 
 
 def test_monitor_choices_exclude_inactive_and_deduplicate_paths():
@@ -243,6 +599,76 @@ def test_missing_saved_pnp_path_requires_reselection_when_only_fallback_exists()
     choices = build_monitor_choices([DisplayDeviceRecord(
         'DISPLAY1', '', '', True, primary=True, hmonitor=42)])
     assert not resolve_monitor_selection(r"\\?\display#missing", choices).resolved
+
+
+def test_winapi_monitorinfo_primary_flag_drives_first_run_selection(monkeypatch):
+    """GetMonitorInfoW's MONITORINFOF_PRIMARY flag reaches selection policy."""
+    import core.windows_monitor as windows_monitor
+
+    class _FakeApiFunction:
+        def __init__(self, callback):
+            self._callback = callback
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            return self._callback(*args)
+
+    def fake_get_monitor_info(monitor, info_pointer):
+        info = info_pointer._obj
+        if monitor == 101:
+            info.szDevice = r"\\.\DISPLAY1"
+            info.rcMonitor.left, info.rcMonitor.top = 0, 0
+            info.rcMonitor.right, info.rcMonitor.bottom = 1920, 1080
+            info.dwFlags = 0x00000001  # MONITORINFOF_PRIMARY
+        else:
+            info.szDevice = r"\\.\DISPLAY2"
+            info.rcMonitor.left, info.rcMonitor.top = 1920, 0
+            info.rcMonitor.right, info.rcMonitor.bottom = 3840, 1080
+            info.dwFlags = 0
+        return 1
+
+    def fake_enum_display_monitors(_dc, _clip, callback, _data):
+        callback(101, None, None, 0)
+        callback(202, None, None, 0)
+        return 1
+
+    def fake_enum_display_devices(gdi_name, index, device_pointer, _flags):
+        if index != 0:
+            return 0
+        device = device_pointer._obj
+        device.DeviceString = gdi_name
+        device.DeviceID = rf"\\?\DISPLAY#{gdi_name[-1:]}"
+        device.StateFlags = 0x00000001  # DISPLAY_DEVICE_ACTIVE
+        return 1
+
+    class _FakeUser32:
+        GetMonitorInfoW = _FakeApiFunction(fake_get_monitor_info)
+        EnumDisplayMonitors = _FakeApiFunction(fake_enum_display_monitors)
+        EnumDisplayDevicesW = _FakeApiFunction(fake_enum_display_devices)
+
+    monkeypatch.setattr(
+        windows_monitor.ctypes,
+        'WinDLL',
+        lambda *_args, **_kwargs: _FakeUser32(),
+        raising=False,
+    )
+    # Keep this test focused on the WinAPI callback data while running on
+    # non-Windows CI, where ctypes exposes CFUNCTYPE but not WINFUNCTYPE.
+    monkeypatch.setattr(
+        windows_monitor.ctypes,
+        'WINFUNCTYPE',
+        lambda *_args: (lambda callback: callback),
+        raising=False,
+    )
+
+    records = windows_monitor.enumerate_windows_monitor_records()
+    choices = build_monitor_choices(records)
+    result = resolve_monitor_selection('', choices)
+
+    assert [record.primary for record in records] == [True, False]
+    assert result.state is MonitorSelectionState.RESOLVED
+    assert result.path == r"\\?\display#1"
 
 
 def test_real_windows_desktop_snapshot_has_valid_capture_arguments():

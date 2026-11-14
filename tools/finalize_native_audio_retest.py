@@ -43,6 +43,7 @@ _LABEL_TYPES = {
 }
 _PRODUCTION_SOURCES = (
     'FTHR_UI/main.py',
+    'FTHR_UI/core/mp4_timing.py',
     'FTHR_UI/core/combined_audio_policy.py',
     'FTHR_UI/core/audio_manifest.py',
     'FTHR_UI/core/ffmpeg_tools.py',
@@ -265,6 +266,17 @@ def run_retest(native_path: str | Path, output_directory: str | Path) -> Path:
         'ffmpeg_path': str(Path(ffmpeg).resolve()),
         'ffprobe_path': str(Path(ffprobe).resolve()),
         'warnings': [],
+        'timing_normalization': {
+            'platform': sys.platform,
+            'scope': 'windows_mp4_only',
+            'attempted': sys.platform == 'win32' and copied_media.suffix.casefold() == '.mp4',
+            'rewritten': None,
+            'source_files': {
+                'FTHR_UI/main.py': source_code_hashes['FTHR_UI/main.py'],
+                'FTHR_UI/core/mp4_timing.py': source_code_hashes[
+                    'FTHR_UI/core/mp4_timing.py'],
+            },
+        },
         'overlay_hooks': {
             'disabled': True,
             'reason': 'headless retest host uses no-op crop/image/keyboard/camera hooks',
@@ -280,11 +292,15 @@ def run_retest(native_path: str | Path, output_directory: str | Path) -> Path:
         host = SimpleNamespace(
             _record_finalization_warning=lambda path, message:
                 warnings.append((path, message)),
+            _clip_readiness=SimpleNamespace(
+                finalization_failed=lambda path, message, **_kwargs:
+                warnings.append((path, message))),
             _apply_crop=lambda *_args: None,
             _apply_image_overlay=lambda *_args: None,
             _apply_keyboard_overlay=lambda *_args: None,
             _apply_camera_overlay=lambda *_args: None,
         )
+        host._replace_finalization_output = MainWindow._replace_finalization_output.__get__(host)
         duration_seconds = max(
             1,
             math.ceil(max(
@@ -296,6 +312,9 @@ def run_retest(native_path: str | Path, output_directory: str | Path) -> Path:
         )
         MainWindow._combine_native_audio_worker(
             host, str(copied_media), duration_seconds, 0.0, None, None)
+        timing_rewritten = MainWindow._normalize_clip_presentation_timing(
+            host, str(copied_media))
+        evidence['timing_normalization']['rewritten'] = bool(timing_rewritten)
         evidence['warnings'] = [message for _path, message in warnings]
         if warnings:
             raise RuntimeError('production finalizer reported a warning')

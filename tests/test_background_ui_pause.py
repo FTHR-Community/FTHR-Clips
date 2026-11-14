@@ -334,6 +334,20 @@ def test_background_pause_waits_for_the_first_painted_frame(qtbot, monkeypatch):
     assert len(scheduled) == 1
 
 
+def _initialize_empty_cover_lane(grid):
+    """Mirror the constructor's empty cover state without starting workers."""
+    from collections import OrderedDict
+
+    grid._cover_decode_jobs = {}
+    grid._cover_decode_inflight = grid._cover_decode_jobs
+    grid._cover_decode_pending = OrderedDict()
+    grid._cover_decode_demands = OrderedDict()
+    grid._cover_committed_overrides = {}
+    grid._cover_bindings_snapshot = {}
+    grid._records_by_path = {record.path: record for record in grid._records.values()}
+    grid._backup_restore_refresh_pending = False
+
+
 def test_thumbnail_cancel_resume_re_enriches_card_and_allows_open(
         qtbot, tmp_path, monkeypatch):
     """A cancelled thumbnail must not strand an otherwise valid library card."""
@@ -374,12 +388,18 @@ def test_thumbnail_cancel_resume_re_enriches_card_and_allows_open(
 
     grid = ClipGrid.__new__(ClipGrid)
     grid._sm = None
+    grid._scanning_started = True
     grid._shutdown_started = False
     grid._background_paused = False
     grid._background_refresh_pending = False
     grid._scan_generation = 0
     grid._active_scan_worker = None
     grid._pending_saved_clips = {}
+    grid._bulk_job = None
+    grid._mutation_paths = set()
+    grid._mutation_refresh_pending = False
+    grid._trash_rebuild_pending = False
+    grid._pending_scan_request = None
     grid._thread_pool = QThreadPool()
     grid._thumbnail_cancel_event = threading.Event()
     grid._thumbnail_generation = 0
@@ -407,6 +427,7 @@ def test_thumbnail_cancel_resume_re_enriches_card_and_allows_open(
             media_path, canonical_media_path(media_path), (), False, 'video',
             media.stat().st_size, media.stat().st_mtime_ns)
     }
+    _initialize_empty_cover_lane(grid)
     grid._imported_files = set()
     grid.refresh_timer = QTimer()
     grid._debounce_timer = QTimer()
@@ -619,12 +640,18 @@ def test_repeated_pause_resume_does_not_strand_thumbnail_ownership(
     qtbot.addWidget(card)
     grid = ClipGrid.__new__(ClipGrid)
     grid._sm = None
+    grid._scanning_started = True
     grid._shutdown_started = False
     grid._background_paused = False
     grid._background_refresh_pending = False
     grid._scan_generation = 0
     grid._active_scan_worker = None
     grid._pending_saved_clips = {}
+    grid._bulk_job = None
+    grid._mutation_paths = set()
+    grid._mutation_refresh_pending = False
+    grid._trash_rebuild_pending = False
+    grid._pending_scan_request = None
     class _FakeThreadPool:
         def start(self, _worker):
             return None
@@ -659,6 +686,7 @@ def test_repeated_pause_resume_does_not_strand_thumbnail_ownership(
             media_path, canonical_media_path(media_path), (), False, 'video',
             media.stat().st_size, media.stat().st_mtime_ns)
     }
+    _initialize_empty_cover_lane(grid)
     grid._imported_files = set()
     grid.refresh_timer = QTimer()
     grid._debounce_timer = QTimer()

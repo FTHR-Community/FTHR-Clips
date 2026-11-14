@@ -540,6 +540,7 @@ def test_native_worker_publishes_combined_clip_and_logs_count(
     )
     from main import MainWindow
 
+    host._replace_finalization_output = MainWindow._replace_finalization_output.__get__(host)
     MainWindow._combine_native_audio_worker(
         host, str(native), 1, 0.0, None, None)
 

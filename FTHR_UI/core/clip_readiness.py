@@ -7,8 +7,12 @@ import threading
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
+from core.library_index import canonical_media_path
+
 
 class ClipReadinessState(Enum):
+    INITIALIZING = auto()
+    RECOVERY_REQUIRED = auto()
     ENGINE_COMMITTED = auto()
     FINALIZING = auto()
     READY = auto()
@@ -17,7 +21,7 @@ class ClipReadinessState(Enum):
 
 
 def _key(path: str | os.PathLike[str]) -> str:
-    return os.path.normcase(os.path.abspath(os.fspath(path)))
+    return canonical_media_path(path)
 
 
 @dataclass
@@ -31,6 +35,48 @@ class ClipReadinessRegistry:
     def __init__(self) -> None:
         self._handles: dict[str, ClipReadinessHandle] = {}
         self._lock = threading.RLock()
+        self._initializing = False
+        self._blocked: dict[str, set[str]] = {}
+
+    def set_initializing(self, initializing: bool) -> None:
+        with self._lock:
+            self._initializing = bool(initializing)
+
+    def block_keys(self, keys, *, reason='mutation') -> None:
+        """Block already captured canonical keys without resolving paths again."""
+        with self._lock:
+            for key in keys:
+                self._blocked.setdefault(key, set()).add(str(reason))
+
+    def unblock_keys(self, keys, *, reason='mutation') -> None:
+        with self._lock:
+            for key in keys:
+                reasons = self._blocked.get(key)
+                if reasons is not None:
+                    reasons.discard(str(reason))
+                    if not reasons:
+                        self._blocked.pop(key, None)
+
+    def block_paths(self, paths, *, reason='mutation') -> None:
+        self.block_keys(tuple(_key(path) for path in paths), reason=reason)
+
+    def unblock_paths(self, paths, *, reason='mutation') -> None:
+        self.unblock_keys(tuple(_key(path) for path in paths), reason=reason)
+
+    def set_recovery_paths(self, paths) -> None:
+        with self._lock:
+            for key, reasons in list(self._blocked.items()):
+                reasons.discard('recovery')
+                if not reasons:
+                    self._blocked.pop(key, None)
+            for path in paths:
+                self._blocked.setdefault(_key(path), set()).add('recovery')
+
+    def rename_committed(self, source, destination) -> None:
+        with self._lock:
+            handle = self._handles.pop(_key(source), None)
+            if handle is not None:
+                self._handles[_key(destination)] = handle
 
     def engine_committed(
         self, path: str | os.PathLike[str], *, needs_finalization: bool
@@ -93,7 +139,12 @@ class ClipReadinessRegistry:
 
     def state(self, path: str | os.PathLike[str]) -> ClipReadinessState:
         with self._lock:
-            handle = self._handles.get(_key(path))
+            if self._initializing:
+                return ClipReadinessState.INITIALIZING
+            path_key = _key(path)
+            if self._blocked.get(path_key):
+                return ClipReadinessState.RECOVERY_REQUIRED
+            handle = self._handles.get(path_key)
             if handle is not None:
                 return handle.state
         if os.path.isfile(path):

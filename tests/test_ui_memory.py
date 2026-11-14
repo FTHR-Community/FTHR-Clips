@@ -4,11 +4,11 @@ import threading
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QMenu, QWidget
 
 from main import _SettingsPage
 from core.settings_manager import SettingsManager
@@ -17,7 +17,6 @@ from ui import clip_viewer, camera_overlay_editor
 from ui.clip_viewer import TrimSlider, ClipViewer, TimelineSegment
 from ui.image_memory import ImageLRU, image_bytes
 from ui.screenshot_editor import CropCanvas, ScreenshotEditor
-from ui.shell_transitions import SnapshotSlide, ShellPageStack
 from ui.clip_editor_window import ClipEditorWindow
 
 
@@ -152,19 +151,165 @@ def test_idle_editor_releases_images_preserves_state_and_reuses_controls(
 
 
 def test_hidden_library_discards_recent_images_and_excess_spares(qtbot):
-    from ui.clip_grid import ClipGrid
+    from ui.clip_grid import ClipGrid, ClipThumbnail
     cards = [QWidget() for _ in range(12)]
     for card in cards:
         qtbot.addWidget(card)
     cache = ImageLRU(8 * 1024 * 1024)
     cache['recent'] = ('fingerprint', QPixmap.fromImage(_image()), 5, 'label', '')
+    viewport = QWidget()
+    qtbot.addWidget(viewport)
+    visible_card = ClipThumbnail('visible.mp4', parent=viewport)
     visible = QPixmap.fromImage(_image())
+    visible_card.set_custom_cover(visible, 'cover')
+    covers = {'cover': visible}
     host = SimpleNamespace(_background_paused=True, _current_columns=4,
-                           _recent_thumbnails=cache, _recycled_cards=cards,
-                           _scroll_viewport=lambda: None)
+                           _recent_thumbnails=cache, _cover_pixmap_cache=covers,
+                           _recycled_cards=cards,
+                           _thumb_widgets={'visible.mp4': visible_card},
+                           _scroll_viewport=lambda: viewport)
     ClipGrid._trim_hidden_memory(host)
     assert cache.bytes_used == 0 and len(cards) == 4
-    assert not visible.isNull()
+    assert not covers
+    assert not visible_card._cover_pixmap.isNull()
+    assert visible_card._cover_cache_key == 'cover'
+
+
+@pytest.mark.parametrize('accepted', [False, True])
+@pytest.mark.parametrize('tool', ['crop', 'stretch'])
+def test_editor_preview_dialog_disposes_after_result(
+        qtbot, monkeypatch, tmp_path, accepted, tool):
+    window = _editor(monkeypatch, qtbot, tmp_path)
+    page = window.clip_page
+    before = page._crop_rect, page._stretch_ratio
+    crop = (10, 10, 160, 80)
+    ratio = 1.5
+    preview = _image()
+
+    def load_crop(dialog):
+        dialog._on_frame_loaded((dialog._frame_generation, preview, None))
+
+    monkeypatch.setattr(clip_viewer.CropDialog, '_load_frame', load_crop)
+    monkeypatch.setattr(clip_viewer.StretchDialog, '_extract_preview_frame',
+                        lambda *_: QPixmap.fromImage(preview))
+    dialog_type = (clip_viewer.CropDialog if tool == 'crop'
+                   else clip_viewer.StretchDialog)
+    destroyed = []
+
+    def run_dialog(dialog):
+        dialog.destroyed.connect(lambda: destroyed.append(True))
+        if tool == 'crop':
+            dialog.crop_rect = crop
+        else:
+            dialog.stretch_ratio = ratio
+        QTimer.singleShot(0, dialog.accept if accepted else dialog.reject)
+        return QDialog.exec(dialog)
+
+    monkeypatch.setattr(dialog_type, 'exec', run_dialog)
+    getattr(page, f'_open_{tool}_dialog')()
+    expected = ((crop, before[1]) if tool == 'crop' else (before[0], ratio))
+    assert (page._crop_rect, page._stretch_ratio) == (expected if accepted else before)
+    qtbot.waitUntil(lambda: destroyed == [True])
+    assert not page.findChildren(dialog_type)
+
+
+def test_repeated_card_context_menu_close_releases_submenus(qtbot, monkeypatch):
+    from ui.clip_grid import ClipThumbnail
+
+    card = ClipThumbnail('preview.mp4')
+    qtbot.addWidget(card)
+    event = SimpleNamespace(globalPos=lambda: QPoint(0, 0))
+    opened = []
+    monkeypatch.setattr(card, '_emit_opened', lambda: opened.append(card.file_path))
+
+    def choose_open():
+        menu = QApplication.activePopupWidget()
+        menu.setActiveAction(menu.actions()[0])
+        QTest.keyClick(menu, Qt.Key.Key_Return)
+
+    for close_menu in (lambda: QApplication.activePopupWidget().close(), choose_open):
+        QTimer.singleShot(0, close_menu)
+        card.contextMenuEvent(event)
+        qtbot.waitUntil(lambda: not card.findChildren(QMenu))
+    assert opened == ['preview.mp4']
+
+
+def test_share_picker_disposes_on_cancel_and_after_selection(qtbot):
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    parent.sm = None
+    opened = []
+    parent._open_share_window = opened.append
+    parent._open_share_preset = opened.append
+    for choose_mode in (False, True):
+        ClipViewer._show_share_overlay(parent)
+        picker = parent.findChild(clip_viewer.ShareModeDialog)
+        if choose_mode:
+            picker._select(False)
+        else:
+            picker.reject()
+        qtbot.waitUntil(lambda: not parent.findChildren(clip_viewer.ShareModeDialog))
+    assert opened == [False]
+
+
+@pytest.mark.parametrize('accepted', [False, True])
+def test_game_crop_releases_screenshot_after_result(qtbot, monkeypatch, accepted):
+    import main
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    rule = {'exe_name': 'game.exe'}
+    saved = []
+    host = SimpleNamespace(
+        _custom_rules=[rule], window=lambda: parent,
+        sm=SimpleNamespace(get=lambda _key, _default: 1),
+        _save_rules=lambda: saved.append(True),
+        _set_browser_status=lambda _status: None,
+    )
+    screen = SimpleNamespace(grabWindow=lambda _hwnd: QPixmap.fromImage(_image()))
+    monkeypatch.setattr(main, 'QApplication', SimpleNamespace(primaryScreen=lambda: screen))
+
+    def run_dialog(dialog):
+        assert not dialog.canvas._preview.isNull()
+        QTimer.singleShot(0, dialog.accept if accepted else dialog.reject)
+        return QDialog.exec(dialog)
+
+    monkeypatch.setattr(main.GameCropDialog, 'exec', run_dialog)
+    main.GameDetectionPopup._edit_crop(host, 0)
+    assert saved == ([True] if accepted else [])
+    assert ('crop_profile' in rule) is accepted
+    qtbot.waitUntil(lambda: not parent.findChildren(main.GameCropDialog))
+
+
+@pytest.mark.parametrize('accepted', [False, True])
+def test_common_modal_dialogs_release_after_return(qtbot, accepted):
+    from ui.dialogs import FthrInputDialog, FthrMessageDialog
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+
+    def finish():
+        dialog = QApplication.activeModalWidget()
+        if isinstance(dialog, FthrInputDialog):
+            dialog.text_edit.setText('edited')
+        (dialog.accept if accepted else dialog.reject)()
+
+    QTimer.singleShot(0, finish)
+    assert FthrInputDialog.get_text(parent, 'Input', 'Name') == ('edited', accepted)
+    QTimer.singleShot(0, finish)
+    assert FthrMessageDialog.question(parent, 'Confirm', 'Continue?') is accepted
+    qtbot.waitUntil(lambda: not parent.findChildren(QDialog))
+
+
+def test_nonmodal_message_releases_reference_on_parent_destruction(qtbot):
+    from ui.dialogs import FthrMessageDialog
+
+    parent = QWidget()
+    before = len(FthrMessageDialog._live_non_modal)
+    FthrMessageDialog.warning(parent, 'Warning', 'Example')
+    assert len(FthrMessageDialog._live_non_modal) == before + 1
+    parent.deleteLater()
+    qtbot.waitUntil(lambda: len(FthrMessageDialog._live_non_modal) == before)
 
 
 def test_overlay_preview_follows_display_size_and_reloads_after_idle(qtbot, tmp_path):
@@ -261,48 +406,83 @@ def test_rotated_screenshot_preview_and_save_use_same_orientation(qtbot, tmp_pat
     assert QImage(str(out)) == expected
 
 
-@pytest.mark.parametrize('horizontal', [False, True])
-@pytest.mark.parametrize('direction', [-1, 1])
-def test_live_slide_keeps_one_image_and_restores_geometry(qtbot, horizontal, direction):
-    stack = QWidget()
-    qtbot.addWidget(stack)
-    stack.resize(400, 300)
-    page = QWidget(stack)
-    page.setGeometry(stack.rect())
-    page.setStyleSheet('background: blue')
-    page.show()
-    stack.show()
-    outgoing = QPixmap(400, 300)
-    outgoing.fill(QColor('red'))
-    slide = SnapshotSlide(stack, outgoing, page, direction, horizontal=horizontal)
-    slide.show()
-    slide.raise_()
-    assert slide._incoming.isNull()
-    slide._advance(.5)
-    shown = stack.grab().toImage()
-    before = shown.pixelColor(50, 150) if horizontal else shown.pixelColor(200, 30)
-    after = shown.pixelColor(350, 150) if horizontal else shown.pixelColor(200, 270)
-    assert before == QColor('red' if direction > 0 else 'blue')
-    assert after == QColor('blue' if direction > 0 else 'red')
-    slide.hide()
-    assert page.geometry() == stack.rect()
-    assert slide._outgoing.isNull() and slide._incoming.isNull()
 
 
-def test_snapshot_stack_interrupt_and_resize_keep_current_page_layout(qtbot):
-    stack = ShellPageStack()
-    qtbot.addWidget(stack)
-    for color in ('red', 'green', 'blue'):
-        page = QWidget()
-        page.setStyleSheet(f'background: {color}')
-        stack.addWidget(page)
-    stack.resize(400, 300)
-    stack.show()
-    stack.setCurrentIndex(1)
-    assert not stack._slide._incoming.isNull()
-    assert stack._slide._live_incoming is None
-    stack._slide._advance(.5)
-    stack.setCurrentIndex(2)
-    stack.resize(500, 400)
-    assert stack._slide is None
-    assert stack.currentWidget().geometry() == stack.contentsRect()
+def test_disabled_strip_never_starts_work_during_playback_or_scrubbing(
+        qtbot, monkeypatch, tmp_path):
+    import core.media_process
+    monkeypatch.setattr('pathlib.Path.home', lambda: tmp_path)
+    settings = SettingsManager()
+    settings.set('timeline_preview_strip_enabled', False)
+    settings.save_settings()
+    window = _editor(monkeypatch, qtbot, tmp_path, settings)
+    page = window.clip_page
+    page._playback_ready = True
+    monkeypatch.setattr(page.player, 'playbackState',
+                        lambda: QMediaPlayer.PlaybackState.PlayingState)
+    calls = []
+    monkeypatch.setattr(core.media_process, 'run_media_process',
+                        lambda *args, **kwargs: calls.append((args, kwargs)))
+    for _ in range(3):
+        page._on_state_changed(QMediaPlayer.PlaybackState.PlayingState)
+        page._on_seek_requested(.5)
+        page._schedule_timeline_thumbnails()
+        page._load_timeline_thumbnails_if_idle()
+        page.trim_slider.load_thumbnails(page.clip_path)
+    assert not page._timeline_prepare_timer.isActive()
+    assert page.trim_slider._thumbnail_worker_starts == 0
+    assert not calls
+    assert not page.trim_slider._thumbnails
+    window._teardown_player()
+
+
+def test_disabling_filmstrip_reaps_a_real_decoder_and_stays_off(
+        qtbot, monkeypatch, tmp_path):
+    import subprocess
+    import time
+    from core import media_process
+    from core.ffmpeg_tools import get_ffmpeg_exe
+
+    clip = tmp_path / 'slow-filmstrip.mp4'
+    subprocess.run([
+        get_ffmpeg_exe(), '-v', 'error', '-f', 'lavfi', '-i',
+        'color=c=blue:s=160x90:r=24:d=24', '-c:v', 'mpeg4', str(clip),
+    ], check=True, capture_output=True, timeout=20,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    original_runner = media_process.run_media_process
+    children = []
+    original_started = media_process._media_process_started
+
+    def record_child(process):
+        children.append(process)
+        original_started(process)
+
+    def paced_runner(command, *args, **kwargs):
+        # Force a real long-running FFmpeg decode so the toggle must kill it,
+        # rather than racing a tiny fixture which has already completed.
+        command = list(command)
+        command.insert(command.index('-i'), '-re')
+        return original_runner(command, *args, **kwargs)
+
+    monkeypatch.setattr(media_process, '_media_process_started', record_child)
+    monkeypatch.setattr(media_process, 'run_media_process', paced_runner)
+    slider = TrimSlider(24_000)
+    qtbot.addWidget(slider)
+    slider.load_thumbnails(str(clip))
+    qtbot.waitUntil(lambda: bool(slider._thumbnails), timeout=5000)
+    assert children and children[0].poll() is None
+    started = time.monotonic()
+    slider.set_preview_strip_enabled(False)
+    qtbot.waitUntil(lambda: media_process.media_process_snapshot()[0] == 0, timeout=3000)
+    assert time.monotonic() - started < 3
+    assert all(child.poll() is not None for child in children)
+    assert not slider._thumbnails and not slider._scaled_thumbnails
+    assert clip_viewer._TIMELINE_IMAGE_CACHE.bytes_used == 0
+    starts = slider._thumbnail_worker_starts
+    child_count = len(children)
+    for _ in range(3):
+        slider.load_thumbnails(str(clip))
+    qtbot.wait(200)
+    assert len(children) == child_count
+    assert slider._thumbnail_worker_starts == starts
+    assert not slider._thumbnails

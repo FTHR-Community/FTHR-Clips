@@ -7,10 +7,18 @@
 #include <windows.h>
 #include <d3d11.h>
 
+extern "C" {
+#include <libavutil/frame.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
+}
+
 #include <cstdlib>
 #include <deque>
 #include <iostream>
 #include <memory>
+#include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,6 +61,7 @@ public:
     bool return_wrong_codec = false;
     bool submit_error = false;
     bool need_drain_once = false;
+    bool always_need_drain = false;
     bool flush_error = false;
     bool receive_error = false;
     bool emit_packet = false;
@@ -131,7 +140,7 @@ public:
             error = "simulated AMF submit failure";
             return AmfSubmitStatus::Error;
         }
-        if (need_drain_once) {
+        if (need_drain_once || always_need_drain) {
             need_drain_once = false;
             return AmfSubmitStatus::NeedDrain;
         }
@@ -527,6 +536,9 @@ void BackpressureDrainDeliversOlderPacketBeforeRetry() {
     CheckAmf(fake->submit_calls == 4
             && callbacks == std::vector<std::pair<int64_t, int64_t>>{{0, start}},
         "backpressure drain delivers the older packet before successful retry");
+    CheckAmf(fake->submitted_pts_history[2] == fake->submitted_pts_history[3]
+        && fake->submitted_force_keyframe_history[2] == fake->submitted_force_keyframe_history[3],
+        "successful AMF EAGAIN retry retains the pending PTS and keyframe intent");
 }
 
 void EndOfStreamEmitsFinalDelayedPacket() {
@@ -889,10 +901,448 @@ void FlushAndErrorsAreObservable() {
         "AMF encode errors propagate without fallback");
 }
 
+void FailureEvidenceKeepsErrorDomainsSeparateAndBounded() {
+    fthr::detail::AmfFailureEvidence evidence;
+    evidence.operation = "avcodec_send_frame";
+    evidence.codec = "h264_amf";
+    evidence.ffmpeg_error_available = true;
+    evidence.ffmpeg_error = AVERROR_UNKNOWN;
+    evidence.device_removed_available = true;
+    evidence.device_removed_reason = 0;
+    const auto json = fthr::detail::BuildAmfFailureEvidence(evidence);
+    CheckAmf(json.find("\"native_amf_result\":\"unavailable:not_exposed_by_ffmpeg_api\"") != std::string::npos
+        && json.find("\"hresult\":\"unavailable:not_observed\"") != std::string::npos
+        && json.find("\"ffmpeg_error\":" + std::to_string(AVERROR_UNKNOWN)) != std::string::npos
+        && json.find("\"device_removed_reason\":0") != std::string::npos
+        && json.find("texture_operation_success") == std::string::npos,
+        "AMF failure event does not invent a native result or HRESULT from FFmpeg UNKNOWN or S_OK");
+    evidence.operation = std::string(100000, 'x');
+    evidence.codec = std::string(100000, 'y');
+    const auto bounded = fthr::detail::BuildAmfFailureEvidence(evidence);
+    CheckAmf(bounded.size() < 8192 && bounded.back() == '}',
+        "AMF failure evidence remains bounded and complete for oversized labels");
+    evidence.operation = "quoted\"operation\n";
+    evidence.hresult_available = true;
+    evidence.hresult = static_cast<int32_t>(0x887A0005u);
+    evidence.input.available = true;
+    evidence.input.width = 1920;
+    evidence.input.array_size = 8;
+    evidence.input.subresource = 3;
+    const auto native = fthr::detail::BuildAmfFailureEvidence(evidence);
+    CheckAmf(native.find("\"hresult\":-2005270523") != std::string::npos
+        && native.find("quoted\\\"operation\\n") != std::string::npos
+        && native.find("\"subresource\":3") != std::string::npos
+        && native.find("\"bind_flags\":0") != std::string::npos
+        && native.find("\"source_device_matches\":\"unavailable:not_observed\"") != std::string::npos,
+        "AMF evidence preserves real HRESULT, texture slice/flags, escaped labels and unavailable identities independently");
+}
+
+void ProductionFailureReporterRunsWithoutHardwareAndIsBoundedOnce() {
+    auto session = fthr::detail::CreateProductionAmfCodecSession();
+    std::ostringstream captured;
+    auto* previous = std::cout.rdbuf(captured.rdbuf());
+    std::string error;
+    const bool first = session->PrepareGpuFrame(nullptr, 0, error);
+    const bool second = session->PrepareGpuFrame(nullptr, 0, error);
+    std::cout.rdbuf(previous);
+    const auto output = captured.str();
+    const std::string marker = "FTHR_DIAGNOSTIC_EVENT ";
+    const auto position = output.find(marker);
+    CheckAmf(!first && !second && position != std::string::npos
+        && output.find(marker, position + marker.size()) == std::string::npos
+        && output.find("PrepareGpuFrame:resources") != std::string::npos
+        && output.find("unavailable:not_exposed_by_ffmpeg_api") != std::string::npos,
+        "actual production AMF failure reporter executes and emits only one bounded event before reset");
+}
+
+void SubmitFailuresDoNotFabricatePacketsOrRetryFatalErrors() {
+    for (const bool fatal : {false, true}) {
+        auto session = std::make_unique<FakeAmfSession>();
+        auto* fake = session.get();
+        fake->submit_error = fatal;
+        fake->always_need_drain = !fatal;
+        uint32_t packets = 0;
+        FfmpegAmfReplayEncoder encoder(VideoCodec::H264, std::move(session));
+        const bool initialized = encoder.Initialize(TestEncoderConfig(),
+            reinterpret_cast<ID3D11Device*>(1), reinterpret_cast<ID3D11DeviceContext*>(1),
+            [&](const uint8_t*, uint32_t, int64_t, bool, int64_t) { ++packets; }, false);
+        CheckAmf(initialized && encoder.PrepareGpuFrame(nullptr, 0) && !encoder.EncodeFrame(1)
+            && fake->submit_calls == (fatal ? 1u : 2u) && packets == 0,
+            "AMF fatal sends run once; persistent EAGAIN is bounded to two attempts without fabricated packets");
+        CheckAmf(fake->submitted_pts_history.front() == fake->submitted_pts_history.back()
+            && fake->submitted_force_keyframe_history.front() == fake->submitted_force_keyframe_history.back(),
+            "AMF backpressure retries retain pending PTS and keyframe intent");
+    }
+}
+
 void SuccessfulAmfUsesCompressedReplay() {
     CheckAmf(!fthr::ShouldAllocateRawReplayPool(
                   ReplayEncoderBackend::FfmpegAmf, true),
         "successful AMF selection skips the raw replay pool");
+}
+
+bool fail_next_pool_texture = false;
+HRESULT FailFirstPoolTexture(ID3D11Device* device,
+    const D3D11_TEXTURE2D_DESC* description, ID3D11Texture2D** texture) {
+    if (fail_next_pool_texture) { fail_next_pool_texture = false; return E_OUTOFMEMORY; }
+    return device->CreateTexture2D(description, nullptr, texture);
+}
+
+void LogPoolTestAdapter(ID3D11Device* device, const char* mode) {
+    std::cout << "AMF input-pool contract: D3D11 mode=" << mode
+              << ", no AMF encoding";
+    IDXGIDevice* dxgi_device = nullptr;
+    IDXGIAdapter* adapter = nullptr;
+    DXGI_ADAPTER_DESC description{};
+    if (SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice),
+            reinterpret_cast<void**>(&dxgi_device)))
+        && SUCCEEDED(dxgi_device->GetAdapter(&adapter))
+        && SUCCEEDED(adapter->GetDesc(&description))) {
+        char name[512]{};
+        WideCharToMultiByte(CP_UTF8, 0, description.Description, -1,
+            name, sizeof(name), nullptr, nullptr);
+        std::cout << ", vendor_id=" << description.VendorId << ", adapter=" << name;
+    } else std::cout << ", adapter=unavailable";
+    if (adapter) adapter->Release();
+    if (dxgi_device) dxgi_device->Release();
+    std::cout << std::endl;
+}
+
+void BoundedSingleTexturePoolUsesActualFfmpegFrameOwnership() {
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* immediate = nullptr;
+    D3D_FEATURE_LEVEL level{};
+    const HRESULT hardware_result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE,
+        nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+        nullptr, 0, D3D11_SDK_VERSION, &device, &level, &immediate);
+    if (FAILED(hardware_result)) {
+        if (immediate) immediate->Release();
+        if (device) device->Release();
+        std::cout << "AMF FFmpeg hardware-frame integration: UNAVAILABLE, D3D11CreateDevice HRESULT="
+                  << hardware_result << "; mandatory WARP factory contracts still run" << std::endl;
+        return;
+    }
+    LogPoolTestAdapter(device, "HARDWARE, actual FFmpeg hwframe integration");
+    AVBufferRef* device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+    CheckAmf(device_ref != nullptr, "pool test allocates actual FFmpeg device context");
+    auto* device_ctx = reinterpret_cast<AVHWDeviceContext*>(device_ref->data);
+    device->AddRef();
+    reinterpret_cast<AVD3D11VADeviceContext*>(device_ctx->hwctx)->device = device;
+    const int device_init = av_hwdevice_ctx_init(device_ref);
+    if (device_init < 0) {
+        av_buffer_unref(&device_ref);
+        immediate->Release();
+        device->Release();
+        std::cout << "AMF FFmpeg hardware-frame integration: UNAVAILABLE, pinned av_hwdevice_ctx_init="
+                  << device_init << "; mandatory WARP factory contracts still run" << std::endl;
+        return;
+    }
+    auto create_frames = [&]() {
+        auto* reference = av_hwframe_ctx_alloc(device_ref);
+        CheckAmf(reference != nullptr, "pool test allocates frames context");
+        auto* context = reinterpret_cast<AVHWFramesContext*>(reference->data);
+        context->format = AV_PIX_FMT_D3D11;
+        context->sw_format = AV_PIX_FMT_BGRA;
+        context->width = 640;
+        context->height = 360;
+        return reference;
+    };
+    auto stats = std::make_shared<fthr::detail::AmfInputPoolDiagnostics>();
+    AVBufferRef* frames_ref = create_frames();
+    auto* frames = reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
+    CheckAmf(fthr::detail::InstallAmfSingleTexturePool(frames, device, stats) == 0
+        && frames->initial_pool_size == 0 && frames->pool && frames->free,
+        "production bounded caller pool is owned by frames-context final-free hook");
+    CheckAmf(av_hwframe_ctx_init(frames_ref) == 0, "actual FFmpeg accepts bounded descriptor pool");
+    std::vector<AVFrame*> held;
+    std::set<ID3D11Texture2D*> textures;
+    for (int index = 0; index < 8; ++index) {
+        auto* frame = av_frame_alloc();
+        CheckAmf(frame && fthr::detail::AcquireAmfInputFrame(frames_ref, frame) == 0,
+            "each of eight actual FFmpeg frames acquires a bounded texture");
+        auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
+        D3D11_TEXTURE2D_DESC description{};
+        texture->GetDesc(&description);
+        auto* descriptor = reinterpret_cast<AVD3D11FrameDescriptor*>(frame->buf[0]->data);
+        CheckAmf(description.ArraySize == 1 && description.MipLevels == 1
+            && description.Format == DXGI_FORMAT_B8G8R8A8_UNORM
+            && description.Usage == D3D11_USAGE_DEFAULT && description.CPUAccessFlags == 0
+            && frame->data[1] == nullptr && descriptor->texture == texture && descriptor->index == 0,
+            "production pool supplies FFmpeg descriptor ABI with GPU-only single texture and slice zero");
+        textures.insert(texture);
+        held.push_back(frame);
+    }
+    CheckAmf(textures.size() == 8 && stats->live_textures == 8,
+        "eight held frames have eight distinct live single textures");
+    auto* ninth = av_frame_alloc();
+    CheckAmf(fthr::detail::AcquireAmfInputFrame(frames_ref, ninth) < 0
+        && stats->capacity_exhausted && stats->live_textures == 8,
+        "ninth concurrent acquisition fails immediately without allocating beyond eight");
+    auto* clone = av_frame_clone(held.front());
+    CheckAmf(clone != nullptr, "actual AVFrame clone retains texture lease");
+    auto* first_texture = reinterpret_cast<ID3D11Texture2D*>(clone->data[0]);
+    av_frame_free(&held.front());
+    CheckAmf(fthr::detail::AcquireAmfInputFrame(frames_ref, ninth) < 0,
+        "original frame release cannot reuse texture still held by clone");
+    av_frame_free(&clone);
+    CheckAmf(fthr::detail::AcquireAmfInputFrame(frames_ref, ninth) == 0
+        && reinterpret_cast<ID3D11Texture2D*>(ninth->data[0]) == first_texture
+        && !stats->capacity_exhausted && stats->live_textures == 8,
+        "last clone release permits exact texture reuse without new allocation");
+    av_buffer_unref(&frames_ref);
+    av_buffer_unref(&device_ref);
+    CheckAmf(!stats->state_destroyed, "owner reset cannot destroy context/pool while actual frames retain it");
+    D3D11_TEXTURE2D_DESC still_valid{};
+    first_texture->GetDesc(&still_valid);
+    CheckAmf(still_valid.Width == 640, "outstanding frame texture remains valid after owner reset");
+    auto* buffer_only_lease = av_buffer_ref(ninth->buf[0]);
+    CheckAmf(buffer_only_lease != nullptr, "separate buffer lease does not require frames-context reference");
+    for (auto*& frame : held) av_frame_free(&frame);
+    av_frame_free(&ninth);
+    CheckAmf(!stats->state_destroyed && stats->live_textures == 1,
+        "pool state survives final context-free hook while separate buffer lease remains");
+    first_texture->GetDesc(&still_valid);
+    CheckAmf(still_valid.Width == 640, "separate buffer lease texture survives closed pool");
+    av_buffer_unref(&buffer_only_lease);
+    CheckAmf(stats->state_destroyed && stats->live_textures == 0,
+        "last frame triggers context hook and frees all pool textures safely");
+
+    // An initialization/allocation failure must not consume capacity or leave a dangling hook.
+    device_ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+    device_ctx = reinterpret_cast<AVHWDeviceContext*>(device_ref->data);
+    device->AddRef();
+    reinterpret_cast<AVD3D11VADeviceContext*>(device_ctx->hwctx)->device = device;
+    CheckAmf(av_hwdevice_ctx_init(device_ref) == 0, "allocation-failure test initializes device");
+    frames_ref = create_frames();
+    frames = reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
+    auto failure_stats = std::make_shared<fthr::detail::AmfInputPoolDiagnostics>();
+    fail_next_pool_texture = true;
+    CheckAmf(fthr::detail::InstallAmfSingleTexturePool(frames, device, failure_stats,
+        FailFirstPoolTexture) == 0 && av_hwframe_ctx_init(frames_ref) == 0,
+        "fault seam uses same production pool with actual FFmpeg context");
+    auto* retry = av_frame_alloc();
+    CheckAmf(fthr::detail::AcquireAmfInputFrame(frames_ref, retry) < 0
+        && failure_stats->live_textures == 0 && !failure_stats->capacity_exhausted
+        && failure_stats->hresult_available && failure_stats->hresult == E_OUTOFMEMORY,
+        "real texture allocation HRESULT is distinct from exhaustion and rolls back capacity");
+    CheckAmf(fthr::detail::AcquireAmfInputFrame(frames_ref, retry) == 0
+        && failure_stats->live_textures == 1 && !failure_stats->hresult_available,
+        "allocation failure is recoverable without permanently losing a pool slot");
+    av_frame_free(&retry);
+    av_buffer_unref(&frames_ref);
+    CheckAmf(failure_stats->state_destroyed && failure_stats->live_textures == 0,
+        "failure/retry context teardown releases state and texture");
+    frames_ref = create_frames();
+    frames = reinterpret_cast<AVHWFramesContext*>(frames_ref->data);
+    auto partial_stats = std::make_shared<fthr::detail::AmfInputPoolDiagnostics>();
+    CheckAmf(fthr::detail::InstallAmfSingleTexturePool(frames, device, partial_stats) == 0,
+        "partial initialization installs owned pool");
+    frames->width = 0;
+    CheckAmf(av_hwframe_ctx_init(frames_ref) < 0, "invalid initialization actually fails in FFmpeg");
+    av_buffer_unref(&frames_ref);
+    CheckAmf(partial_stats->state_destroyed && partial_stats->live_textures == 0,
+        "failed frames initialization still runs context pool cleanup");
+    av_buffer_unref(&device_ref);
+    immediate->Release();
+    device->Release();
+}
+
+void BoundedSingleTexturePoolWarpFactoryContractAlwaysRuns() {
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* immediate = nullptr;
+    D3D_FEATURE_LEVEL level{};
+    CheckAmf(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+        &device, &level, &immediate)), "mandatory WARP pool test creates BGRA device without VIDEO_SUPPORT");
+    LogPoolTestAdapter(device, "WARP, direct factory/Stock AVBufferPool contract only");
+    // WARP need not expose video interfaces required by pinned hwdevice_init.
+    // Exercise the same production caller-pool factory before backend init,
+    // using an isolated stack context and its actual registered free hook.
+    AVHWFramesContext frames{};
+    frames.format = AV_PIX_FMT_D3D11;
+    frames.sw_format = AV_PIX_FMT_BGRA;
+    frames.width = 640;
+    frames.height = 360;
+    auto stats = std::make_shared<fthr::detail::AmfInputPoolDiagnostics>();
+    CheckAmf(fthr::detail::InstallAmfSingleTexturePool(&frames, device, stats) == 0
+        && frames.pool && frames.free && frames.initial_pool_size == 0,
+        "WARP installs the identical production caller-pool factory without fake FFmpeg device init");
+    auto acquire = [&]() {
+        auto* frame = av_frame_alloc();
+        CheckAmf(frame != nullptr, "WARP allocates actual AVFrame");
+        frame->buf[0] = av_buffer_pool_get(frames.pool);
+        if (!frame->buf[0]) { av_frame_free(&frame); return frame; }
+        const auto* descriptor = reinterpret_cast<AVD3D11FrameDescriptor*>(frame->buf[0]->data);
+        frame->data[0] = reinterpret_cast<uint8_t*>(descriptor->texture);
+        frame->data[1] = reinterpret_cast<uint8_t*>(descriptor->index);
+        frame->format = AV_PIX_FMT_D3D11;
+        frame->width = frames.width;
+        frame->height = frames.height;
+        return frame;
+    };
+    std::vector<AVFrame*> held;
+    std::set<ID3D11Texture2D*> textures;
+    for (int index = 0; index < 8; ++index) {
+        auto* frame = acquire();
+        CheckAmf(frame != nullptr, "WARP acquires eight simultaneous production-pool textures");
+        auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
+        D3D11_TEXTURE2D_DESC description{};
+        texture->GetDesc(&description);
+        CheckAmf(description.ArraySize == 1 && description.MipLevels == 1
+            && description.Format == DXGI_FORMAT_B8G8R8A8_UNORM
+            && description.Usage == D3D11_USAGE_DEFAULT && description.CPUAccessFlags == 0
+            && frame->data[1] == nullptr, "WARP validates actual single-texture descriptor and slice zero");
+        textures.insert(texture);
+        held.push_back(frame);
+    }
+    CheckAmf(textures.size() == 8 && stats->live_textures == 8,
+        "WARP holds eight distinct GPU-resource textures, no ninth allocation");
+    CheckAmf(acquire() == nullptr && stats->capacity_exhausted && stats->live_textures == 8,
+        "WARP ninth lease fails boundedly at capacity eight");
+    auto* clone = av_frame_clone(held.front());
+    CheckAmf(clone != nullptr, "WARP real AVFrame clone retains production-pool lease");
+    auto* first_texture = reinterpret_cast<ID3D11Texture2D*>(clone->data[0]);
+    av_frame_free(&held.front());
+    CheckAmf(acquire() == nullptr, "WARP frame clone blocks reuse after original release");
+    av_frame_free(&clone);
+    held.front() = acquire();
+    CheckAmf(held.front() && held.front()->data[0] == reinterpret_cast<uint8_t*>(first_texture)
+        && stats->live_textures == 8, "WARP final clone release permits exact stock-pool reuse");
+    auto* buffer_lease = av_buffer_ref(held.front()->buf[0]);
+    CheckAmf(buffer_lease != nullptr, "WARP retains separate actual AVBufferRef");
+    for (auto*& frame : held) av_frame_free(&frame);
+    frames.free(&frames);
+    CheckAmf(!frames.pool && !frames.user_opaque && !stats->state_destroyed
+        && stats->live_textures == 1, "actual context-free hook closes WARP pool without invalidating buffer lease");
+    D3D11_TEXTURE2D_DESC still_valid{};
+    first_texture->GetDesc(&still_valid);
+    CheckAmf(still_valid.Width == 640, "WARP descriptor/texture remains valid after context-free hook");
+    av_buffer_unref(&buffer_lease);
+    CheckAmf(stats->state_destroyed && stats->live_textures == 0,
+        "WARP final buffer ref frees texture and pool state");
+
+    AVHWFramesContext partial{};
+    partial.format = AV_PIX_FMT_D3D11;
+    partial.sw_format = AV_PIX_FMT_BGRA;
+    partial.width = 640;
+    partial.height = 360;
+    auto failure_stats = std::make_shared<fthr::detail::AmfInputPoolDiagnostics>();
+    fail_next_pool_texture = true;
+    CheckAmf(fthr::detail::InstallAmfSingleTexturePool(&partial, device, failure_stats,
+        FailFirstPoolTexture) == 0, "WARP installs same production factory with allocation fault seam");
+    CheckAmf(!av_buffer_pool_get(partial.pool) && failure_stats->live_textures == 0
+        && failure_stats->hresult_available && failure_stats->hresult == E_OUTOFMEMORY
+        && !failure_stats->capacity_exhausted, "WARP allocation failure rolls capacity back with distinct actual HRESULT");
+    auto* retry = av_buffer_pool_get(partial.pool);
+    CheckAmf(retry && failure_stats->live_textures == 1, "WARP allocation retry succeeds without capacity leak");
+    av_buffer_unref(&retry);
+    partial.free(&partial);
+    CheckAmf(failure_stats->state_destroyed && failure_stats->live_textures == 0,
+        "WARP partially initialized context cleanup frees actual factory resources");
+    immediate->Release();
+    device->Release();
+}
+
+bool nv12_descriptor_observed = false;
+HRESULT ObserveNv12DescriptorFailure(ID3D11Device*,
+    const D3D11_TEXTURE2D_DESC* description, ID3D11Texture2D**) {
+    nv12_descriptor_observed = description->Format == DXGI_FORMAT_NV12
+        && description->Width == 640 && description->Height == 360
+        && description->ArraySize == 1 && description->MipLevels == 1
+        && description->SampleDesc.Count == 1 && description->CPUAccessFlags == 0
+        && description->Usage == D3D11_USAGE_DEFAULT;
+    return E_OUTOFMEMORY;
+}
+
+void Nv12PoolValidatesFormatGeometryAndFailureLifetime() {
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+    CheckAmf(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+        &device, nullptr, &context)), "NV12 descriptor contract creates WARP device");
+    AVHWFramesContext frames{};
+    frames.format = AV_PIX_FMT_D3D11;
+    frames.sw_format = AV_PIX_FMT_NV12;
+    frames.width = 641;
+    frames.height = 360;
+    CheckAmf(fthr::detail::InstallAmfSingleTexturePool(&frames, device) == AVERROR(EINVAL)
+        && !frames.pool, "odd NV12 width is rejected before pool/resource creation");
+    frames.width = 640;
+    frames.height = 361;
+    CheckAmf(fthr::detail::InstallAmfSingleTexturePool(&frames, device) == AVERROR(EINVAL),
+        "odd NV12 height is rejected");
+    frames.height = 360;
+    frames.sw_format = AV_PIX_FMT_P010;
+    CheckAmf(fthr::detail::InstallAmfSingleTexturePool(&frames, device) == AVERROR(EINVAL),
+        "unqualified P010 cannot be substituted for NV12");
+    frames.sw_format = AV_PIX_FMT_NV12;
+    auto stats = std::make_shared<fthr::detail::AmfInputPoolDiagnostics>();
+    nv12_descriptor_observed = false;
+    CheckAmf(fthr::detail::InstallAmfSingleTexturePool(&frames, device, stats,
+        ObserveNv12DescriptorFailure) == 0, "NV12 installs the bounded descriptor factory");
+    auto* failed = av_buffer_pool_get(frames.pool);
+    CheckAmf(!failed && nv12_descriptor_observed && stats->live_textures == 0
+        && stats->hresult_available && stats->hresult == static_cast<int32_t>(E_OUTOFMEMORY),
+        "NV12 descriptor, allocation rollback and original HRESULT are preserved");
+    frames.free(&frames);
+    CheckAmf(stats->state_destroyed && !frames.pool && !frames.user_opaque,
+        "NV12 failed allocation cleans up the real FFmpeg pool");
+    context->Release();
+    device->Release();
+}
+
+void Nv12HardwarePoolRemainsBoundedWithoutClaimingAmfEncoding() {
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+    const HRESULT created = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+        &device, nullptr, &context);
+    if (FAILED(created)) {
+        std::cout << "NV12 hardware pool: unavailable; no AMF encoding claimed\n";
+        return;
+    }
+    LogPoolTestAdapter(device, "HARDWARE, NV12 caller-pool resources only; no AMF encoding");
+    AVHWFramesContext frames{};
+    frames.format = AV_PIX_FMT_D3D11;
+    frames.sw_format = AV_PIX_FMT_NV12;
+    frames.width = 640;
+    frames.height = 360;
+    auto stats = std::make_shared<fthr::detail::AmfInputPoolDiagnostics>();
+    CheckAmf(fthr::detail::InstallAmfSingleTexturePool(&frames, device, stats) == 0,
+        "hardware installs identical bounded NV12 pool");
+    std::vector<AVBufferRef*> held;
+    std::set<ID3D11Texture2D*> textures;
+    for (int index = 0; index < 8; ++index) {
+        auto* lease = av_buffer_pool_get(frames.pool);
+        if (!lease && index == 0) {
+            CheckAmf(stats->live_textures == 0, "unsupported NV12 allocation rolls back capacity");
+            std::cout << "NV12 texture allocation unavailable on this hardware; no AMF encoding claimed\n";
+            frames.free(&frames);
+            context->Release();
+            device->Release();
+            return;
+        }
+        CheckAmf(lease != nullptr, "eight simultaneous hardware NV12 leases are available");
+        auto* descriptor = reinterpret_cast<AVD3D11FrameDescriptor*>(lease->data);
+        D3D11_TEXTURE2D_DESC actual{};
+        descriptor->texture->GetDesc(&actual);
+        CheckAmf(actual.Format == DXGI_FORMAT_NV12 && actual.ArraySize == 1
+            && actual.MipLevels == 1 && descriptor->index == 0,
+            "hardware NV12 frame has actual single-texture layout and slice zero");
+        textures.insert(descriptor->texture);
+        held.push_back(lease);
+    }
+    auto* ninth = av_buffer_pool_get(frames.pool);
+    CheckAmf(!ninth && textures.size() == 8 && stats->capacity_exhausted,
+        "NV12 cannot allocate a ninth texture");
+    frames.free(&frames);
+    CheckAmf(stats->live_textures == 8 && !stats->state_destroyed,
+        "hardware NV12 leases survive context destruction");
+    for (auto*& lease : held) av_buffer_unref(&lease);
+    CheckAmf(stats->live_textures == 0 && stats->state_destroyed,
+        "last NV12 lease releases all textures and pool state");
+    context->Release();
+    device->Release();
 }
 
 } // namespace
@@ -921,7 +1371,14 @@ int RunAmfReplayEncoderTests() {
     AmfKeyframeCadenceMatchesPublishedBound();
     GenerationConfigCannotChange();
     FlushAndErrorsAreObservable();
+    FailureEvidenceKeepsErrorDomainsSeparateAndBounded();
+    ProductionFailureReporterRunsWithoutHardwareAndIsBoundedOnce();
+    SubmitFailuresDoNotFabricatePacketsOrRetryFatalErrors();
     SuccessfulAmfUsesCompressedReplay();
+    BoundedSingleTexturePoolUsesActualFfmpegFrameOwnership();
+    BoundedSingleTexturePoolWarpFactoryContractAlwaysRuns();
+    Nv12PoolValidatesFormatGeometryAndFailureLifetime();
+    Nv12HardwarePoolRemainsBoundedWithoutClaimingAmfEncoding();
     std::cout << "FTHRclips AMF tests completed ("
               << amf_checks << " checks)" << std::endl;
     return amf_checks;

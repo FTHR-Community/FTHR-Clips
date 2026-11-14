@@ -17,13 +17,10 @@ UI_OPTIONS = (
     ('library_thumbnails_enabled', True, 'Library thumbnails', 'Medium',
      'Off: hide preview pictures in your clip library. You can still find, '
      'open and manage clips by name.'),
-    ('settings_visual_previews_enabled', True, 'Animated settings previews', 'Medium',
+    ('settings_visual_previews_enabled', True, 'Live settings previews', 'Medium',
      'Off: stop the moving camera and keyboard previews in Settings. This does '
      'not change what appears in recordings. After turning this back on, '
      'reopen Visuals to see the previews.'),
-    ('reduce_ui_animations', False, 'Reduce interface animations', 'Medium',
-     'On: use fewer animations when you move the mouse over buttons or switch '
-     'between screens.'),
     ('pause_ui_in_background', True, 'Pause interface in background', 'Medium',
      'On: let the app do less work when you’re using another app or its window '
      'is minimized. Recording continues.'),
@@ -31,10 +28,10 @@ UI_OPTIONS = (
 DEFAULTS = {key: default for key, default, *_ in UI_OPTIONS}
 PRESETS = {
     'Full experience': dict(DEFAULTS),
-    'Balanced': dict(DEFAULTS, reduce_ui_animations=True,
+    'Balanced': dict(DEFAULTS,
                      settings_visual_previews_enabled=False,
                      timeline_preview_strip_enabled=False),
-    'Low power': dict(DEFAULTS, reduce_ui_animations=True,
+    'Low power': dict(DEFAULTS,
                       settings_visual_previews_enabled=False,
                       timeline_preview_strip_enabled=False,
                       clip_editor_live_preview=False,

@@ -24,7 +24,7 @@ def test_reset_all_restores_every_section_and_persists_volumes(qtbot, monkeypatc
     theme.set_icon_tint('play.png', '#fedcba')
     theme.set_capture_card_color('CAPTURE_CARD_BG', '#123456')
     asset = tmp_path / 'imported.png'
-    asset.write_bytes((Path(__file__).parents[1] / 'FTHR_UI/assets/gary.png').read_bytes())
+    asset.write_bytes((Path(__file__).parents[1] / 'FTHR_UI/assets/fthr_logo.png').read_bytes())
     theme.set_custom_icon('play.png', asset)
     sound = tmp_path / 'imported.wav'
     sound.write_bytes((Path(__file__).parents[1] / 'FTHR_UI/assets/sounds/error.wav').read_bytes())
@@ -41,10 +41,8 @@ def test_reset_all_restores_every_section_and_persists_volumes(qtbot, monkeypatc
     page.show()
     page._sounds_section.expand()
     rows = page.findChildren(_SoundRow)
-    applied = []
-    page.theme_applied.connect(lambda: applied.append(True))
-    page._reset_btn.click()
-    assert applied == [True]
+    with qtbot.waitSignal(page.theme_applied):
+        page._reset_btn.click()
     assert not theme.has_any_customization()
     assert page._sounds_section.expanded
     assert page.findChildren(_SoundRow) == rows
@@ -102,7 +100,8 @@ def test_card_restart_does_not_wait_for_slow_old_process(monkeypatch):
             release.wait(5)
             finished.set()
 
-    client = capture_card_client.CaptureCardClient.__new__(capture_card_client.CaptureCardClient)
+    monkeypatch.setattr(capture_card_client.CaptureCardClient, '_launch', lambda self: None)
+    client = capture_card_client.CaptureCardClient()
     client._proc = Process()
     launches = []
     monkeypatch.setattr(client, '_launch', lambda: launches.append(True))

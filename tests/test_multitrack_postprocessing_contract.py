@@ -12,6 +12,12 @@ def _method_source(name: str, next_name: str) -> str:
 
 
 def test_visual_postprocessors_map_all_audio_and_rebind_source_manifest():
+    import main
+    from core.audio_manifest import rebind_manifest_after_media_replace
+
+    assert main.rebind_manifest_after_media_replace is rebind_manifest_after_media_replace
+    adapter = _method_source('_rebind_manifest_after_owned_replace', '_persist_capture_highlights_worker')
+    assert 'rebound = rebind_manifest_after_media_replace(clip_path)' in adapter
     methods = (
         _method_source('_apply_image_overlay', '_apply_camera_overlay'),
         _method_source('_apply_camera_overlay', '_apply_crop'),
@@ -21,4 +27,6 @@ def test_visual_postprocessors_map_all_audio_and_rebind_source_manifest():
         assert "'-map', '0:a?'" in method
         assert "'-map_metadata', '0'" in method
         assert "'-c:a', 'copy'" in method
-        assert 'rebind_manifest_after_media_replace(clip_path)' in method
+        publication = method.index('self._replace_finalization_output(')
+        rebind = method.index('self._rebind_manifest_after_owned_replace(clip_path)')
+        assert publication < rebind

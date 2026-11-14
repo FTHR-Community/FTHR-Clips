@@ -1,5 +1,6 @@
 #include "ffmpeg_amf_replay_encoder.h"
 #include "capture_scale_geometry.h"
+#include "bgra_direct_copy.h"
 #include "windows_native_error.h"
 
 #ifndef NOMINMAX
@@ -8,6 +9,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi.h>
 
 #ifdef _MSC_VER
@@ -32,6 +34,7 @@ extern "C" {
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <new>
 #include <sstream>
 #include <utility>
 
@@ -62,6 +65,98 @@ const AmfCodecSelection kAv1Amf{
 // Keeping this bound in the wrapper makes the exported progress snapshot
 // bounded even if a test seam accepts frames without producing packets.
 constexpr uint32_t kAmfFramePoolCapacity = 8;
+std::atomic<uint64_t> next_amf_generation{0};
+
+struct AmfInputPoolState {
+    ID3D11Device* device = nullptr;
+    D3D11_TEXTURE2D_DESC description{};
+    std::shared_ptr<detail::AmfInputPoolDiagnostics> diagnostics;
+    detail::AmfCreatePoolTexture create_texture = nullptr;
+    ~AmfInputPoolState() {
+        if (device) device->Release();
+        if (diagnostics) diagnostics->state_destroyed.store(true);
+    }
+};
+
+void FreeAmfPoolTexture(void* opaque, uint8_t* data) {
+    auto* state = static_cast<AmfInputPoolState*>(opaque);
+    auto* descriptor = reinterpret_cast<AVD3D11FrameDescriptor*>(data);
+    if (descriptor->texture) descriptor->texture->Release();
+    delete descriptor;
+    state->diagnostics->live_textures.fetch_sub(1);
+}
+
+AVBufferRef* AllocateAmfPoolTexture(void* opaque, size_t) {
+    auto* state = static_cast<AmfInputPoolState*>(opaque);
+    auto& stats = *state->diagnostics;
+    auto count = stats.live_textures.load();
+    do {
+        if (count >= kAmfFramePoolCapacity) {
+            stats.capacity_exhausted.store(true);
+            return nullptr;
+        }
+    } while (!stats.live_textures.compare_exchange_weak(count, count + 1));
+
+    // Allocation reservation rolls back on every failure, including FFmpeg's
+    // later BufferPoolEntry allocation failure (via FreeAmfPoolTexture).
+    auto descriptor = std::unique_ptr<AVD3D11FrameDescriptor>(
+        new (std::nothrow) AVD3D11FrameDescriptor{});
+    if (!descriptor) { stats.live_textures.fetch_sub(1); return nullptr; }
+    const HRESULT result = state->create_texture
+        ? state->create_texture(state->device, &state->description, &descriptor->texture)
+        : state->device->CreateTexture2D(&state->description, nullptr, &descriptor->texture);
+    if (FAILED(result) || !descriptor->texture) {
+        if (descriptor->texture) descriptor->texture->Release();
+        if (FAILED(result)) { stats.hresult.store(result); stats.hresult_available.store(true); }
+        stats.live_textures.fetch_sub(1);
+        return nullptr;
+    }
+    descriptor->index = 0;
+    auto* buffer = av_buffer_create(reinterpret_cast<uint8_t*>(descriptor.get()),
+        sizeof(AVD3D11FrameDescriptor), FreeAmfPoolTexture, state, 0);
+    if (!buffer) {
+        descriptor->texture->Release();
+        stats.live_textures.fetch_sub(1);
+        return nullptr;
+    }
+    descriptor.release();
+    return buffer;
+}
+
+void FreeAmfPoolState(void* opaque) { delete static_cast<AmfInputPoolState*>(opaque); }
+
+void FreeAmfFramesPool(AVHWFramesContext* frames) {
+    // FFmpeg owns only pool_internal. The caller pool is closed at final
+    // frames-context destruction, not when an encoder drops its own ref.
+    frames->user_opaque = nullptr;
+    av_buffer_pool_uninit(&frames->pool);
+}
+
+detail::AmfTextureEvidence DescribeTexture(
+    const D3D11_TEXTURE2D_DESC& description, uint32_t subresource) {
+    detail::AmfTextureEvidence result;
+    result.available = true;
+    result.width = description.Width;
+    result.height = description.Height;
+    result.format = description.Format;
+    result.array_size = description.ArraySize;
+    result.mip_levels = description.MipLevels;
+    result.bind_flags = description.BindFlags;
+    result.misc_flags = description.MiscFlags;
+    result.usage = description.Usage;
+    result.cpu_access_flags = description.CPUAccessFlags;
+    result.sample_count = description.SampleDesc.Count;
+    result.sample_quality = description.SampleDesc.Quality;
+    result.subresource = subresource;
+    return result;
+}
+
+detail::AmfTextureEvidence DescribeTexture(ID3D11Texture2D* texture, uint32_t subresource) {
+    if (!texture) return {};
+    D3D11_TEXTURE2D_DESC description{};
+    texture->GetDesc(&description);
+    return DescribeTexture(description, subresource);
+}
 
 std::string AvErrorString(int error_code) {
     char buffer[AV_ERROR_MAX_STRING_SIZE]{};
@@ -211,6 +306,8 @@ std::vector<uint8_t> BuildAvccExtradata(
 
 class FfmpegAmfCodecSession final : public detail::IAmfCodecSession {
 public:
+    explicit FfmpegAmfCodecSession(bool nv12_comparison = false)
+        : nv12_comparison_(nv12_comparison) {}
     ~FfmpegAmfCodecSession() override {
         Reset();
     }
@@ -224,6 +321,7 @@ public:
         std::string& error) override {
         Reset();
         selection_ = &selection;
+        generation_ = next_amf_generation.fetch_add(1, std::memory_order_relaxed) + 1;
 
         if (!shared_device || !shared_context) {
             error = "AMF requires a D3D11 device and immediate context";
@@ -257,6 +355,14 @@ public:
         output_width_ = geometry.target_width;
         output_height_ = geometry.target_height;
         destination_ = geometry.destination;
+        direct_bgra_copy_ = !nv12_comparison_ && source_width_ == output_width_
+            && source_height_ == output_height_ && destination_.left == 0
+            && destination_.top == 0 && destination_.width == output_width_
+            && destination_.height == output_height_;
+        if (nv12_comparison_ && ((output_width_ % 2) || (output_height_ % 2))) {
+            error = "NV12 comparison requires even output dimensions";
+            return false;
+        }
 
         const AVCodec* codec = avcodec_find_encoder_by_name(selection.encoder_name);
         if (!codec || !codec->name
@@ -281,6 +387,7 @@ public:
         if (result < 0) {
             error = "could not initialize FFmpeg D3D11 hardware device context: "
                 + AvErrorString(result);
+            ReportFailure("av_hwdevice_ctx_init", true, result);
             Reset();
             return false;
         }
@@ -294,18 +401,25 @@ public:
         auto* frames_context = reinterpret_cast<AVHWFramesContext*>(
             hw_frames_ctx_->data);
         frames_context->format = AV_PIX_FMT_D3D11;
-        frames_context->sw_format = AV_PIX_FMT_BGRA;
+        frames_context->sw_format = nv12_comparison_ ? AV_PIX_FMT_NV12 : AV_PIX_FMT_BGRA;
         frames_context->width = static_cast<int>(output_width_);
         frames_context->height = static_cast<int>(output_height_);
-        // This pinned D3D11 hwcontext requires a non-zero fixed pool. Eight
-        // slices cover AMF async_depth=4 plus the prepared input and transient
-        // references. Each submitted AVFrame retains its array slice until AMF
-        // releases it; capture never maps this GPU-only texture array.
-        frames_context->initial_pool_size = kAmfFramePoolCapacity;
+        // PR #87 identified a texture-array interoperability issue on Radeon.
+        // Use FFmpeg's descriptor ABI with separate textures, while retaining
+        // an eight-texture hard bound and FFmpeg's normal AVFrame lease/reuse.
+        result = detail::InstallAmfSingleTexturePool(frames_context, shared_device);
+        if (result < 0) {
+            error = "could not allocate bounded AMF single-texture input pool: "
+                + AvErrorString(result);
+            ReportFailure("InstallAmfSingleTexturePool", true, result);
+            Reset();
+            return false;
+        }
         result = av_hwframe_ctx_init(hw_frames_ctx_);
         if (result < 0) {
             error = "could not initialize FFmpeg D3D11 hardware frame context: "
                 + AvErrorString(result);
+            ReportFailure("av_hwframe_ctx_init", true, result);
             Reset();
             return false;
         }
@@ -362,6 +476,7 @@ public:
         if (result < 0) {
             error = std::string("could not open ") + selection.encoder_name
                 + ": " + AvErrorString(result);
+            ReportFailure("avcodec_open2", true, result);
             av_dict_free(&options);
             Reset();
             return false;
@@ -426,7 +541,10 @@ public:
         d3d11_device_ = shared_device;
         initialized_ = true;
         std::cout << "[AMF] Opened " << selection.encoder_name
-                  << " on the selected AMD D3D11 adapter (BGRA hardware frames)"
+                  << " on the selected AMD D3D11 adapter ("
+                  << (nv12_comparison_ ? "NV12" : "BGRA")
+                  << " single-texture pool, capacity=8, preparation="
+                  << (direct_bgra_copy_ ? "direct_bgra_copy" : "video_processor_copy") << ')'
                   << std::endl;
         return true;
     }
@@ -436,23 +554,33 @@ public:
         uint32_t source_subresource,
         std::string& error) override {
         prepared_ = false;
-        if (!initialized_ || !source || !copy_context_ || !video_device_
-            || !video_context_ || !video_processor_ || !video_processor_enumerator_
-            || !converter_texture_ || !converter_output_view_ || !frame_
+        source_evidence_ = {};
+        source_device_matches_ = false;
+        source_identity_available_ = false;
+        // Accepted sends may leave prefetch deferred until the wrapper's normal
+        // receive/drain has released an input. Reacquire once, without waiting.
+        if (initialized_ && frame_ && !frame_->data[0]
+            && !PrepareInputFrame(error)) return false;
+        if (!initialized_ || !source || !copy_context_ || !frame_
             || !frame_->data[0]) {
             error = "AMF conversion resources are unavailable";
+            ReportFailure("PrepareGpuFrame:resources");
             return false;
         }
         ID3D11Device* source_device = nullptr;
         source->GetDevice(&source_device);
+        source_identity_available_ = source_device && d3d11_device_;
         const bool same_device = SameComObject(source_device, d3d11_device_);
+        source_device_matches_ = same_device;
         if (source_device) source_device->Release();
         if (!same_device) {
             error = "AMF source texture belongs to a different D3D11 device";
+            ReportFailure("PrepareGpuFrame:source_device");
             return false;
         }
         D3D11_TEXTURE2D_DESC source_description{};
         source->GetDesc(&source_description);
+        source_evidence_ = DescribeTexture(source_description, source_subresource);
         const uint32_t mip_levels = std::max(1U, source_description.MipLevels);
         const uint32_t subresource_count = mip_levels
             * std::max(1U, source_description.ArraySize);
@@ -461,6 +589,7 @@ public:
             || source_description.Format != DXGI_FORMAT_B8G8R8A8_UNORM
             || source_subresource >= subresource_count) {
             error = "AMF source texture geometry, format, or subresource is invalid";
+            ReportFailure("PrepareGpuFrame:source_descriptor");
             return false;
         }
         ID3D11Texture2D* destination_texture =
@@ -475,43 +604,63 @@ public:
             1U, destination_description.ArraySize);
         if (destination_description.Width != output_width_
             || destination_description.Height != output_height_
-            || destination_description.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+            || destination_description.Format != InputFormat()
             || destination_subresource >= destination_mips * destination_arrays) {
             error = "AMF hardware frame texture geometry, format, or subresource is invalid";
+            ReportFailure("PrepareGpuFrame:input_descriptor");
             return false;
         }
-        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_description{};
-        input_description.FourCC = 0;
-        input_description.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-        input_description.Texture2D.MipSlice = source_subresource % mip_levels;
-        input_description.Texture2D.ArraySlice = source_subresource / mip_levels;
-        ID3D11VideoProcessorInputView* input_view = nullptr;
-        HRESULT result = video_device_->CreateVideoProcessorInputView(
-            source, video_processor_enumerator_, &input_description, &input_view);
-        if (FAILED(result) || !input_view) {
-            error = HResultString(
-                "ID3D11VideoDevice::CreateVideoProcessorInputView", result);
-            return false;
+        if (direct_bgra_copy_) {
+            if (!detail::CanDirectCopyBgra(source_description, source_subresource,
+                                         destination_description, destination_subresource)) {
+                error = "AMF direct BGRA copy requires matching single-sample subresources";
+                ReportFailure("PrepareGpuFrame:direct_copy_descriptor");
+                return false;
+            }
+            copy_context_->CopySubresourceRegion(destination_texture, destination_subresource,
+                0, 0, 0, source, source_subresource, nullptr);
+        } else {
+            if (!video_device_ || !video_context_ || !video_processor_
+                || !video_processor_enumerator_ || !converter_texture_ || !converter_output_view_) {
+                error = "AMF video processor resources are unavailable";
+                return false;
+            }
+            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_description{};
+            input_description.FourCC = 0;
+            input_description.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+            input_description.Texture2D.MipSlice = source_subresource % mip_levels;
+            input_description.Texture2D.ArraySlice = source_subresource / mip_levels;
+            ID3D11VideoProcessorInputView* input_view = nullptr;
+            HRESULT result = video_device_->CreateVideoProcessorInputView(
+                source, video_processor_enumerator_, &input_description, &input_view);
+            if (FAILED(result) || !input_view) {
+                error = HResultString(
+                    "ID3D11VideoDevice::CreateVideoProcessorInputView", result);
+                ReportFailure("CreateVideoProcessorInputView", false, 0, true, result);
+                return false;
+            }
+            D3D11_VIDEO_PROCESSOR_STREAM stream{};
+            stream.Enable = TRUE;
+            stream.OutputIndex = 0;
+            stream.pInputSurface = input_view;
+            result = video_context_->VideoProcessorBlt(
+                video_processor_, converter_output_view_, 0, 1, &stream);
+            input_view->Release();
+            if (FAILED(result)) {
+                error = HResultString("ID3D11VideoContext::VideoProcessorBlt", result);
+                ReportFailure("VideoProcessorBlt", false, 0, true, result);
+                return false;
+            }
+            copy_context_->CopySubresourceRegion(
+                destination_texture,
+                destination_subresource,
+                0, 0, 0, converter_texture_, 0, nullptr);
         }
-        D3D11_VIDEO_PROCESSOR_STREAM stream{};
-        stream.Enable = TRUE;
-        stream.OutputIndex = 0;
-        stream.pInputSurface = input_view;
-        result = video_context_->VideoProcessorBlt(
-            video_processor_, converter_output_view_, 0, 1, &stream);
-        input_view->Release();
-        if (FAILED(result)) {
-            error = HResultString("ID3D11VideoContext::VideoProcessorBlt", result);
-            return false;
-        }
-        copy_context_->CopySubresourceRegion(
-            destination_texture,
-            destination_subresource,
-            0, 0, 0, converter_texture_, 0, nullptr);
         const HRESULT removed = d3d11_device_->GetDeviceRemovedReason();
         if (FAILED(removed)) {
             error = HResultString(
                 "ID3D11Device::GetDeviceRemovedReason(AMF)", removed);
+            ReportFailure("PrepareGpuFrame:device_removed", false, 0, true, removed);
             return false;
         }
         prepared_ = true;
@@ -529,18 +678,22 @@ public:
             reinterpret_cast<uintptr_t>(frame_->data[1]));
     }
 
+    bool UsesDirectBgraCopy() const noexcept override { return initialized_ && direct_bgra_copy_; }
+
     detail::AmfSubmitStatus SubmitFrame(
         int64_t pts,
         bool force_keyframe,
         std::string& error) override {
         if (!initialized_ || !codec_context_ || !frame_) {
             error = "AMF frame submitted before initialization";
+            ReportFailure("SubmitFrame:resources");
             return detail::AmfSubmitStatus::Error;
         }
         if (!prepared_ || !frame_->data[0]) {
             error = prepare_error_.empty()
                 ? "AMF has no prepared D3D11 input texture"
                 : prepare_error_;
+            ReportFailure("SubmitFrame:unprepared");
             return detail::AmfSubmitStatus::Error;
         }
         if (d3d11_device_) {
@@ -548,11 +701,13 @@ public:
             if (FAILED(removed)) {
                 error = diagnostics::FormatHResultFailure(
                     "ID3D11Device::GetDeviceRemovedReason(AMF)", removed);
+                ReportFailure("SubmitFrame:device_removed", false, 0, true, removed);
                 return detail::AmfSubmitStatus::Error;
             }
         }
 
         frame_->pts = pts;
+        pending_pts_ = pts;
         frame_->pict_type = force_keyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
         const int result = avcodec_send_frame(codec_context_, frame_);
         if (result == AVERROR(EAGAIN)) {
@@ -561,19 +716,18 @@ public:
         if (result < 0) {
             error = std::string("avcodec_send_frame failed: ")
                 + AvErrorString(result);
+            ReportFailure("avcodec_send_frame", true, result);
             return detail::AmfSubmitStatus::Error;
         }
 
         prepared_ = false;
+        ++successful_submits_;
+        last_submit_pts_ = pts;
         av_frame_unref(frame_);
         std::string prepare_error;
-        if (!PrepareInputFrame(prepare_error)) {
-            // The submitted frame remains valid inside FFmpeg/AMF. Preserve its
-            // output, but make the next input attempt fail deterministically.
-            prepare_error_ = std::move(prepare_error);
-        } else {
-            prepare_error_.clear();
-        }
+        // Prefetch is optional: pool capacity can be temporarily leased by AMF
+        // until ReceivePacket. Do not poison an accepted send before that drain.
+        PrepareInputFrame(prepare_error, true);
         return detail::AmfSubmitStatus::Accepted;
     }
 
@@ -582,6 +736,7 @@ public:
         std::string& error) override {
         if (!codec_context_ || !packet_) {
             error = "AMF receive called without a codec context";
+            ReportFailure("ReceivePacket:resources");
             return detail::AmfReceiveStatus::Error;
         }
 
@@ -597,6 +752,7 @@ public:
             if (result < 0) {
                 error = std::string("avcodec_receive_packet failed: ")
                     + AvErrorString(result);
+                ReportFailure("avcodec_receive_packet", true, result);
                 return detail::AmfReceiveStatus::Error;
             }
 
@@ -617,6 +773,7 @@ public:
             if (!packet_data || packet_size <= 0) continue;
             if (packet_->pts == AV_NOPTS_VALUE) {
                 error = "AMF returned an encoded packet without a PTS";
+                ReportFailure("avcodec_receive_packet:missing_pts");
                 return detail::AmfReceiveStatus::Error;
             }
             output.data = packet_data;
@@ -625,6 +782,8 @@ public:
             output.dts = packet_->dts == AV_NOPTS_VALUE
                 ? packet_->pts : packet_->dts;
             output.keyframe = (packet_->flags & AV_PKT_FLAG_KEY) != 0;
+            ++packets_;
+            last_output_pts_ = packet_->pts;
             return detail::AmfReceiveStatus::Packet;
         }
     }
@@ -641,6 +800,7 @@ public:
         if (result < 0) {
             error = std::string("AMF flush submission failed: ")
                 + AvErrorString(result);
+            ReportFailure("avcodec_send_frame:eos", true, result);
             return detail::AmfSubmitStatus::Error;
         }
         return detail::AmfSubmitStatus::Accepted;
@@ -675,19 +835,76 @@ public:
         source_width_ = source_height_ = output_width_ = output_height_ = 0;
         destination_ = {};
         selection_ = nullptr;
+        failure_reported_ = false;
+        source_evidence_ = {};
+        source_device_matches_ = false;
+        source_identity_available_ = false;
+        successful_submits_ = packets_ = 0;
+        pending_pts_ = last_submit_pts_ = last_output_pts_ = -1;
     }
 
 private:
+    void ReportFailure(const char* operation, bool ffmpeg_available = false,
+        int ffmpeg_error = 0, bool hresult_available = false, HRESULT hresult = 0) {
+        // A broken generation needs a new initialization. Preserve the first
+        // boundary, once, without replacing process-global FFmpeg log handling.
+        if (failure_reported_) return;
+        failure_reported_ = true;
+        detail::AmfFailureEvidence evidence;
+        evidence.operation = operation;
+        evidence.codec = selection_ ? selection_->encoder_name : "unavailable";
+        evidence.generation = generation_;
+        evidence.ffmpeg_error_available = ffmpeg_available;
+        evidence.ffmpeg_error = ffmpeg_error;
+        evidence.hresult_available = hresult_available;
+        evidence.hresult = static_cast<int32_t>(hresult);
+        evidence.device_removed_available = d3d11_device_ != nullptr;
+        if (d3d11_device_) {
+            // This is sampled AFTER the failing call; S_OK only means that
+            // device removal is not reported, never that a void copy succeeded.
+            evidence.device_removed_reason = static_cast<int32_t>(
+                d3d11_device_->GetDeviceRemovedReason());
+        }
+        evidence.source = source_evidence_;
+        evidence.source_device_matches = source_device_matches_;
+        evidence.source_identity_available = source_identity_available_;
+        if (frame_ && frame_->data[0]) {
+            auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame_->data[0]);
+            evidence.input = DescribeTexture(texture, static_cast<uint32_t>(
+                reinterpret_cast<uintptr_t>(frame_->data[1])));
+            ID3D11Device* input_device = nullptr;
+            texture->GetDevice(&input_device);
+            evidence.input_identity_available = input_device && d3d11_device_;
+            evidence.input_device_matches = SameComObject(input_device, d3d11_device_);
+            if (input_device) input_device->Release();
+            evidence.hw_frames_ctx_matches = frame_->hw_frames_ctx && codec_context_
+                && codec_context_->hw_frames_ctx
+                && frame_->hw_frames_ctx->data == codec_context_->hw_frames_ctx->data;
+            evidence.hw_frames_identity_available = frame_ && codec_context_;
+        }
+        evidence.pts = pending_pts_;
+        evidence.last_submit_pts = last_submit_pts_;
+        evidence.last_output_pts = last_output_pts_;
+        evidence.successful_submits = successful_submits_;
+        evidence.packets = packets_;
+        std::cout << "FTHR_DIAGNOSTIC_EVENT "
+                  << detail::BuildAmfFailureEvidence(evidence) << std::endl;
+    }
+
     bool CreateConversionPipeline(
         ID3D11Device* shared_device,
         ID3D11DeviceContext* shared_context,
         uint32_t fps,
         std::string& error) {
+        copy_context_ = shared_context;
+        copy_context_->AddRef();
+        if (direct_bgra_copy_) return true;
         HRESULT result = shared_device->QueryInterface(
             __uuidof(ID3D11VideoDevice),
             reinterpret_cast<void**>(&video_device_));
         if (FAILED(result) || !video_device_) {
             error = HResultString("AMD D3D11 video-device query", result);
+            ReportFailure("QueryInterface:ID3D11VideoDevice", false, 0, true, result);
             return false;
         }
         result = shared_context->QueryInterface(
@@ -695,10 +912,9 @@ private:
             reinterpret_cast<void**>(&video_context_));
         if (FAILED(result) || !video_context_) {
             error = HResultString("AMD D3D11 video-context query", result);
+            ReportFailure("QueryInterface:ID3D11VideoContext", false, 0, true, result);
             return false;
         }
-        copy_context_ = shared_context;
-        copy_context_->AddRef();
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
         content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
         content.InputFrameRate = {fps, 1};
@@ -713,6 +929,7 @@ private:
         if (FAILED(result) || !video_processor_enumerator_) {
             error = HResultString(
                 "ID3D11VideoDevice::CreateVideoProcessorEnumerator", result);
+            ReportFailure("CreateVideoProcessorEnumerator", false, 0, true, result);
             return false;
         }
         UINT input_support = 0;
@@ -723,6 +940,7 @@ private:
             error = diagnostics::FormatHResultFailure(
                 "ID3D11VideoProcessorEnumerator::CheckVideoProcessorFormat(BGRA,input)",
                 result);
+            ReportFailure("CheckVideoProcessorFormat:input", false, 0, true, result);
             return false;
         }
         if ((input_support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0) {
@@ -730,36 +948,40 @@ private:
             return false;
         }
         result = video_processor_enumerator_->CheckVideoProcessorFormat(
-            DXGI_FORMAT_B8G8R8A8_UNORM, &output_support);
+            InputFormat(), &output_support);
         if (FAILED(result)) {
             error = diagnostics::FormatHResultFailure(
-                "ID3D11VideoProcessorEnumerator::CheckVideoProcessorFormat(BGRA,output)",
+                "ID3D11VideoProcessorEnumerator::CheckVideoProcessorFormat(AMF input,output)",
                 result);
+            ReportFailure("CheckVideoProcessorFormat:output", false, 0, true, result);
             return false;
         }
         if ((output_support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0) {
-            error = "ID3D11VideoProcessorEnumerator::CheckVideoProcessorFormat(BGRA,output) reports unsupported format";
+            error = "ID3D11VideoProcessorEnumerator::CheckVideoProcessorFormat(AMF input,output) reports unsupported format";
             return false;
         }
         result = video_device_->CreateVideoProcessor(
             video_processor_enumerator_, 0, &video_processor_);
         if (FAILED(result) || !video_processor_) {
             error = HResultString("ID3D11VideoDevice::CreateVideoProcessor", result);
+            ReportFailure("CreateVideoProcessor", false, 0, true, result);
             return false;
         }
+        if (nv12_comparison_ && !ConfigureNv12ColorConversion(error)) return false;
         D3D11_TEXTURE2D_DESC converter_description{};
         converter_description.Width = output_width_;
         converter_description.Height = output_height_;
         converter_description.MipLevels = 1;
         converter_description.ArraySize = 1;
-        converter_description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        converter_description.Format = InputFormat();
         converter_description.SampleDesc.Count = 1;
         converter_description.Usage = D3D11_USAGE_DEFAULT;
         converter_description.BindFlags = D3D11_BIND_RENDER_TARGET;
         result = shared_device->CreateTexture2D(
             &converter_description, nullptr, &converter_texture_);
         if (FAILED(result) || !converter_texture_) {
-            error = HResultString("AMF BGRA converter texture creation", result);
+            error = HResultString("AMF converter texture creation", result);
+            ReportFailure("CreateTexture2D:converter", false, 0, true, result);
             return false;
         }
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_description{};
@@ -771,6 +993,7 @@ private:
         if (FAILED(result) || !converter_output_view_) {
             error = HResultString(
                 "ID3D11VideoDevice::CreateVideoProcessorOutputView", result);
+            ReportFailure("CreateVideoProcessorOutputView", false, 0, true, result);
             return false;
         }
         RECT source_rect{0, 0, static_cast<LONG>(source_width_),
@@ -799,20 +1022,79 @@ private:
         return true;
     }
 
+    DXGI_FORMAT InputFormat() const noexcept {
+        return nv12_comparison_ ? DXGI_FORMAT_NV12 : DXGI_FORMAT_B8G8R8A8_UNORM;
+    }
+
+    bool ConfigureNv12ColorConversion(std::string& error) {
+        // Require explicit Windows 10 conversion support. Never substitute a
+        // CPU conversion or the default BT.601/range state in this comparison.
+        ID3D11VideoProcessorEnumerator1* enumerator = nullptr;
+        HRESULT result = video_processor_enumerator_->QueryInterface(
+            __uuidof(ID3D11VideoProcessorEnumerator1), reinterpret_cast<void**>(&enumerator));
+        if (FAILED(result) || !enumerator) {
+            error = HResultString("NV12 comparison: video enumerator1 query", result);
+            ReportFailure("NV12:QueryInterface:enumerator1", false, 0, true, result);
+            return false;
+        }
+        constexpr auto source_space = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        constexpr auto target_space = DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
+        BOOL supported = FALSE;
+        result = enumerator->CheckVideoProcessorFormatConversion(
+            DXGI_FORMAT_B8G8R8A8_UNORM, source_space, DXGI_FORMAT_NV12,
+            target_space, &supported);
+        enumerator->Release();
+        if (FAILED(result) || !supported) {
+            error = "NV12 comparison: full-range RGB to studio-range BT.709 conversion unsupported";
+            ReportFailure("NV12:CheckVideoProcessorFormatConversion", false, 0,
+                FAILED(result), result);
+            return false;
+        }
+        ID3D11VideoContext1* context = nullptr;
+        result = video_context_->QueryInterface(
+            __uuidof(ID3D11VideoContext1), reinterpret_cast<void**>(&context));
+        if (FAILED(result) || !context) {
+            error = HResultString("NV12 comparison: video context1 query", result);
+            ReportFailure("NV12:QueryInterface:context1", false, 0, true, result);
+            return false;
+        }
+        context->VideoProcessorSetStreamColorSpace1(video_processor_, 0, source_space);
+        context->VideoProcessorSetOutputColorSpace1(video_processor_, target_space);
+        DXGI_COLOR_SPACE_TYPE actual_source{}, actual_target{};
+        context->VideoProcessorGetStreamColorSpace1(video_processor_, 0, &actual_source);
+        context->VideoProcessorGetOutputColorSpace1(video_processor_, &actual_target);
+        context->Release();
+        if (actual_source != source_space || actual_target != target_space) {
+            error = "NV12 comparison: video processor did not retain explicit BT.709 color spaces";
+            ReportFailure("NV12:color_space_state");
+            return false;
+        }
+        return true;
+    }
+
     static std::string HResultString(const char* operation, HRESULT result) {
         return diagnostics::FormatHResultFailure(operation, result);
     }
 
-    bool PrepareInputFrame(std::string& error) {
+    bool PrepareInputFrame(std::string& error, bool prefetch = false) {
         if (!frame_ || !hw_frames_ctx_) {
             error = "AMF input frame or hardware pool is unavailable";
             return false;
         }
-        av_frame_unref(frame_);
-        const int result = av_hwframe_get_buffer(hw_frames_ctx_, frame_, 0);
+        const int result = detail::AcquireAmfInputFrame(hw_frames_ctx_, frame_);
         if (result < 0) {
-            error = std::string("could not acquire AMD D3D11 input texture: ")
+            const auto* stats = detail::GetAmfInputPoolDiagnostics(
+                reinterpret_cast<AVHWFramesContext*>(hw_frames_ctx_->data));
+            const bool exhausted = stats && stats->capacity_exhausted.load();
+            if (prefetch && exhausted) return false;
+            error = std::string(exhausted
+                ? "bounded AMF input pool exhausted after normal output drain (capacity=8): "
+                : "could not acquire AMD D3D11 input texture: ")
                 + AvErrorString(result);
+            prepare_error_ = error;
+            ReportFailure(exhausted ? "av_hwframe_get_buffer:pool_exhausted"
+                : "av_hwframe_get_buffer", true, result,
+                stats && stats->hresult_available.load(), stats ? stats->hresult.load() : 0);
             return false;
         }
         if (frame_->format != AV_PIX_FMT_D3D11 || !frame_->data[0]) {
@@ -820,10 +1102,20 @@ private:
             av_frame_unref(frame_);
             return false;
         }
+        if (nv12_comparison_) {
+            frame_->color_range = AVCOL_RANGE_MPEG;
+            frame_->color_primaries = AVCOL_PRI_BT709;
+            frame_->color_trc = AVCOL_TRC_BT709;
+            frame_->colorspace = AVCOL_SPC_BT709;
+            frame_->chroma_location = AVCHROMA_LOC_LEFT;
+        }
+        prepare_error_.clear();
         return true;
     }
 
     const AmfCodecSelection* selection_ = nullptr;
+    const bool nv12_comparison_;
+    bool direct_bgra_copy_ = false;
     AVBufferRef* hw_device_ctx_ = nullptr;
     AVBufferRef* hw_frames_ctx_ = nullptr;
     AVCodecContext* codec_context_ = nullptr;
@@ -847,6 +1139,11 @@ private:
     std::string prepare_error_;
     std::vector<NalSpan> nals_scratch_;
     std::vector<uint8_t> normalized_packet_;
+    uint64_t generation_ = 0, successful_submits_ = 0, packets_ = 0;
+    int64_t pending_pts_ = -1, last_submit_pts_ = -1, last_output_pts_ = -1;
+    bool failure_reported_ = false, source_device_matches_ = false;
+    bool source_identity_available_ = false;
+    detail::AmfTextureEvidence source_evidence_;
 };
 
 } // namespace
@@ -884,8 +1181,119 @@ EncodedVideoConfig BuildAmfVideoConfig(
 
 namespace detail {
 
+int InstallAmfSingleTexturePool(AVHWFramesContext* frames, ID3D11Device* device,
+    std::shared_ptr<AmfInputPoolDiagnostics> diagnostics,
+    AmfCreatePoolTexture create_texture) noexcept {
+    if (!frames || !device || frames->pool || frames->free || frames->user_opaque
+        || frames->width <= 0 || frames->height <= 0
+        || frames->format != AV_PIX_FMT_D3D11
+        || (frames->sw_format != AV_PIX_FMT_BGRA && frames->sw_format != AV_PIX_FMT_NV12)
+        || (frames->sw_format == AV_PIX_FMT_NV12 && ((frames->width % 2) || (frames->height % 2))))
+        return AVERROR(EINVAL);
+    try {
+        auto state = std::make_unique<AmfInputPoolState>();
+        state->diagnostics = diagnostics ? std::move(diagnostics)
+            : std::make_shared<AmfInputPoolDiagnostics>();
+        state->device = device;
+        device->AddRef();
+        state->create_texture = create_texture;
+        auto& description = state->description;
+        description.Width = static_cast<UINT>(frames->width);
+        description.Height = static_cast<UINT>(frames->height);
+        description.MipLevels = 1;
+        description.ArraySize = 1;
+        description.Format = frames->sw_format == AV_PIX_FMT_NV12
+            ? DXGI_FORMAT_NV12 : DXGI_FORMAT_B8G8R8A8_UNORM;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        auto* pool = av_buffer_pool_init2(sizeof(AVD3D11FrameDescriptor),
+            state.get(), AllocateAmfPoolTexture, FreeAmfPoolState);
+        if (!pool) return AVERROR(ENOMEM);
+        frames->initial_pool_size = 0;
+        frames->pool = pool;
+        frames->user_opaque = state.release();
+        frames->free = FreeAmfFramesPool;
+        return 0;
+    } catch (const std::bad_alloc&) { return AVERROR(ENOMEM); }
+}
+
+const AmfInputPoolDiagnostics* GetAmfInputPoolDiagnostics(
+    const AVHWFramesContext* frames) noexcept {
+    return frames && frames->free == FreeAmfFramesPool && frames->user_opaque
+        ? static_cast<const AmfInputPoolState*>(frames->user_opaque)->diagnostics.get()
+        : nullptr;
+}
+
+int AcquireAmfInputFrame(AVBufferRef* frames, AVFrame* frame) noexcept {
+    if (!frames || !frame) return AVERROR(EINVAL);
+    auto* context = reinterpret_cast<AVHWFramesContext*>(frames->data);
+    if (context->free != FreeAmfFramesPool || !context->user_opaque) return AVERROR(EINVAL);
+    auto& stats = *static_cast<AmfInputPoolState*>(context->user_opaque)->diagnostics;
+    stats.capacity_exhausted.store(false);
+    stats.hresult_available.store(false);
+    stats.hresult.store(0);
+    av_frame_unref(frame);
+    return av_hwframe_get_buffer(frames, frame, 0);
+}
+
+std::string BuildAmfFailureEvidence(const AmfFailureEvidence& evidence) {
+    std::ostringstream json;
+    const auto label = [](const std::string& value) {
+        return diagnostics::JsonEscape(value.substr(0, 160));
+    };
+    const auto texture = [&](const AmfTextureEvidence& value) {
+        if (!value.available) { json << "\"unavailable:not_observed\""; return; }
+        json << "{\"width\":" << value.width << ",\"height\":" << value.height
+             << ",\"format\":" << value.format << ",\"array_size\":" << value.array_size
+             << ",\"mip_levels\":" << value.mip_levels << ",\"subresource\":" << value.subresource
+             << ",\"bind_flags\":" << value.bind_flags << ",\"misc_flags\":" << value.misc_flags
+             << ",\"usage\":" << value.usage << ",\"cpu_access_flags\":" << value.cpu_access_flags
+             << ",\"sample_count\":" << value.sample_count << ",\"sample_quality\":" << value.sample_quality << '}';
+    };
+    const auto identity = [](bool available, bool matches) {
+        return available ? (matches ? "true" : "false") : "\"unavailable:not_observed\"";
+    };
+    json << "{\"subsystem\":\"encoder\",\"event\":\"amf_boundary_failed\",\"schema_version\":1"
+         << ",\"generation\":" << evidence.generation
+         << ",\"operation\":\"" << label(evidence.operation) << "\",\"codec\":\"" << label(evidence.codec) << '"'
+         << ",\"ffmpeg_error\":";
+    if (evidence.ffmpeg_error_available) json << evidence.ffmpeg_error;
+    else json << "\"unavailable:not_observed\"";
+    json << ",\"ffmpeg_error_text\":\"" << (evidence.ffmpeg_error_available
+        ? label(AvErrorString(evidence.ffmpeg_error)) : "unavailable:not_observed") << '"'
+         << ",\"native_amf_result\":\"unavailable:not_exposed_by_ffmpeg_api\""
+         << ",\"amf_sdk_header_revision\":\"unavailable:not_recorded_by_runtime_manifest\""
+         << ",\"hresult\":";
+    if (evidence.hresult_available) json << evidence.hresult;
+    else json << "\"unavailable:not_observed\"";
+    json << ",\"device_removed_reason\":";
+    if (evidence.device_removed_available) json << evidence.device_removed_reason;
+    else json << "\"unavailable:no_device\"";
+    json << ",\"device_removed_sample\":\"" << (evidence.device_removed_available
+        ? "after_failure" : "unavailable:no_device") << "\",\"pts\":" << evidence.pts
+         << ",\"last_successful_submit_pts\":" << evidence.last_submit_pts
+         << ",\"last_output_pts\":" << evidence.last_output_pts
+         << ",\"successful_submits\":" << evidence.successful_submits << ",\"packets\":" << evidence.packets
+         << ",\"pool_capacity\":" << kAmfFramePoolCapacity
+         << ",\"generation_kind\":\"amf_session\""
+         << ",\"source_device_matches\":" << identity(evidence.source_identity_available, evidence.source_device_matches)
+         << ",\"input_device_matches\":" << identity(evidence.input_identity_available, evidence.input_device_matches)
+         << ",\"hw_frames_ctx_matches\":" << identity(evidence.hw_frames_identity_available, evidence.hw_frames_ctx_matches)
+         << ",\"input_texture_role\":\"current_frame_slot\""
+         << ",\"source_texture\":";
+    texture(evidence.source);
+    json << ",\"input_texture\":";
+    texture(evidence.input);
+    json << '}';
+    return json.str();
+}
+
 std::unique_ptr<IAmfCodecSession> CreateProductionAmfCodecSession() {
     return std::make_unique<FfmpegAmfCodecSession>();
+}
+
+std::unique_ptr<IAmfCodecSession> CreateNv12AmfComparisonSession() {
+    return std::make_unique<FfmpegAmfCodecSession>(true);
 }
 
 } // namespace detail
@@ -1000,6 +1408,10 @@ bool FfmpegAmfReplayEncoder::Initialize(
     packet_callback_ = std::move(callback);
     initialized_ = true;
     return true;
+}
+
+bool FfmpegAmfReplayEncoder::UsesDirectBgraCopy() const noexcept {
+    return session_ && session_->UsesDirectBgraCopy();
 }
 
 bool FfmpegAmfReplayEncoder::RequiresBackendGpuPreparation() const noexcept {

@@ -168,13 +168,17 @@ def _run_native_inventory_process(
     return stdout
 
 
-def parse_microphone_inventory(payload: str) -> list[WindowsMicrophoneEndpoint]:
-    """Parse the engine's versioned JSON inventory without trusting fields."""
+def parse_microphone_inventory(
+    payload: str, *, strict: bool = False,
+) -> list[WindowsMicrophoneEndpoint]:
+    """Parse inventory; strict playback scans reject incomplete/malformed rows."""
     try:
         data = json.loads(payload)
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError('native microphone inventory was not valid JSON') from exc
     if not isinstance(data, dict) or data.get('schema_version') != 1:
+        raise ValueError('native microphone inventory has an unsupported schema')
+    if strict and type(data.get('schema_version')) is not int:
         raise ValueError('native microphone inventory has an unsupported schema')
     raw_endpoints = data.get('microphones')
     if not isinstance(raw_endpoints, list):
@@ -184,6 +188,8 @@ def parse_microphone_inventory(payload: str) -> list[WindowsMicrophoneEndpoint]:
     seen_ids: set[str] = set()
     for item in raw_endpoints:
         if not isinstance(item, dict):
+            if strict:
+                raise ValueError('native microphone inventory has an invalid endpoint')
             continue
         endpoint_id = item.get('endpoint_id')
         display_name = item.get('display_name')
@@ -191,7 +197,12 @@ def parse_microphone_inventory(payload: str) -> list[WindowsMicrophoneEndpoint]:
         if (not isinstance(endpoint_id, str) or not endpoint_id
                 or not isinstance(display_name, str) or not display_name
                 or not isinstance(state, int) or endpoint_id in seen_ids):
+            if strict:
+                raise ValueError('native microphone inventory has an invalid or duplicate endpoint')
             continue
+        if strict and (type(state) is not int
+                       or ('is_default' in item and type(item['is_default']) is not bool)):
+            raise ValueError('native microphone inventory has invalid endpoint state')
         seen_ids.add(endpoint_id)
         result.append(WindowsMicrophoneEndpoint(
             endpoint_id=endpoint_id,

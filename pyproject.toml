@@ -19,6 +19,7 @@ filterwarnings = ["error::DeprecationWarning:core.*"]
 line-length = 100
 target-version = "py312"   # lowest interpreter CI exercises
 exclude = [
+    ".venv",
     "build", "dist", "dist_old_gpl_*",
     ".ui-port", ".ux-backup", ".shortcut-backup",
     "FTHRcapture",

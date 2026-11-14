@@ -62,12 +62,12 @@ AVCodecID ToAvCodecId(VideoCodec codec) noexcept {
     return AV_CODEC_ID_NONE;
 }
 
-void ApplySdrBt709ColorMetadata(AVCodecParameters* parameters) noexcept {
+void ApplyVideoColorMetadata(AVCodecParameters* parameters, bool hdr10) noexcept {
     if (!parameters) return;
     parameters->color_range = AVCOL_RANGE_MPEG;
-    parameters->color_primaries = AVCOL_PRI_BT709;
-    parameters->color_trc = AVCOL_TRC_BT709;
-    parameters->color_space = AVCOL_SPC_BT709;
+    parameters->color_primaries = hdr10 ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709;
+    parameters->color_trc = hdr10 ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_BT709;
+    parameters->color_space = hdr10 ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709;
     parameters->chroma_location = AVCHROMA_LOC_LEFT;
 }
 
@@ -76,6 +76,7 @@ void ApplyConfiguredVideoMetadata(
     AVStream* stream,
     const EncodedVideoConfig& config) noexcept {
     if (!stream || !stream->codecpar) return;
+    ApplyVideoColorMetadata(stream->codecpar, config.hdr10);
 
     const AVRational frame_rate = {
         config.frame_rate.numerator,

@@ -75,7 +75,11 @@ uint64_t TopologyGeneration(const std::vector<MonitorTopologyEntry>& entries) {
         value << NormalizeMonitorDevicePath(entry.monitor_device_path) << L'|'
               << entry.adapter_luid.high_part << L':' << entry.adapter_luid.low_part << L'|'
               << entry.source_id << L':' << entry.target_id << L'|'
-              << entry.source_gdi_name << L'|' << entry.hmonitor;
+              << entry.source_gdi_name << L'|' << entry.hmonitor << L'|'
+              << entry.adapter_luid_available << L'|'
+              << entry.target_adapter_luid_available << L'|'
+              << entry.target_adapter_luid.high_part << L':'
+              << entry.target_adapter_luid.low_part;
         identities.push_back(value.str());
     }
     std::sort(identities.begin(), identities.end());
@@ -162,6 +166,12 @@ TopologyQueryResult BuildLiveMonitorTopology(
             entry.adapter_luid_available = true;
             entry.source_id = first.source_id;
             entry.target_id = first.target_id;
+            // A cloned source may have several CCD targets. Do not query color
+            // metadata against an arbitrarily chosen target in that case.
+            entry.target_adapter_luid_available = paths.size() == 1
+                && first.target_adapter_luid_available;
+            entry.target_adapter_luid = entry.target_adapter_luid_available
+                ? first.target_adapter_luid : AdapterLuid{};
             if (paths.size() == 1 && entry.monitor_device_path.empty()) {
                 entry.monitor_device_path = first.monitor_device_path;
                 entry.friendly_name = first.friendly_name;
@@ -173,16 +183,30 @@ TopologyQueryResult BuildLiveMonitorTopology(
         for (const auto& output : outputs) {
             if (output.hmonitor != entry.hmonitor
                 || !EqualInsensitive(output.source_gdi_name, entry.source_gdi_name)) continue;
-            if (matched_output && matched_output->adapter_luid != output.adapter_luid) {
+            if (matched_output && (matched_output->adapter_luid != output.adapter_luid
+                || matched_output->output_index != output.output_index)) {
                 return {MonitorResolveError::MonitorTopologyChanged, {},
-                    "live desktop monitor maps to multiple DXGI adapters"};
+                    "live desktop monitor maps to multiple DXGI outputs"};
             }
             matched_output = &output;
         }
         if (matched_output) {
             if (entry.adapter_luid_available && entry.adapter_luid != matched_output->adapter_luid) {
-                return {MonitorResolveError::MonitorTopologyChanged, {},
-                    "CCD and DXGI disagree about the live monitor adapter"};
+                std::ostringstream message;
+                message << "[Monitor] Using exact DXGI output adapter for "
+                        << diagnostics::WideToUtf8(entry.source_gdi_name)
+                        << ": CCD=" << entry.adapter_luid.high_part << ':'
+                        << entry.adapter_luid.low_part << " DXGI="
+                        << matched_output->adapter_luid.high_part << ':'
+                        << matched_output->adapter_luid.low_part;
+                // Topology is polled frequently; keep repeated mismatches quiet.
+                static thread_local std::vector<std::string> reported;
+                const auto detail = message.str();
+                if (std::find(reported.begin(), reported.end(), detail) == reported.end()) {
+                    std::cerr << detail << std::endl;
+                    if (reported.size() == 32) reported.erase(reported.begin());
+                    reported.push_back(detail);
+                }
             }
             entry.adapter_luid = matched_output->adapter_luid;
             entry.adapter_luid_available = true;
@@ -256,6 +280,8 @@ TopologyQueryResult WindowsMonitorTopologySource::QueryActiveTopology() {
             MonitorTopologyEntry entry;
             entry.source_gdi_name = source.viewGdiDeviceName;
             entry.adapter_luid = ToAdapterLuid(path.sourceInfo.adapterId);
+            entry.target_adapter_luid = ToAdapterLuid(path.targetInfo.adapterId);
+            entry.target_adapter_luid_available = true;
             entry.source_id = path.sourceInfo.id; entry.target_id = path.targetInfo.id;
             DISPLAYCONFIG_TARGET_DEVICE_NAME target{};
             target.header = {DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, sizeof(target),

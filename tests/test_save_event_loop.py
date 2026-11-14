@@ -6,6 +6,7 @@ submission would stall that counter.
 
 import ctypes
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -15,14 +16,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'FTHR_UI'))
 pytest.importorskip('PySide6.QtCore')
 from PySide6.QtCore import QTimer, QEventLoop, QElapsedTimer, Qt
 
-from core.capture_bridge import CaptureBridge, SharedMemoryLayout, ResponseType
+from core.capture_bridge import CaptureBridge, CommandType, SharedMemoryLayout, ResponseType
 from core.save_state import SaveStateMachine, EngineEvent, OutcomeKind
 
 
 class SilentEngineBridge(CaptureBridge):
     """A connected bridge whose engine never writes a response."""
 
+    def __new__(cls):
+        return object.__new__(cls)
+
     def __init__(self):
+        self._mapping_lock = threading.RLock()
         self._buf = (ctypes.c_byte * ctypes.sizeof(SharedMemoryLayout))()
         self._layout = SharedMemoryLayout.from_buffer(self._buf)
         self._layout.is_initialized = True
@@ -32,6 +37,27 @@ class SilentEngineBridge(CaptureBridge):
 
 def _a_path():
     return 'C:/clips/t10.mp4' if sys.platform == 'win32' else '/tmp/t10.mp4'
+
+
+def test_silent_bridge_owns_layout_without_reusing_base_singleton(monkeypatch):
+    monkeypatch.setattr(CaptureBridge, '_instance', None)
+    base = CaptureBridge()
+    assert type(base) is CaptureBridge
+    assert base._layout is None
+    bridge = SilentEngineBridge()
+
+    assert type(bridge) is SilentEngineBridge
+    assert bridge is not base
+    assert isinstance(bridge._layout, SharedMemoryLayout)
+    assert ctypes.addressof(bridge._layout) == ctypes.addressof(bridge._buf)
+    assert bridge._mapping_lock is not base._mapping_lock
+    assert CaptureBridge._instance is base
+    assert bridge.save_clip(_a_path(), 30) is True
+    assert bridge._layout.ui_command == CommandType.SAVE_CLIP
+    assert bridge.save_clip(_a_path(), 30) is False
+    assert CaptureBridge._instance is base
+    assert base._layout is None
+    assert base._initialized is False
 
 
 def _run_loop_for(ms: int):

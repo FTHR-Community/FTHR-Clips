@@ -70,6 +70,7 @@ VSVersionInfo(
 # an independently rebuilt playback bridge is never silently packaged as an
 # older DLL from the solution output directory.
 _ENGINE_CANDIDATES = [
+    ROOT / 'FTHRcapture' / 'FTHRclips' / 'x64' / 'HDRRelease' / 'FTHRclips.exe',
     ROOT / 'FTHRcapture' / 'FTHRclips' / 'x64' / 'CFRReleaseFinal' / 'FTHRclips.exe',
     ROOT / 'FTHRcapture' / 'FTHRclips' / 'x64' / 'CFRRelease' / 'FTHRclips.exe',
     ROOT / 'FTHRcapture' / 'x64' / 'Release' / 'FTHRClips.exe',
@@ -104,8 +105,6 @@ a = Analysis(
         (str(ASSETS_DIR / 'favicon.ico'),     'assets'),
         (str(ASSETS_DIR / 'fthr_logo.png'),   'assets'),
         (str(ASSETS_DIR / 'preview_desktop.png'), 'assets'),
-        (str(ASSETS_DIR / 'gary.png'), 'assets'),
-        (str(ASSETS_DIR / 'gatze.png'), 'assets'),
         *[(str(bundle), 'plugin-packages') for bundle in OPTIONAL_PLUGIN_BUNDLES],
         # Licence paperwork must travel INSIDE the bundle (AUDIT-005), so a
         # portable copy is as complete as an installed one.
@@ -147,6 +146,7 @@ a = Analysis(
         'ui.capture_settings_widget',
         'ui.clip_grid',
         'ui.clip_viewer',
+        'ui.basic_clip_viewer',
         'ui.customize_page',
         'ui.app_style',
         'ui.screenshot_editor',
@@ -167,9 +167,10 @@ a = Analysis(
         'core.theme_manager',
         'core.upload_manager',
         'core.windows_autostart',
+        'core.windows_startup',
     ],
     hookspath=[],
-    runtime_hooks=[],
+    runtime_hooks=[str(ROOT / 'tools' / 'pyi_rth_windows_startup.py')],
     excludes=[
         # Exclude imageio_ffmpeg; use the project-pinned FFmpeg runtime beside
         # the engine. See core/ffmpeg_tools.py.

@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <map>
 #include <string>
@@ -51,10 +52,25 @@ std::string ResolveWindowsAudioSourceName(const std::wstring& executable_basenam
                                           const std::wstring& executable_description);
 std::string BuildWindowsRuntimeGroupKey(uint32_t root_process_id,
                                         const std::wstring& executable_basename);
+bool IsVerifiedWindowsAudioParent(uint64_t child_created, uint64_t parent_created,
+                                  uint64_t snapshot_started) noexcept;
+bool IsFthrAudioUiParent(uint32_t verified_parent, uint32_t announced_ui,
+                         const std::wstring& parent_image,
+                         const std::wstring& engine_image);
+void GroupWindowsAudioSessionTrees(
+    std::map<std::string, WindowsAudioSessionDescriptor>& groups,
+    const std::function<uint32_t(uint32_t)>& parent_process);
+// Drop excluded executables and any broad INCLUDE provider whose subtree
+// contains one. Other descendants remain independent candidates.
+void ExcludeWindowsAudioSessionTrees(
+    std::map<std::string, WindowsAudioSessionDescriptor>& groups,
+    const std::vector<std::string>& excluded_identities,
+    const std::function<uint32_t(uint32_t)>& parent_process,
+    const std::vector<uint32_t>& excluded_processes = {});
 
 class WindowsAudioSessionRegistry {
 public:
-    WindowsAudioSessionRegistry();
+    explicit WindowsAudioSessionRegistry(std::vector<std::string> excluded_identities = {});
     ~WindowsAudioSessionRegistry();
 
     WindowsAudioSessionRegistry(const WindowsAudioSessionRegistry&) = delete;
@@ -97,6 +113,7 @@ private:
     std::atomic<bool> dirty_{false};
     std::vector<WindowsAudioSessionDescriptor> current_;
     std::string last_error_;
+    std::vector<std::string> excluded_identities_;
 };
 
 }  // namespace fthr

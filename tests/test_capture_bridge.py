@@ -1,5 +1,6 @@
 import ctypes
 import sys
+import threading
 
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'FTHR_UI'))
 
@@ -17,14 +18,27 @@ def _make_fake_layout():
 
 class _FakeBridge(CaptureBridge):
     """CaptureBridge subclass backed by in-process fake layout."""
+    def __new__(cls, layout):
+        return object.__new__(cls)
+
     def __init__(self, layout):
+        self._mapping_lock = threading.RLock()
         self._layout = layout
         self._initialized = True
 
 
-def test_set_encoder_config_writes_fields():
+def test_set_encoder_config_writes_fields(monkeypatch):
+    monkeypatch.setattr(CaptureBridge, '_instance', None)
+    cold_bridge = CaptureBridge()
+    assert type(cold_bridge) is CaptureBridge
+    assert cold_bridge._layout is None
+    assert cold_bridge._initialized is False
     layout, buf = _make_fake_layout()
     bridge = _FakeBridge(layout)
+    assert isinstance(bridge, _FakeBridge)
+    assert bridge._layout is layout
+    assert CaptureBridge._instance is cold_bridge
+    assert cold_bridge._layout is None
     result = bridge.set_encoder_config('hevc', 5)
     assert result is True
     assert layout.cfg_codec_pref == 2           # hevc = 2
@@ -88,6 +102,7 @@ def test_set_encoder_config_clamps_preset():
     bridge = _FakeBridge(layout)
     bridge.set_encoder_config('h264', 0)    # below min
     assert layout.cfg_preset == 1
+    layout.ui_command = CommandType.NONE  # the engine consumed the command
     bridge.set_encoder_config('h264', 99)   # above max
     assert layout.cfg_preset == 7
 
@@ -146,8 +161,30 @@ def test_save_clip_does_not_touch_engine_response():
 def test_save_clip_refuses_when_disconnected():
     layout, buf = _make_fake_layout()
     bridge = _FakeBridge(layout)
+    layout.ui_param1 = 30
+    layout.ui_param2 = 17
+    layout.ui_string = ('pending-marker' if sys.platform == 'win32'
+                        else b'pending-marker')
+    layout.engine_response = ResponseType.CLIP_SAVED
     layout.is_initialized = False
+    before = bytes(buf)
     assert bridge.save_clip(_a_path(), 30) is False
+    assert bytes(buf) == before
+
+
+def test_busy_command_preserves_existing_payload_and_command():
+    layout, buf = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+    layout.ui_command = CommandType.MARK_HIGHLIGHT
+    layout.ui_param1 = 123
+    pending_string = ('pending-marker' if sys.platform == 'win32'
+                      else b'pending-marker')
+    layout.ui_string = pending_string
+
+    assert bridge.save_clip(_a_path(), 30) is False
+    assert layout.ui_command == CommandType.MARK_HIGHLIGHT
+    assert layout.ui_param1 == 123
+    assert layout.ui_string == pending_string
 
 
 def test_bridge_has_no_second_response_consumer():
@@ -290,6 +327,7 @@ def test_ack_is_delivered_once_and_rearmed_for_next_save():
     bridge = _FakeBridge(layout)
     for _ in range(3):
         assert bridge.save_clip(_a_path(), 5)
+        layout.ui_command = CommandType.NONE  # the engine consumed the command
         layout.engine_response = ResponseType.SAVE_STARTED
         assert bridge.peek_save_response() == ('started', '')
         assert bridge.consume_save_response('started')

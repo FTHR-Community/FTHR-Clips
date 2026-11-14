@@ -20,6 +20,12 @@ extern "C" {
 
 typedef struct FTHRPlaybackMixer FTHRPlaybackMixer;
 
+FTHR_PLAYBACK_API int fthr_playback_configure_dsp(FTHRPlaybackMixer* mixer,
+    const char* const* source_filters, int source_count, const char* output_filter,
+    char* error_text, size_t error_text_capacity);
+FTHR_PLAYBACK_API float fthr_playback_output_peak(const FTHRPlaybackMixer* mixer);
+FTHR_PLAYBACK_API int64_t fthr_playback_buffered_frames(const FTHRPlaybackMixer* mixer);
+
 // Opens one local media container and one FFmpeg decoder per selected absolute
 // stream index. Error text is always optional and NUL-terminated when present.
 FTHR_PLAYBACK_API FTHRPlaybackMixer* fthr_playback_open(
@@ -29,11 +35,20 @@ FTHR_PLAYBACK_API FTHRPlaybackMixer* fthr_playback_open(
     char* error_text,
     size_t error_text_capacity);
 
+// One path per selected stream. Local imported tracks start at clip time zero.
+// All inputs share seek/speed and are summed before the final output clamp.
+FTHR_PLAYBACK_API FTHRPlaybackMixer* fthr_playback_open_sources(
+    const char* const* media_paths_utf8,
+    const int* stream_indexes,
+    int stream_count,
+    char* error_text,
+    size_t error_text_capacity);
+
 // Decodes/mixes up to frame_count canonical frames (48 kHz float32 stereo).
 // Returns the supplied frame_count, zero at final EOF, or -1 on a recoverable
 // decoder failure. ``gains`` is one linear value per selected source and
-// master_gain is applied after equal-power headroom and the zero-lookahead
-// limiter, matching the derived-export filter graph.
+// master_gain is applied before the zero-lookahead output clamp. Source levels
+// do not change when another source is muted, matching derived exports.
 FTHR_PLAYBACK_API int fthr_playback_pull(
     FTHRPlaybackMixer* mixer,
     float* interleaved_float_stereo,

@@ -26,7 +26,6 @@ def test_upload_and_copy_hover_share_outline_and_survive_action_change(qtbot, tm
     QApplication.sendEvent(card.share_btn, QEvent(QEvent.Type.Enter))
     assert card.share_btn.property('actionHovered')
     assert card._share_icon_key == ('upload', Colors.ACCENT)
-    card.share_btn._hover_animation.setCurrentTime(120)
     upload_background = card.share_btn.grab().toImage().pixelColor(6, 6)
     card.set_upload_info({'url': 'https://example.com/clip'})
     assert card._share_icon_key == ('link', Colors.ACCENT)
@@ -36,38 +35,6 @@ def test_upload_and_copy_hover_share_outline_and_survive_action_change(qtbot, tm
     QApplication.sendEvent(card.share_btn, QEvent(QEvent.Type.Leave))
     assert not card.share_btn.property('actionHovered')
     assert card._share_icon_key == ('link', Colors.BG)
-
-
-def test_upload_hover_reverses_smoothly_and_survives_style_refresh(qtbot, tmp_path, qapp):
-    from PySide6.QtWidgets import QApplication
-    from ui.hover_transition import HoverTransitions
-    transitions = HoverTransitions(qapp)
-    card = ClipThumbnail(str(tmp_path / 'clip.mp4'), upload_enabled=True)
-    qtbot.addWidget(card)
-    card.show()
-    try:
-        button = card.share_btn
-        for _ in range(3):
-            QApplication.sendEvent(card, QEvent(QEvent.Type.Enter))
-            QApplication.sendEvent(button, QEvent(QEvent.Type.Enter))
-            assert getattr(card, '_hover_fade', None) is None
-            assert getattr(button, '_hover_fade', None) is None
-            button._hover_animation.setCurrentTime(60)
-            before = button._hover_progress
-            assert 0 < before < 1
-            color = button.grab().toImage().pixelColor(6, 6).name()
-            assert color not in (Colors.ACCENT.lower(), Colors.ACCENT_SOFT.lower())
-            QApplication.sendEvent(button, QEvent(QEvent.Type.StyleChange))
-            assert button._hover_animation.state() == button._hover_animation.State.Running
-            card.set_upload_info({'url': 'https://example.com/clip'})
-            assert button._hover_progress == before
-            QApplication.sendEvent(button, QEvent(QEvent.Type.Leave))
-            assert button._hover_animation.startValue() == before
-            button._hover_animation.setCurrentTime(120)
-            assert button._hover_progress == 0
-    finally:
-        qapp.removeEventFilter(transitions)
-        transitions.deleteLater()
 
 
 def test_card_displays_actual_filename_and_static_bottom_fade(qtbot, tmp_path):
@@ -191,9 +158,42 @@ def test_inline_rename_enter_changes_the_actual_file(qtbot, tmp_path):
 
 @pytest.mark.skipif(sys.platform != 'win32', reason='uses a real Windows sharing lock')
 @pytest.mark.parametrize('operation', ['rename', 'delete'])
-def test_windows_sharing_lock_retries_without_freezing_ui(qtbot, tmp_path, operation):
+def test_windows_sharing_lock_retries_without_freezing_ui(qtbot, tmp_path, monkeypatch, request, operation):
+    from core.clip_metadata_manager import ClipMetadataManager
+
     clip = tmp_path / 'locked.mp4'
     clip.write_bytes(b'media')
+    manager = ClipMetadataManager(database_path=tmp_path / 'metadata.sqlite3')
+    manager.migrate()
+    manager.register_media(manager.inspect_media(clip))
+    host = None
+    released, ticks = [], []
+    if operation == 'delete':
+        from core.library_index import canonical_media_path
+        from test_library_trash_integration import make_trash_host, stop_trash_host
+
+        manager.migrate(target_version=3)
+        settings = SimpleNamespace(get=lambda key, default=None: {
+            'clips_directory': str(tmp_path), 'imported_clip_folders': []}.get(key, default))
+        uploader = UploadManager(settings, metadata_manager=manager)
+        grid = SimpleNamespace(_release_thumbnail_reader=lambda path: True)
+        host = make_trash_host(settings, manager, grid, uploader)
+        release = host._release_clip_paths
+
+        def released_by_host(reservation):
+            release(reservation)
+            if canonical_media_path(clip) in reservation['keys']:
+                released.append(str(clip))
+
+        def dispose_host():
+            try:
+                stop_trash_host(host)
+            finally:
+                uploader.stop()
+
+        host._release_clip_paths = released_by_host
+        request.addfinalizer(dispose_host)
+        monkeypatch.setattr('core.ffmpeg_playback.finish_audio_cleanup', lambda path: True)
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong,
                                   ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p]
@@ -201,10 +201,11 @@ def test_windows_sharing_lock_retries_without_freezing_ui(qtbot, tmp_path, opera
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
     handle = kernel.CreateFileW(str(clip), 0x80000000, 0, None, 3, 0, None)
     assert handle != ctypes.c_void_p(-1).value
-    card = ClipThumbnail(str(clip), clips_root=str(tmp_path))
+    card = ClipThumbnail(str(clip), clips_root=str(tmp_path), metadata_manager=manager)
     qtbot.addWidget(card)
-    released, ticks = [], []
     card._finish_mutation = released.append
+    if host is not None:
+        card._trash_handler = host._request_clip_trash
     destination = tmp_path / 'renamed.mp4'
     try:
         card._begin_mutation(operation, str(destination))

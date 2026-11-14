@@ -214,7 +214,7 @@ class UploadSettingsWidget(QWidget):
     _test_finished = Signal(bool, str)
     connection_failed = Signal(str)
 
-    def __init__(self, upload_manager, parent=None, no_scroll=False):
+    def __init__(self, upload_manager, parent=None, no_scroll=False, show_title=True):
         super().__init__(parent)
         if hasattr(upload_manager, 'is_enabled'):
             self._sm = upload_manager
@@ -225,8 +225,13 @@ class UploadSettingsWidget(QWidget):
             from core.upload_manager import UploadManager
             self._sm = UploadManager(upload_manager)
         self._no_scroll = no_scroll
+        self._show_title = show_title
         self._loading = True
         self._selected_provider = 'catbox'
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(450)
+        self._save_timer.timeout.connect(self._on_save)
         self._test_thread: threading.Thread | None = None
         self._test_finished.connect(self._on_test_done)
         self._setup_ui()
@@ -239,7 +244,10 @@ class UploadSettingsWidget(QWidget):
         page = QWidget()
         page.setStyleSheet('background: transparent;')
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
+        if self._no_scroll:
+            layout.setContentsMargins(0, 0, 0, 0)
+        else:
+            layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
         layout.setSpacing(0)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         if not self._no_scroll:
@@ -252,9 +260,10 @@ class UploadSettingsWidget(QWidget):
         else:
             outer.addWidget(page)
 
-        layout.addWidget(_section_header('Upload'))
-        layout.addSpacing(12)
-        self.enable_check = QCheckBox('Enable optional clip uploader')
+        if self._show_title:
+            layout.addWidget(_section_header('Upload'))
+            layout.addSpacing(12)
+        self.enable_check = QCheckBox('Enable clip uploads')
         set_theme_style(self.enable_check, checkbox_qss)
         self.enable_check.stateChanged.connect(self._on_enabled_changed)
         layout.addWidget(self.enable_check)
@@ -476,14 +485,39 @@ class UploadSettingsWidget(QWidget):
         body.addWidget(_section_header('Post-Upload'))
         body.addSpacing(12)
         self.auto_delete_check = QCheckBox(
-            'Auto-delete local clip after a confirmed successful upload')
+            'Move to Trash after upload (confirmed successful uploads only)')
         set_theme_style(self.auto_delete_check, checkbox_qss)
         body.addWidget(self.auto_delete_check)
         body.addSpacing(24)
-        self.save_btn = QPushButton('Save upload settings')
-        set_theme_style(self.save_btn, button_primary_qss)
-        self.save_btn.clicked.connect(self._on_save)
-        body.addWidget(self.save_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._save_error = QLabel()
+        self._save_error.setWordWrap(True)
+        set_theme_style(self._save_error, lambda: label_body(Colors.ERROR, Fonts.SIZE_BODY))
+        self._save_error.hide()
+        body.addWidget(self._save_error)
+        self._editable_fields = (
+            self.catbox_userhash, self.server_url_edit, self.server_auth_edit,
+            *self.sftp_fields.values(),
+        )
+        for field in self._editable_fields:
+            field.textEdited.connect(self._save_timer.stop)
+            field.editingFinished.connect(self._schedule_save)
+        self._mode_group.idToggled.connect(
+            lambda _index, checked: self._schedule_save() if checked else None)
+        for combo in (self.interval_value, self.interval_unit):
+            combo.currentIndexChanged.connect(self._schedule_save)
+        for check in (self.sftp_public_check, self.auto_compress_check,
+                      self.auto_delete_check):
+            check.toggled.connect(self._schedule_save)
+
+    def _schedule_save(self, *_args):
+        if not self._loading:
+            self._save_error.hide()
+            self._save_timer.start()
+
+    def hideEvent(self, event):  # noqa: N802
+        if self._save_timer.isActive():
+            self._on_save()
+        super().hideEvent(event)
 
     def _load_settings(self) -> None:
         enabled = self._sm.is_enabled()
@@ -588,6 +622,7 @@ class UploadSettingsWidget(QWidget):
         return True
 
     def _on_provider_changed(self, _index: int) -> None:
+        self._save_timer.stop()
         provider = self.provider_combo.currentData() or 'catbox'
         previous = self._selected_provider
         if (not self._loading and self.enable_check.isChecked()
@@ -597,9 +632,11 @@ class UploadSettingsWidget(QWidget):
             self.provider_combo.setCurrentIndex(old_index if old_index >= 0 else 0)
             self.provider_combo.blockSignals(False)
             self._apply_provider(previous)
+            self._schedule_save()
             return
         self._selected_provider = provider
         self._apply_provider(provider)
+        self._schedule_save()
 
     def _apply_provider(self, provider: str) -> None:
         catbox = provider == 'catbox'
@@ -625,50 +662,94 @@ class UploadSettingsWidget(QWidget):
             QDesktopServices.openUrl(QUrl(url))
 
     def _on_save(self) -> None:
+        self._save_timer.stop()
         provider = self.provider_combo.currentData() or 'catbox'
-        if self.enable_check.isChecked() and not self._ensure_provider_ready(provider):
+        if (self.enable_check.isChecked() and provider == 'catbox'
+                and not self._sm.provider_consent_current(provider)):
+            self._show_save_error('Accept the Catbox terms to save this provider.')
             return
-        if provider in {'sftp', 'vaultscope'}:
-            try:
-                config = self._sftp_config()
-                ok, message = self._sm.sftp_credentials(config)
-            except Exception:
-                ok, message = False, 'SFTP settings could not be saved. Enable the Upload Extension first.'
-            if not ok:
-                FthrMessageDialog.warning(self, 'SFTP settings', message)
-                return
-            for key, value in config.items():
-                if key != 'sftp_password':
-                    self._sm.set(key, value)
-            self.sftp_fields['sftp_password'].clear()
-        self._sm.set('upload_provider', 'sftp' if provider == 'vaultscope' else provider)
-        if provider in {'sftp', 'vaultscope'}:
-            self._sm.set('sftp_provider_name', 'VaultScope' if provider == 'vaultscope' else '')
-        self._sm.set('catbox_userhash', self.catbox_userhash.text().strip())
+
         server_url = self.server_url_edit.text().strip()
         if server_url and not server_url.lower().startswith(('http://', 'https://')):
             server_url = f'https://{server_url}'
-            self.server_url_edit.setText(server_url)
-        self._sm.set('upload_server_url', server_url)
-        self._sm.set('upload_auth_header', self.server_auth_edit.text().strip())
+        if provider == _CUSTOM_PROVIDER:
+            url = QUrl(server_url)
+            if not url.isValid() or not url.host():
+                self._show_save_error('Enter a valid server URL to save this provider.')
+                return
+
         mode = {0: 'immediate', 1: 'interval', 2: 'manual'}.get(
             self._mode_group.checkedId(), 'manual')
-        self._sm.set('upload_mode', mode)
-        try:
-            value = int(self.interval_value.currentText())
-        except ValueError:
-            value = 5
-        self._sm.set('upload_interval_value', value)
-        self._sm.set('upload_interval_unit', self.interval_unit.currentText())
-        self._sm.set('upload_auto_compress', self.auto_compress_check.isChecked())
-        self._sm.set('upload_auto_delete', self.auto_delete_check.isChecked())
-        ok, message = self._sm.set_plugin_enabled(self.enable_check.isChecked())
-        if not ok:
-            FthrMessageDialog.warning(self, 'Uploader Settings', message)
-            return
-        self._test_status.setText('Settings saved')
-        set_theme_style(self._test_status, lambda: (label_body(Colors.SUCCESS, Fonts.SIZE_BODY)))
-        QTimer.singleShot(3000, lambda: self._test_status.setText('Not tested'))
+        defaults = {
+            'upload_provider': 'catbox',
+            'catbox_userhash': '',
+            'upload_server_url': '',
+            'upload_auth_header': '',
+            'upload_mode': 'manual',
+            'upload_interval_value': 5,
+            'upload_interval_unit': 'minutes',
+            'upload_auto_compress': False,
+            'upload_auto_delete': False,
+        }
+        values = {
+            'upload_provider': 'sftp' if provider == 'vaultscope' else provider,
+            'catbox_userhash': self.catbox_userhash.text().strip(),
+            'upload_server_url': server_url,
+            'upload_auth_header': self.server_auth_edit.text().strip(),
+            'upload_mode': mode,
+            'upload_interval_value': int(self.interval_value.currentText() or 5),
+            'upload_interval_unit': self.interval_unit.currentText(),
+            'upload_auto_compress': self.auto_compress_check.isChecked(),
+            'upload_auto_delete': self.auto_delete_check.isChecked(),
+        }
+
+        config = None
+        password = ''
+        if provider in {'sftp', 'vaultscope'}:
+            config = self._sftp_config()
+            if not config['sftp_host'] or not config['sftp_username']:
+                self._show_save_error('Enter an SFTP host and username to save this provider.')
+                return
+            password = config.pop('sftp_password')
+            values.update(config)
+            values['sftp_provider_name'] = 'VaultScope' if provider == 'vaultscope' else ''
+            defaults.update({
+                'sftp_port': '22',
+                'sftp_directory': '.',
+                'sftp_public_enabled': False,
+            })
+
+        previous = {key: self._sm.get(key, defaults.get(key, '')) for key in values}
+        changed = {key: value for key, value in values.items() if value != previous[key]}
+        if config is not None and (password or 'upload_provider' in changed
+                                   or any(key.startswith('sftp_') for key in changed)):
+            try:
+                ok, message = self._sm.sftp_credentials(
+                    {**config, 'sftp_password': password})
+            except Exception:
+                ok, message = False, 'Enable the Upload Extension to save SFTP settings.'
+            if not ok:
+                self._show_save_error(message)
+                return
+
+        if changed:
+            for key, value in changed.items():
+                self._sm.set(key, value)
+            if self._sm.save_settings() is False:
+                for key in changed:
+                    self._sm.set(key, previous[key])
+                self._show_save_error('Upload settings could not be saved. Change a setting to retry.')
+                return
+
+        if password:
+            self.sftp_fields['sftp_password'].clear()
+        if server_url != self.server_url_edit.text():
+            self.server_url_edit.setText(server_url)
+        self._save_error.hide()
+
+    def _show_save_error(self, message: str):
+        self._save_error.setText(message or 'Upload settings could not be saved.')
+        self._save_error.show()
 
     def _on_test_connection(self) -> None:
         provider = self.provider_combo.currentData() or 'catbox'
@@ -732,7 +813,8 @@ class UploadSettingsWidget(QWidget):
         for key, value in values.items():
             self.sftp_fields[key].setText(value)
         self.sftp_public_check.setChecked(False)
-        self._test_status.setText('VaultScope login filled in. Test the connection, then save settings.')
+        self._test_status.setText('VaultScope login filled in. Test the connection when ready.')
+        self._schedule_save()
 
     def _sftp_config(self) -> dict:
         return {

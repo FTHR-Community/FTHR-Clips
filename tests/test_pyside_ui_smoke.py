@@ -116,6 +116,9 @@ def test_background_start_defers_main_ui_but_keeps_core_services(
 
     assert window.centralWidget() is None
     assert not hasattr(window, 'clip_grid')
+    assert not window._file_operations_ready
+    assert not window._background_services_started
+    qtbot.waitUntil(lambda: window._file_operations_ready, timeout=3000)
     assert window._background_services_started
 
     # Keep the test Qt application alive while the app-level cleanup runs.

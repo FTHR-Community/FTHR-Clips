@@ -5,6 +5,8 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QLineEdit, QWidget
 
 from FTHR_UI import main
 from FTHR_UI.ui.error_bar import ErrorBar
@@ -12,17 +14,23 @@ from FTHR_UI.ui.error_bar import ErrorBar
 
 class _Settings:
     def __init__(self, **values):
-        self.values = values
+        self.settings = dict(values)
+        self.values = self.settings
         self.save_count = 0
 
     def get(self, key, default=None):
-        return self.values.get(key, default)
+        return self.settings.get(key, default)
 
     def set(self, key, value):
-        self.values[key] = value
+        self.settings[key] = value
 
     def save_settings(self):
         self.save_count += 1
+
+    def read_capture_admission_policy(self):
+        from core.settings_manager import SettingsManager
+
+        return SettingsManager.read_capture_admission_policy(self)
 
 
 class _CheckBox:
@@ -83,20 +91,75 @@ class _Preview:
         self.events.append(('frame', pixmap, threading.get_ident()))
 
 
+class _UiDispatcher(QObject):
+    callback_ready = Signal(object)
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.callback_ready.connect(self._run)
+
+    def _run(self, callback):
+        callback()
+
+    def emit(self, callback):
+        self.callback_ready.emit(callback)
+
+
 class _FakeCameraRecorder:
     available = True
     requests = []
     stop_count = 0
+    last_device = 0
+    generation = 0
+    owned_provider_ledger = {}
 
     @classmethod
     def is_available(cls):
         return cls.available
 
-    def start_async(self, device_index, on_result=None):
+    def start_async(self, device_index, on_result=None, *, owner_token=None,
+                    request_token=None):
+        type(self).last_device = int(device_index)
+        type(self).generation += 1
+        type(self).owned_provider_ledger[id(request_token)] = {
+            'owner_token': owner_token,
+            'request_token': request_token,
+            'device_index': int(device_index),
+            'generation': type(self).generation,
+            'active': True,
+        }
         type(self).requests.append((device_index, on_result))
 
     def stop(self):
         type(self).stop_count += 1
+
+    def request_stop_async(self, *, expected_generation=None,
+                           expected_device_index=None, owner_token=None,
+                           request_token=None, on_result=None):
+        entry = type(self).owned_provider_ledger.get(id(request_token))
+        if (entry is None or entry['owner_token'] is not owner_token
+                or entry['request_token'] is not request_token
+                or (expected_generation is not None
+                    and expected_generation != entry['generation'])
+                or expected_device_index != entry['device_index']
+                or not entry['active']):
+            return False
+        entry['active'] = False
+        type(self).stop_count += 1
+        if on_result is not None:
+            on_result(True)
+        return True
+
+    def owned_cleanup_complete(self, *, owner_token):
+        return not any(
+            entry['active'] and entry['owner_token'] is owner_token
+            for entry in type(self).owned_provider_ledger.values())
+
+    def runtime_snapshot(self):
+        return SimpleNamespace(
+            running=True, ready=True,
+            device_index=type(self).last_device,
+            generation=type(self).generation or 1)
 
 
 @pytest.fixture
@@ -104,6 +167,9 @@ def camera_settings_page(qtbot, monkeypatch):
     _FakeCameraRecorder.available = True
     _FakeCameraRecorder.requests = []
     _FakeCameraRecorder.stop_count = 0
+    _FakeCameraRecorder.last_device = 0
+    _FakeCameraRecorder.generation = 0
+    _FakeCameraRecorder.owned_provider_ledger = {}
     monkeypatch.setattr(main._SettingsPage, '_setup_ui', lambda _self: None)
     monkeypatch.setattr(main._SettingsPage, '_apply_styles', lambda _self: None)
     monkeypatch.setattr(
@@ -119,7 +185,10 @@ def camera_settings_page(qtbot, monkeypatch):
         camera_overlay_rect={'x': 0.7, 'y': 0.7, 'w': 0.2, 'h': 0.2},
         camera_position='top-left',
     )
-    page = main._SettingsPage(settings)
+    owner = QWidget()
+    qtbot.addWidget(owner)
+    page = main._SettingsPage(settings, parent=owner)
+    page.settings_search = QLineEdit(page)
     page.camera_check = _CheckBox(False)
     page.camera_device_combo = _ComboBox([0, 2, 5])
     page.stack = _Stack()
@@ -129,11 +198,97 @@ def camera_settings_page(qtbot, monkeypatch):
     if hasattr(page, 'camera_unavailable'):
         page.camera_unavailable.connect(
             page.camera_unavailable_messages.append)
-    qtbot.addWidget(page)
+    owner._settings_page_widget = page
+    owner.settings_manager = page.sm
+    owner.camera_unavailable_messages = []
+    owner._manual_record_state = 'idle'
+    owner._mux_threads = ()
+    owner._save_state = SimpleNamespace(is_busy=lambda: False)
+    owner._shutdown_requested = False
+    owner._shutdown_complete = False
+    owner._camera_apply_generation = 0
+    owner._camera_pending_request = None
+    owner._camera_runtime_receipt = None
+    owner._camera_owner_token = object()
+    owner._camera_provider = None
+    owner._camera_pending_operation = None
+    owner._camera_retired_operations = []
+    owner._camera_active_physical = None
+    owner._camera_retired_physical = []
+    owner._camera_disabled_request = None
+    owner._camera_disabled_generation = None
+    owner._camera_stop_receipts = []
+    owner._engine_gen = 0
+    owner._engine_process_generation = None
+    owner._pending_launch_request = None
+    owner._pending_manual_record_request = None
+    owner._desired_capture_request = None
+    owner._admission_epoch = 0
+    owner._admission_policy = None
+    owner._admission_policy_error = None
+    owner._ui_call = _UiDispatcher(owner)
+    owner._set_status = lambda *_args, **_kwargs: None
+    owner._publish_capture_profile_status = lambda *_args, **_kwargs: None
+    owner._show_camera_unavailable = (
+        lambda detail: owner.camera_unavailable_messages.append(str(detail)))
+    owner._on_camera_apply_result = (
+        main.MainWindow._on_camera_apply_result.__get__(owner))
+    owner._manual_prepare_owns_capture = (
+        main.MainWindow._manual_prepare_owns_capture.__get__(owner))
+    owner._capture_resources_busy = (
+        main.MainWindow._capture_resources_busy.__get__(owner))
+    for name, descriptor in vars(main.MainWindow).items():
+        if not (name.startswith('_admission_')
+                or name.startswith('_camera_')):
+            continue
+        helper = getattr(main.MainWindow, name)
+        if isinstance(descriptor, staticmethod):
+            setattr(owner, name, helper)
+        elif callable(helper):
+            setattr(owner, name, helper.__get__(owner))
+    owner._capture_owner_snapshot = (
+        main.MainWindow._capture_owner_snapshot.__get__(owner))
+    owner._capture_owner_snapshot_is_current = (
+        main.MainWindow._capture_owner_snapshot_is_current.__get__(owner))
+
+    def route(payload):
+        from core.capture_session import SourceSnapshot
+        from core.capture_session import build_resolved_capture_request
+        from core.capture_settings import CaptureConfig
+
+        camera = main.CameraSnapshot(
+            enabled=bool(payload.get('enabled', False)),
+            device_index=int(payload.get('device_index', 0) or 0),
+            overlay_rect=payload.get(
+                'overlay_rect', main.DEFAULT_OVERLAY_RECT),
+        )
+        config = CaptureConfig(
+            fps=60, buffer_seconds=32, width=1920, height=1080,
+            bitrate_kbps=25_000, codec='auto', preset=4, monitor='',
+            scaling='stretch', audio_enabled=True, encoder='auto',
+            normal_clip_seconds=30,
+        )
+        owner._capture_request_token = int(
+            getattr(owner, '_capture_request_token', 0)) + 1
+        request = build_resolved_capture_request(
+            request_token=owner._capture_request_token, purpose='clips',
+            source=SourceSnapshot(source_mode='desktop', clip_group='Desktop'),
+            capture_config=config, camera=camera,
+            effects={'capture_card_enabled': True},
+        )
+        owner._desired_capture_request = request
+        main.MainWindow._request_camera_apply(
+            owner, camera, origin='settings',
+            request_token=request.request_token, capture_request=request)
+
+    page.camera_settings_requested.connect(route)
+    owner.show()
+    page.show()
+    qtbot.waitUntil(page.isVisible, timeout=1000)
     return page
 
 
-def test_camera_toggle_failure_unchecks_disables_clears_and_reports(
+def test_camera_toggle_failure_preserves_intent_and_reports(
         camera_settings_page, qtbot):
     page = camera_settings_page
     ui_thread = threading.get_ident()
@@ -149,9 +304,10 @@ def test_camera_toggle_failure_unchecks_disables_clears_and_reports(
     worker.join()
     qtbot.waitUntil(lambda: bool(page.camera_unavailable_messages))
 
-    assert page.sm.get('camera_enabled') is False
-    assert page.camera_check.checked is False
+    assert page.sm.get('camera_enabled') is True
+    assert page.camera_check.checked is True
     assert page.camera_unavailable_messages
+    assert page.parentWidget().camera_unavailable_messages
     assert 'connected' in page.camera_unavailable_messages[-1].lower()
     assert len(page.camera_unavailable_messages[-1]) <= 240
     assert not page._camera_preview_timer.active
@@ -162,7 +318,7 @@ def test_camera_toggle_failure_unchecks_disables_clears_and_reports(
     assert {event[-1] for event in page._camera_preview_timer.events} == {ui_thread}
 
 
-def test_device_change_failure_keeps_selected_device_but_disables_camera(
+def test_device_change_failure_keeps_selected_device_and_intent(
         camera_settings_page):
     page = camera_settings_page
     page.sm.set('camera_enabled', True)
@@ -177,14 +333,15 @@ def test_device_change_failure_keeps_selected_device_but_disables_camera(
     on_result(False)
 
     assert page.sm.get('camera_device_index') == 2
-    assert page.sm.get('camera_enabled') is False
-    assert page.camera_check.checked is False
+    assert page.sm.get('camera_enabled') is True
+    assert page.camera_check.checked is True
     assert page.sm.get('camera_overlay_rect') == before
     assert page.sm.get('camera_position') == 'top-left'
     assert page.unified_overlay_editor.overlay_enabled == ('camera', False)
     assert page.unified_overlay_editor.frame.isNull()
     assert not page._camera_preview_timer.active
     assert page.camera_unavailable_messages
+    assert page.parentWidget().camera_unavailable_messages
 
 
 def test_stale_open_result_after_disable_is_ignored(camera_settings_page):
@@ -201,6 +358,7 @@ def test_stale_open_result_after_disable_is_ignored(camera_settings_page):
 
     assert page.sm.get('camera_enabled') is False
     assert page.camera_unavailable_messages == []
+    assert page.parentWidget().camera_unavailable_messages == []
     assert page._camera_preview_timer.events == timer_events
     assert page.unified_overlay_editor.events == preview_events
     assert page.camera_check.mutations == checkbox_mutations
@@ -239,11 +397,11 @@ def test_camera_unavailable_build_capability_fails_consistently(
     page._on_camera_toggled(True)
 
     assert _FakeCameraRecorder.requests == []
-    assert page.sm.get('camera_enabled') is False
-    assert page.camera_check.checked is False
+    assert page.sm.get('camera_enabled') is True
+    assert page.camera_check.checked is True
     assert not page._camera_preview_timer.active
     assert page.unified_overlay_editor.overlay_enabled == ('camera', False)
-    assert page.camera_unavailable_messages
+    assert page.parentWidget().camera_unavailable_messages
 
 
 @pytest.mark.parametrize('result', [False, True])
@@ -261,9 +419,13 @@ def test_camera_result_after_settings_hide_is_ignored(
     timer_before = list(page._camera_preview_timer.events)
     on_result(result)
 
+    # Main keeps the warning available even after the settings page is hidden;
+    # the hidden page itself must not mutate preview or timer state.
     assert page.camera_unavailable_messages == errors_before
     assert page.unified_overlay_editor.events == preview_before
     assert page._camera_preview_timer.events == timer_before
+    if result is False:
+        assert page.parentWidget().camera_unavailable_messages
 
 
 def test_camera_warning_uses_visible_error_bar_with_settings_action(qtbot):

@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <dxgi.h>
 
 #ifdef _MSC_VER
@@ -245,7 +246,11 @@ public:
             error = "D3D11 immediate context belongs to a different device";
             return false;
         }
+        if (!detail::EnableQsvMultithreadProtection(shared_context, error)) {
+            return false;
+        }
 
+        hdr10_ = config.hdr10;
         source_width_ = config.src_width;
         source_height_ = config.src_height;
         output_width_ = config.enc_width > 0
@@ -268,6 +273,11 @@ public:
             return false;
         }
 
+        if (hdr10_ && (selection.codec != VideoCodec::HEVC
+            || source_width_ != output_width_ || source_height_ != output_height_)) {
+            error = "QSV HDR requires target-sized P010 HEVC input";
+            return false;
+        }
         if (!CreateHardwareContexts(shared_device, error)
             || !CreateConversionPipeline(
                 shared_device, shared_context, config.fps,
@@ -287,11 +297,11 @@ public:
         codec_context_->width = static_cast<int>(output_width_);
         codec_context_->height = static_cast<int>(output_height_);
         codec_context_->pix_fmt = AV_PIX_FMT_QSV;
-        codec_context_->sw_pix_fmt = AV_PIX_FMT_NV12;
+        codec_context_->sw_pix_fmt = hdr10_ ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
         codec_context_->color_range = AVCOL_RANGE_MPEG;
-        codec_context_->color_primaries = AVCOL_PRI_BT709;
-        codec_context_->color_trc = AVCOL_TRC_BT709;
-        codec_context_->colorspace = AVCOL_SPC_BT709;
+        codec_context_->color_primaries = hdr10_ ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709;
+        codec_context_->color_trc = hdr10_ ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_BT709;
+        codec_context_->colorspace = hdr10_ ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_BT709;
         codec_context_->chroma_sample_location = AVCHROMA_LOC_LEFT;
         codec_context_->time_base = AVRational{1, static_cast<int>(config.fps)};
         codec_context_->framerate = AVRational{static_cast<int>(config.fps), 1};
@@ -301,7 +311,7 @@ public:
         codec_context_->rc_buffer_size = static_cast<int>(codec_context_->bit_rate);
         codec_context_->gop_size = static_cast<int>(config.fps);
         codec_context_->max_b_frames = 0;
-        codec_context_->profile = selection.profile;
+        codec_context_->profile = hdr10_ ? AV_PROFILE_HEVC_MAIN_10 : selection.profile;
         codec_context_->flags |= AV_CODEC_FLAG_LOW_DELAY
             | AV_CODEC_FLAG_GLOBAL_HEADER
             | AV_CODEC_FLAG_CLOSED_GOP;
@@ -376,6 +386,7 @@ public:
             config.fps,
             config.bitrate_kbps,
             extradata);
+        video_config.hdr10 = hdr10_;
         if (!IsValidEncodedVideoConfig(video_config)) {
             error = "QSV produced an invalid encoded video configuration";
             Reset();
@@ -384,7 +395,8 @@ public:
 
         initialized_ = true;
         std::cout << "[QSV] Opened " << selection.encoder_name
-                  << " on the selected Intel D3D11 adapter (BGRA -> NV12 -> QSV)"
+                  << (hdr10_ ? " on the selected Intel D3D11 adapter (P010 -> QSV)"
+                             : " on the selected Intel D3D11 adapter (BGRA -> NV12 -> QSV)")
                   << std::endl;
         return true;
     }
@@ -394,10 +406,7 @@ public:
         uint32_t source_subresource,
         std::string& error) override {
         prepared_ = false;
-        if (!initialized_ || !source || !copy_context_
-            || !video_device_ || !video_context_ || !video_processor_
-            || !video_processor_enumerator_ || !converter_texture_
-            || !converter_output_view_ || !d3d_frame_) {
+        if (!initialized_ || !source || !copy_context_ || !d3d_frame_) {
             error = "QSV conversion resources are unavailable";
             return false;
         }
@@ -424,11 +433,14 @@ public:
             * std::max(1U, source_description.ArraySize);
         if (source_description.Width != source_width_
             || source_description.Height != source_height_
-            || source_description.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+            || source_description.Format != (hdr10_ ? DXGI_FORMAT_P010 : DXGI_FORMAT_B8G8R8A8_UNORM)
+            || source_description.SampleDesc.Count != 1
             || source_subresource >= subresource_count) {
             error = "QSV source texture geometry, format, or subresource is invalid";
             return false;
         }
+
+        if (hdr10_) return CopyEncoderInput(source, source_subresource, error);
 
         D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_description{};
         input_description.FourCC = 0;
@@ -462,12 +474,17 @@ public:
             return false;
         }
 
+        return CopyEncoderInput(converter_texture_, 0, error);
+    }
+
+    bool CopyEncoderInput(ID3D11Texture2D* texture, uint32_t subresource,
+                          std::string& error) {
         copy_context_->CopySubresourceRegion(
             reinterpret_cast<ID3D11Texture2D*>(d3d_frame_->data[0]),
             static_cast<UINT>(reinterpret_cast<uintptr_t>(d3d_frame_->data[1])),
             0, 0, 0,
-            converter_texture_,
-            0,
+            texture,
+            subresource,
             nullptr);
         const HRESULT removed = d3d11_device_->GetDeviceRemovedReason();
         if (FAILED(removed)) {
@@ -698,7 +715,7 @@ private:
         auto* frames_context = reinterpret_cast<AVHWFramesContext*>(
             d3d_frames_ctx_->data);
         frames_context->format = AV_PIX_FMT_D3D11;
-        frames_context->sw_format = AV_PIX_FMT_NV12;
+        frames_context->sw_format = hdr10_ ? AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
         frames_context->width = static_cast<int>(output_width_);
         frames_context->height = static_cast<int>(output_height_);
         frames_context->initial_pool_size = kQsvPoolSize;
@@ -709,7 +726,7 @@ private:
         d3d_frames->BindFlags = D3D11_BIND_DECODER | D3D11_BIND_VIDEO_ENCODER;
         result = av_hwframe_ctx_init(d3d_frames_ctx_);
         if (result < 0) {
-            error = "could not initialize Intel D3D11 NV12 frame pool: "
+            error = "could not initialize Intel D3D11 frame pool: "
                 + AvErrorString(result);
             return false;
         }
@@ -751,6 +768,7 @@ private:
         }
         copy_context_ = shared_context;
         copy_context_->AddRef();
+        if (hdr10_) return true;
 
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
         content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
@@ -884,7 +902,7 @@ private:
         av_frame_unref(d3d_frame_);
         int result = av_hwframe_get_buffer(d3d_frames_ctx_, d3d_frame_, 0);
         if (result < 0) {
-            error = "could not acquire Intel D3D11 NV12 input texture: "
+            error = "could not acquire Intel D3D11 input texture: "
                 + AvErrorString(result);
             return false;
         }
@@ -914,6 +932,7 @@ private:
     }
 
     const QsvCodecSelection* selection_ = nullptr;
+    bool hdr10_ = false;
     AVBufferRef* d3d_device_ctx_ = nullptr;
     AVBufferRef* qsv_device_ctx_ = nullptr;
     AVBufferRef* d3d_frames_ctx_ = nullptr;
@@ -977,6 +996,32 @@ EncodedVideoConfig BuildQsvVideoConfig(
 }
 
 namespace detail {
+
+bool EnableQsvMultithreadProtection(
+    ID3D11DeviceContext* context, std::string& error) {
+    if (!context || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+        error = "QSV requires a D3D11 immediate context for multithread protection";
+        return false;
+    }
+    ID3D11Multithread* multithread = nullptr;
+    const HRESULT result = context->QueryInterface(
+        __uuidof(ID3D11Multithread), reinterpret_cast<void**>(&multithread));
+    if (FAILED(result) || !multithread) {
+        error = HResultString("QSV ID3D11Multithread query", result);
+        return false;
+    }
+    // The return value is the PREVIOUS state, not a success result. A fresh
+    // capture context normally returns FALSE here. Leave the lock enabled
+    // for the full shared-device lifetime, including oneVPL shutdown.
+    multithread->SetMultithreadProtected(TRUE);
+    const bool protected_context = multithread->GetMultithreadProtected() != FALSE;
+    multithread->Release();
+    if (!protected_context) {
+        error = "could not enable QSV D3D11 multithread protection";
+        return false;
+    }
+    return true;
+}
 
 std::unique_ptr<IQsvCodecSession> CreateProductionQsvCodecSession() {
     return std::make_unique<FfmpegQsvCodecSession>();

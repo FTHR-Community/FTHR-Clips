@@ -33,6 +33,7 @@ struct ID3D11VideoDevice;
 struct ID3D11VideoContext;
 struct ID3D11VideoProcessorEnumerator;
 struct ID3D11VideoProcessor;
+struct ID3D11VideoProcessorInputView;
 struct ID3D11VideoProcessorOutputView;
 struct SwsContext;
 
@@ -105,6 +106,9 @@ namespace fthr {
         ActiveEncoderInfo GetActiveEncoderInfo() const override;
         std::string GetLastError() const override { return last_error_; }
         ReplayEncoderDiagnostics GetDiagnostics() const noexcept override;
+        CaptureStagePercentiles TakeDrainTimings() noexcept override {
+            return drain_timings_.Take();
+        }
         void SetCaptureGeneration(uint64_t generation) noexcept override {
             diagnostic_generation_.store(generation, std::memory_order_release);
         }
@@ -144,6 +148,7 @@ namespace fthr {
 
         bool InitializeGpuScalePipeline(std::string& error);
         void ReleaseGpuScalePipeline() noexcept;
+        bool ScaleIntoCurrentGpuInput(ID3D11VideoProcessorInputView* source_view);
 
         // Async drain state
         std::thread*            drain_thread_;
@@ -163,15 +168,16 @@ namespace fthr {
         ID3D11Device*        d3d11_device_;
         ID3D11DeviceContext* d3d11_context_;
 
-        // Same-adapter scaling path. The source is converted into the current
-        // target-sized NVENC slot entirely on the GPU; no CPU frame copy is
-        // introduced. The pipeline is used whenever source and encoded dimensions differ.
+        // Scale into a target-sized NVENC slot on the encoder's GPU. Hybrid
+        // capture uploads its source-sized BGRA frame before using this pipeline.
         ID3D11VideoDevice*              video_device_;
         ID3D11VideoContext*             video_context_;
         ID3D11VideoProcessorEnumerator* video_processor_enumerator_;
         ID3D11VideoProcessor*           video_processor_;
         ID3D11Texture2D*                gpu_scale_texture_;
         ID3D11VideoProcessorOutputView* gpu_scale_output_view_;
+        ID3D11Texture2D*                cpu_upload_texture_;
+        ID3D11VideoProcessorInputView*  cpu_upload_view_;
         CaptureScaleGeometry            gpu_scale_geometry_;
         uint32_t                        input_width_;
         uint32_t                        input_height_;
@@ -179,9 +185,10 @@ namespace fthr {
         bool                            gpu_frame_prepared_;
 
         // Input mode
-        bool cpu_input_mode_;  // true = Optimus path (CPU-side NVENC input buffers)
+        bool hdr10_ = false;
+        bool cpu_input_mode_;  // true when using CPU-side NVENC input buffers
 
-        // GPU zero-copy path: D3D11 texture pool registered with NVENC
+        // D3D11 texture pool registered with NVENC
         ID3D11Texture2D** input_textures_;        // GPU-only D3D11_USAGE_DEFAULT
         void**            registered_resources_;  // NV_ENC_REGISTERED_PTR handles
         void**            mapped_input_resources_; // Kept mapped until output lock completes
@@ -261,6 +268,7 @@ namespace fthr {
         std::atomic<uint32_t> diag_queued_outputs_{0};
         std::atomic<uint32_t> diag_submit_stage_{0};
         std::atomic<uint32_t> diag_drain_stage_{0};
+        CaptureStageTiming drain_timings_;
         std::atomic<uint32_t> diag_submit_slot_{0xffffffffu};
         std::atomic<uint32_t> diag_drain_slot_{0xffffffffu};
         std::atomic<int32_t> diag_last_nvenc_status_{0};

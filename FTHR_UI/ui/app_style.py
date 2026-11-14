@@ -3,10 +3,22 @@ from __future__ import annotations
 
 import os
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QPalette
-from PySide6.QtWidgets import QApplication, QStyleFactory
+from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle, QStyleFactory
 
-from ui.style import Colors, Fonts, Sizes
+from ui.style import Colors, Fonts, Sizes, slider_qss, combo_qss
+
+
+class _SettingsWheelStyle(QProxyStyle):
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint in (QStyle.StyleHint.SH_Widget_Animate,
+                    QStyle.StyleHint.SH_Widget_Animation_Duration):
+            return 0
+        if hint == QStyle.StyleHint.SH_ComboBox_AllowWheelScrolling:
+            # Native fallback combos follow the same rule on every page.
+            return 0
+        return super().styleHint(hint, option, widget, returnData)
 
 
 def configure_qt_style() -> None:
@@ -17,11 +29,20 @@ def configure_qt_style() -> None:
 
 def apply_app_style(app: QApplication) -> None:
     """Apply the FTHR palette to native fallback widgets."""
+    app.setEffectEnabled(Qt.UIEffect.UI_General, False)
+    if not hasattr(app, '_fthr_dropdown_filter'):
+        from ui.dropdown_menu import DropdownPopupFilter
+        app._fthr_dropdown_filter = DropdownPopupFilter(app)
+        app.installEventFilter(app._fthr_dropdown_filter)
+    if not hasattr(app, '_fthr_visible_scroll_filter'):
+        from ui.wheel_scroll import VisibleScrollWheelFilter
+        app._fthr_visible_scroll_filter = VisibleScrollWheelFilter(app)
+        app.installEventFilter(app._fthr_visible_scroll_filter)
     # Qt wraps the base style in QStyleSheetStyle after QSS is installed;
     # its objectName no longer identifies Fusion. Configure it once per app.
     if not getattr(app, '_fthr_fusion_configured', False):
         if "Fusion" in QStyleFactory.keys():
-            app.setStyle(QStyleFactory.create("Fusion"))
+            app.setStyle(_SettingsWheelStyle("Fusion"))
         app._fthr_fusion_configured = True
 
     font = QFont(Fonts.BODY_FAMILY)
@@ -48,7 +69,7 @@ def apply_app_style(app: QApplication) -> None:
         app.setPalette(palette)
     # A fallback for bespoke controls and dialogs that only style their color.
     # Local recipes can still override the radius for a specific control.
-    sheet = f'''
+    sheet = slider_qss() + combo_qss() + f'''
         QPushButton, QLineEdit, QAbstractSpinBox, QComboBox {{
             border-radius: {Sizes.RADIUS_MD}px;
         }}
@@ -56,5 +77,3 @@ def apply_app_style(app: QApplication) -> None:
     '''
     if app.styleSheet() != sheet:
         app.setStyleSheet(sheet)
-    from ui.hover_transition import install_hover_transitions
-    install_hover_transitions(app)

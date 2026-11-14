@@ -284,7 +284,8 @@ class ExportPresetsWidget(QWidget):
         self.combo.blockSignals(True)
         self.combo.clear()
         for preset in self.manager.all():
-            suffix = ' · Built-in' if preset.built_in else ''
+            suffix = (' · Plugin' if preset.preset_id.startswith('plugin:')
+                      else ' · Built-in' if preset.built_in else '')
             self.combo.addItem(preset.name + suffix, preset.preset_id)
         index = self.combo.findData(current)
         self.combo.setCurrentIndex(index if index >= 0 else 0)
@@ -293,7 +294,7 @@ class ExportPresetsWidget(QWidget):
 
     def _sync(self):
         preset = self.selected()
-        built_in = not preset or preset.built_in
+        built_in = not preset or preset.built_in or preset.preset_id.startswith('plugin:')
         self.edit_btn.setEnabled(not built_in)
         self.delete_btn.setEnabled(not built_in)
         if not preset:
@@ -317,7 +318,7 @@ class ExportPresetsWidget(QWidget):
 
     def _edit(self):
         preset = self.selected()
-        if not preset or preset.built_in:
+        if not preset or preset.built_in or preset.preset_id.startswith('plugin:'):
             return
         dialog = ExportPresetDialog(preset, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -328,7 +329,7 @@ class ExportPresetsWidget(QWidget):
 
     def _delete(self):
         preset = self.selected()
-        if not preset or preset.built_in:
+        if not preset or preset.built_in or preset.preset_id.startswith('plugin:'):
             return
         answer = FthrMessageDialog.question(
             self, 'Delete export preset?', f'Delete “{preset.name}”?',

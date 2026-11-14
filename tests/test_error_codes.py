@@ -26,12 +26,3 @@ def test_error_bar_title_format_includes_code():
     assert format_error_title('clip save failed') == (
         '[Error 014] CLIP SAVE FAILED')
     assert format_error_title('routine notice') == 'ROUTINE NOTICE'
-
-
-def test_docs_site_contains_the_complete_failure_code_registry():
-    docs_script = (
-        ROOT / 'public_html' / 'docs' / 'script.js'
-    ).read_text(encoding='utf-8')
-    for item in APP_FAILURE_CODES:
-        assert item.code in docs_script
-        assert item.title in docs_script

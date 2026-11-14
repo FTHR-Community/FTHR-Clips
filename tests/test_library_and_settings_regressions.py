@@ -167,7 +167,8 @@ def test_card_does_not_start_transparent_or_require_rounded_duration(
     assert image.save(str(path))
     card = clip_grid.ClipThumbnail(str(tmp_path / 'short.mp4'))
     qtbot.addWidget(card)
-    card.fade_in(delay_ms=600)
+    card.show()
+    assert card.isVisible()
     assert card.graphicsEffect() is None
     card.set_video_thumbnail(str(path), 0)
     assert card._thumbnail_ready

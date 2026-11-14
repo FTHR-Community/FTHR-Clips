@@ -19,6 +19,7 @@ class FocusMonitor(QObject):
         self._target  = target_name
         self._focused = True
         self._poll_running = False
+        self._generation = 0
         self._timer   = QTimer(self)
         self._timer.setInterval(2000)
         # Keep foreground-window lookup off the Qt main thread.
@@ -26,33 +27,48 @@ class FocusMonitor(QObject):
         self._title_polled.connect(self._apply_title)
 
     def _start_poll(self):
-        if not self._target or self._poll_running:
+        if not self._timer.isActive() or not self._target or self._poll_running:
             return
         self._poll_running = True
+        generation = self._generation
 
         def _work():
             try:
                 title = _get_active_window_title()
             except Exception:
                 title = None
-            self._title_polled.emit(title)
+            try:
+                self._title_polled.emit((generation, title))
+            except RuntimeError:
+                # The owning QObject can be deleted while a lookup finishes.
+                pass
 
         threading.Thread(target=_work, daemon=True,
                          name='fthr-focus-poll').start()
 
-    def _apply_title(self, title):
+    def _apply_title(self, result):
+        generation, title = result
         self._poll_running = False
-        self._evaluate(title)
+        if not self._timer.isActive():
+            return
+        if generation == self._generation:
+            self._evaluate(title)
+        else:
+            self._start_poll()
 
     def set_target(self, name: str):
+        if name != self._target:
+            self._generation += 1
         self._target  = name
         self._focused = True
 
     def start(self):
+        self._generation += 1
         self._focused = True
         self._timer.start()
 
     def stop(self):
+        self._generation += 1
         self._timer.stop()
 
     def _title_matches(self, title: str) -> bool:

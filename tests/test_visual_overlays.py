@@ -11,6 +11,14 @@ from core.camera_overlay import (
 from core.settings_manager import SettingsManager
 from core.ffmpeg_tools import get_ffmpeg_exe
 from ui.camera_overlay_editor import CameraOverlayEditor, UnifiedOverlayPreview
+from main import MainWindow
+
+
+class _VisualHost:
+    _captured_effects = MainWindow._captured_effects
+    _replace_finalization_output = MainWindow._replace_finalization_output
+    _rebind_manifest_after_owned_replace = MainWindow._rebind_manifest_after_owned_replace
+    _clip_dimensions = staticmethod(MainWindow._clip_dimensions)
 
 
 def test_overlay_geometry_uses_each_overlay_default():
@@ -141,7 +149,7 @@ def test_image_overlay_is_burned_into_a_real_video(tmp_path):
     overlay.fill(QColor('#ef2200'))
     assert overlay.save(str(image_path), 'PNG')
 
-    class _Host:
+    class _Host(_VisualHost):
         settings_manager = {
             'image_overlay_enabled': True,
             'image_overlay_path': str(image_path),
@@ -149,7 +157,6 @@ def test_image_overlay_is_burned_into_a_real_video(tmp_path):
             'image_overlay_fit': 'fit',
             'image_overlay_rect': DEFAULT_IMAGE_OVERLAY_RECT,
         }
-        _clip_dimensions = staticmethod(MainWindow._clip_dimensions)
         warnings = []
 
         def _record_finalization_warning(self, _clip_path, message):
@@ -190,7 +197,7 @@ def test_multiple_image_overlays_are_burned_in_one_pass(tmp_path):
     assert red.save(str(red_path), 'PNG')
     assert green.save(str(green_path), 'PNG')
 
-    class _Host:
+    class _Host(_VisualHost):
         settings_manager = {
             'image_overlay_enabled': True,
             'image_overlays': [
@@ -202,7 +209,6 @@ def test_multiple_image_overlays_are_burned_in_one_pass(tmp_path):
                  'rect': {'x': .04, 'y': .04, 'w': .24, 'h': .30}},
             ],
         }
-        _clip_dimensions = staticmethod(MainWindow._clip_dimensions)
         warnings = []
 
         def _record_finalization_warning(self, _clip_path, message):
@@ -246,7 +252,7 @@ def test_keyboard_overlay_is_streamed_into_a_real_video(tmp_path):
             for _ in range(output_fps):
                 yield frame
 
-    class _Host:
+    class _Host(_VisualHost):
         settings_manager = {
             'third_party_keyboard': {
                 'enabled': True,
@@ -255,7 +261,6 @@ def test_keyboard_overlay_is_streamed_into_a_real_video(tmp_path):
             },
         }
         _keyboard_overlay_capture = _KeyboardCapture()
-        _clip_dimensions = staticmethod(MainWindow._clip_dimensions)
         warnings = []
 
         def _record_finalization_warning(self, _clip_path, message):

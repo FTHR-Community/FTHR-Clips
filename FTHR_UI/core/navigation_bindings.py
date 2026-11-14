@@ -9,7 +9,7 @@ BINDING_DEFINITIONS = (
     ('switch_panel', 'Switch Clips / Settings', 'Tab+S', 'application', 'Application'),
     ('sidebar_next', 'Next sidebar destination', 'Shift+Down', 'application', 'Application'),
     ('sidebar_previous', 'Previous sidebar destination', 'Shift+Up', 'application', 'Application'),
-    ('toggle_detection', 'Toggle game detection', 'Shift+G', 'main', 'Application'),
+    ('toggle_detection', 'Switch game detection mode', 'Shift+G', 'main', 'Application'),
     ('restart_capture', 'Restart capture engine', 'Alt+Shift+R', 'main', 'Application'),
     ('library_scroll_up', 'Scroll clips up', 'Up', 'library', 'Clips'),
     ('library_scroll_down', 'Scroll clips down', 'Down', 'library', 'Clips'),

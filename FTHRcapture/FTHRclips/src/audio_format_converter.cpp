@@ -209,7 +209,9 @@ float DecodeSample(const uint8_t* bytes, bool is_float, uint16_t bits,
     if (is_float) {
         float value = 0.0f;
         std::memcpy(&value, bytes, sizeof(value));
-        return std::isfinite(value) ? std::clamp(value, -1.0f, 1.0f) : 0.0f;
+        // Float masters retain headroom. Limit only the final listening/export
+        // mix; clipping here permanently destroys recoverable source peaks.
+        return std::isfinite(value) ? value : 0.0f;
     }
     if (bits == 16) {
         int16_t value = 0;

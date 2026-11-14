@@ -3,6 +3,9 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from threading import RLock
+
+from core.replay_storage import REPLAY_STORAGE_KEY, ReplayStorageSettings
 
 
 class StoragePathError(OSError):
@@ -10,6 +13,7 @@ class StoragePathError(OSError):
 
 
 _MISSING = object()
+_SETTINGS_WRITER_LOCK = RLock()
 _CLIPS_SUBDIRECTORIES = (
     'Desktop', 'Recordings', 'Exported', 'Shared', 'Screenshots',
 )
@@ -84,6 +88,34 @@ def clips_directory_from(settings_manager=None, *, missing_default=None) -> Path
             'folder in FTHR Settings. No files were moved.') from None
 
 
+def clips_directory_lexical_from(settings_manager=None, *, missing_default=None) -> Path:
+    """Read the configured clips path without resolving filesystem links.
+
+    GUI admission compares the configured spelling only.  The storage worker
+    performs the authoritative non-reparse root identity check before walking.
+    """
+    if settings_manager is None:
+        return clips_directory_from(None, missing_default=missing_default)
+    try:
+        configured = settings_manager.get('clips_directory', _MISSING)
+        if configured is _MISSING:
+            if missing_default is None:
+                return clips_directory_from(settings_manager)
+            configured = missing_default
+        raw_path = os.fspath(configured)
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError('path is empty')
+        path = Path(os.path.expandvars(raw_path)).expanduser()
+        path = Path(os.path.abspath(os.fspath(path)))
+        if not path.is_absolute():
+            raise ValueError('path is not absolute')
+        return path
+    except (OSError, TypeError, ValueError) as exc:
+        raise StoragePathError(
+            'The configured clips storage folder is invalid. Choose a valid '
+            'folder in FTHR Settings. No files were moved.') from exc
+
+
 def recording_directory_from(settings_manager=None) -> Path:
     """Use the same absolute, environment-expanded path in the UI and engine."""
     try:
@@ -136,13 +168,25 @@ class SettingsManager:
         self.config_file = Path.home() / '.fthr' / 'settings.json'
         self._navigation_bindings_migrated = False
         self._retired_settings_removed = False
-        self.settings = self._load_settings()
-        if self._retired_settings_removed or self._navigation_bindings_migrated:
-            self.save_settings()
-    
+        self._persistence_blocked = False
+        self._corrupt_backup_path = None
+        self._corrupt_backup_verified = False
+        with _SETTINGS_WRITER_LOCK:
+            self.settings = self._load_settings()
+            if self._retired_settings_removed or self._navigation_bindings_migrated:
+                self.save_settings()
+
     def _load_settings(self) -> dict:
         """Load settings from config file"""
-        config_exists = self.config_file.exists()
+        existence_error = None
+        try:
+            self.config_file.stat()
+            config_exists = True
+        except FileNotFoundError:
+            config_exists = False
+        except OSError as error:
+            existence_error = error
+            config_exists = True  # Unreadable is not a new installation.
         # Do not migrate an existing user's library merely because a new
         # version has a different first-run default. Only a genuinely fresh
         # install consults the redirected Windows Videos known folder.
@@ -154,10 +198,13 @@ class SettingsManager:
             **UI_PERFORMANCE_DEFAULTS,
             "navigation_bindings": dict(DEFAULT_NAVIGATION_BINDINGS),
             "navigation_bindings_version": 5,
-            'reduce_ui_animations': False,
             'shortcuts_enabled': True,
             'shortcut_categories_enabled': {},
             'custom_clip_lengths': [],
+            REPLAY_STORAGE_KEY: ReplayStorageSettings().to_dict(),
+            'allow_replay_gaps': True,
+            'allow_low_fps_clips': True,
+            'capture_cursor': True,
             'show_kofi_widget': True,
             'clip_length': 30,       # seconds
             'framerate': 60,         # FPS
@@ -185,15 +232,12 @@ class SettingsManager:
             'mic_device_name': None, # str display name, or None for system default
             'mic_volume': 100,       # 0–200 (scaled in callbacks)
             'mic_loopback': False,   # real-time monitor: hear your own mic
-            # Gary Mode fades a calming image onto the active screen when the
-            # microphone level moves through the configured response range.
-            'gary_mode_enabled': False,
-            'gary_min_level': 55,
-            'gary_max_level': 85,
-            'gary_image_path': None,
             # Windows only: X hides the main window to the notification area.
             # The dedicated title-bar power control remains the full-exit path.
             'close_to_tray': True,
+            # Packaged Windows builds check the website; downloads are opt-in.
+            'app_updates_auto_check': False,
+            'app_updates_privacy_consent': False,
             # 'stretch' = fill the target rect, distort if aspect differs.
             # 'fit'     = preserve aspect, add black bars (letterbox/pillarbox).
             'scaling_mode': 'stretch',
@@ -222,6 +266,10 @@ class SettingsManager:
             'error_notifications_enabled': True,
             'capture_monitor': '',
             'clips_directory': str(clips_root),
+            # Per-root storage limits are intentionally opt-in.  Keep this
+            # mapping separate from the selected root so switching libraries
+            # never silently transfers a quota or an automation toggle.
+            'storage_policies': {},
             'imported_clip_folders': [],  # additional folders from other clipping software
             'recording_directory': str(clips_root / 'Recordings'),
             'selected_export_preset': 'discord',
@@ -243,18 +291,23 @@ class SettingsManager:
             'timeline_preview_strip_enabled': True,
             'hide_deleted_timeline_segments': False,
             'grid_show_edited_duration': False,
-            'game_detection_enabled':  False,
             # Foreground-game handoff. ``auto`` switches capture immediately;
             # ``prompt`` waits for the configured accept/dismiss hotkeys.
             'game_detection_mode':     'auto',
+            'game_detection_enabled':  True,
             # Manual rules can also carry legacy per-game crop overrides.
             'game_detection_custom_games': [],
             # If enabled, an automatically selected game is replaced by
             # desktop capture after the game window has actually closed.
             'game_detection_fallback_desktop': False,
             'capture_mode':           'desktop',
+            # Track whether the selected source was picked manually or
+            # selected by game detection for startup and game-close handling.
+            'capture_source_authority': 'manual',
             'target_hwnd':            0,
             'target_window_name':     '',
+            # Stable manual HWND identity; a reused HWND is not the same target.
+            'target_window_identity': None,
             # Stable future-save folder identity; title remains separate UI text.
             'target_clip_group':      '',
             'audio_capture_enabled':   True,
@@ -262,6 +315,11 @@ class SettingsManager:
             # default. Separated streams are an explicit opt-in because they
             # require a multi-track editor/export path.
             'audio_capture_mode':      'combined',
+            'audio_source_mode':       None,
+            'audio_device_tracks':     [],
+            'per_app_audio_tracks':    None,
+            'application_audio_exclusions': [],
+            'keep_system_audio_backup': True,
             # Visual notification card. Sound cues remain active when this
             # is disabled because they are handled by the same sound-only
             # helper process.
@@ -302,13 +360,16 @@ class SettingsManager:
             # and can be reset to the standard background at any time.
             'input_overlay_preview_background': '',
         }
-        
+
         if not config_exists:
             return default_settings
 
+        raw = None
         try:
-            with open(self.config_file, 'r') as f:
-                loaded = json.load(f)
+            if existence_error is not None:
+                raise existence_error
+            raw = self.config_file.read_bytes()
+            loaded = json.loads(raw)
             # Merge persisted settings over defaults, including one level of nested
             # keys, so older files retain new defaults without losing user choices.
             merged = dict(default_settings)
@@ -317,6 +378,18 @@ class SettingsManager:
                     merged[k] = {**merged[k], **v}
                 else:
                     merged[k] = v
+            mode = str(merged['game_detection_mode']).lower()
+            if (merged['game_detection_mode'] != mode
+                    or mode not in {'auto', 'prompt'}):
+                merged['game_detection_mode'] = (
+                    'prompt' if mode == 'prompt' else 'auto')
+                if mode == 'paused':
+                    merged['game_detection_enabled'] = False
+                self._retired_settings_removed = True
+            merged['game_detection_enabled'] = merged['game_detection_enabled'] is not False
+            merged['allow_replay_gaps'] = merged['allow_replay_gaps'] is True
+            merged['allow_low_fps_clips'] = merged['allow_low_fps_clips'] is True
+            merged['capture_cursor'] = merged['capture_cursor'] is not False
             if 'clips_directory' not in loaded:
                 merged['clips_directory'] = str(_legacy_clips_directory())
             if 'recording_directory' not in loaded:
@@ -378,7 +451,7 @@ class SettingsManager:
                 merged.pop(key, None)
             retired_hotkey = merged.get('hotkeys', {}).pop('save_extended_clip', None)
             self._retired_settings_removed = bool(
-                retired_hotkey is not None or
+                self._retired_settings_removed or retired_hotkey is not None or
                 retired_overlay_keys or retired_audio_keys or retired_feature_keys)
             if ('image_overlays' not in loaded
                     and str(loaded.get('image_overlay_path', '') or '')):
@@ -399,25 +472,63 @@ class SettingsManager:
                     loaded.get('camera_position', 'bottom-right'),
                     loaded.get('camera_size', 'medium'),
                 )
+            merged[REPLAY_STORAGE_KEY] = ReplayStorageSettings.from_value(
+                merged.get(REPLAY_STORAGE_KEY)).to_dict()
             return merged
         except StoragePathError:
             raise
         except Exception as e:
-            print(f"Failed to load settings: {e}")
-            # Keep invalid settings for diagnosis before falling back to defaults.
+            # A partial migration is not a reason to overwrite a corrupt input
+            # automatically. Defaults remain RAM-only until an explicit save.
+            self._navigation_bindings_migrated = False
+            self._retired_settings_removed = False
+            preservation_error = None
             try:
-                self.config_file.replace(self.config_file.with_suffix('.json.corrupt'))
-                print(f"Corrupt settings backed up to {self.config_file.with_suffix('.json.corrupt')}")
-            except OSError:
+                if raw is None:
+                    raise OSError('Original settings bytes could not be read')
+                # Exclusive creation preserves previous quarantines. Preserve
+                # precisely the bytes passed to JSON, not a later reread.
+                with tempfile.NamedTemporaryFile(
+                        mode='wb', dir=self.config_file.parent,
+                        prefix=self.config_file.name + '.corrupt-', delete=False) as backup:
+                    self._corrupt_backup_path = Path(backup.name)
+                    if backup.write(raw) != len(raw):
+                        raise OSError('Incomplete settings preservation write')
+                    backup.flush()
+                    os.fsync(backup.fileno())
+                self._corrupt_backup_verified = True
+            except Exception as backup_error:
+                self._persistence_blocked = True
+                preservation_error = backup_error
+            try:
+                print(f'Failed to load settings: {e}. Using defaults in memory.')
+                if preservation_error is not None:
+                    print('Settings persistence blocked: original settings could not '
+                          f'be safely preserved ({preservation_error}). '
+                          f'Unverified backup, if created: {self._corrupt_backup_path}')
+                else:
+                    print(f'Original settings preserved at {self._corrupt_backup_path}; '
+                          'source file left unchanged.')
+            except Exception:
+                # Console failures cannot lift the persistence safety latch.
                 pass
             return default_settings
-    
-    def save_settings(self):
-        """Save current settings to file"""
+
+    def _persist_settings_candidate(self, candidate: dict) -> bool:
+        """Atomically persist one detached settings candidate.
+
+        The candidate writer is deliberately narrow so the game-profile API
+        can stage a document and publish it to RAM only after the replace
+        succeeds.  Generic settings persistence continues to use this same
+        atomic path and retains its historical return/error behavior.
+        """
+        if getattr(self, '_persistence_blocked', False):
+            return False
         try:
             self.config_file.parent.mkdir(parents=True, exist_ok=True)
             # Drop runtime-only scratch values before persisting user settings.
-            persistable = {k: v for k, v in self.settings.items() if not k.startswith('_')}
+            persistable = {k: v for k, v in candidate.items()
+                           if not k.startswith('_')}
             # Write to a temp file first, then atomically replace.
             # A crash or SIGKILL during a direct write truncates the JSON and
             # loses all settings on next launch.
@@ -433,6 +544,14 @@ class SettingsManager:
             except OSError:
                 pass
             return False
+        return True
+
+    def save_settings(self):
+        """Save current settings to file."""
+        with _SETTINGS_WRITER_LOCK:
+            saved = self._persist_settings_candidate(self.settings)
+        if not saved:
+            return False
         try:
             print(f"[Settings] Saved to {self.config_file}")
         except Exception:
@@ -440,15 +559,143 @@ class SettingsManager:
             # reported settings failure.
             pass
         return True
-    
+
+    def read_game_capture_profiles(self):
+        """Read the strict per-game catalog without inserting defaults."""
+        from core.game_profiles import STORAGE_KEY, catalog_from_raw
+        from core.game_profiles import empty_catalog
+
+        with _SETTINGS_WRITER_LOCK:
+            if STORAGE_KEY not in self.settings:
+                return empty_catalog()
+            raw = self.settings[STORAGE_KEY]
+            return catalog_from_raw(raw)
+
+    def save_game_capture_profiles(self, catalog, *, expected_revision) -> bool:
+        """Persist a versioned per-game catalog with same-manager CAS.
+
+        The compare, transition validation, stage, atomic replace and RAM
+        publication are one serialized operation for this manager.  The
+        contract intentionally does not claim coordination with another
+        process or an external editor of the same JSON file.
+        """
+        from core.game_profiles import STORAGE_KEY
+        from core.game_profiles import catalog_from_dict
+        from core.game_profiles import validate_catalog_transition
+
+        with _SETTINGS_WRITER_LOCK:
+            current = self.read_game_capture_profiles()
+            if (isinstance(expected_revision, bool)
+                    or not isinstance(expected_revision, int)
+                    or expected_revision < 0):
+                raise ValueError('expected_revision must be a non-negative integer')
+            if expected_revision != current.revision:
+                return False
+            candidate = catalog_from_dict(catalog.to_dict()
+                                          if hasattr(catalog, 'to_dict')
+                                          else catalog)
+            validate_catalog_transition(current, candidate)
+            if candidate.to_dict() == current.to_dict():
+                return True
+
+            # Keep the old in-memory value visible until the disk commit is
+            # successful.  A shallow copy is sufficient because no nested
+            # value is mutated while the staged candidate is serialized.
+            staged = dict(self.settings)
+            staged[STORAGE_KEY] = candidate.to_dict()
+            if not self._persist_settings_candidate(staged):
+                return False
+            self.settings[STORAGE_KEY] = candidate.to_dict()
+            return True
+
+    def read_capture_admission_policy(self):
+        """Read the executable-admission policy without inserting defaults."""
+        from core.capture_admission import STORAGE_KEY, empty_policy
+        from core.capture_admission import policy_from_raw
+
+        with _SETTINGS_WRITER_LOCK:
+            if STORAGE_KEY not in self.settings:
+                return empty_policy()
+            return policy_from_raw(self.settings[STORAGE_KEY])
+
+    def save_capture_admission_policy(self, policy, *, expected_revision) -> bool:
+        """Persist an admission policy with same-manager revision CAS.
+
+        The candidate is fully validated and staged before the successful
+        atomic write is published to RAM.  This intentionally provides the
+        same-manager guarantee as the game-profile API and makes no claim
+        about another process editing the settings file concurrently.
+        """
+        from core.capture_admission import STORAGE_KEY
+        from core.capture_admission import policy_from_dict
+        from core.capture_admission import validate_policy_transition
+
+        with _SETTINGS_WRITER_LOCK:
+            current = self.read_capture_admission_policy()
+            if (type(expected_revision) is not int
+                    or expected_revision < 0):
+                raise ValueError(
+                    'expected_revision must be a non-negative integer')
+            if expected_revision != current.revision:
+                return False
+            candidate = policy_from_dict(
+                policy.to_dict() if hasattr(policy, 'to_dict') else policy)
+            validate_policy_transition(current, candidate)
+            if candidate.to_dict() == current.to_dict():
+                return True
+
+            staged = dict(self.settings)
+            staged[STORAGE_KEY] = candidate.to_dict()
+            if not self._persist_settings_candidate(staged):
+                return False
+            self.settings[STORAGE_KEY] = candidate.to_dict()
+            return True
+
+    def storage_policy_for(self, root, *, strict=False):
+        """Return the validated policy for one canonical clips root.
+
+        Invalid or future entries are fail-closed.  They are not repaired here:
+        a later settings save must not erase a policy the current build cannot
+        interpret.
+        """
+        from core.library_storage import policy_for_root
+        return policy_for_root(self, root, strict=strict)
+
+    def save_storage_policy(self, root, policy) -> bool:
+        """Persist one validated root policy with RAM rollback on failure."""
+        from core.library_storage import StoragePolicy, policy_map_with
+        if not isinstance(policy, StoragePolicy):
+            raise TypeError('policy must be a StoragePolicy')
+        # Revalidate at the persistence boundary so a future caller cannot
+        # bypass the strict JSON contract with a mutable/subclassed object.
+        policy = StoragePolicy.from_mapping(policy.to_dict(), strict=True)
+        previous = self.settings.get('storage_policies', _MISSING)
+        updated = policy_map_with(self, root, policy)
+        self.settings['storage_policies'] = updated
+        try:
+            saved = bool(self.save_settings())
+        except Exception:
+            if previous is _MISSING:
+                self.settings.pop('storage_policies', None)
+            else:
+                self.settings['storage_policies'] = previous
+            raise
+        if saved:
+            return True
+        if previous is _MISSING:
+            self.settings.pop('storage_policies', None)
+        else:
+            self.settings['storage_policies'] = previous
+        return False
+
     def get(self, key: str, default=None):
         """Get a setting value"""
         return self.settings.get(key, default)
-    
+
     def set(self, key: str, value):
         """Set a setting value"""
         self.settings[key] = value
-    
+
     def update(self, settings_dict: dict):
         """Update multiple settings at once"""
         self.settings.update(settings_dict)

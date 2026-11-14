@@ -11,6 +11,16 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="tests\capture_source_safety_test.cpp" />
+    <ClCompile Include="tests\native_encoder_probe_test.cpp" />
+    <ClCompile Include="..\FTHRclips\src\native_encoder_probe.cpp" />
+    <ClCompile Include="..\FTHRclips\src\hdr_frame_converter.cpp" />
+    <ClCompile Include="..\FTHRclips\src\bgra_frame_scaler.cpp" />
+    <ClCompile Include="tests\bgra_frame_scaler_test.cpp" />
+    <ClCompile Include="..\FTHRclips\src\replay_encoder_factory.cpp" />
+    <ClCompile Include="..\FTHRclips\src\hardware_encoder.cpp" />
+    <ClCompile Include="tests\wgc_window_lifecycle_test.cpp" />
+    <ClCompile Include="..\FTHRclips\src\wgc_window_lifecycle.cpp" />
     <ClCompile Include="tests\capture_scale_geometry_test.cpp" />
     <ClCompile Include="tests\nvenc_input_lifecycle_test.cpp" />
     <ClCompile Include="tests\continuous_recording_writer_test.cpp" />
@@ -19,13 +29,22 @@
     <ClCompile Include="tests\windows_process_loopback_audio_provider_test.cpp" />
     <ClCompile Include="tests\windows_microphone_audio_provider_test.cpp" />
     <ClCompile Include="tests\audio_format_converter_test.cpp" />
+    <ClCompile Include="tests\audio_capture_recovery_test.cpp" />
+    <ClCompile Include="..\FTHRclips\src\audio_capture.cpp" />
+    <ClCompile Include="..\FTHRclips\src\audio_ring_buffer.cpp" />
     <ClCompile Include="tests\amf_replay_encoder_test.cpp" />
     <ClCompile Include="tests\software_replay_encoder_test.cpp" />
     <ClCompile Include="tests\qsv_replay_encoder_test.cpp" />
     <ClCompile Include="tests\windows_replay_policy_test.cpp" />
+    <ClCompile Include="tests\replay_memory_budget_test.cpp" />
     <ClCompile Include="tests\windows_monitor_resolver_test.cpp" />
+    <ClCompile Include="tests\capture_timeline_test.cpp" />
     <ClCompile Include="tests\windows_capture_border_policy_test.cpp" />
     <ClCompile Include="tests\windows_capture_backend_policy_test.cpp" />
+    <ClCompile Include="tests\dxgi_cursor_test.cpp" />
+    <ClCompile Include="tests\replay_disk_store_test.cpp" />
+    <ClCompile Include="..\FTHRclips\src\dxgi_cursor.cpp" />
+    <ClCompile Include="..\FTHRclips\src\replay_disk_store.cpp" />
     <ClCompile Include="..\FTHRclips\src\encoded_ring_buffer.cpp" />
     <ClCompile Include="..\FTHRclips\src\save_clip_task.cpp" />
     <ClCompile Include="..\FTHRclips\src\continuous_recording_writer.cpp" />
@@ -90,7 +109,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)..\FTHRclips\third_party\ffmpeg\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;d3d11.lib;dxgi.lib;User32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;User32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -107,7 +126,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)..\FTHRclips\third_party\ffmpeg\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;d3d11.lib;dxgi.lib;User32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;User32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

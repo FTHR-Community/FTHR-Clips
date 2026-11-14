@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include "shared_memory.h"
 
 namespace fthr {
@@ -13,6 +14,21 @@ enum class WindowsCaptureBackendPreference : uint32_t {
     Wgc = 2,
 };
 
+inline bool ParseWindowsCaptureBackendPreference(
+    const char* value, WindowsCaptureBackendPreference& preference) noexcept {
+    if (!value) return false;
+    if (std::strcmp(value, "auto") == 0) {
+        preference = WindowsCaptureBackendPreference::Auto;
+    } else if (std::strcmp(value, "dxgi") == 0) {
+        preference = WindowsCaptureBackendPreference::Dxgi;
+    } else if (std::strcmp(value, "wgc") == 0) {
+        preference = WindowsCaptureBackendPreference::Wgc;
+    } else {
+        return false;
+    }
+    return true;
+}
+
 enum class WindowsCaptureBackend : uint32_t {
     None = 0,
     DxgiDesktop,
@@ -24,8 +40,17 @@ enum class WindowsCapturePolicyFailure : uint32_t {
     None = 0,
     MissingWindowTarget,
     WindowRequiresWgc,
+    CursorExclusionRequiresWgc,
     UnknownPreference,
 };
+
+// Desktop Duplication cannot safely normalize rotated outputs in this path.
+// DXGI_MODE_ROTATION_UNSPECIFIED is zero and IDENTITY is one in the DXGI
+// contract; every rotated mode is rejected during startup so Auto can try the
+// exact-monitor WGC fallback before any capture thread starts.
+constexpr bool IsSupportedDxgiOutputRotation(uint32_t rotation) noexcept {
+    return rotation == 0u || rotation == 1u;
+}
 
 struct WindowsCaptureStartupPlan {
     bool supported = false;
@@ -37,20 +62,22 @@ struct WindowsCaptureStartupPlan {
 };
 
 // A cached WGC item-size mismatch has the same source semantics as a fresh
-// frame ContentSize mismatch: monitor capture can be reconfigured, while a
-// selected window remains a backend failure only.
+// frame ContentSize mismatch. Both source types require a fresh generation;
+// the selected HWND is retained by the caller's identity guard.
 constexpr uint32_t WgcSizeMismatchHealthFlags(bool monitor_item) noexcept {
-    return CAPTURE_HEALTH_BACKEND_FAILED
-        | (monitor_item ? CAPTURE_HEALTH_RECONFIGURE_REQUIRED : 0u);
+    (void)monitor_item;
+    return CAPTURE_HEALTH_BACKEND_FAILED | CAPTURE_HEALTH_RECONFIGURE_REQUIRED;
 }
 
 // Select only startup paths that preserve the user's selected source. The
-// only automatic fallback is desktop WGC to DXGI on the same resolved monitor.
+// The only automatic fallback is desktop DXGI to WGC on the same resolved
+// monitor.
 constexpr WindowsCaptureStartupPlan PlanWindowsCaptureStartup(
     bool window_mode,
     bool window_target_available,
     bool protected_window,
-    WindowsCaptureBackendPreference preference) noexcept {
+    WindowsCaptureBackendPreference preference,
+    bool capture_cursor = true) noexcept {
     if (preference != WindowsCaptureBackendPreference::Auto
         && preference != WindowsCaptureBackendPreference::Dxgi
         && preference != WindowsCaptureBackendPreference::Wgc) {
@@ -63,6 +90,17 @@ constexpr WindowsCaptureStartupPlan PlanWindowsCaptureStartup(
         return {false, WindowsCaptureBackend::None,
                 WindowsCaptureBackend::None, false,
                 WindowsCapturePolicyFailure::MissingWindowTarget};
+    }
+
+    // Duplication may already contain a software cursor in desktop pixels.
+    // Only WGC can guarantee exclusion of the system pointer.
+    if (!capture_cursor) {
+        if (preference == WindowsCaptureBackendPreference::Dxgi) {
+            return {false, WindowsCaptureBackend::None,
+                    WindowsCaptureBackend::None, false,
+                    WindowsCapturePolicyFailure::CursorExclusionRequiresWgc};
+        }
+        preference = WindowsCaptureBackendPreference::Wgc;
     }
 
     if (window_mode) {
@@ -89,8 +127,8 @@ constexpr WindowsCaptureStartupPlan PlanWindowsCaptureStartup(
                 WindowsCaptureBackend::None, false,
                 WindowsCapturePolicyFailure::None};
     }
-    return {true, WindowsCaptureBackend::WgcMonitor,
-            WindowsCaptureBackend::DxgiDesktop, false,
+    return {true, WindowsCaptureBackend::DxgiDesktop,
+            WindowsCaptureBackend::WgcMonitor, false,
             WindowsCapturePolicyFailure::None};
 }
 

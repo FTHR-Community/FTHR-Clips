@@ -9,6 +9,8 @@
 #include "dxgi_replay_cadence.h"
 #include "encoded_replay_health.h"
 #include "wgc_cadence_wait.h"
+#include "wgc_update_interval_policy.h"
+#include "wgc_readback_queue.h"
 
 #include <algorithm>
 #include <array>
@@ -70,6 +72,99 @@ void WgcWaitPreservesDeadlineAndInterruption() {
         lock.unlock();
         stopper.join();
     }
+}
+
+void WgcUpdateIntervalVerifiesOptionalPropertyWithoutBlockingStartup() {
+    using fthr::wgc::ConfigureUpdateInterval;
+    using fthr::wgc::UpdateIntervalStatus;
+    struct Session {
+        bool supported = true;
+        int32_t query_error = 0;
+        int32_t initial_read_error = 0;
+        int32_t set_error = 0;
+        int32_t readback_error = 0;
+        bool apply = true;
+        int64_t interval = 160'000;
+        int queries = 0;
+        int reads = 0;
+        int writes = 0;
+
+        fthr::wgc::UpdateIntervalResult Configure(uint32_t fps = 120) {
+            return ConfigureUpdateInterval(fps,
+                [&](bool& present) {
+                    ++queries;
+                    if (!query_error) present = supported;
+                    return query_error;
+                },
+                [&](int64_t& observed) {
+                    const int32_t error = reads++ == 0 ? initial_read_error : readback_error;
+                    if (!error) observed = interval;
+                    return error;
+                },
+                [&](int64_t requested) {
+                    ++writes;
+                    if (apply && !set_error) interval = requested;
+                    return set_error;
+                });
+        }
+    };
+
+    for (const uint32_t fps : {1u, 24u, 60u, 120u, 144u, 240u, 360u}) {
+        Session paced_capture;
+        const auto changed = paced_capture.Configure(fps);
+        CheckPolicy(changed.status == UpdateIntervalStatus::Applied && changed.default_100ns == 160'000
+                && changed.requested_100ns == 0 && changed.effective_100ns == 0
+                && paced_capture.reads == 2 && paced_capture.writes == 1,
+            "a valid target removes the WGC update throttle and verifies zero readback");
+    }
+    for (const uint32_t fps : {0u, 361u, std::numeric_limits<uint32_t>::max()}) {
+        Session invalid;
+        const auto skipped = invalid.Configure(fps);
+        CheckPolicy(skipped.status == UpdateIntervalStatus::InvalidFps && skipped.requested_100ns == -1
+                && invalid.queries == 0 && invalid.reads == 0 && invalid.writes == 0,
+            "an invalid target is distinct from a valid zero interval and never accesses the property");
+    }
+    Session unavailable;
+    unavailable.supported = false;
+    CheckPolicy(unavailable.Configure().status == UpdateIntervalStatus::OsUnavailable
+            && unavailable.queries == 1 && unavailable.reads == 0 && unavailable.writes == 0,
+        "older Windows keeps default WGC session behavior without a property call");
+    Session query_failure;
+    query_failure.query_error = -1;
+    const auto failed_query = query_failure.Configure();
+    CheckPolicy(failed_query.status == UpdateIntervalStatus::AvailabilityCheckFailed
+            && failed_query.hresult == -1 && query_failure.reads == 0 && query_failure.writes == 0,
+        "a failed WGC availability probe records its error and leaves capture settings alone");
+    Session read_failure;
+    read_failure.initial_read_error = -2;
+    const auto failed_read = read_failure.Configure();
+    CheckPolicy(failed_read.status == UpdateIntervalStatus::DefaultReadFailed
+            && failed_read.hresult == -2 && failed_read.default_100ns == -1 && read_failure.writes == 0,
+        "failure to read the WGC default does not mutate the session");
+    Session set_failure;
+    set_failure.set_error = -3;
+    const auto failed_set = set_failure.Configure();
+    CheckPolicy(failed_set.status == UpdateIntervalStatus::SetFailed && failed_set.hresult == -3
+            && failed_set.default_100ns == 160'000 && failed_set.effective_100ns == 160'000,
+        "a failed WGC setter reports the error and still observes the effective interval");
+    Session readback_failure;
+    readback_failure.readback_error = -4;
+    const auto failed_readback = readback_failure.Configure();
+    CheckPolicy(failed_readback.status == UpdateIntervalStatus::ReadbackFailed
+            && failed_readback.hresult == -4 && failed_readback.effective_100ns == -1,
+        "a failed WGC readback does not claim the requested interval took effect");
+    Session mismatch;
+    mismatch.apply = false;
+    const auto unchanged = mismatch.Configure();
+    CheckPolicy(unchanged.status == UpdateIntervalStatus::ReadbackMismatch
+            && unchanged.requested_100ns == 0 && unchanged.effective_100ns == 160'000,
+        "a successful WGC setter with different readback does not claim the target interval");
+    Session already;
+    already.interval = 0;
+    const auto configured = already.Configure();
+    CheckPolicy(configured.status == UpdateIntervalStatus::AlreadyConfigured
+            && configured.effective_100ns == 0 && already.reads == 1 && already.writes == 0,
+        "a WGC session with the desired interval needs no setter call");
 }
 
 void SameAdapterVendorMatrixIsAuthoritative() {
@@ -653,6 +748,52 @@ void ReplayHealthReportsExactSavePredicates() {
             && gap_report.intervals_over_gap_threshold == 1
             && gap_report.largest_gap_s > gap_report.max_allowed_gap_s,
         "genuine wall gaps report actual/required threshold predicates");
+
+    using fthr::replay_health::Evaluate;
+    using fthr::replay_health::Failure;
+    auto dropped_frames = ReplayHealthFixture(2, 60);
+    // At 60 FPS, retaining the endpoints of these two runs produces gaps
+    // of 57 and 42 frame intervals (0.95 s and 0.70 s).
+    dropped_frames.packets.erase(
+        dropped_frames.packets.begin() + 78, dropped_frames.packets.begin() + 119);
+    dropped_frames.packets.erase(
+        dropped_frames.packets.begin() + 21, dropped_frames.packets.begin() + 77);
+    const auto strict = Evaluate(dropped_frames);
+    const auto allowed = Evaluate(dropped_frames, true, true);
+    CheckPolicy(!strict.accepted && strict.failure == Failure::LargeTimelineGap
+            && allowed.accepted && allowed.failure == Failure::None
+            && allowed.tolerated_cadence_failure == Failure::LargeTimelineGap
+            && allowed.intervals_over_gap_threshold == 2
+            && std::abs(allowed.largest_pts_gap_s - 0.95) < 0.001
+            && allowed.actual_coverage_s == strict.actual_coverage_s,
+        "the opt-in admits real replay gaps while preserving timeline diagnostics");
+
+    const auto low_rate = ReplayHealthObservedRateFixture(2, 60, 30);
+    CheckPolicy(Evaluate(low_rate).failure == Failure::LowEffectiveRate
+            && Evaluate(low_rate, true, false).failure == Failure::LowEffectiveRate
+            && Evaluate(low_rate, false, true).accepted
+            && Evaluate(low_rate, false, true).tolerated_cadence_failure == Failure::LowEffectiveRate,
+        "low-rate acceptance is independent of the gap opt-in");
+    CheckPolicy(Evaluate(dropped_frames, false, true).failure == Failure::LargeTimelineGap
+            && Evaluate(dropped_frames, true, false).failure == Failure::LowEffectiveRate,
+        "each cadence policy enforces its own check when both defects occur");
+    CheckPolicy(Evaluate(ReplayHealthFixture(2, 60), true).tolerated_cadence_failure
+            == Failure::None,
+        "the opt-in leaves a healthy replay free of cadence warnings");
+
+    auto stale = dropped_frames;
+    stale.target_end_wall_qpc = stale.packets.back().wall_qpc + 1'100'000;
+    auto mixed_generation = dropped_frames;
+    ++mixed_generation.packets.back().generation;
+    auto short_replay = dropped_frames;
+    short_replay.requested_duration_seconds = 3;
+    CheckPolicy(Evaluate({}, true).failure == Failure::Empty
+            && Evaluate(wall_regression, true).failure == Failure::InvalidTimeline
+            && Evaluate(pts_regression, true).failure == Failure::InvalidTimeline
+            && Evaluate(stale, true).failure == Failure::StaleEnd
+            && Evaluate(mixed_generation, true).failure == Failure::GenerationDiscontinuity
+            && Evaluate(short_replay, true).failure == Failure::InsufficientCoverage,
+        "the opt-in preserves empty, invalid timeline, freshness, generation and coverage checks");
 }
 
 void ReplaySaveClassificationCoversEvidenceBoundaries() {
@@ -734,6 +875,76 @@ void ReplaySaveClassificationCoversEvidenceBoundaries() {
                     Failure::StaleEnd, SnapshotEvidence{}, encoder, 30.0)
                 == Classification::EncoderStarvation,
         "pending submissions without output classify encoder starvation");
+}
+
+void OutputCadenceIsSeparateFromPipelineLiveness() {
+    using namespace fthr::capture_pipeline_health;
+    Snapshot sample;
+    sample.wgc_backend = true;
+    sample.expected_fps = 120;
+    sample.observation_interval_ms = 10000;
+    sample.source_frames = 1318;
+    sample.accepted_source_frame_delta = 1318;
+    sample.encoder_submissions = 1048;
+    sample.encoded_packets = 1048;
+    sample.replay_ring_insertions = 1048;
+    CheckPolicy(Classify(sample) == Classification::Healthy
+            && ClassifyOutputCadence(sample, 1048, true, false) == OutputCadence::Degraded,
+        "a live pipeline with the reported WGC delivery and 104.8 encoded FPS misses 120 FPS cadence");
+    CheckPolicy(ClassifyOutputCadence(sample, 1080, true, false) == OutputCadence::OnTarget,
+        "a complete observation at the 90 percent boundary is on target");
+    CheckPolicy(ClassifyOutputCadence(sample, 1079, true, false) == OutputCadence::Degraded,
+        "output just under 90 percent is degraded");
+    CheckPolicy(ClassifyOutputCadence(sample, 1048, false, false) == OutputCadence::NotObserved,
+        "the first observation interval is warmup");
+    CheckPolicy(ClassifyOutputCadence(sample, 1048, true, true) == OutputCadence::NotObserved,
+        "a sampled pause invalidates that interval even after output resumes");
+    sample.interval_generation_resets = 1;
+    CheckPolicy(ClassifyOutputCadence(sample, 1048, true, false) == OutputCadence::NotObserved,
+        "a generation reset invalidates output cadence for that interval");
+    sample.interval_generation_resets = 0;
+    sample.accepted_source_frame_delta = 0;
+    CheckPolicy(ClassifyOutputCadence(sample, 1048, true, false) == OutputCadence::NotObserved,
+        "a static image does not establish sustained output loss");
+    sample.accepted_source_frame_delta = 1200;
+    sample.encoded_output_age_ms = 3000;
+    CheckPolicy(ClassifyOutputCadence(sample, 1048, true, false) == OutputCadence::NotObserved
+            && Classify(sample) == Classification::EncoderOutputStallCandidate,
+        "a stalled output is classified by liveness");
+}
+
+void StageTimingReportsBoundedIntervalPercentiles() {
+    fthr::CaptureStageTiming timing;
+    for (int i = 0; i < 95; ++i) timing.Record(230);
+    for (int i = 0; i < 4; ++i) timing.Record(16001);
+    timing.Record(90000);
+    const auto distribution = timing.Take();
+    CheckPolicy(distribution.samples == 100 && distribution.p95_us == 250
+            && distribution.p99_us == 17000,
+        "stage histogram reports upper bucket boundaries at the requested ranks");
+    CheckPolicy(timing.Take().samples == 0, "stage intervals consume each sample once");
+    timing.Record(80000);
+    CheckPolicy(timing.Take().p99_us == -1, "out-of-range stage time reports overflow");
+}
+
+void WgcReadbackQueuePreservesTimingAndSourceBoundaries() {
+    fthr::wgc::ReadbackQueue queue;
+    const auto seed = queue.Queue(100, 1);
+    CheckPolicy(seed.write_slot == 0 && !seed.read, "a new readback queue seeds before mapping");
+    const auto next = queue.Queue(185, 1);
+    CheckPolicy(next.write_slot == 1 && next.read && next.read->slot == 0
+            && next.read->qpc == 100, "readback preserves the previous capture timestamp");
+    const auto later = queue.Queue(300, 1);
+    CheckPolicy(later.write_slot == 0 && later.read && later.read->slot == 1
+            && later.read->qpc == 185, "read and write slots alternate without reusing the mapped surface");
+    const auto replacement = queue.Queue(420, 2);
+    CheckPolicy(!replacement.read, "a generation change discards pending readback pixels");
+    const auto restored = queue.Queue(507, 2);
+    CheckPolicy(restored.read && restored.read->qpc == 420,
+        "the first valid frame after a generation change retains its timestamp");
+    queue.Reset();
+    CheckPolicy(!queue.Queue(700, 2).read,
+        "an explicit focus or resize pause clears queued pixels even within one generation");
 }
 
 void CapturePipelineHealthClassifiesBoundaries() {
@@ -1877,6 +2088,132 @@ void CadenceTracksQuietHoldGenerationAndQpcRaces() {
         "capture generation change disarms old texture until a new-generation image seeds it");
 }
 
+void CadenceAcquireWaitRespectsRemainingProcessingBudget() {
+    using fthr::dxgi_replay::Cadence;
+    constexpr int64_t kFrequency = 1'000'003;
+    constexpr int64_t kEpoch = 1'000'000;
+
+    struct RateAndWait { uint32_t fps; uint32_t on_time_wait_ms; };
+    constexpr RateAndWait kRates[] = {
+        {24, 12}, {30, 12}, {60, 12}, {120, 6}, {144, 5}, {240, 3}, {360, 2}};
+    for (const auto& [fps, on_time_wait_ms] : kRates) {
+        Cadence cadence(fps, kFrequency);
+        const auto slot = cadence.Schedule(kEpoch);
+        const int64_t period = cadence.PeriodQpc();
+        const int64_t deadline = kEpoch + period;
+        const int64_t reserve = period / 4 + (period % 4 != 0);
+        const int64_t last_full_wait = deadline - reserve - 2'001;
+        CheckPolicy(slot.due && slot.skipped_slots == 0
+                && cadence.AcquireTimeoutMs(slot.tick, kEpoch) == on_time_wait_ms,
+            "on-time DXGI acquire waits use a 12 ms cap and shrink at higher frame rates");
+        CheckPolicy(cadence.AcquireTimeoutMs(slot.tick, last_full_wait) == 2
+                && cadence.AcquireTimeoutMs(slot.tick, last_full_wait + 1) == 1
+                && cadence.AcquireTimeoutMs(slot.tick, deadline - reserve - 1'001) == 1
+                && cadence.AcquireTimeoutMs(slot.tick, deadline - reserve - 1'000) == 0,
+            "wait rounds down to whole milliseconds and spends only remaining QPC budget");
+        CheckPolicy(cadence.AcquireTimeoutMs(slot.tick, kEpoch, period - 1'001) == 1
+                && cadence.AcquireTimeoutMs(slot.tick, kEpoch, period - 1'000) == 0
+                && cadence.AcquireTimeoutMs(slot.tick, kEpoch, period) == 0
+                && cadence.AcquireTimeoutMs(slot.tick, kEpoch, -1) == on_time_wait_ms,
+            "recent processing can reserve extra time and cannot reduce the minimum reserve");
+        const int64_t busy_reserve = period / 2 + period % 2;
+        const int64_t late_call = deadline - busy_reserve - 1'001;
+        CheckPolicy(cadence.AcquireTimeoutMs(slot.tick, late_call, busy_reserve) == 1
+                && cadence.AcquireTimeoutMs(slot.tick, late_call + 1, busy_reserve) == 0,
+            "a late call and measured work both come out of the same deadline budget");
+        CheckPolicy(cadence.AcquireTimeoutMs(slot.tick, 0) == 0
+                && cadence.AcquireTimeoutMs(slot.tick, kEpoch - 1) == 0
+                && cadence.AcquireTimeoutMs(slot.tick, deadline) == 0
+                && cadence.AcquireTimeoutMs(slot.tick + 1, kEpoch) == 0
+                && cadence.AcquireTimeoutMs(0, kEpoch) == 0,
+            "invalid clocks, expired deadlines, and invalid tokens cannot authorize a wait");
+    }
+
+    Cadence invalid_frequency(60, 0);
+    CheckPolicy(!invalid_frequency.Schedule(kEpoch).due
+            && invalid_frequency.AcquireTimeoutMs(1, kEpoch) == 0,
+        "an invalid QPC frequency cannot authorize acquisition");
+    Cadence invalid_now(60, kFrequency);
+    CheckPolicy(!invalid_now.Schedule(0).due && invalid_now.Schedule(kEpoch).due,
+        "a valid QPC sample can reinitialize scheduling after a zero clock reading");
+
+    constexpr int64_t kQpcMax = std::numeric_limits<int64_t>::max();
+    Cadence high_frequency(60, kQpcMax);
+    const auto large_slot = high_frequency.Schedule(kEpoch);
+    CheckPolicy(large_slot.due && high_frequency.AcquireTimeoutMs(large_slot.tick, kEpoch) == 12
+            && high_frequency.AcquireTimeoutMs(large_slot.tick, kEpoch, kQpcMax) == 0,
+        "QPC conversion and processing budget remain bounded at large integer limits");
+    Cadence overflow(240, kFrequency);
+    CheckPolicy(!overflow.Schedule(kQpcMax - 1).due
+            && overflow.AcquireTimeoutMs(1, kQpcMax - 1) == 0
+            && overflow.Schedule(kEpoch).due,
+        "deadline overflow does not authorize acquisition and resets scheduling");
+}
+
+void CadenceSeparatesSkippedSlotsFromBoundedAcquireOutcomes() {
+    using fthr::dxgi_replay::Cadence;
+    using fthr::dxgi_replay::Observation;
+    constexpr int64_t kEpoch = 1'000'000;
+    constexpr uint64_t kGeneration = 7;
+    Cadence cadence(240, 1'000'000);
+    const int64_t period = cadence.PeriodQpc();
+    const auto first = CompleteCadenceStep(
+        cadence, kEpoch, kGeneration, Observation::WaitTimeout, 0, false, false, 2'000);
+    const auto early = cadence.Schedule(kEpoch + period - 1);
+    CheckPolicy(first.schedule.due && first.schedule.skipped_slots == 0
+            && !first.presentation.present && !cadence.HasSeed()
+            && !early.due && early.wait_qpc == 1 && early.skipped_slots == 0,
+        "bounded startup timeout neither invents a frame nor counts a skipped slot");
+
+    const int64_t late_qpc = kEpoch + 5 * period + 3'000;
+    const auto late = cadence.Schedule(late_qpc);
+    CheckPolicy(late.due && late.skipped_slots == 4
+            && cadence.AcquireTimeoutMs(late.tick, late_qpc) == 0
+            && !cadence.Schedule(late_qpc + 1).due,
+        "overruns report only missed slots and authorize one nonblocking acquire when budget is exhausted");
+    auto acquired = first.acquire;
+    acquired.call_start_qpc = late_qpc;
+    acquired.call_end_qpc = late_qpc + 1;
+    cadence.Complete(late.tick, acquired);
+    const auto next = cadence.Schedule(late_qpc + 2);
+    CheckPolicy(!next.due && next.wait_qpc > 0 && next.skipped_slots == 0
+            && cadence.AcquireTimeoutMs(late.tick, late_qpc + 2) == 0,
+        "a completed late token cannot authorize another wait or a catch-up burst");
+}
+
+void BoundedAcquireKeepsSourceTimeAndQuietHoldRules() {
+    using fthr::dxgi_replay::Cadence;
+    using fthr::dxgi_replay::Observation;
+    constexpr int64_t kEpoch = 1'000'000;
+    constexpr uint64_t kGeneration = 7;
+    Cadence cadence(60, 1'000'000);
+    const int64_t period = cadence.PeriodQpc();
+    const auto image = CompleteCadenceStep(cadence, kEpoch, kGeneration,
+        Observation::Image, kEpoch + 1'000, true, true, 2'000);
+    CheckPolicy(image.presentation.present && image.presentation.qpc == kEpoch + 1'000
+            && cadence.CommitPresentation(image.presentation.qpc),
+        "an image arriving during the bounded wait retains its real presentation timestamp");
+    const auto short_gap = CompleteCadenceStep(cadence, kEpoch + 3 * period,
+        kGeneration, Observation::WaitTimeout, 0, false, false, 2'000);
+    const auto quiet = CompleteCadenceStep(cadence, kEpoch + 8 * period,
+        kGeneration, Observation::WaitTimeout, 0, false, false, 2'000);
+    CheckPolicy(!short_gap.presentation.present && quiet.presentation.present
+            && quiet.presentation.held && quiet.presentation.qpc == quiet.acquire.call_end_qpc
+            && cadence.CommitPresentation(quiet.presentation.qpc),
+        "bounded timeouts require the existing quiet interval before reusing the owned image");
+
+    const auto interrupted = cadence.Schedule(kEpoch + 9 * period);
+    cadence.SetGeneration(kGeneration + 1);
+    CheckPolicy(interrupted.due
+            && cadence.AcquireTimeoutMs(interrupted.tick, kEpoch + 9 * period) == 0
+            && !cadence.HasSeed() && cadence.LastSubmittedQpc() == quiet.presentation.qpc,
+        "a generation change revokes a pending wait and disarms the cache without resetting presentation time");
+    const auto after_recovery = CompleteCadenceStep(cadence, kEpoch + 10 * period,
+        kGeneration + 1, Observation::WaitTimeout, 0, false, false, 2'000);
+    CheckPolicy(after_recovery.schedule.due && !after_recovery.presentation.present,
+        "after recovery a bounded timeout cannot reuse an old-generation image");
+}
+
 void CadenceRejectsStallsAndDoesNotBurstAfterLatePolls() {
     using fthr::dxgi_replay::Cadence;
     using fthr::dxgi_replay::Observation;
@@ -2396,6 +2733,7 @@ void RapidSaveRequestsPreserveAcceptedOrder() {
 
 int RunWindowsReplayPolicyTests() {
     WgcWaitPreservesDeadlineAndInterruption();
+    WgcUpdateIntervalVerifiesOptionalPropertyWithoutBlockingStartup();
     SameAdapterVendorMatrixIsAuthoritative();
     MissingRuntimeAndUnsupportedCodecStayFailed();
     CaptureAdapterCannotBeStolenByAnotherVendor();
@@ -2414,6 +2752,9 @@ int RunWindowsReplayPolicyTests() {
     ReplayHealthReportsExactSavePredicates();
     ReplaySaveClassificationCoversEvidenceBoundaries();
     CapturePipelineHealthClassifiesBoundaries();
+    OutputCadenceIsSeparateFromPipelineLiveness();
+    StageTimingReportsBoundedIntervalPercentiles();
+    WgcReadbackQueuePreservesTimingAndSourceBoundaries();
     EncodedRingGenerationIsolatedAcrossClear();
     ActiveTruthAndGenerationAreScoped();
     ProductionThreeByThreeMatrixAndRegressionsHold();
@@ -2425,6 +2766,9 @@ int RunWindowsReplayPolicyTests() {
     StaticDesktopAndCaptureInterruptionReplayBaseline();
     CadenceRejectsUnseededAndInvalidImageCompletions();
     CadenceTracksQuietHoldGenerationAndQpcRaces();
+    CadenceAcquireWaitRespectsRemainingProcessingBudget();
+    CadenceSeparatesSkippedSlotsFromBoundedAcquireOutcomes();
+    BoundedAcquireKeepsSourceTimeAndQuietHoldRules();
     CadenceRejectsStallsAndDoesNotBurstAfterLatePolls();
     CadenceReplayScenariosUseProductionSnapshotHealth();
     std::cout << "Windows replay policy tests: " << policy_checks

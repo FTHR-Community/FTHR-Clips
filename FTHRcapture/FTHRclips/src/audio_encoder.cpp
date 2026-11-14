@@ -1,5 +1,4 @@
-// AAC encoding with partial-frame accumulation. Convert interleaved PCM to
-// FFmpeg planar float inside EncodeFrame before submitting each full frame.
+// Float PCM packetization, with partial-frame accumulation and legacy AAC support.
 
 #ifdef _MSC_VER
 #if __has_include("pch.h")
@@ -50,7 +49,7 @@ namespace fthr {
         uint32_t       channels,
         uint32_t       bitrate_kbps,
         PacketCallback callback,
-        int64_t        initial_pts_samples)
+        int64_t        initial_pts_samples, bool lossless_float)
     {
         if (initialized_) {
             Finalize();
@@ -72,6 +71,11 @@ namespace fthr {
         bitrate_kbps_ = bitrate_kbps;
         pts_samples_ = initial_pts_samples;
         accum_frames_ = 0;
+        lossless_float_ = lossless_float;
+        if (lossless_float_) {
+            initialized_ = true;
+            return true;
+        }
 
         const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
         if (!codec) {
@@ -176,7 +180,17 @@ namespace fthr {
         bool success = true;
 
         const uint32_t frames_in = num_samples / channels_;
-        const uint32_t frame_size = static_cast<uint32_t>(codec_ctx_->frame_size);  // 1024
+        if (lossless_float_) {
+            // Raw capture has no codec frame boundary or hidden final tail.
+            if (num_samples > UINT32_MAX / sizeof(float)) return false;
+            packet_callback_(reinterpret_cast<const uint8_t*>(pcm_data),
+                num_samples * sizeof(float), pts_samples_);
+            pts_samples_ += frames_in;
+            frames_submitted_.fetch_add(1, std::memory_order_relaxed);
+            packets_emitted_.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        const uint32_t frame_size = static_cast<uint32_t>(codec_ctx_->frame_size);
 
         uint32_t consumed = 0;
         while (consumed < frames_in) {
@@ -270,6 +284,10 @@ namespace fthr {
 
     bool AudioEncoder::Finalize()
     {
+        if (lossless_float_ && initialized_) {
+            accum_buf_.clear(); accum_frames_ = 0; initialized_ = false;
+            return true;
+        }
         if (!initialized_) return true;
 
         bool success = true;

@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """Fetch manifest-pinned third-party build inputs.
 
---ffmpeg installs the Windows runtime; --ffmpeg-linux installs matching Linux
-headers and libraries; --appimagetool-linux installs the pinned AppImage
-packaging tool and type-2 runtime; --vcredist fetches the Windows prerequisite.
---all selects this platform's inputs. Verify files against manifest hashes and
-reject mismatches before packaging.
+--ffmpeg installs the Windows runtime; --vcredist fetches the Windows prerequisite.
+--all selects both. Verify manifest hashes before packaging.
 """
 
 from __future__ import annotations
@@ -14,12 +11,9 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import shutil
-import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import urllib.error
 import urllib.request
@@ -30,14 +24,6 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / 'tools' / 'ffmpeg_manifest.json'
 FFMPEG_DIR = ROOT / 'FTHRcapture' / 'FTHRclips' / 'third_party' / 'ffmpeg'
 REDIST_DIR = ROOT / 'redist'
-
-# AUDIT-014: the Linux engine must NOT link the distribution's FFmpeg, which is
-# a GPL build on every mainstream distro. This is the LGPL runtime it is built
-# against and shipped with instead.
-MANIFEST_LINUX = ROOT / 'tools' / 'ffmpeg_manifest_linux.json'
-FFMPEG_LINUX_DIR = ROOT / 'FTHRcapture_linux' / 'third_party' / 'ffmpeg'
-APPIMAGE_MANIFEST = ROOT / 'tools' / 'appimage_tool_manifest.json'
-APPIMAGE_OUTPUT_DIR = ROOT / 'build_output'
 
 VCREDIST_URL = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
 VCREDIST_METADATA = REDIST_DIR / 'vc_redist.x64.json'
@@ -83,83 +69,8 @@ def _verify_download(path: Path, asset: dict[str, object]) -> None:
             f'{path.name} sha256 mismatch: expected {expected_hash}, got {actual_hash}')
 
 
-def _verified_appimage_asset(
-    asset: dict[str, object], target: Path, *, force: bool = False
-) -> None:
-    """Install one manifest-pinned AppImage asset with an atomic replacement.
-
-    A valid existing cache is reused. Downloads land beside the final target,
-    are checked before installation, and are atomically renamed only after
-    both the declared size and digest pass. A failed download therefore cannot
-    replace a previously valid cache with partial or untrusted bytes.
-    """
-    if target.is_file():
-        try:
-            _verify_download(target, asset)
-        except RuntimeError as exc:
-            print(f'  cached {target.name} is invalid: {exc}')
-        else:
-            print(f'  cached {target.name} passed size and sha256 verification.')
-            if not force:
-                return
-
-    url = str(asset['url'])
-    if not url.startswith('https://'):
-        raise RuntimeError(f'refusing non-HTTPS AppImage asset URL: {url}')
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(
-        prefix=f'.{target.name}.', suffix='.download', dir=target.parent)
-    os.close(fd)
-    temp = Path(temp_name)
-    try:
-        _download(url, temp)
-        _verify_download(temp, asset)
-        temp.chmod(temp.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        os.replace(temp, target)
-    except (OSError, RuntimeError, urllib.error.URLError) as exc:
-        temp.unlink(missing_ok=True)
-        raise RuntimeError(f'could not install verified {target.name}: {exc}') from exc
 
 
-def fetch_appimage_tools(force: bool) -> int:
-    """Fetch and verify the pinned appimagetool and type-2 runtime."""
-    try:
-        manifest = json.loads(APPIMAGE_MANIFEST.read_text(encoding='utf-8'))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f'could not read AppImage tool manifest: {exc}') from exc
-    if not isinstance(manifest, dict):
-        raise RuntimeError('AppImage tool manifest must contain a JSON object')
-    if manifest.get('platform') != 'linux' or manifest.get('arch') != 'x86_64':
-        raise RuntimeError('AppImage tool manifest is not for Linux x86_64')
-    assets: dict[str, dict[str, object]] = {}
-    for key in ('appimagetool', 'runtime'):
-        asset = manifest.get(key)
-        if not isinstance(asset, dict):
-            raise RuntimeError(f'AppImage tool manifest is missing {key}')
-        filename = asset.get('filename')
-        url = asset.get('url')
-        size_bytes = asset.get('size_bytes')
-        sha256 = asset.get('sha256')
-        if not isinstance(filename, str) or not filename:
-            raise RuntimeError(f'AppImage tool manifest has invalid {key} filename')
-        if not filename or Path(filename).name != filename:
-            raise RuntimeError(f'invalid AppImage asset filename: {filename!r}')
-        if not isinstance(url, str) or not url.startswith('https://'):
-            raise RuntimeError(f'AppImage tool manifest has invalid {key} URL')
-        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
-            raise RuntimeError(f'AppImage tool manifest has invalid {key} size_bytes')
-        if not isinstance(sha256, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', sha256):
-            raise RuntimeError(f'AppImage tool manifest has invalid {key} sha256')
-        assets[key] = asset
-
-    # Validate both records before touching the network. A malformed runtime
-    # entry must not allow the first asset to be fetched successfully.
-    for key, asset in assets.items():
-        filename = str(asset['filename'])
-        target = APPIMAGE_OUTPUT_DIR / filename
-        print(f'Fetching verified {key} {asset.get("version", "unknown")}')
-        _verified_appimage_asset(asset, target, force=force)
-    return 0
 
 
 def _windows_powershell() -> str:
@@ -249,77 +160,8 @@ def _verify_vcredist(path: Path) -> dict[str, str]:
     return details
 
 
-def _ensure_linux_ffmpeg_tool_rpaths(bin_dir: Path) -> None:
-    """Repair the bundled CLI tools' loader path without touching libraries.
-
-    The pinned BtbN archive currently carries ``-Wl:../lib`` as a literal
-    DT_RPATH.  That is not relative to the executable, so direct invocations
-    of ``ffmpeg``/``ffprobe`` fail unless the caller happens to set
-    ``LD_LIBRARY_PATH``.  Only the two executable entry points are patched;
-    manifest-verified library bytes are never rewritten here.
-    """
-    patchelf = shutil.which('patchelf')
-    if not patchelf:
-        raise RuntimeError(
-            'patchelf is required to repair the bundled Linux FFmpeg CLI '
-            'RPATH; install patchelf before fetching FFmpeg')
-
-    for name in ('ffmpeg', 'ffprobe'):
-        tool = bin_dir / name
-        if not tool.is_file():
-            raise RuntimeError(
-                f'Linux FFmpeg archive is missing bin/{name}; refusing to '
-                'install an incomplete runtime')
-        try:
-            subprocess.run(
-                [patchelf, '--force-rpath', '--set-rpath',
-                 '$ORIGIN/../lib', str(tool)],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except (OSError, subprocess.CalledProcessError) as exc:
-            detail = ''
-            if isinstance(exc, subprocess.CalledProcessError):
-                detail = (exc.stderr or exc.stdout or '').strip()
-                if detail:
-                    detail = f': {detail}'
-            raise RuntimeError(
-                f'patchelf failed while repairing Linux FFmpeg {name} RPATH'
-                f'{detail}') from exc
 
 
-def _ensure_linux_ffmpeg_aliases(
-    lib_dir: Path, soname_map: dict[str, str]
-) -> None:
-    """Restore and verify FFmpeg development and SONAME aliases after extraction.
-
-    Missing aliases can select system libraries or break runtime loading.
-    Prefer symlinks, then hard links, then byte copies for portability.
-    """
-    for versioned_name, soname in soname_map.items():
-        source = lib_dir / versioned_name
-        source_digest = _sha256(source)
-        linker_name = soname.split('.so.', 1)[0] + '.so'
-        for alias_name in (soname, linker_name):
-            alias = lib_dir / alias_name
-            same_file = alias.is_file() and os.path.samefile(alias, source)
-            if same_file or (alias.is_file() and _sha256(alias) == source_digest):
-                continue
-            alias.unlink(missing_ok=True)
-            try:
-                alias.symlink_to(source.name)
-            except OSError:
-                try:
-                    os.link(source, alias)
-                except OSError:
-                    shutil.copy2(source, alias)
-            same_file = alias.is_file() and os.path.samefile(alias, source)
-            if not same_file and (
-                not alias.is_file() or _sha256(alias) != source_digest
-            ):
-                raise RuntimeError(
-                    f'could not materialize FFmpeg library alias: {alias_name}')
 
 
 def fetch_ffmpeg(force: bool) -> int:
@@ -404,95 +246,6 @@ def fetch_ffmpeg(force: bool) -> int:
     return 0
 
 
-def fetch_ffmpeg_linux(force: bool) -> int:
-    """Install the pinned Linux FFmpeg headers and runtime from one archive.
-
-    Compile-time and bundled libraries must agree on the ABI.
-    """
-    manifest = json.loads(MANIFEST_LINUX.read_text(encoding='utf-8'))
-    src = manifest['source']
-    expected = manifest['shipped_files_sha256']
-    lib_dir = FFMPEG_LINUX_DIR / 'lib'
-
-    if lib_dir.is_dir() and not force:
-        have = {p.name: p for p in lib_dir.iterdir() if p.is_file()}
-        if set(expected) <= set(have):
-            bad = [n for n, d in expected.items() if _sha256(have[n]) != d]
-            if not bad:
-                _ensure_linux_ffmpeg_tool_rpaths(FFMPEG_LINUX_DIR / 'bin')
-                _ensure_linux_ffmpeg_aliases(lib_dir, manifest['soname_map'])
-                print(f'LGPL FFmpeg {manifest["version"]} already present and verified.')
-                return 0
-            print(f'  present but {len(bad)} file(s) failed sha256: {bad}')
-
-    print(f'FFmpeg {manifest["version"]} ({manifest["license"]}) '
-          f'from {src["project"]} — Linux')
-
-    with tempfile.TemporaryDirectory() as td:
-        archive = Path(td) / src['asset']
-        _download(src['url'], archive)
-
-        digest = _sha256(archive)
-        if digest != src['sha256']:
-            print('ERROR: archive sha256 mismatch\n'
-                  f'  expected {src["sha256"]}\n'
-                  f'  got      {digest}\n'
-                  'This is NOT the build the licence paperwork describes. '
-                  'Refusing to install it.', file=sys.stderr)
-            return 1
-        print('  archive sha256 OK')
-
-        staged = Path(td) / 'staged'
-        with tarfile.open(archive) as tf:
-            members = [m for m in tf.getmembers() if m.isfile() or m.issym()]
-            root_prefix = members[0].name.split('/', 1)[0] + '/'
-            for m in members:
-                rel = m.name[len(root_prefix):] if m.name.startswith(root_prefix) else m.name
-                if not rel or rel.startswith(('doc/', 'man/', 'presets/')):
-                    continue
-                m2 = tf.getmember(m.name)
-                m2.name = rel
-                # filter='data' refuses absolute paths and traversal (py3.12+).
-                try:
-                    tf.extract(m2, staged, filter='data')
-                except TypeError:            # older tarfile without `filter`
-                    tf.extract(m2, staged)
-
-        staged_lib = staged / 'lib'
-        missing = [n for n in expected if not (staged_lib / n).is_file()]
-        if missing:
-            print(f'ERROR: archive is missing expected libraries: {missing}',
-                  file=sys.stderr)
-            return 1
-        bad = [n for n, d in expected.items() if _sha256(staged_lib / n) != d]
-        if bad:
-            print(f'ERROR: per-file sha256 mismatch: {bad}', file=sys.stderr)
-            return 1
-        print(f'  all {len(expected)} libraries verified against the manifest')
-
-        # Patch the temporary extraction before replacing an existing runtime.
-        # A missing or broken patchelf must leave the previously installed tree
-        # untouched rather than creating a half-repaired runtime.
-        _ensure_linux_ffmpeg_tool_rpaths(staged / 'bin')
-
-        if FFMPEG_LINUX_DIR.exists():
-            shutil.rmtree(FFMPEG_LINUX_DIR)
-        FFMPEG_LINUX_DIR.mkdir(parents=True)
-        for sub in ('lib', 'include', 'bin'):
-            if (staged / sub).exists():
-                shutil.copytree(staged / sub, FFMPEG_LINUX_DIR / sub,
-                                symlinks=True)
-        for lic in ('LICENSE.txt', 'LICENSE'):
-            if (staged / lic).is_file():
-                shutil.copy2(staged / lic, FFMPEG_LINUX_DIR / 'LICENSE.txt')
-                break
-
-        _ensure_linux_ffmpeg_aliases(lib_dir, manifest['soname_map'])
-
-    print(f'LGPL FFmpeg installed into {FFMPEG_LINUX_DIR.relative_to(ROOT)}')
-    print(f'  build the engine with: '
-          f'-DFTHR_FFMPEG_ROOT={FFMPEG_LINUX_DIR.relative_to(ROOT)}')
-    return 0
 
 
 def fetch_vcredist(force: bool) -> int:
@@ -530,10 +283,6 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--ffmpeg', action='store_true',
                     help='Windows LGPL FFmpeg runtime')
-    ap.add_argument('--ffmpeg-linux', action='store_true',
-                    help='Linux LGPL FFmpeg (headers + libs) — AUDIT-014')
-    ap.add_argument('--appimagetool-linux', action='store_true',
-                    help='pinned Linux AppImage tool and type-2 runtime')
     ap.add_argument('--vcredist', action='store_true')
     ap.add_argument('--all', action='store_true',
                     help='everything for the current platform')
@@ -541,32 +290,14 @@ def main() -> int:
                     help='re-download even if the files are already present')
     args = ap.parse_args()
 
-    if not (args.ffmpeg or args.ffmpeg_linux or args.appimagetool_linux
-            or args.vcredist or args.all):
+    if not (args.ffmpeg or args.vcredist or args.all):
         ap.print_help()
         return 2
 
-    # all is platform-aware: fetching the Windows runtime on Linux (or the
-    # reverse) downloads 150 MB nobody can use.
-    on_windows = sys.platform == 'win32'
     rc = 0
-    if args.ffmpeg or (args.all and on_windows):
+    if args.ffmpeg or args.all:
         rc |= fetch_ffmpeg(args.force)
-    if args.ffmpeg_linux or (args.all and not on_windows):
-        try:
-            rc |= fetch_ffmpeg_linux(args.force)
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            print(f'ERROR: Linux FFmpeg preparation failed: {exc}',
-                  file=sys.stderr)
-            rc |= 1
-    if args.appimagetool_linux or (args.all and not on_windows):
-        try:
-            rc |= fetch_appimage_tools(args.force)
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            print(f'ERROR: AppImage tool preparation failed: {exc}',
-                  file=sys.stderr)
-            rc |= 1
-    if args.vcredist or (args.all and on_windows):
+    if args.vcredist or args.all:
         rc |= fetch_vcredist(args.force)
     return rc
 

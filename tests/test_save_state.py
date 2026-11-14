@@ -6,13 +6,16 @@ to exercise timing, peek/consume ordering, and response decoding.
 
 import ctypes
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'FTHR_UI'))
 
-from core.capture_bridge import CaptureBridge, SharedMemoryLayout, ResponseType
+from core.capture_bridge import (
+    CaptureBridge, CommandType, SharedMemoryLayout, ResponseType,
+)
 from core.save_state import (
     SaveStateMachine, SaveState, EngineEvent, OutcomeKind, RejectReason,
 )
@@ -34,11 +37,13 @@ class FakeEngine:
         The Linux engine's *failure* path writes them the other way round; see
         `test_error_with_empty_string_is_tolerated` for that case.
         """
+        self.layout.ui_command = CommandType.NONE
         self._write_string(detail)
         self.layout.engine_response = response
 
     def respond_code_first(self, response: ResponseType, detail: str = ''):
         """Reproduce the Linux failure-path ordering: code before string."""
+        self.layout.ui_command = CommandType.NONE
         self.layout.engine_response = response
         self._write_string(detail)
 
@@ -54,10 +59,35 @@ class FakeEngine:
 
 
 class FakeBridge(CaptureBridge):
+    def __new__(cls, engine: FakeEngine):
+        return object.__new__(cls)
+
     def __init__(self, engine: FakeEngine):
+        self._mapping_lock = threading.RLock()
         self._layout = engine.layout
         self._initialized = True
         self._logged_read_errors = set()
+
+
+def test_fake_bridge_owns_layout_without_reusing_base_singleton(monkeypatch):
+    monkeypatch.setattr(CaptureBridge, '_instance', None)
+    base = CaptureBridge()
+    assert type(base) is CaptureBridge
+    assert base._layout is None
+    engine = FakeEngine()
+    bridge = FakeBridge(engine)
+
+    assert type(bridge) is FakeBridge
+    assert bridge is not base
+    assert bridge._layout is engine.layout
+    assert bridge._mapping_lock is not base._mapping_lock
+    assert CaptureBridge._instance is base
+    assert bridge.save_clip('/clips/isolated.mp4', 30) is True
+    assert engine.layout.ui_command == CommandType.SAVE_CLIP
+    assert bridge.save_clip('/clips/pending.mp4', 30) is False
+    assert CaptureBridge._instance is base
+    assert base._layout is None
+    assert base._initialized is False
 
 
 class Driver:

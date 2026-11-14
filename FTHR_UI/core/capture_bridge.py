@@ -9,6 +9,9 @@ from ctypes import Structure, c_uint32, c_bool, c_float, c_uint64
 from enum import IntEnum
 import os
 import threading
+from dataclasses import dataclass
+from uuid import UUID
+import weakref
 
 from core.capture_health import CaptureHealthFlag
 
@@ -30,6 +33,7 @@ class CommandType(IntEnum):
     GET_STATUS = 9
     RECONFIGURE_ENCODER = 10
     SHUTDOWN = 11
+    MARK_HIGHLIGHT = 12
 
 
 class ResponseType(IntEnum):
@@ -119,10 +123,53 @@ else:
         ]
 
 
+@dataclass(frozen=True, slots=True)
+class TerminalResponseSnapshot:
+    """Detached terminal response data from one retained native mapping."""
+
+    capture_generation: int
+    response_code: int
+    detail: str
+    save_response: tuple[str, str] | None
+    manual_response: tuple[str, str] | None
+    is_recording: bool
+
+    __hash__ = None
+
+    def __post_init__(self):
+        if type(self.capture_generation) is not int:
+            raise TypeError('capture_generation must be an integer')
+        if not 0 <= self.capture_generation <= 0xFFFFFFFF:
+            raise ValueError('capture_generation must be a uint32')
+        if type(self.response_code) is not int:
+            raise TypeError('response_code must be an integer')
+        if not isinstance(self.detail, str):
+            raise TypeError('detail must be a string')
+        if type(self.is_recording) is not bool:
+            raise TypeError('is_recording must be a boolean')
+        for channel in (self.save_response, self.manual_response):
+            if channel is not None:
+                if (not isinstance(channel, tuple) or len(channel) != 2
+                        or any(not isinstance(item, str) for item in channel)):
+                    raise TypeError('response channels must be string tuples')
+        if self.save_response is not None and self.manual_response is not None:
+            raise ValueError('a response cannot belong to two channels')
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalResponseOwner:
+    """Opaque owner for one exact bridge/layout/native-generation tuple."""
+
+    bridge: object
+    _layout_ref: object
+    capture_generation: int
+
+
 class CaptureBridge:
     # The mapping name is versioned so processes with different structure
     # layouts cannot attach to one another.
     SHARED_MEM_NAME = 'FTHR_SharedMemory_v4'
+    HIGHLIGHT_CAPABILITY = 1 << 16
 
     # Singleton. There is exactly one engine and one mapping, so one bridge.
     # Anything else just hands you back the same object.
@@ -147,19 +194,56 @@ class CaptureBridge:
             self._logged_read_errors.add(where)
             print(f'[CaptureBridge] {where} read failed: {type(e).__name__}: {e}')
 
+    def _submit_command(self, command: CommandType, payload_writer=None,
+                        *, allow_unhealthy=False) -> bool:
+        """Publish one payload/command pair under mapping ownership.
+
+        The ABI has one command slot and no correlation token.  Keeping the
+        existing mapping lock across the NONE check, payload writes, and final
+        command store prevents concurrent save/mark/stop/config callers from
+        interleaving their payloads or overwriting a pending command.
+        """
+        with self._mapping_lock:
+            if not self._initialized or self._layout is None:
+                return False
+            try:
+                if not self._layout.is_initialized:
+                    return False
+                if int(self._layout.ui_command) != int(CommandType.NONE):
+                    return False
+                flags = CaptureHealthFlag(int(self._layout.capture_health_flags))
+                if (not allow_unhealthy and flags & (
+                        CaptureHealthFlag.RECOVERING
+                        | CaptureHealthFlag.BACKEND_FAILED
+                        | CaptureHealthFlag.RECONFIGURE_REQUIRED)):
+                    return False
+                # A focus pause preserves replay history. Let the native save
+                # boundary validate that history (and explain an empty ring)
+                # instead of treating every Alt-Tab as a broken engine.
+                if (not allow_unhealthy and flags & CaptureHealthFlag.PAUSED
+                        and command != CommandType.SAVE_CLIP):
+                    return False
+                if payload_writer is not None and payload_writer() is False:
+                    return False
+                self._layout.ui_command = command
+                return True
+            except (AttributeError, OSError, TypeError, ValueError):
+                # A stale or invalid ABI slot is a failed submission; do not
+                # publish a command after partial shared-memory access.
+                return False
+
 
     def initialize(self) -> bool:
-        if sys.platform == 'win32':
-            # Stop/restart may arrive while OpenFileMappingW or MapViewOfFile
-            # is in flight. Serialize only mapping ownership; polling and
-            # process waits remain outside this lock.
-            with self._mapping_lock:
+        # Stop/restart may arrive while the mapping is being opened. Serialize
+        # mapping ownership on both platforms; process waits remain outside.
+        with self._mapping_lock:
+            if sys.platform == 'win32':
                 if self._initialized:
                     return True
                 return self._initialize_windows()
-        if self._initialized:
-            return True
-        return self._initialize_linux()
+            if self._initialized:
+                return True
+            return self._initialize_linux()
 
 
     def _initialize_linux(self) -> bool:
@@ -267,18 +351,18 @@ class CaptureBridge:
 
 
     def shutdown(self):
-        # Release the acknowledgement's layout reference before unmapping.
-        self._save_acknowledged_layout = None
-        if sys.platform != 'win32':
-            # Release the ctypes from_buffer reference before closing the mmap;
-            # otherwise Python raises BufferError for the exported pointer.
-            self._release_linux_mapping()
-            self._initialized = False
-            if CaptureBridge._instance is self:
-                CaptureBridge._instance = None
-            return
-
         with self._mapping_lock:
+            # Release the acknowledgement's layout reference before unmapping.
+            self._save_acknowledged_layout = None
+            if sys.platform != 'win32':
+                # Release the ctypes from_buffer reference before closing the
+                # mmap; otherwise Python raises BufferError for the exported
+                # pointer. Keep this under the same mapping lock as reads.
+                self._release_linux_mapping()
+                self._initialized = False
+                if CaptureBridge._instance is self:
+                    CaptureBridge._instance = None
+                return
             if self._layout:
                 ctypes.windll.kernel32.UnmapViewOfFile(
                     ctypes.c_void_p(getattr(self, '_win_map_ptr', None) or 0))
@@ -290,6 +374,183 @@ class CaptureBridge:
             self._initialized = False
             if CaptureBridge._instance is self:
                 CaptureBridge._instance = None
+
+
+    @staticmethod
+    def _valid_uint32(value) -> bool:
+        return type(value) is int and 0 <= value <= 0xFFFFFFFF
+
+    def retain_terminal_response_owner(
+            self, *, expected_capture_generation: int):
+        """Retain one exact mapping for a post-exit response read.
+
+        Native shutdown sets ``layout.is_initialized`` false before queued
+        save work drains. The wrapper and mapping still remain owned here;
+        therefore this method deliberately does not use ``is_connected`` or
+        inspect that native field.
+        """
+        if not self._valid_uint32(expected_capture_generation):
+            return None
+        with self._mapping_lock:
+            if not self._initialized or self._layout is None:
+                return None
+            layout = self._layout
+            try:
+                if int(layout.capture_generation) != expected_capture_generation:
+                    return None
+            except (AttributeError, OSError, TypeError, ValueError) as exc:
+                self._log_read_error_once(
+                    'retain_terminal_response_owner', exc)
+                return None
+            return _TerminalResponseOwner(
+                self, weakref.ref(layout), expected_capture_generation)
+
+    def release_terminal_response_owner(self, owner=None) -> bool:
+        """Release exactly the mapping retained by ``owner``.
+
+        Terminal-response owners are a capability for one particular native
+        mapping, so releasing one must never fall through to ``shutdown`` and
+        close a replacement mapping.  All identity and generation checks, as
+        well as the platform close sequence, stay under the mapping lock.
+        """
+        with self._mapping_lock:
+            if owner is None:
+                # A missing owner is only a read-only proof that no physical
+                # bridge resources remain.  It must never trigger teardown.
+                return (
+                    self._initialized is False
+                    and self._layout is None
+                    and self._win_map_ptr in (None, 0)
+                    and self._mem_handle in (None, 0)
+                    and self._linux_mmap is None
+                )
+
+            if type(owner) is not _TerminalResponseOwner:
+                return False
+            try:
+                if owner.bridge is not self:
+                    return False
+                if (not self._initialized or self._layout is None
+                        or self._linux_mmap is not None
+                        and sys.platform == 'win32'):
+                    return False
+                if not self._valid_uint32(owner.capture_generation):
+                    return False
+                # Do not retain this weakly referenced layout in a local
+                # variable: on Linux mmap.close() must see no exported view.
+                if owner._layout_ref() is not self._layout:
+                    return False
+                if (int(self._layout.capture_generation)
+                        != owner.capture_generation):
+                    return False
+            except Exception:
+                # Invalid ownership cannot authorize releasing any resource.
+                return False
+
+            if sys.platform == 'win32':
+                # A real Windows owner always has both native resources.  A
+                # partial wrapper cannot truthfully claim that it was freed.
+                original_ptr = self._win_map_ptr
+                original_handle = self._mem_handle
+                if (original_ptr in (None, 0)
+                        or original_handle in (None, 0)
+                        or self._linux_mmap is not None):
+                    return False
+
+                kernel32 = ctypes.windll.kernel32
+                try:
+                    if not kernel32.UnmapViewOfFile(
+                            ctypes.c_void_p(original_ptr)):
+                        return False
+                except Exception:
+                    # Retain the original view and handle when unmap is uncertain.
+                    return False
+
+                # The view is gone permanently after a successful unmap.  Do
+                # not restore its pointer if the handle close is unsuccessful.
+                self._layout = None
+                self._win_map_ptr = None
+                self._initialized = False
+                self._save_acknowledged_layout = None
+                try:
+                    if not kernel32.CloseHandle(original_handle):
+                        return False
+                except Exception:
+                    # Keep the handle visible until its close can be proved.
+                    return False
+                self._mem_handle = None
+            else:
+                mapping = self._linux_mmap
+                layout_ref = owner._layout_ref
+                if (mapping is None or self._win_map_ptr not in (None, 0)
+                        or self._mem_handle not in (None, 0)):
+                    return False
+
+                # Drop the ctypes exported view before close().  Keep the mmap
+                # object in a local until close succeeds so a failure leaves
+                # the original resource visible on the bridge.
+                self._save_acknowledged_layout = None
+                self._layout = None
+                try:
+                    mapping.close()
+                except Exception:
+                    retained_layout = layout_ref()
+                    if retained_layout is not None:
+                        self._layout = retained_layout
+                    return False
+                self._linux_mmap = None
+                self._initialized = False
+
+            if (self._layout is not None
+                    or self._win_map_ptr not in (None, 0)
+                    or self._mem_handle not in (None, 0)
+                    or self._linux_mmap is not None
+                    or self._initialized):
+                return False
+            if CaptureBridge._instance is self:
+                CaptureBridge._instance = None
+            return True
+
+    def read_terminal_response_snapshot(
+            self, owner, *, process_exited: bool):
+        """Read retained terminal response data without consuming or writing."""
+        if type(process_exited) is not bool or not process_exited:
+            return None
+        with self._mapping_lock:
+            if type(owner) is not _TerminalResponseOwner:
+                return None
+            if owner.bridge is not self:
+                return None
+            if not self._initialized or self._layout is None:
+                return None
+            layout = owner._layout_ref()
+            if layout is None or self._layout is not layout:
+                return None
+            try:
+                generation = int(layout.capture_generation)
+                if (not self._valid_uint32(generation)
+                        or generation != owner.capture_generation):
+                    return None
+                response_code = int(layout.engine_response)
+                detail = self._read_engine_string_from_layout(layout)
+                save_kind = self._SAVE_RESPONSES.get(response_code)
+                manual_kind = self._MANUAL_RECORDING_RESPONSES.get(response_code)
+                save_response = ((save_kind, detail)
+                                 if save_kind is not None else None)
+                manual_response = ((manual_kind, detail)
+                                   if manual_kind is not None else None)
+                return TerminalResponseSnapshot(
+                    capture_generation=generation,
+                    response_code=response_code,
+                    detail=detail,
+                    save_response=save_response,
+                    manual_response=manual_response,
+                    is_recording=bool(layout.is_recording),
+                )
+            except (AttributeError, OSError, TypeError, ValueError) as exc:
+                self._log_read_error_once(
+                    'read_terminal_response_snapshot', exc)
+                return None
 
 
     def is_connected(self) -> bool:
@@ -309,60 +570,77 @@ class CaptureBridge:
         owns responses and must process any pending result before submission.
         Never clear engine_response here: it may hold the previous save result.
         """
-        if not self.is_connected():
-            print('Not connected to capture engine')
-            return False
+        def write_payload():
+            if sys.platform != 'win32':
+                encoded = output_path.encode('utf-8')
+                if len(encoded) > 1023:
+                    encoded = (encoded[:1023].decode('utf-8', errors='ignore')
+                               .encode('utf-8'))
+                self._layout.ui_string = encoded
+            else:
+                if len(output_path) > 255:
+                    print(f'save_clip: path too long ({len(output_path)} chars), refusing')
+                    return False
+                self._layout.ui_string = output_path
+            self._layout.ui_param1 = duration
+            self._save_acknowledged_layout = None
+            return True
+        return self._submit_command(CommandType.SAVE_CLIP, write_payload)
 
-        # Send command — Linux uses c_char (bytes), Windows uses c_wchar (str)
-        if sys.platform != 'win32':
-            # Encode and truncate at a char boundary so we never split a multi-byte
-            # UTF-8 sequence. The buffer is 1024 bytes; leave 1 for the null terminator.
-            encoded = output_path.encode('utf-8')
-            if len(encoded) > 1023:
-                encoded = output_path.encode('utf-8')[:1023].decode('utf-8', errors='ignore').encode('utf-8')
-            self._layout.ui_string = encoded
-        else:
-            # Buffer is c_wchar * 256 — a longer path raises ValueError mid-save.
-            if len(output_path) > 255:
-                print(f'save_clip: path too long ({len(output_path)} chars), refusing')
+    def mark_highlight(self, marker_id: str) -> bool:
+        """Submit one bounded highlight request through the existing ABI.
+
+        This is submission-only: native capture owns the ring mark and the
+        shared response slot remains exclusively owned by the poller.
+        """
+
+        try:
+            parsed = UUID(marker_id)
+        except (AttributeError, TypeError, ValueError):
+            # Invalid caller marker IDs are rejected without touching the
+            # shared-memory command or response slots.
+            return False
+        canonical = str(parsed)
+        if marker_id != canonical:
+            return False
+        def write_payload():
+            flags = int(self._layout.capture_health_flags)
+            if not flags & self.HIGHLIGHT_CAPABILITY:
                 return False
-            self._layout.ui_string = output_path
-        self._layout.ui_param1 = duration
-        self._save_acknowledged_layout = None
-        # Write the command code LAST. The engine polls ui_command, so once this
-        # lands it may read every other field — they all need to be set already.
-        self._layout.ui_command = CommandType.SAVE_CLIP
-        return True
+            health = CaptureHealthFlag(flags)
+            if not health & CaptureHealthFlag.ACTIVE:
+                return False
+            self._layout.ui_string = (canonical if sys.platform == 'win32'
+                                      else canonical.encode('utf-8'))
+            return True
+        return self._submit_command(CommandType.MARK_HIGHLIGHT, write_payload)
 
 
     def pause_recording(self) -> bool:
-        if not self.is_connected():
-            return False
-        self._layout.ui_command = CommandType.STOP_RECORDING
-        return True
+        return self._submit_command(CommandType.STOP_RECORDING,
+                                    allow_unhealthy=True)
 
     def resume_recording(self) -> bool:
-        if not self.is_connected():
-            return False
-        self._layout.ui_command = CommandType.START_RECORDING
-        return True
+        return self._submit_command(CommandType.START_RECORDING,
+                                    allow_unhealthy=True)
 
     def start_manual_recording(self, output_path: str) -> bool:
         """Start the native Windows continuous recorder asynchronously."""
-        if sys.platform != 'win32' or not self.is_connected():
+        if sys.platform != 'win32':
             return False
         if not output_path or len(output_path) > 255:
             print('[CaptureBridge] Manual-recording path is empty or too long')
             return False
-        self._layout.ui_string = output_path
-        self._layout.ui_command = CommandType.START_RECORDING
-        return True
+        return self._submit_command(
+            CommandType.START_RECORDING,
+            lambda: setattr(self._layout, 'ui_string', output_path) or True,
+            allow_unhealthy=True)
 
     def stop_manual_recording(self) -> bool:
-        if sys.platform != 'win32' or not self.is_connected():
+        if sys.platform != 'win32':
             return False
-        self._layout.ui_command = CommandType.STOP_RECORDING
-        return True
+        return self._submit_command(CommandType.STOP_RECORDING,
+                                    allow_unhealthy=True)
 
     def request_engine_shutdown(self) -> bool:
         """Ask the native engine to leave its command loop cleanly.
@@ -371,14 +649,8 @@ class CaptureBridge:
         layout remains byte-for-byte unchanged.  The caller still owns the
         bounded process wait and escalation policy.
         """
-        if not self.is_connected():
-            return False
-        try:
-            self._layout.ui_command = CommandType.SHUTDOWN
-            return True
-        except Exception as e:
-            self._log_read_error_once('request_engine_shutdown', e)
-            return False
+        return self._submit_command(CommandType.SHUTDOWN,
+                                    allow_unhealthy=True)
 
     # The save poller in main.py owns this response channel. It peeks the code
     # and detail together, interprets them, then consumes the result. The engine
@@ -479,8 +751,12 @@ class CaptureBridge:
     def _read_engine_string(self) -> str:
         """Read engine_string across both layouts (wchar on Windows, bytes on
         Linux) without letting a garbled buffer raise into the caller."""
+        return self._read_engine_string_from_layout(self._layout)
+
+    @staticmethod
+    def _read_engine_string_from_layout(layout) -> str:
         try:
-            raw = self._layout.engine_string
+            raw = layout.engine_string
             if isinstance(raw, bytes):
                 return raw.decode('utf-8', errors='replace').rstrip('\x00').strip()
             return str(raw).rstrip('\x00').strip()
@@ -519,16 +795,15 @@ class CaptureBridge:
     _CODEC_PREF_MAP = {'auto': 0, 'h264': 1, 'hevc': 2, 'av1': 3}
 
     def set_encoder_config(self, codec_pref: str, preset: int) -> bool:
-        if not self.is_connected():
-            return False
         pref_int = self._CODEC_PREF_MAP.get(codec_pref.lower(), 0)
         if codec_pref.lower() not in self._CODEC_PREF_MAP:
             print(f'[CaptureBridge] Unknown codec_pref "{codec_pref}", falling back to auto')
         preset   = max(1, min(7, preset))
-        self._layout.cfg_codec_pref = pref_int
-        self._layout.cfg_preset     = preset
-        self._layout.ui_command     = CommandType.RECONFIGURE_ENCODER
-        return True
+        def write_payload():
+            self._layout.cfg_codec_pref = pref_int
+            self._layout.cfg_preset = preset
+            return True
+        return self._submit_command(CommandType.RECONFIGURE_ENCODER, write_payload)
 
     def get_active_codec(self) -> str:
         if not self.is_connected():

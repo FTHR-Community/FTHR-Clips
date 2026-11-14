@@ -246,8 +246,8 @@ def test_export_uses_current_source_gain_mute_master_and_limiter():
     joined = ' '.join(command)
     assert '0:a:0' in joined and '0:a:1' in joined
     assert 'volume=0.000000' in joined
-    assert 'alimiter=limit=0.98' in joined
-    assert 'volume=0.500000[aout]' in joined
+    assert 'alimiter=limit=0.98:level=disabled:latency=1' in joined
+    assert 'volume=0.500000,alimiter=' in joined
 
 
 @pytest.mark.parametrize('late_stream', ('microphone', 'system'))

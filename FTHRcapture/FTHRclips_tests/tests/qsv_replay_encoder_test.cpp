@@ -6,6 +6,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
 
 #include <cstdlib>
 #include <deque>
@@ -430,6 +431,41 @@ void GenerationFlushAndErrorsAreObservable() {
         "QSV encode errors propagate without fallback");
 }
 
+void QsvProtectsAnInitiallyUnprotectedCaptureContext() {
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+    CheckQsv(SUCCEEDED(D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, &device, nullptr, &context)),
+        "WARP creates a real capture-style device without an Intel GPU");
+    ID3D11Multithread* multithread = nullptr;
+    CheckQsv(SUCCEEDED(context->QueryInterface(
+        __uuidof(ID3D11Multithread), reinterpret_cast<void**>(&multithread))),
+        "capture context exposes the D3D11 multithread interface");
+    multithread->SetMultithreadProtected(FALSE);
+    CheckQsv(multithread->GetMultithreadProtected() == FALSE,
+        "regression starts with the production context's unprotected state");
+    std::string error;
+    CheckQsv(fthr::detail::EnableQsvMultithreadProtection(context, error)
+            && multithread->GetMultithreadProtected() != FALSE,
+        "QSV enables the context lock before sharing the device with oneVPL");
+    CheckQsv(fthr::detail::EnableQsvMultithreadProtection(context, error)
+            && multithread->GetMultithreadProtected() != FALSE,
+        "QSV reinitialization preserves the shared context lock");
+    CheckQsv(!fthr::detail::EnableQsvMultithreadProtection(nullptr, error)
+            && error.find("immediate context") != std::string::npos,
+        "missing QSV context fails with a specific diagnostic");
+    ID3D11DeviceContext* deferred = nullptr;
+    CheckQsv(SUCCEEDED(device->CreateDeferredContext(0, &deferred)),
+        "deferred context is available for invalid-input regression");
+    CheckQsv(!fthr::detail::EnableQsvMultithreadProtection(deferred, error),
+        "QSV rejects a deferred context rather than reporting it protected");
+    deferred->Release();
+    multithread->Release();
+    context->Release();
+    device->Release();
+}
+
 void SuccessfulQsvUsesCompressedReplayAndPoliciesStayStable() {
     CheckQsv(!fthr::ShouldAllocateRawReplayPool(
                   ReplayEncoderBackend::FfmpegQsv, true),
@@ -456,8 +492,9 @@ int RunQsvReplayEncoderTests() {
     RingMuxAndTransactionRemainCodecNeutral();
     PacketMetadataAndDeferredAv1ConfigPropagate();
     GenerationFlushAndErrorsAreObservable();
+    QsvProtectsAnInitiallyUnprotectedCaptureContext();
     SuccessfulQsvUsesCompressedReplayAndPoliciesStayStable();
-    std::cout << "FTHRclips QSV tests: 27 scenarios passed ("
+    std::cout << "FTHRclips QSV tests: 28 scenarios passed ("
               << qsv_checks << " checks)" << std::endl;
     return qsv_checks;
 }

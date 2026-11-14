@@ -5,6 +5,7 @@ CaptureCardClient forwards commands; animations control slide-in, hold,
 and slide-out while timers update shimmer and progress.
 """
 
+import math
 import os
 from pathlib import Path
 
@@ -117,6 +118,7 @@ def _notification_sounds_enabled() -> bool:
     try:
         return bool(SettingsManager().get('notification_sounds_enabled', True))
     except Exception:
+        # Keep the default sound preference if the detached helper cannot read settings.
         return True
 
 
@@ -134,10 +136,14 @@ class CaptureCard(QWidget):
             None,
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool,
+            Qt.WindowType.Tool |
+            Qt.WindowType.WindowTransparentForInput |
+            Qt.WindowType.WindowDoesNotAcceptFocus,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setFixedSize(_FULL_W, _FULL_H)
 
         # Display state
@@ -201,15 +207,34 @@ class CaptureCard(QWidget):
 
     # Public API
 
-    def show_clip(self, duration_s: int, fps: int, resolution: str,
-                  hold_duration_ms: int = _DEFAULT_HOLD_DURATION_MS) -> None:
+    def show_captured(self, duration_s: float | None = None,
+                      fps: int | None = None, resolution: str = '') -> None:
+        """Acknowledge an accepted replay immediately; finalization is asynchronous."""
         self._headline = 'CLIP CAPTURED'
         self._detail = ''
-        self._stats = [
-            (f'{duration_s}s',  'Duration'),
-            (f'{fps} FPS',      'Framerate'),
-            (resolution,        'Resolution'),
-        ]
+        self._stats = []
+        if duration_s is not None:
+            duration = f'{duration_s:g}'
+            self._stats.append((f'{duration}s', 'Clip length'))
+        if fps is not None:
+            self._stats.append((f'{fps} FPS', 'Framerate'))
+        if resolution:
+            self._stats.append((resolution, 'Resolution'))
+        self._show('clip_captured', compact=not bool(self._stats))
+
+    def show_saving(self) -> None:
+        # Compatibility with commands from an older parent process.
+        self.show_captured()
+
+    def show_clip(self, duration_s: float | None, fps: int, resolution: str,
+                  hold_duration_ms: int = _DEFAULT_HOLD_DURATION_MS) -> None:
+        self._headline = 'CLIP SAVED'
+        self._detail = '' if duration_s is not None else 'Video duration unverified.'
+        self._stats = []
+        if duration_s is not None:
+            duration = f'{duration_s:.2f}'.rstrip('0').rstrip('.')
+            self._stats.append((f'{duration}s', 'Duration'))
+        self._stats.extend([(f'{fps} FPS', 'Framerate'), (resolution, 'Resolution')])
         self._show('clip_captured', hold_duration_ms=hold_duration_ms)
 
     def show_screenshot(
@@ -269,11 +294,27 @@ class CaptureCard(QWidget):
 
     def show_recording_saved(
             self, filename: str = '',
-            hold_duration_ms: int = _DEFAULT_HOLD_DURATION_MS) -> None:
+            hold_duration_ms: int = _DEFAULT_HOLD_DURATION_MS, *,
+            duration_seconds: float | None = None) -> None:
         self._headline = 'MANUAL RECORDING SAVED'
         self._detail = (
             f'{filename}  ·  Ready to trim and export.'
             if filename else 'Ready to trim and export.')
+        try:
+            duration = (float(duration_seconds)
+                        if type(duration_seconds) in (int, float) else None)
+        except (ValueError, OverflowError):
+            duration = None
+        if duration is not None and math.isfinite(duration) and duration >= 0:
+            if duration < 60:
+                timing = f'Video {duration:.2f} s'
+            else:
+                rounded = round(duration, 2)
+                whole = int(rounded)
+                hours, remainder = divmod(whole, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                timing = f'Video {hours:02d}:{minutes:02d}:{seconds + rounded - whole:05.2f}'
+            self._detail = f'{timing}  ·  {self._detail}'
         self._stats = []
         self._show(
             None, compact=True, hold_duration_ms=hold_duration_ms)
@@ -342,6 +383,7 @@ class CaptureCard(QWidget):
             self._c_prog_track = QColor(tm.get_capture_card_color('CAPTURE_CARD_PROGRESS_TRACK'))
             self._c_prog_fill  = QColor(tm.get_capture_card_color('CAPTURE_CARD_PROGRESS_FILL'))
         except Exception:
+            # Keep the available palette colors and continue displaying the notification.
             pass
 
         if sound_key is not None and _notification_sounds_enabled():

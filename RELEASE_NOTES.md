@@ -1,4 +1,73 @@
-# FTHR Clips 2.0.0-alpha
+# FTHR Clips 2.1.0
+
+## 11 November 2026 — opt-in update checks
+
+- Disable automatic update checks by default, including older preferences without privacy consent.
+- Explain internet access and request metadata before enabling background checks.
+- Keep update downloads and installer launch under user control.
+
+## 7 November 2026 — settings and capture interface
+
+- Organize settings into consistent folded sections, including game profiles and allowed games inside Clip.
+- Move Save clips with gaps and Save low-FPS clips into Video encoding.
+- Refine dropdown menus, top-bar panel attachment, scroll areas, and compact numeric steppers.
+- Show app icons in Allowed Games and use a switch for its capture restriction.
+- Keep one animated capture card and remove the extra saved-duration notification.
+
+## Next update — working source, 19 October 2026
+
+- Mark favorites from library cards or the editor and filter the library to favorites. New favorites are protected by default; favoriting and deletion protection remain independent, with explicit unprotection available.
+- Release automatically added favorite protection when the favorite is removed, restoring the active red delete button. Preserve separately chosen protection and older protection whose origin is unknown. Place the card's favorite button in the upper-right corner of its thumbnail.
+- Check current protection and file identity before library/editor deletion, post-upload auto-delete and orphan audio-manifest cleanup. Keep protected files and retain local files when the deletion context cannot be verified.
+- Preserve editor drafts when deletion cannot proceed. Refuse teardown after a failed save and restore the existing editor session if protection changes before the file can be removed.
+- Give clips stable IDs in the existing SQLite metadata store. Back up databases and legacy metadata before an explicit, versioned migration; retain tags, editor drafts and unknown metadata fields.
+- Journal same-folder renames and associated audio-manifest updates so interrupted operations can be recovered before library scanning and background services start. Reserve source and destination paths against uploads, exports and active recordings.
+- Save active and parked editor drafts before renaming their media; keep edits and the original file available when saving or closing fails.
+- Define a versioned editor-project contract with multiple media references and a lossless adapter for existing drafts. The expanded editor and remaining library features remain planned work.
+- Keep ordinary metadata reads on a validated in-memory schema snapshot while retaining file-identity checks and fresh database validation for writes.
+- Restore library scroll updates after initial scanning and attach them only once when the grid enters its scroll area.
+- Explain the system-mix fallback for an empty playback-device selection; distinguish missing devices from an unchecked or failed scan and allow retrying in multi-device mode.
+- Mark the manual recording timer as approximate and report measured video duration after the closed file is validated. Missing timing information does not prevent saving a valid recording.
+- Keep clip metadata in memory unchanged when its database transaction fails, including editor-draft pruning; reject metadata rename collisions instead of overwriting the destination.
+- Bind new editor drafts to the source file's device/file identity as well as size and modification time, while retaining existing draft compatibility.
+- Upload the current editor result after a separate validated export, including cuts, crop, effects, speed and audio mix. Preserve the original file and refuse uploads when export or media inspection fails.
+- Keep upload exports running across editor navigation/close, prevent repeated export jobs for the same source and reuse unchanged completed output through the existing uploader's duplicate checks.
+- Hardware qualification and release-package acceptance remain open. This later source change is not included in the previously built installer.
+
+## 19 October 2026 — vxnsin pull request integration
+
+- PR #87 is already covered by the adapted AMF single-texture pool; retain the current AMD stabilization.
+- Integrate PR #88: real CANCEL/CONTINUE installer navigation while applications use files, plus distinct finished/pending step artwork.
+- Integrate PR #89: Windows replay clips can record one playback device, per-program tracks or up to four named playback-device tracks. Preserve legacy settings and route the active generation through finalization without merging the new separate tracks away. Manual continuous recordings retain the existing system-mix path.
+- Integrate PR #90: window size changes request a restart of the same selected HWND. Keep existing identity, generation and retry-budget guards; show terminal errors when recovery is unavailable.
+- The earlier audio-sync fixes remain included. Parser/UI/build checks do not replace multi-endpoint or supported-Windows per-program hardware qualification.
+
+## 19 October 2026 — Windows audio/video synchronization
+
+- Correct the reproduced Windows MP4 video-edit and AAC-priming interpretation with a lossless, timing-neutral container workaround. Apply it before new Windows MP4 saves/exports are published and to eligible older clips through an asynchronous playback copy. Original library files remain intact.
+- Preserve the complete video tail when the combined AAC track ends earlier, without changing relative audio start times.
+- Use the shared overflow-safe QPC conversion in the optional process-loopback fallback.
+- The local Warzone decoder comparison and generated WGC/system-loopback marker test pass. Physical microphone/speaker latency, long gameplay and Radeon qualification remain pending.
+
+## 18 October 2026 — AMD source stabilization and verification
+
+- Keep AMF production input on the bounded pool of separate BGRA textures;
+  matching geometry uses a direct GPU copy. GPU NV12 remains an explicit
+  diagnostic comparison, with separate production and comparison results.
+- Bound compressed replay video and live save snapshots by a shared byte
+  budget. Reject settings or saves that cannot fit instead of silently
+  shortening configured history.
+- Bind window capture to its HWND/process/thread identity and replace
+  blocking diagnostic readbacks with bounded asynchronous sampling.
+- Qualify Windows encoders through the actual native GPU path and decode all
+  48 changing testframes. Cache identity includes engine/runtime content and
+  current monitor, adapter, driver and encoding parameters.
+- Correct the WinAPI primary-monitor flag used for first-run monitor selection.
+- Add a repeatable video-only WGC window lifecycle qualification helper and
+  compile it in Windows CI alongside the AMD helper.
+- The full local MSVC Release/x64 build and NVIDIA GPU-input regressions now
+  pass in the historical development environment. Physical Radeon qualification
+  remains pending; these results do not qualify the complete release matrix.
 
 ## 17 October 2026 — partial replay saves
 

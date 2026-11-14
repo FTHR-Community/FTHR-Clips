@@ -54,7 +54,7 @@ def _viewer(monkeypatch, qtbot, path: str, metadata_manager=None) -> ClipViewer:
     return viewer
 
 
-def test_playback_has_one_ui_loop_and_filmstrip_is_idle_only(
+def test_playback_has_one_ui_loop_and_keeps_filmstrip_scheduled(
         monkeypatch, qtbot, tmp_path):
     viewer = _viewer(monkeypatch, qtbot, str(tmp_path / 'clip.mp4'))
     timer_identity = id(viewer._ph_timer)
@@ -66,12 +66,13 @@ def test_playback_has_one_ui_loop_and_filmstrip_is_idle_only(
 
     assert id(viewer._ph_timer) == timer_identity
     assert viewer._ph_timer.isActive()
-    assert not viewer._timeline_prepare_timer.isActive()
+    assert viewer._timeline_prepare_timer.isActive()
     assert viewer.trim_slider._thumbnail_worker_starts == 0
 
     viewer._on_state_changed(QMediaPlayer.PlaybackState.PausedState)
     assert not viewer._ph_timer.isActive()
-    assert viewer._timeline_prepare_timer.interval() == 1500
+    # A state change must not postpone work already scheduled at startup.
+    assert viewer._timeline_prepare_timer.interval() == 300
     viewer._teardown_player()
 
 
@@ -165,6 +166,7 @@ def test_editor_draft_is_debounced_and_restored_on_reopen(
     first.trim_slider.selected_segment = 1
     first._crop_rect = (10, 20, 640, 360)
     first._stretch_ratio = 1.25
+    first._stretch_size = (400, 700)
     first._effects['contrast'] = 30
     first._commit_editor_change(before)
 
@@ -180,9 +182,36 @@ def test_editor_draft_is_debounced_and_restored_on_reopen(
     assert reopened.trim_slider.segments[1].deleted is True
     assert reopened._crop_rect == (10, 20, 640, 360)
     assert reopened._stretch_ratio == 1.25
+    assert reopened._stretch_size == (400, 700)
     assert reopened._effects['contrast'] == 30
     assert manager.writes == 1
     reopened._teardown_player()
+
+
+def test_crop_change_adjusts_custom_stretch_and_undo_restores_both(
+        monkeypatch, qtbot, tmp_path):
+    viewer = _viewer(monkeypatch, qtbot, str(tmp_path / 'clip.mp4'))
+    viewer._metadata_loaded = True
+    viewer._src_w, viewer._src_h = 1920, 1080
+    viewer._stretch_size = (1200, 1000)
+    before = viewer._capture_editor_state()
+
+    viewer._crop_rect = (0, 0, 160, 160)
+    viewer._update_crop_ui()
+    viewer._commit_editor_change(before)
+    assert viewer._stretch_size == (640, 640)
+    assert '640 × 640' in viewer.stretch_btn.text()
+
+    viewer._undo()
+    assert viewer._crop_rect is None
+    assert viewer._stretch_size == (1200, 1000)
+    viewer._redo()
+    assert viewer._crop_rect == (0, 0, 160, 160)
+    assert viewer._stretch_size == (640, 640)
+    viewer._reset_stretch()
+    assert viewer._stretch_size is None
+    assert viewer._crop_rect == (0, 0, 160, 160)
+    viewer._teardown_player()
 
 
 def test_immediate_play_is_deferred_until_preparation_finishes(
@@ -419,3 +448,70 @@ def test_neutral_editor_preview_uses_smooth_frame_scaling(qtbot):
 
     boundary = rendered.pixelColor(4, 4).red()
     assert 0 < boundary < 255
+
+def test_24_second_filmstrip_finishes_while_playback_stays_active(
+        monkeypatch, qtbot, tmp_path):
+    import subprocess
+    from PySide6.QtCore import QTimer
+    from core.ffmpeg_tools import get_ffmpeg_exe
+    from core.media_process import media_process_snapshot
+
+    clip = tmp_path / 'playing.mp4'
+    subprocess.run([
+        get_ffmpeg_exe(), '-v', 'error', '-f', 'lavfi', '-i',
+        'testsrc2=size=320x180:rate=24:duration=24', '-c:v', 'mpeg4',
+        '-g', '96', str(clip),
+    ], check=True, timeout=20,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    # Keep the player in PlayingState for this scheduling regression while
+    # the actual FFmpeg worker decodes the 24-second source on its own lane.
+    monkeypatch.setattr(ClipViewer, '_prepare_initial_media_source', lambda self: None)
+    monkeypatch.setattr(ClipViewer, '_discover_audio_sources_async', lambda self: None)
+    viewer = _viewer(monkeypatch, qtbot, str(clip))
+    viewer.duration_ms = viewer.trim_slider.duration_ms = 24_000
+    viewer._metadata_probe_pending = False
+    viewer._playback_ready = True
+    monkeypatch.setattr(viewer.player, 'playbackState',
+                        lambda: QMediaPlayer.PlaybackState.PlayingState)
+    # Late audio is idle-only, but must not prevent the filmstrip from loading.
+    viewer._deferred_audio_mixer_sources = (object(),)
+    monkeypatch.setattr(viewer, '_prepare_audio_mixer',
+                        lambda *_: (_ for _ in ()).throw(AssertionError('audio rebuilt during playback')))
+    ticks = []
+    heartbeat = QTimer(viewer)
+    heartbeat.setInterval(20)
+    heartbeat.timeout.connect(lambda: ticks.append(time.monotonic()))
+    heartbeat.start()
+    started = time.monotonic()
+    try:
+        viewer._on_state_changed(QMediaPlayer.PlaybackState.PlayingState)
+        qtbot.waitUntil(lambda: bool(viewer.trim_slider._thumbnails), timeout=8000)
+        generation = viewer.trim_slider._thumbnail_job
+        viewer._on_state_changed(QMediaPlayer.PlaybackState.PlayingState)
+        assert viewer.trim_slider._thumbnail_job == generation
+        qtbot.waitUntil(lambda: viewer.trim_slider._thumbnail_complete, timeout=8000)
+        assert time.monotonic() - started < 24
+        assert len(viewer.trim_slider._thumbnails) == 24
+        assert ticks
+        assert viewer.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        assert viewer.trim_slider._thumbnail_worker_starts == 1
+    finally:
+        heartbeat.stop()
+        viewer._teardown_player()
+    qtbot.waitUntil(lambda: media_process_snapshot()[0] == 0, timeout=4000)
+
+
+def test_scrubbing_during_playback_reschedules_cancelled_filmstrip(
+        monkeypatch, qtbot, tmp_path):
+    monkeypatch.setattr(ClipViewer, '_prepare_initial_media_source', lambda self: None)
+    viewer = _viewer(monkeypatch, qtbot, str(tmp_path / 'clip.mp4'))
+    viewer._playback_ready = True
+    monkeypatch.setattr(viewer.player, 'playbackState',
+                        lambda: QMediaPlayer.PlaybackState.PlayingState)
+    viewer.trim_slider._thumbnail_loading = True
+    cancelled = viewer.trim_slider._thumbnail_cancel
+    viewer._on_seek_requested(0.5)
+    assert cancelled.is_set()
+    assert viewer._timeline_prepare_timer.isActive()
+    assert viewer._timeline_prepare_timer.interval() == 750
+    viewer._teardown_player()

@@ -9,6 +9,7 @@ from FTHR_UI.core import hotkey_manager as hotkeys
 class _PopupHotkeyManager:
     hotkeys = {
         'save_clip': 'F9',
+        'mark_highlight': '',
         'save_screenshot': 'F12',
         'start_recording': '',
         'stop_recording': '',
@@ -45,6 +46,7 @@ def test_hotkey_popup_exposes_all_visible_configurable_actions(qtbot):
 
     expected = {
         'save_clip',
+        'mark_highlight',
         'save_screenshot',
         'confirm_game_detection',
         'dismiss_game_detection',
@@ -53,8 +55,8 @@ def test_hotkey_popup_exposes_all_visible_configurable_actions(qtbot):
         expected.update({'start_recording', 'stop_recording'})
 
     assert set(popup._controller_buttons) == expected
-    labels = {label.text() for label in popup.findChildren(main.QLabel)}
-    assert {'CONFIRM GAME', 'DISMISS GAME'} <= labels
+    labels = {label.text().upper() for label in popup.findChildren(main.QLabel)}
+    assert {'HIGHLIGHT', 'CONFIRM GAME', 'DISMISS GAME'} <= labels
 
 
 def test_keyboard_clear_only_unbinds_selected_action(qtbot):
@@ -131,3 +133,21 @@ def test_duplicate_game_detection_binding_is_rejected_with_visible_error(
     assert binding in detail
     assert existing_action.replace('_', ' ') in detail
     assert level == 'warning'
+
+
+def test_compact_hotkeys_switch_device_without_losing_bindings(qtbot):
+    popup = main.HotkeyPopup(_PopupHotkeyManager())
+    qtbot.addWidget(popup)
+    trigger = main.TopBarButton('Hotkeys')
+    qtbot.addWidget(trigger)
+    trigger.bindPopup(popup)
+    assert popup.width() == trigger.width() == 340
+    popup.show()
+    assert popup._keyboard_buttons['save_clip'].isVisible()
+    assert not popup._controller_buttons['save_clip'].isVisible()
+    popup.device_combo.setCurrentIndex(1)
+    assert popup._controller_buttons['save_clip'].isVisible()
+    assert not popup._keyboard_buttons['save_clip'].isVisible()
+    popup.reload_actions()
+    qtbot.waitUntil(lambda: popup._controller_buttons['save_clip'].isVisible())
+    assert popup.height() < 400

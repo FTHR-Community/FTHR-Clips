@@ -10,11 +10,10 @@ from html import escape
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
                               QPushButton, QFrame, QSizePolicy,
                               QFileIconProvider)
-from PySide6.QtCore import Qt, QSize, QFileInfo, Signal
+from PySide6.QtCore import Qt, QSize, QFileInfo, QTimer, Signal
 from PySide6.QtGui import QIcon, QCursor
-from ui.style import set_theme_style
+from ui.style import combo_qss, set_theme_style
 from ui.style import Colors, Fonts, Sizes, ThemedDropdownArrow, WheelSafeComboBox
-from ui.window_preview import WindowPreview
 from core.clip_grouping import clip_group_for_source
 
 if sys.platform == 'win32':
@@ -24,7 +23,8 @@ if sys.platform == 'win32':
 # Window enumeration — Windows only.
 # capture via wlr-screencopy; per-window targeting is not available.
 
-def _get_exe_info(exe_path: str, size: int = 16) -> 'tuple[str | None, QIcon | None]':
+def _get_exe_info(exe_path: str, size: int = 16, *,
+                  include_icon: bool = True) -> 'tuple[str | None, QIcon | None]':
     if sys.platform != 'win32':
         return None, None
     name = None
@@ -50,6 +50,8 @@ def _get_exe_info(exe_path: str, size: int = 16) -> 'tuple[str | None, QIcon | N
     except Exception:
         pass
 
+    if not include_icon:
+        return name, None
     try:
         provider = QFileIconProvider()
         icon = provider.icon(QFileInfo(exe_path))
@@ -100,7 +102,7 @@ def _get_hwnd_exe_path(hwnd: int) -> 'str | None':
     return None
 
 
-def _enumerate_capturable_windows():
+def _enumerate_capturable_windows(*, include_icons: bool = True):
     """List visible, titled capture targets using Win32, hyprctl, or xdotool.
 
     Records contain hwnd, title, display_name, exe_path, exe_name, is_game,
@@ -168,7 +170,8 @@ def _enumerate_capturable_windows():
         exe = _get_hwnd_exe_path(entry['hwnd'])
         if exe:
             if exe not in exe_cache:
-                exe_cache[exe] = _get_exe_info(exe, 16)
+                exe_cache[exe] = (_get_exe_info(exe, 16) if include_icons
+                                  else _get_exe_info(exe, 16, include_icon=False))
             name, icon = exe_cache[exe]
         else:
             name, icon = None, None
@@ -184,50 +187,11 @@ def _enumerate_capturable_windows():
 
 
 # Shared combobox style (kept for capture-source picker). These are functions,
-# rather than import-time constants, so Apply Theme can refresh this legacy
+# rather than import-time constants, so theme edits can refresh this legacy
 # compact widget along with the newer top-bar popup.
 def _combo_style() -> str:
-    return f'''
-    QComboBox {{
-        combobox-popup: 0;
-        background-color: {Colors.SURFACE_2};
-        border: none;
-        border-radius: {Sizes.RADIUS_MD}px;
-        padding: 3px 8px;
-        color: {Colors.TEXT};
-        font-size: 11px;
-        font-family: {Fonts.BODY};
-        min-width: 90px;
-        max-height: 24px;
-    }}
-    QComboBox:hover {{
-        background-color: {Colors.SURFACE_1};
-    }}
-    QComboBox::drop-down {{
-        border: none;
-        width: 22px;
-    }}
-    QComboBox::down-arrow {{
-        image: none;
-        width: 0;
-        height: 0;
-        border: none;
-    }}
-    QComboBox QAbstractItemView {{
-        background-color: {Colors.SURFACE_2};
-        border: none;
-        border-radius: {Sizes.RADIUS_MD}px;
-        color: {Colors.TEXT};
-        font-size: 11px;
-        selection-background-color: {Colors.SURFACE_3};
-        selection-color: {Colors.ACCENT};
-        padding: 2px;
-    }}
-    QComboBox QAbstractItemView::item {{
-        min-height: 22px;
-        padding-left: 4px;
-    }}
-'''
+    return combo_qss(background=Colors.SURFACE_2, compact=True)
+
 
 def _label_style() -> str:
     return f'''
@@ -236,29 +200,6 @@ def _label_style() -> str:
     font-family: {Fonts.DISPLAY};
     letter-spacing: 0px;
 '''
-
-def _restart_style() -> str:
-    return f'''
-    QPushButton {{
-        background-color: {Colors.ACCENT};
-        border: none;
-        color: {Colors.BG};
-        font-size: 10px;
-        font-family: {Fonts.DISPLAY};
-        font-weight: 600;
-        letter-spacing: 0px;
-        padding: 4px 12px;
-        border-radius: {Sizes.RADIUS_MD}px;
-    }}
-    QPushButton:hover {{
-        background-color: {Colors.TEXT};
-    }}
-    QPushButton:pressed {{
-        background-color: {Colors.ACCENT_DIM};
-        color: {Colors.TEXT};
-    }}
-'''
-
 
 # SettingBlock — expandable tile replacing the label+combobox pattern
 
@@ -435,7 +376,7 @@ class CaptureSettingsWidget(QWidget):
     bitrate_changed          = Signal(int)
     restart_engine_requested = Signal()
     retry_hardware_encoding  = Signal()
-    # Emitted when the user picks a new capture source and applies it.
+    # Emitted when the user picks a new capture source.
     # Carries (capture_mode_str, hwnd_int) — e.g. ('desktop', 0) or ('window', 12345678)
     capture_source_changed   = Signal(str, int)
 
@@ -456,7 +397,10 @@ class CaptureSettingsWidget(QWidget):
         self.current_bitrate_level = settings_manager.get('bitrate_level',  'high')
         self.current_capture_mode  = settings_manager.get('capture_mode',   'desktop')
         self.current_target_hwnd   = settings_manager.get('target_hwnd',    0)
-        self.restart_needed        = False
+        self._restart_timer = QTimer(self)
+        self._restart_timer.setSingleShot(True)
+        self._restart_timer.setInterval(400)
+        self._restart_timer.timeout.connect(self.restart_engine_requested.emit)
         # Cached window list: list of {'hwnd', 'title', 'is_game'}
         self._window_list          = []
         self._setup_ui()
@@ -517,13 +461,6 @@ class CaptureSettingsWidget(QWidget):
 
         settings_row.addStretch()
 
-        # Restart button
-        self.restart_button = QPushButton('Apply + restart')
-        self.restart_button.setStyleSheet(_restart_style())
-        self.restart_button.setVisible(False)
-        self.restart_button.clicked.connect(self._on_restart_clicked)
-        settings_row.addWidget(self.restart_button)
-
         main_layout.addLayout(settings_row)
 
         # Capture source row: Desktop | Window/Game picker
@@ -551,10 +488,6 @@ class CaptureSettingsWidget(QWidget):
         window_column.setContentsMargins(0, 0, 0, 0)
         window_column.setSpacing(5)
         window_column.addWidget(self.window_combo)
-        self.window_preview = WindowPreview(self, eyebrow=False)
-        self.window_preview.setMaximumWidth(300)
-        self.window_preview.setVisible(False)
-        window_column.addWidget(self.window_preview)
         source_row.addLayout(window_column)
 
         self.refresh_btn = QPushButton('Refresh')
@@ -585,13 +518,7 @@ class CaptureSettingsWidget(QWidget):
         # If we start in window mode, populate the list immediately so the user
         # doesn't have to click REFRESH before seeing anything.
         if self.current_capture_mode == 'window':
-            prev_hwnd = self.current_target_hwnd
             self._refresh_window_list()
-            # If the saved HWND wasn't found (stale / different session) and a
-            # new window was auto-selected, prompt the user to restart the engine
-            # so it picks up the correct capture target.
-            if self.current_target_hwnd != prev_hwnd:
-                self._show_restart_button()
 
         # Hardware encoding status bar (hidden by default)
         self.hw_status_bar = QFrame()
@@ -680,19 +607,20 @@ class CaptureSettingsWidget(QWidget):
         self.settings_manager.set('clip_length', self.current_clip_length)
         self.settings_manager.save_settings()
         self.clip_length_changed.emit(self.current_clip_length)
+        self._restart_timer.start()
 
     def _on_fps_block_changed(self, label: str):
         self.current_framerate = int(label)
         self.settings_manager.set('framerate', self.current_framerate)
         self.settings_manager.save_settings()
-        self._show_restart_button()
+        self._restart_timer.start()
         self.framerate_changed.emit(self.current_framerate)
 
     def _on_res_block_changed(self, label: str):
         self.current_resolution = label.lower()
         self.settings_manager.set('resolution', self.current_resolution)
         self.settings_manager.save_settings()
-        self._show_restart_button()
+        self._restart_timer.start()
         self._update_bitrate()
         dims = self._get_dims(self.current_resolution)
         self.resolution_changed.emit(dims[0], dims[1])
@@ -702,35 +630,35 @@ class CaptureSettingsWidget(QWidget):
         self.settings_manager.set('bitrate_level', self.current_bitrate_level)
         self.settings_manager.save_settings()
         self._update_bitrate()
+        self._restart_timer.start()
 
     def _on_capture_mode_changed(self, index):
         self.current_capture_mode = 'window' if index == 1 else 'desktop'
-        self.settings_manager.set('capture_mode', self.current_capture_mode)
-        if self.current_capture_mode == 'desktop':
-            self.current_target_hwnd = 0
-            self.settings_manager.set('target_hwnd', 0)
-            self.settings_manager.set('target_window_name', '')
-            self.settings_manager.set('target_clip_group', '')
-            self.window_preview.set_window(None)
         self._update_window_picker_visibility()
         if self.current_capture_mode == 'window':
             self._refresh_window_list()
-        self._show_restart_button()
+            return
+        self.current_target_hwnd = 0
+        self.settings_manager.set('capture_mode', 'desktop')
+        self.settings_manager.set('target_hwnd', 0)
+        self.settings_manager.set('target_window_name', '')
+        self.settings_manager.set('target_clip_group', '')
         self.settings_manager.save_settings()
+        self._restart_timer.start()
 
     def _on_window_selected(self, index):
         if index < 0 or index >= len(self._window_list):
             return
         entry = self._window_list[index]
         self.current_target_hwnd = entry['hwnd']
-        self.window_preview.set_window(entry)
+        self.settings_manager.set('capture_mode', 'window')
         self.settings_manager.set('target_hwnd', self.current_target_hwnd)
         self.settings_manager.set('target_window_name',
                                   entry.get('display_name', entry.get('title', '')))
         self.settings_manager.set('target_clip_group',
                                   clip_group_for_source(entry))
         self.settings_manager.save_settings()
-        self._show_restart_button()
+        self._restart_timer.start()
 
     def _refresh_window_list(self):
         self._window_list = _enumerate_capturable_windows()
@@ -738,7 +666,7 @@ class CaptureSettingsWidget(QWidget):
         self.window_combo.clear()
 
         # Try to re-select the previously chosen HWND
-        select_idx = 0
+        select_idx = -1
         for i, w in enumerate(self._window_list):
             label = ('★ ' if w['is_game'] else '') + w['display_name']
             if w.get('icon'):
@@ -751,14 +679,7 @@ class CaptureSettingsWidget(QWidget):
             if w['hwnd'] == self.current_target_hwnd:
                 select_idx = i
 
-        if self._window_list:
-            self.window_combo.setCurrentIndex(select_idx)
-            entry = self._window_list[select_idx]
-            self.current_target_hwnd = entry['hwnd']
-            self.settings_manager.set('target_hwnd', self.current_target_hwnd)
-            self.window_preview.set_window(entry, force_refresh=True)
-        else:
-            self.window_preview.set_window(None)
+        self.window_combo.setCurrentIndex(select_idx)
 
         self.window_combo.blockSignals(False)
 
@@ -766,16 +687,6 @@ class CaptureSettingsWidget(QWidget):
         show = (self.current_capture_mode == 'window')
         self.window_combo.setVisible(show)
         self.refresh_btn.setVisible(show)
-        self.window_preview.setVisible(show)
-
-    def _show_restart_button(self):
-        self.restart_needed = True
-        self.restart_button.setVisible(True)
-
-    def _on_restart_clicked(self):
-        self.restart_button.setVisible(False)
-        self.restart_needed = False
-        self.restart_engine_requested.emit()
 
     def _on_retry_hardware_encoding(self):
         self.retry_hardware_encoding.emit()
@@ -794,15 +705,11 @@ class CaptureSettingsWidget(QWidget):
         ''')
 
     def refresh_theme(self):
-        """Refresh compact capture controls after Apply Theme."""
+        """Refresh compact capture controls after a theme change."""
         for block in getattr(self, '_setting_blocks', []):
             block.refresh_theme()
-        if hasattr(self, 'restart_button'):
-            self.restart_button.setStyleSheet(_restart_style())
         for combo in self.findChildren(WheelSafeComboBox):
             combo.setStyleSheet(_combo_style())
-        if hasattr(self, 'window_preview'):
-            self.window_preview.refresh_theme()
         if hasattr(self, 'refresh_btn'):
             set_theme_style(self.refresh_btn, lambda: (f'''
                 QPushButton {{
@@ -871,7 +778,7 @@ class CaptureSettingsWidget(QWidget):
         self._apply_hw_status_style(success=True)
         self.hw_status_message.setText('Hardware encoding initialized successfully')
         self.hw_status_bar.setVisible(True)
-        
+
         # Hide after 3 seconds
         from PySide6.QtCore import QTimer
         QTimer.singleShot(3000, self.hide_hardware_encoding_error)

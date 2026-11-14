@@ -1,16 +1,20 @@
 # clip_viewer.py - FTHR clip editor
 
 from ui.style import set_theme_style
-import ctypes, json, math, os, sys, threading, subprocess, time
+import json, math, os, sys, threading, subprocess, time
 from ui.icons import IconButton
-from ui.motion import reduce_motion
 from ui.timeline_segments import TimelineSegment, TimelineSegments
 from ui.image_memory import ImageLRU, start_image_cache_maintenance
+from ui.clip_worker import ClipWorker as _ClipWorker
+from ui.clip_worker import CompatibilitySourceWorker as _CompatibilitySourceWorker
+from ui.highlight_markers import HighlightMarkersPanel
 
 from collections import deque
 from bisect import bisect_right
 from dataclasses import dataclass, replace
 from enum import Enum
+from types import MappingProxyType
+from uuid import uuid4
 from core.ffmpeg_tools import (
     FFmpegUnavailable,
     get_ffmpeg_exe,
@@ -20,10 +24,18 @@ from core.ffmpeg_tools import (
     # patch the historical helper; queued exports use core.export_encoding.
     software_video_args,  # noqa: F401 - patched by compatibility integrations
 )
-from core.library_ownership import MediaOwnership, classify_media_path
+from core.audio_processing import SourceProcessing, mixed_output_metadata
+from core.library_ownership import (
+    media_file_identity,
+)
+from core.library_tags import format_tags_text, parse_tags_text
+from core.highlight_markers import (
+    decode_highlight_markers, marker_dicts, normalize_highlight_markers,
+)
+from core.capture_highlights import media_identity, read_capture_highlights
 from core.settings_manager import clips_directory_from
 from core.ffmpeg_playback import (
-    FFmpegPlaybackController, PlaybackError, discover_playback_sources,
+    FFmpegPlaybackController, PlaybackError, discover_playback_sources, probe_audio_streams,
 )
 from core.export_lifecycle import ExportJob, ExportState
 from core.media_metadata import (
@@ -34,7 +46,7 @@ from core.media_metadata import (
 from core.media_identity import file_identity
 from core.playback_mix_model import (
     PlaybackSource, SourceMixState, ffmpeg_mix_filter, source_display_name,
-    source_icon_key,
+    source_icon_key, audio_input_arguments, MAX_IMPORTED_AUDIO_TRACKS,
 )
 from core.transactional_output import (
     commit_staged_output,
@@ -43,6 +55,8 @@ from core.transactional_output import (
 )
 from core.export_profiles import (
     DISCORD_PRESET,
+    MAX_TARGET_DIMENSION,
+    MIN_TARGET_DIMENSION,
     ExportPreset,
     ExportPresetManager,
     plan_export,
@@ -170,12 +184,12 @@ import numpy as np
 
 from PySide6.QtWidgets import (
     QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QFileDialog, QMessageBox,
     QLabel, QSlider, QFrame, QSizePolicy, QLineEdit, QCheckBox,
-    QFileIconProvider, QScrollArea, QMenu, QStyle, QStyleOptionSlider,
+    QScrollArea, QMenu, QStyle, QStyleOptionSlider,
 )
 from PySide6.QtCore import (
-    Qt, Signal, QUrl, QTimer, QSize, QRect, QPoint, QEvent, QFileInfo,
-    QPropertyAnimation, QEasingCurve, QMimeData, QObject, QRunnable,
+    Qt, Signal, QUrl, QTimer, QSize, QRect, QPoint, QEvent, QMimeData, QObject, QRunnable,
     QThreadPool, Slot,
 )
 from PySide6.QtMultimedia import (
@@ -185,17 +199,16 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from ui.quick_video_preview import QuickVideoPreview, quick_preview_supported
 from PySide6.QtGui import (
     QPainter, QBrush, QPen, QColor, QFont, QPixmap, QImage, QPolygon, QDrag, QIcon,
-    QFontMetrics, QKeySequence, QShortcut, QRadialGradient,
+    QFontMetrics, QIntValidator, QKeySequence, QShortcut, QRadialGradient,
 )
 
 from ui.style import (
-    Colors, Fonts, Sizes, button_primary_qss, combo_qss,
+    Colors, Fonts, Sizes, button_primary_qss, combo_qss, slider_qss,
     ThemedDropdownButton, WheelSafeComboBox,
 )
 from ui.dialogs import FthrMessageDialog, install_fthr_titlebar
 
 
-_WINDOWS_APP_ICON_CACHE: dict[str, QIcon] = {}
 
 
 class PlayerLifecycleState(str, Enum):
@@ -249,6 +262,16 @@ def _estimate_fps(samples, units_per_second: float) -> float:
 _NATIVE_TIMESTAMP_DISCONTINUITY_MS = 1000.0
 _SEEK_ACK_TOLERANCE_MS = 250.0
 _SEEK_GUARD_TIMEOUT_SECONDS = 2.0
+_SCRUB_PREVIEW_INTERVAL_MS = 70
+_PREVIEW_QUALITY_OPTIONS = (
+    ('Auto', 'auto'), ('540p', '540p'), ('720p', '720p'), ('Original', 'original'),
+)
+_PREVIEW_QUALITY_HEIGHT = {'auto': 720, '540p': 540, '720p': 720}
+
+
+def _preview_quality_setting(settings) -> str:
+    value = settings.get('editor_preview_quality', 'auto') if settings else 'auto'
+    return value if value in ('auto', '540p', '720p', 'original') else 'auto'
 
 
 def _use_native_preview_output(platform: str | None = None) -> bool:
@@ -281,91 +304,12 @@ def _load_themed_icon(filename: str, size: int, tint: str | None = None) -> QIco
 
 
 def _running_windows_app_icon(persistent_identity: str | None) -> QIcon | None:
-    """Resolve an icon from a running process matching the manifest identity.
-
-    Persist no executable path. Use a semantic glyph if no process matches.
-    """
-
+    """Resolve a local executable or its saved icon; never trust clip paths."""
     if not persistent_identity:
         return None
-    identity = persistent_identity.casefold()
-    if identity.endswith('.exe'):
-        identity = identity[:-4]
-    cached = _WINDOWS_APP_ICON_CACHE.get(identity)
-    if cached is not None and not cached.isNull():
-        return cached
-
-    try:
-        from ctypes import wintypes
-
-        class _PROCESSENTRY32W(ctypes.Structure):
-            _fields_ = [
-                ('dwSize', wintypes.DWORD), ('cntUsage', wintypes.DWORD),
-                ('th32ProcessID', wintypes.DWORD),
-                ('th32DefaultHeapID', ctypes.c_size_t),
-                ('th32ModuleID', wintypes.DWORD), ('cntThreads', wintypes.DWORD),
-                ('th32ParentProcessID', wintypes.DWORD),
-                ('pcPriClassBase', wintypes.LONG), ('dwFlags', wintypes.DWORD),
-                ('szExeFile', wintypes.WCHAR * 260),
-            ]
-
-        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE,
-                                             ctypes.POINTER(_PROCESSENTRY32W)]
-        kernel32.Process32FirstW.restype = wintypes.BOOL
-        kernel32.Process32NextW.argtypes = [wintypes.HANDLE,
-                                            ctypes.POINTER(_PROCESSENTRY32W)]
-        kernel32.Process32NextW.restype = wintypes.BOOL
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.QueryFullProcessImageNameW.argtypes = [
-            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
-            ctypes.POINTER(wintypes.DWORD)]
-        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-
-        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
-        if snapshot == wintypes.HANDLE(-1).value:
-            return None
-        executable_path = None
-        try:
-            entry = _PROCESSENTRY32W()
-            entry.dwSize = ctypes.sizeof(entry)
-            more = bool(kernel32.Process32FirstW(snapshot, ctypes.byref(entry)))
-            while more:
-                candidate = entry.szExeFile.casefold()
-                if candidate.endswith('.exe'):
-                    candidate = candidate[:-4]
-                if candidate == identity:
-                    process = kernel32.OpenProcess(0x1000, False, entry.th32ProcessID)
-                    if process:
-                        try:
-                            path = ctypes.create_unicode_buffer(32768)
-                            size = wintypes.DWORD(len(path))
-                            if kernel32.QueryFullProcessImageNameW(
-                                    process, 0, path, ctypes.byref(size)):
-                                executable_path = path.value
-                                break
-                        finally:
-                            kernel32.CloseHandle(process)
-                more = bool(kernel32.Process32NextW(snapshot, ctypes.byref(entry)))
-        finally:
-            kernel32.CloseHandle(snapshot)
-        if not executable_path:
-            return None
-        icon = QFileIconProvider().icon(QFileInfo(executable_path))
-        if icon.isNull():
-            return None
-        _WINDOWS_APP_ICON_CACHE[identity] = icon
-        return icon
-    except (AttributeError, OSError, TypeError, ValueError):
-        return None
-
-
-# Timeline primitives
+    from core.running_apps import application_icon
+    icon = application_icon(persistent_identity, size=24, fallback=False)
+    return None if icon.isNull() else icon
 
 
 @dataclass(frozen=True)
@@ -381,16 +325,72 @@ class EditorSnapshot:
     effects: tuple[tuple[str, int], ...]
     speed_rate: float = 1.0
     preserve_pitch: bool = True
+    master_volume: int = 80
+    source_volumes: tuple[tuple[str, int], ...] = ()
+    source_mutes: tuple[tuple[str, bool], ...] = ()
+    imported_sources: tuple[PlaybackSource, ...] = ()
+    removed_audio_sources: tuple[str, ...] = ()
+    limiter_enabled: bool = True
+    stretch_size: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
+class _UploadBuildState:
+    clip_path: str
+    sm: object
+    _watermark_enabled: bool
+    _speed_rate: float
+    _preserve_pitch: bool
+    _audio_tracks: tuple
+    _playback_sources: tuple[PlaybackSource, ...]
+    _source_volumes: object
+    _source_mutes: object
+    _master_volume: int
+    _limiter_enabled: bool = True
 
 
 _EDITOR_EFFECT_LIMITS = {
-    'exposure': (-100, 100),
-    'contrast': (-100, 100),
-    'saturation': (-100, 100),
-    'temperature': (-100, 100),
-    'sharpness': (0, 100),
-    'vignette': (0, 100),
+    'exposure': (-100, 100), 'contrast': (-100, 100),
+    'saturation': (-100, 100), 'temperature': (-100, 100),
+    'sharpness': (0, 100), 'vignette': (0, 100),
 }
+
+# The bundled software encoder is the export fallback for all hardware paths.
+_MAX_STRETCH_PIXELS = 9_437_184
+
+
+def _stretch_axis_limits(source: int) -> tuple[int, int]:
+    minimum = max(MIN_TARGET_DIMENSION, 2 * math.ceil(source / 8))
+    maximum = min(MAX_TARGET_DIMENSION, 4 * source)
+    return minimum, maximum
+
+
+def _valid_stretch_size(size) -> bool:
+    return (isinstance(size, (list, tuple)) and len(size) == 2
+            and all(type(axis) is int and MIN_TARGET_DIMENSION <= axis <= MAX_TARGET_DIMENSION
+                    and axis % 2 == 0 for axis in size)
+            and size[0] * size[1] <= _MAX_STRETCH_PIXELS)
+
+
+def _bound_stretch_size(size: tuple[int, int], source_w: int,
+                        source_h: int) -> tuple[int, int] | None:
+    """Preserve the requested dimensions where the new crop permits them."""
+    min_w, max_w = _stretch_axis_limits(source_w)
+    min_h, max_h = _stretch_axis_limits(source_h)
+    max_w = min(max_w, (_MAX_STRETCH_PIXELS // min_h) & ~1)
+    if min_w > max_w or min_h > max_h:
+        return None
+    width = max(min_w, min(max_w, size[0]))
+    max_h = min(max_h, (_MAX_STRETCH_PIXELS // width) & ~1)
+    return width, max(min_h, min(max_h, size[1]))
+
+
+def _stretch_preview_ratio(ratio: float, size: tuple[int, int] | None,
+                           crop_rect, source_w: int, source_h: int) -> float:
+    if size is None:
+        return ratio
+    width, height = crop_rect[2:] if crop_rect else (source_w, source_h)
+    return (size[0] / size[1]) * (max(1, height) / max(1, width))
 
 
 def _editor_snapshot_to_draft(state: EditorSnapshot) -> dict:
@@ -403,9 +403,21 @@ def _editor_snapshot_to_draft(state: EditorSnapshot) -> dict:
         'selected_segment': state.selected_segment,
         'crop_rect': list(state.crop_rect) if state.crop_rect else None,
         'stretch_ratio': state.stretch_ratio,
+        'stretch_size': list(state.stretch_size) if state.stretch_size else None,
         'effects': dict(state.effects),
         'speed_rate': state.speed_rate,
         'preserve_pitch': state.preserve_pitch,
+        'master_volume': state.master_volume,
+        'source_volumes': dict(state.source_volumes),
+        'source_mutes': dict(state.source_mutes),
+        'imported_audio': [
+            {'source_id': source.source_id, 'display_name': source.display_name,
+             'media_path': source.media_path, 'container_index': source.container_index,
+             'audio_index': source.audio_index, 'input_gain_percent': source.input_gain_percent,
+             'mono': source.mono}
+            for source in state.imported_sources],
+        'removed_audio_sources': list(state.removed_audio_sources),
+        'limiter_enabled': state.limiter_enabled,
     }
 
 
@@ -427,6 +439,10 @@ def _editor_snapshot_from_draft(payload: dict) -> EditorSnapshot | None:
             or not 0.0 <= trim_start < trim_end <= 1.0
             or not 0.25 <= stretch_ratio <= 4.0
             or not 0.25 <= speed_rate <= 2.0):
+        return None
+
+    raw_size = payload.get('stretch_size')
+    if raw_size is not None and not _valid_stretch_size(raw_size):
         return None
 
     raw_segments = payload.get('segments')
@@ -487,6 +503,54 @@ def _editor_snapshot_from_draft(payload: dict) -> EditorSnapshot | None:
     preserve_pitch = (raw_preserve_pitch
                       if isinstance(raw_preserve_pitch, bool) else True)
 
+    raw_volumes = payload.get('source_volumes', {})
+    raw_mutes = payload.get('source_mutes', {})
+    if not isinstance(raw_volumes, dict) or not isinstance(raw_mutes, dict):
+        return None
+    if len(raw_volumes) > 64 or len(raw_mutes) > 64:
+        return None
+    if (any(not isinstance(key, str) or type(value) is not int or not 0 <= value <= 100
+            for key, value in raw_volumes.items())
+            or any(not isinstance(key, str) or not isinstance(value, bool)
+                   for key, value in raw_mutes.items())):
+        return None
+    master = payload.get('master_volume', 80)
+    if type(master) is not int or not 0 <= master <= 100:
+        return None
+    raw_imports = payload.get('imported_audio', [])
+    removed = payload.get('removed_audio_sources', [])
+    if (not isinstance(raw_imports, list) or len(raw_imports) > MAX_IMPORTED_AUDIO_TRACKS
+            or not isinstance(removed, list) or len(removed) > 64
+            or any(not isinstance(key, str) for key in removed)):
+        return None
+    imports = []
+    for item in raw_imports:
+        if not isinstance(item, dict):
+            return None
+        path = item.get('media_path')
+        if (not isinstance(path, str) or not os.path.isabs(path) or '\x00' in path
+                or not isinstance(item.get('source_id'), str)
+                or not item['source_id'].startswith('import:')
+                or not isinstance(item.get('display_name'), str)
+                or type(item.get('container_index')) is not int
+                or type(item.get('audio_index')) is not int
+                or item['container_index'] < 0 or item['audio_index'] < 0):
+            return None
+        imports.append(PlaybackSource(
+            item['source_id'], item['display_name'], 'track', item['container_index'],
+            item['audio_index'], media_path=path, available=os.path.isfile(path),
+            input_gain_percent=item.get('input_gain_percent', 100), mono=item.get('mono', False)))
+        try:
+            SourceProcessing(imports[-1].input_gain_percent, imports[-1].mono)
+        except ValueError:
+            # Reject the draft as a unit if any imported track has invalid processing settings.
+            return None
+    if len({source.source_id for source in imports}) != len(imports):
+        return None
+    limiter = payload.get('limiter_enabled', True)
+    if not isinstance(limiter, bool):
+        return None
+
     return EditorSnapshot(
         trim_start=trim_start,
         trim_end=trim_end,
@@ -497,6 +561,13 @@ def _editor_snapshot_from_draft(payload: dict) -> EditorSnapshot | None:
         effects=tuple(effects),
         speed_rate=speed_rate,
         preserve_pitch=preserve_pitch,
+        master_volume=master,
+        source_volumes=tuple(sorted(raw_volumes.items())),
+        source_mutes=tuple(sorted(raw_mutes.items())),
+        imported_sources=tuple(imports),
+        removed_audio_sources=tuple(removed),
+        limiter_enabled=limiter,
+        stretch_size=tuple(raw_size) if raw_size is not None else None,
     )
 
 
@@ -505,7 +576,7 @@ _TIMELINE_IMAGE_CACHE = ImageLRU(20 * 1024 * 1024, max_entries=_TIMELINE_CACHE_L
 _TIMELINE_CACHE_LOCK = threading.Lock()
 
 
-def _timeline_cache_key(clip_path: str, count: int) -> tuple | None:
+def _timeline_cache_key(clip_path: str, count: int, duration_ms: int) -> tuple | None:
     """Key filmstrips by stable file identity so overwritten clips cannot reuse frames."""
 
     try:
@@ -513,7 +584,7 @@ def _timeline_cache_key(clip_path: str, count: int) -> tuple | None:
     except OSError:
         # A missing/in-flight clip simply cannot contribute a reusable filmstrip.
         return None
-    return (*identity, count)
+    return (*identity, count, duration_ms)
 
 
 def _cached_timeline_images(key, *, allow_partial=False) -> tuple[QImage, ...] | None:
@@ -544,8 +615,41 @@ def _store_timeline_images(key, images: list[QImage], *, complete=True, cancelle
             _TIMELINE_IMAGE_CACHE.popitem(last=False)
 
 
-class _ClipMetadataSignals(QObject):
-    ready = Signal(object)
+def _timeline_seek_points(clip_path, spacing, start, count, cancelled):
+    """Use indexed seeks only when they avoid enough GOP preroll to pay off."""
+
+    if spacing < 5 or count - start < 2:
+        return ()
+    from core.media_process import run_media_process
+
+    points = tuple((index + 0.5) * spacing for index in range(start, count))
+    intervals = ','.join(f'{point:.6f}%+#1' for point in points)
+    try:
+        result = run_media_process(
+            [get_ffprobe_exe(), '-v', 'error', '-select_streams', 'V:0',
+             '-read_intervals', intervals, '-show_entries',
+             'packet=pts_time,flags:format=start_time', '-of', 'json', clip_path],
+            cancelled, timeout_seconds=3.0, background='timeline')
+        if result is None or result[0] != 0:
+            return ()
+        probe = json.loads(result[1])
+        packets = probe['packets']
+        if (len(packets) != len(points)
+                or abs(float(probe['format']['start_time'])) > 0.001
+                or any('K' not in packet['flags'] for packet in packets)):
+            return ()
+        preroll = [point - float(packet['pts_time'])
+                   for point, packet in zip(points, packets, strict=True)]
+    except (FFmpegUnavailable, KeyError, OSError, TypeError, ValueError):
+        return ()
+
+    # Include the cost of launching a child for each sample. Long GOPs may
+    # make several seeks decode the same frames, so keep the sequential pass
+    # if the index does not show a clear saving.
+    if (not all(0 <= gap < spacing * 2 for gap in preroll)
+            or sum(preroll) + 2 * len(points) >= 0.8 * spacing * len(points)):
+        return ()
+    return points
 
 
 class _ClipResultReceiver(QObject):
@@ -570,6 +674,7 @@ class _ClipResultReceiver(QObject):
 
 
 _FRAME_DECODE_POOL = None
+_PREVIEW_FRAME_POOL = None
 
 
 def _frame_decode_pool():
@@ -578,6 +683,15 @@ def _frame_decode_pool():
         _FRAME_DECODE_POOL = QThreadPool(QApplication.instance())
         _FRAME_DECODE_POOL.setMaxThreadCount(1)
     return _FRAME_DECODE_POOL
+
+
+def _preview_frame_pool():
+    """Give interactive effects a bounded lane independent of background jobs."""
+    global _PREVIEW_FRAME_POOL
+    if _PREVIEW_FRAME_POOL is None:
+        _PREVIEW_FRAME_POOL = QThreadPool(QApplication.instance())
+        _PREVIEW_FRAME_POOL.setMaxThreadCount(1)
+    return _PREVIEW_FRAME_POOL
 
 
 class _PreviewFrameSignals(QObject):
@@ -633,10 +747,13 @@ class _PreviewFrameTask(QRunnable):
             conversion_complete = True
             if image is not None and not image.isNull():
                 processing_started = time.perf_counter()
-                image = image.scaled(
-                    self.target_size,
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation)
+                # Downsample before effects. Leave magnification to the
+                # smooth painter so small proxies never grow on this path.
+                size = self.target_size.boundedTo(image.size())
+                if size != image.size():
+                    image = image.scaled(
+                        size, Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation)
                 image = LiveVideoPreview._apply_color_effects(image, self.effects)
                 processing_ms = (time.perf_counter() - processing_started) * 1000.0
                 processing_complete = True
@@ -658,21 +775,55 @@ class _PreviewFrameTask(QRunnable):
              'force': self.force})
 
 
-class _PlaybackSourceWorker(QRunnable):
-    def __init__(self, path: str, cancelled: threading.Event):
+class _PlaybackSourceWorker(_ClipWorker):
+    def __init__(self, path: str, cancelled: threading.Event, mode: str = 'auto'):
         super().__init__()
         self.path = path
         self.cancelled = cancelled
-        self.signals = _ClipMetadataSignals()
+        self.mode = mode
 
-    def run(self):
+    def _run(self):
         from core.playback_proxy import prepare_playback_path
-        path = prepare_playback_path(self.path, self.cancelled)
+        path = (prepare_playback_path(self.path, self.cancelled)
+                if self.mode == 'auto'
+                else prepare_playback_path(self.path, self.cancelled, self.mode))
         if not self.cancelled.is_set():
             self.signals.ready.emit(path)
 
 
-class _InitialFrameDecodeWorker(QRunnable):
+def _decode_hdr_preview_image(path, cancelled, target_ms=0):
+    """Decode a paused frame, tone mapping HDR if the player has no SDR copy."""
+    from core.hdr_color import probe_hdr, sdr_tonemap_filter
+
+    color = probe_hdr(path, cancelled)
+    if cancelled.is_set():
+        return QImage()
+    if color is not None:
+        from core.ffmpeg_tools import get_ffmpeg_exe
+        from core.media_process import run_media_process
+
+        seek = ['-ss', f'{target_ms / 1000:.3f}'] if target_ms else []
+        result = run_media_process(
+            [get_ffmpeg_exe(), '-v', 'error', '-nostdin', '-threads', '2',
+             '-filter_threads', '1', *seek, '-i', path, '-map', '0:v:0',
+             '-vf', 'scale=w=min(1920\\,iw):h=min(1080\\,ih):'
+             'force_original_aspect_ratio=decrease:force_divisible_by=2,'
+             + sdr_tonemap_filter(color),
+             '-frames:v', '1', '-c:v', 'bmp', '-f', 'image2pipe', '-'],
+            cancelled, timeout_seconds=4)
+        if cancelled.is_set():
+            return QImage()
+        if result is None or result[0] or not result[1]:
+            raise RuntimeError('HDR preview frame could not be tone mapped')
+        image = QImage.fromData(result[1], 'BMP')
+        if image.isNull():
+            raise RuntimeError('tone-mapped preview frame was empty')
+        return image
+
+    return None
+
+
+class _InitialFrameDecodeWorker(_ClipWorker):
     """Decode exactly one real source frame without starting QMediaPlayer."""
 
     def __init__(self, path: str, generation: int,
@@ -681,28 +832,29 @@ class _InitialFrameDecodeWorker(QRunnable):
         self.path = path
         self.generation = int(generation)
         self.cancelled = cancelled
-        self.signals = _ClipMetadataSignals()
 
-    def run(self):
+    def _run(self):
         image = QImage()
         error = None
         capture = None
         try:
             if self.cancelled.is_set():
                 return
-            capture = cv2.VideoCapture(self.path)
-            if self.cancelled.is_set():
-                return
-            ok, frame = capture.read()
-            if self.cancelled.is_set():
-                return
-            if not ok or frame is None or frame.size == 0:
-                raise RuntimeError('first video frame was not decodable')
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            height, width = rgb.shape[:2]
-            image = QImage(
-                rgb.data, width, height, rgb.strides[0],
-                QImage.Format.Format_RGB888).copy()
+            image = _decode_hdr_preview_image(self.path, self.cancelled)
+            if image is None:
+                capture = cv2.VideoCapture(self.path)
+                if self.cancelled.is_set():
+                    return
+                ok, frame = capture.read()
+                if self.cancelled.is_set():
+                    return
+                if not ok or frame is None or frame.size == 0:
+                    raise RuntimeError('first video frame was not decodable')
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                height, width = rgb.shape[:2]
+                image = QImage(
+                    rgb.data, width, height, rgb.strides[0],
+                    QImage.Format.Format_RGB888).copy()
         except (cv2.error, OSError, RuntimeError, TypeError, ValueError) as exc:
             error = f'{type(exc).__name__}: {exc}'
             image = QImage()
@@ -713,7 +865,7 @@ class _InitialFrameDecodeWorker(QRunnable):
             self.signals.ready.emit((self.generation, image, error))
 
 
-class _PausedSeekFrameDecodeWorker(QRunnable):
+class _PausedSeekFrameDecodeWorker(_ClipWorker):
     """Decode one requested paused frame off the UI thread, without play()."""
 
     def __init__(self, path: str, source_generation: int,
@@ -725,32 +877,33 @@ class _PausedSeekFrameDecodeWorker(QRunnable):
         self.seek_generation = int(seek_generation)
         self.target_ms = max(0, int(target_ms))
         self.cancelled = cancelled
-        self.signals = _ClipMetadataSignals()
 
-    def run(self):
+    def _run(self):
         image = QImage()
         error = None
         capture = None
         try:
             if self.cancelled.is_set():
                 return
-            capture = cv2.VideoCapture(self.path)
-            if self.cancelled.is_set():
-                return
-            if self.target_ms > 0:
-                capture.set(cv2.CAP_PROP_POS_MSEC, self.target_ms)
-            if self.cancelled.is_set():
-                return
-            ok, frame = capture.read()
-            if self.cancelled.is_set():
-                return
-            if not ok or frame is None or frame.size == 0:
-                raise RuntimeError('requested paused frame was not decodable')
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            height, width = rgb.shape[:2]
-            image = QImage(
-                rgb.data, width, height, rgb.strides[0],
-                QImage.Format.Format_RGB888).copy()
+            image = _decode_hdr_preview_image(self.path, self.cancelled, self.target_ms)
+            if image is None:
+                capture = cv2.VideoCapture(self.path)
+                if self.cancelled.is_set():
+                    return
+                if self.target_ms > 0:
+                    capture.set(cv2.CAP_PROP_POS_MSEC, self.target_ms)
+                if self.cancelled.is_set():
+                    return
+                ok, frame = capture.read()
+                if self.cancelled.is_set():
+                    return
+                if not ok or frame is None or frame.size == 0:
+                    raise RuntimeError('requested paused frame was not decodable')
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                height, width = rgb.shape[:2]
+                image = QImage(
+                    rgb.data, width, height, rgb.strides[0],
+                    QImage.Format.Format_RGB888).copy()
         except (cv2.error, OSError, RuntimeError, TypeError, ValueError) as exc:
             error = f'{type(exc).__name__}: {exc}'
             image = QImage()
@@ -763,16 +916,55 @@ class _PausedSeekFrameDecodeWorker(QRunnable):
                 self.target_ms, image, error))
 
 
-class _ClipMetadataWorker(QRunnable):
+class _ScrubFrameDecodeWorker(_ClipWorker):
+    """Decode one low-resolution, cancellable drag sample from the active path."""
+
+    def __init__(self, path, source_generation, seek_generation, target_ms, cancelled):
+        super().__init__()
+        self.path = path
+        self.source_generation = source_generation
+        self.seek_generation = seek_generation
+        self.target_ms = target_ms
+        self.cancelled = cancelled
+
+    def _run(self):
+        from core.hdr_color import probe_hdr, sdr_tonemap_filter
+        from core.media_process import run_media_process
+
+        image = QImage()
+        try:
+            # Keep the full picture and original aspect. Timeline tiles are
+            # padded and too small/sparsely sampled for the main preview.
+            color = probe_hdr(self.path, self.cancelled)
+            filters = 'scale=w=min(960\\,iw):h=min(540\\,ih):force_original_aspect_ratio=decrease'
+            if color is not None:
+                filters += ',' + sdr_tonemap_filter(color)
+            result = run_media_process(
+                [get_ffmpeg_exe(), '-v', 'error', '-nostdin', '-threads', '2',
+                 '-filter_threads', '1', '-ss', f'{self.target_ms / 1000:.3f}',
+                 '-i', self.path, '-map', '0:V:0', '-vf', filters,
+                 '-frames:v', '1', '-threads:v', '1', '-c:v', 'bmp', '-f',
+                 'image2pipe', '-'],
+                self.cancelled, timeout_seconds=2)
+            if result is not None and result[0] == 0 and not self.cancelled.is_set():
+                image = QImage.fromData(result[1], 'BMP')
+        except (OSError, RuntimeError, TypeError, ValueError):
+            # Keep the last image if this sample is temporarily undecodable.
+            pass
+        self.signals.ready.emit((
+            self.cancelled, self.source_generation, self.seek_generation,
+            self.target_ms, image))
+
+
+class _ClipMetadataWorker(_ClipWorker):
     """Probe clip metadata without blocking the editor's first paint."""
 
     def __init__(self, clip_path: str, cancelled: threading.Event):
         super().__init__()
         self.clip_path = clip_path
         self.cancelled = cancelled
-        self.signals = _ClipMetadataSignals()
 
-    def run(self):
+    def _run(self):
         if self.cancelled.is_set():
             return
         metadata = None
@@ -818,6 +1010,41 @@ class _ClipMetadataWorker(QRunnable):
             # The dialog may have been closed while the probe was running.
             print(f'[ClipMetadata] result dropped after close: {error}')
             return
+
+
+class _ClipHighlightsWorker(_ClipWorker):
+    """Read embedded markers once off the Qt thread for SQL-absent clips."""
+
+    def __init__(self, clip_path: str, generation: int,
+                 expected_identity: dict | None, cancelled: threading.Event):
+        super().__init__()
+        self.clip_path = clip_path
+        self.generation = int(generation)
+        self.expected_identity = (dict(expected_identity)
+                                  if isinstance(expected_identity, dict) else None)
+        self.cancelled = cancelled
+
+    def _run(self):
+        if self.cancelled.is_set():
+            return
+        identity = None
+        markers = None
+        error = None
+        try:
+            identity = media_identity(self.clip_path)
+            if (self.expected_identity is not None
+                    and identity != self.expected_identity):
+                raise OSError('The clip changed before embedded highlights were read')
+            markers = read_capture_highlights(
+                self.clip_path, expected_identity=identity)
+            final_identity = media_identity(self.clip_path)
+            if final_identity != identity:
+                raise OSError('The clip changed while embedded highlights were read')
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            error = f'{type(exc).__name__}: {exc}'
+        if not self.cancelled.is_set():
+            self.signals.ready.emit((
+                self.generation, self.clip_path, identity, markers, error))
 
 
 SPEED_PRESETS: tuple[tuple[str, float], ...] = (
@@ -916,7 +1143,8 @@ def _normalise_color_effects(effects: dict | None) -> dict[str, int]:
 def _video_filter_chain(crop_rect=None, effects: dict | None = None,
                         stretch_ratio: float = 1.0,
                         ensure_even: bool = False,
-                        speed_rate: float = 1.0) -> list[str]:
+                        speed_rate: float = 1.0,
+                        stretch_size: tuple[int, int] | None = None) -> list[str]:
     """Build the shared FFmpeg video filter chain for Export and Share."""
 
     filters: list[str] = []
@@ -959,7 +1187,12 @@ def _video_filter_chain(crop_rect=None, effects: dict | None = None,
         filters.append(f'vignette=PI/{denominator:.2f}')
 
     ratio = max(0.25, min(4.0, float(stretch_ratio or 1.0)))
-    if abs(ratio - 1.0) > 0.005:
+    if stretch_size is not None:
+        if not _valid_stretch_size(stretch_size):
+            raise ValueError('Invalid custom stretch dimensions')
+        width, height = stretch_size
+        filters.extend((f'scale={width}:{height}', 'setsar=1'))
+    elif abs(ratio - 1.0) > 0.005:
         filters.append(f'scale=trunc(iw*{ratio:.4f}/2)*2:trunc(ih/2)*2')
         # Scale preserves display aspect by changing sample aspect ratio unless
         # explicitly reset. Stretch is intentionally non-uniform, so square
@@ -1047,6 +1280,7 @@ class TrimSlider(QFrame):
 
     range_changed  = Signal(float, float)
     seek_requested = Signal(float)
+    playhead_scrub_finished = Signal()
     segments_changed = Signal()
     selection_changed = Signal(int, bool)
     zoom_changed = Signal(float)
@@ -1056,8 +1290,9 @@ class TrimSlider(QFrame):
     context_split_requested = Signal(float)
     context_toggle_requested = Signal(int)
     hide_deleted_changed = Signal(bool)
+    highlight_activated = Signal(object)
 
-    def __init__(self, duration_ms: int, parent=None):
+    def __init__(self, duration_ms: int, parent=None, *, maintain_cache=True):
         super().__init__(parent)
         self.duration_ms  = max(duration_ms, 1)
         self.start_pct    = 0.0
@@ -1078,13 +1313,24 @@ class TrimSlider(QFrame):
         self._scaled_thumbnails = ImageLRU(4 * 1024 * 1024)
         self.preview_strip_enabled = True
         self._thumbnail_source = None
-        start_image_cache_maintenance()
+        self._thumbnail_count = 0
+        self._thumbnail_loading = False
+        self._thumbnail_complete = False
+        if maintain_cache:
+            start_image_cache_maintenance()
         self._thumbnail_job = 0
         self._thumbnail_cancel = threading.Event()
         self._thumbnail_worker_starts = 0
         self._timeline_background = QPixmap()
         self._timeline_background_key = None
         self._range_mapping_key = None
+        self._highlight_markers: tuple = ()
+        self._highlight_revision = 0
+        self._highlight_geometry_key = None
+        self._highlight_hit_groups: tuple = ()
+        self._highlight_interval_key = None
+        self._highlight_intervals: tuple[tuple[int, int], ...] = ()
+        self._highlight_interval_starts: tuple[int, ...] = ()
         self._painting_timeline = False
         self.setFixedHeight(116)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1116,6 +1362,8 @@ class TrimSlider(QFrame):
         self._segments_generation = self.__dict__.get('_segments_generation', 0) + 1
         self._range_mapping_key = None
         self._timeline_background_key = None
+        self._highlight_geometry_key = None
+        self._highlight_interval_key = None
 
     def _ensure_range_mapping(self):
         if self._painting_timeline:
@@ -1160,6 +1408,9 @@ class TrimSlider(QFrame):
             return
         self.hide_deleted_segments = enabled
         self.view_start_pct = 0.0
+        self._timeline_background_key = None
+        self._highlight_geometry_key = None
+        self._highlight_interval_key = None
         self.ensure_visible(self.playhead_pct)
         self.hide_deleted_changed.emit(enabled)
         self.update()
@@ -1200,8 +1451,122 @@ class TrimSlider(QFrame):
         self._timeline_background_key = None
         self.update()
 
+    def set_highlight_markers(self, markers):
+        """Replace the bounded source-time marker cache used by the timeline."""
+
+        self._highlight_markers = normalize_highlight_markers(list(markers))
+        self._highlight_revision += 1
+        self._highlight_geometry_key = None
+        self._timeline_background_key = None
+        self.update()
+
+    def highlight_position_pct(self, marker) -> float | None:
+        """Convert a marker's retained presentation position to source pct."""
+
+        try:
+            position_100ns = marker.position_100ns
+        except AttributeError:
+            try:
+                position_100ns = marker['position_100ns']
+            except (KeyError, TypeError):
+                # A malformed read-only marker cannot map to the timeline;
+                # leave it unavailable instead of interrupting clip opening.
+                return None
+        if type(position_100ns) is not int or self.duration_ms <= 0:
+            return None
+        duration_100ns = self.duration_ms * 10_000
+        return max(0.0, min(1.0, position_100ns / duration_100ns))
+
+    def _highlight_kept_intervals(self):
+        """Return retained source intervals in exact 100 ns coordinates."""
+
+        duration_100ns = self.duration_ms * 10_000
+        key = (self.duration_ms, self._segments_generation, self._segments.version,
+               self.start_pct, self.end_pct)
+        if key == self._highlight_interval_key:
+            return self._highlight_intervals
+        trim_start = max(0, min(duration_100ns,
+                                int(self.start_pct * duration_100ns)))
+        trim_end = max(trim_start, min(duration_100ns,
+                                      int(self.end_pct * duration_100ns)))
+        intervals = []
+        for segment in self.segments:
+            if segment.deleted:
+                continue
+            start = max(trim_start, min(duration_100ns,
+                                        int(segment.start_pct * duration_100ns)))
+            end = max(start, min(trim_end, int(segment.end_pct * duration_100ns)))
+            if start < end:
+                intervals.append((start, end))
+        self._highlight_interval_key = key
+        self._highlight_intervals = tuple(intervals)
+        self._highlight_interval_starts = tuple(start for start, _ in intervals)
+        return self._highlight_intervals
+
+    def highlight_available(self, marker) -> bool:
+        """Whether a source-time marker remains inside the retained edit."""
+
+        try:
+            position_100ns = (marker.position_100ns
+                              if hasattr(marker, 'position_100ns')
+                              else marker['position_100ns'])
+        except (KeyError, TypeError):
+            # Malformed read-only marker data is unavailable for hit testing.
+            return False
+        duration_100ns = self.duration_ms * 10_000
+        if position_100ns < 0 or position_100ns >= duration_100ns:
+            return False
+        intervals = self._highlight_kept_intervals()
+        index = bisect_right(self._highlight_interval_starts, position_100ns) - 1
+        return (index >= 0 and position_100ns < intervals[index][1])
+
+    def _highlight_geometry(self):
+        self._ensure_range_mapping()
+        key = (
+            self.width(), self.height(), self.devicePixelRatioF(), self.duration_ms,
+            self._highlight_revision,
+            self._segments_generation, self._segments.version,
+            self.hide_deleted_segments, self.view_start_pct,
+            self.view_span_pct, self.start_pct, self.end_pct,
+        )
+        if key == self._highlight_geometry_key:
+            return self._highlight_hit_groups
+        pad, tw = 14, self.width() - 28
+        view_end = self.view_start_pct + self.view_span_pct
+        grouped = {}
+        for marker in self._highlight_markers:
+            pct = self.highlight_position_pct(marker)
+            if pct is None:
+                continue
+            # Deleted/out-of-trim markers remain visible as dim source-time
+            # context, but never map through a collapsed deleted partition.
+            # That keeps their paint location from becoming a false hit at a
+            # retained boundary; hit testing filters them below as well.
+            available = self.highlight_available(marker)
+            if self.hide_deleted_segments and not available:
+                # Deleted source partitions are removed from the display axis;
+                # drawing their raw source coordinate would create a false hit
+                # at a retained boundary.  The sidebar still reports them as
+                # unavailable.
+                continue
+            display = self._source_to_display(pct) if available else pct
+            if not self.view_start_pct <= display <= view_end:
+                continue
+            x = pad + int((display - self.view_start_pct)
+                          / self.view_span_pct * tw)
+            grouped.setdefault(x, []).append((marker, available))
+        self._highlight_hit_groups = tuple(
+            (x, tuple(marker for marker, _ in values),
+             any(available for _, available in values),
+             tuple(marker for marker, available in values if available))
+            for x, values in sorted(grouped.items()))
+        self._highlight_geometry_key = key
+        return self._highlight_hit_groups
+
     def release_thumbnail_resources(self):
         self.cancel_thumbnail_loading()
+        self._thumbnail_count = 0
+        self._thumbnail_complete = False
         self._thumbnails.clear()
         self._scaled_thumbnails.clear()
         self._timeline_background = QPixmap()
@@ -1209,80 +1574,115 @@ class TrimSlider(QFrame):
         if self._thumbnail_source is not None:
             with _TIMELINE_CACHE_LOCK:
                 _TIMELINE_IMAGE_CACHE.pop(self._thumbnail_source, None)
+            self._thumbnail_source = None
 
     def load_thumbnails(self, clip_path: str, count: int = 24):
         """Decode an evenly-spaced filmstrip off the UI thread.
 
-        The viewer starts this only while playback is idle. A clip change or
-        Play request cancels between decoder operations, and an LRU reuses the
+        The viewer debounces this around seeks. A clip change or scrub
+        cancels between decoder operations, and an LRU reuses the
         decoded images when a clip is reopened.
         """
 
-        self.cancel_thumbnail_loading()
         if not self.preview_strip_enabled:
             return
         count = max(1, min(120, int(count)))
         duration_ms = self.duration_ms
-        self._thumbnail_job += 1
+        cache_key = _timeline_cache_key(clip_path, count, duration_ms)
+        if (cache_key is not None and cache_key == self._thumbnail_source
+                and self._thumbnail_loading and not self._thumbnail_cancel.is_set()):
+            return
+        self.cancel_thumbnail_loading()
         job = self._thumbnail_job
         cancelled = threading.Event()
         self._thumbnail_cancel = cancelled
-        cache_key = _timeline_cache_key(clip_path, count)
+        if cache_key is None or cache_key != self._thumbnail_source:
+            self._thumbnails.clear()
+            self._scaled_thumbnails.clear()
+            self.update()
         self._thumbnail_source = cache_key
+        self._thumbnail_count = count
+        self._thumbnail_complete = False
         cached = _cached_timeline_images(cache_key)
         if cached is not None:
-            self._set_thumbnail_images((job, cached))
+            self._set_thumbnail_images((job, cached, True))
             return
+        self._thumbnail_loading = True
         self._thumbnail_worker_starts += 1
 
         def _worker():
             images = list(_cached_timeline_images(cache_key, allow_partial=True) or ())
+            last_update = 0.0
+            complete = False
+
+            def publish(status):
+                if cancelled.is_set():
+                    return
+                try:
+                    self.thumbnails_ready.emit((job, tuple(images), status))
+                except RuntimeError:
+                    # The editor was deleted before the queued update.
+                    cancelled.set()
+
             try:
-                # Decode once, sequentially. Random OpenCV seeks made a
-                # 24-image strip decode the same long GOP up to 24 times,
-                # competing with interactive seeking and surviving cancel.
                 from core.media_process import run_media_process
                 duration_seconds = max(0.001, duration_ms / 1000.0)
-                loaded = len(images)
+                spacing = duration_seconds / count
                 frame_bytes = 180 * 100 * 3
                 pending_pixels = bytearray()
 
                 def receive_pixels(chunk):
+                    nonlocal last_update
                     pending_pixels.extend(chunk)
-                    while len(pending_pixels) >= frame_bytes and len(images) < count:
+                    while (len(pending_pixels) >= frame_bytes and len(images) < count
+                           and not cancelled.is_set()):
                         pixels = bytes(pending_pixels[:frame_bytes])
                         del pending_pixels[:frame_bytes]
                         images.append(QImage(
                             pixels, 180, 100, 180 * 3,
                             QImage.Format.Format_RGB888).copy())
                         _store_timeline_images(cache_key, images, complete=False, cancelled=cancelled)
+                        now = time.monotonic()
+                        if len(images) < count and now - last_update >= 0.1:
+                            last_update = now
+                            publish(None)
 
-                seek_args = (['-ss', f'{loaded * duration_seconds / count:.9f}']
-                             if loaded else [])
-                result = run_media_process(
-                    [get_ffmpeg_exe(), '-v', 'error', '-threads', '1',
-                     '-filter_threads', '1', *seek_args, '-i', clip_path, '-an', '-sn',
-                     '-vf', (f'fps={count / duration_seconds:.9f},'
-                             'scale=180:100:force_original_aspect_ratio=decrease,'
-                             'pad=180:100:(ow-iw)/2:(oh-ih)/2'),
-                     '-frames:v', str(max(1, count - loaded)), '-pix_fmt', 'rgb24',
-                     '-f', 'rawvideo', '-threads:v', '1', '-'],
-                    cancelled, timeout_seconds=30.0, background='timeline',
-                    on_stdout=receive_pixels)
-                if cancelled.is_set() or result is None or result[0] != 0:
-                    return
+                ffmpeg = get_ffmpeg_exe()
+                scale = ('scale=180:100:force_original_aspect_ratio=decrease,'
+                         'pad=180:100:(ow-iw)/2:(oh-ih)/2')
+
+                def decode(offset, frames, filters, timeout):
+                    pending_pixels.clear()
+                    seek_args = ['-ss', f'{offset:.9f}'] if offset else []
+                    result = run_media_process(
+                        [ffmpeg, '-v', 'error', '-threads', '4', '-filter_threads', '1',
+                         *seek_args, '-i', clip_path, '-map', '0:V:0', '-an', '-sn',
+                         '-vf', filters, '-frames:v', str(frames), '-pix_fmt', 'rgb24',
+                         '-f', 'rawvideo', '-threads:v', '1', '-'],
+                        cancelled, timeout_seconds=timeout, background='timeline',
+                        on_stdout=receive_pixels)
+                    return result is not None and result[0] == 0
+
+                for point in _timeline_seek_points(clip_path, spacing, len(images), count,
+                                                    cancelled):
+                    loaded = len(images)
+                    if not decode(point, 1, scale, 8.0) or len(images) == loaded:
+                        break
+
+                loaded = len(images)
+                if loaded == count:
+                    complete = True
+                elif not cancelled.is_set():
+                    # Keep one sequential decoder for densely spaced samples,
+                    # unindexed files, or the remainder after a failed seek.
+                    complete = decode(loaded * spacing, count - loaded,
+                                      f'fps={count / duration_seconds:.9f},{scale}', 30.0)
             except (FFmpegUnavailable, OSError, RuntimeError, TypeError, ValueError) as error:
                 print(f'[ClipTimeline] thumbnail filmstrip unavailable: {error}')
-                images = []
-            if cancelled.is_set():
-                return
-            _store_timeline_images(cache_key, images, cancelled=cancelled)
-            try:
-                self.thumbnails_ready.emit((job, images))
-            except RuntimeError:
-                # The editor was closed while background decoding completed;
-                # there is no remaining widget that needs the result.
-                return
+            complete = bool(images) and complete
+            if complete:
+                _store_timeline_images(cache_key, images, cancelled=cancelled)
+            publish(complete)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1291,11 +1691,15 @@ class TrimSlider(QFrame):
 
         self._thumbnail_cancel.set()
         self._thumbnail_job += 1
+        self._thumbnail_loading = False
 
     def _set_thumbnail_images(self, payload):
-        job, images = payload
+        job, images, complete = payload
         if job != self._thumbnail_job or not self.preview_strip_enabled:
             return
+        if complete is not None:
+            self._thumbnail_loading = False
+            self._thumbnail_complete = complete
         self._thumbnails = [QPixmap.fromImage(image) for image in images]
         self._scaled_thumbnails.clear()
         self.update()
@@ -1333,7 +1737,7 @@ class TrimSlider(QFrame):
         if not self.view_start_pct <= pct <= self.view_start_pct + self.view_span_pct:
             return QRect()
         x = 14 + int((pct - self.view_start_pct) / self.view_span_pct * (self.width() - 28))
-        return QRect(x - 7, 14, 15, 85)
+        return QRect(x - 7, 14, 15, self.height() - 31)
 
     def split_at_playhead(self) -> bool:
         pct = self.playhead_pct
@@ -1395,8 +1799,9 @@ class TrimSlider(QFrame):
         key = (
             self.width(), self.height(), self.devicePixelRatioF(), self.duration_ms,
             self._range_mapping_key, self.hide_deleted_segments, self.selected_segment,
-            self.preview_strip_enabled,
+            self.preview_strip_enabled, self._thumbnail_count,
             self.start_pct, self.end_pct, self.view_start_pct, self.zoom_factor,
+            self._highlight_revision,
             tuple(frame.cacheKey() for frame in self._thumbnails), Fonts.BODY_FAMILY,
             tuple(getattr(Colors, name) for name in
                   ('TEXT_DIM', 'BORDER_HI', 'SURFACE_2', 'TEXT', 'BG', 'DELETE', 'ACCENT')),
@@ -1411,6 +1816,7 @@ class TrimSlider(QFrame):
                 background_painter = QPainter(background)
                 try:
                     self._paint_timeline_background(background_painter)
+                    self._paint_highlight_markers(background_painter)
                 finally:
                     background_painter.end()
                 self._timeline_background = background
@@ -1426,7 +1832,7 @@ class TrimSlider(QFrame):
         w = self.width()
         pad  = 14
         tw   = w - pad * 2
-        ty, th = 22, 70
+        ty, th = 22, max(70, self.height() - 46)
         view_end = self.view_start_pct + self.view_span_pct
 
         # The collapsed timeline labels retained time; seeking stays in source time.
@@ -1450,11 +1856,20 @@ class TrimSlider(QFrame):
         for slot in range(slots):
             left = pad + int(slot * tw / slots)
             right = pad + int((slot + 1) * tw / slots)
-            pct = self.view_start_pct + self.view_span_pct * (slot + 0.5) / slots
-            pct = self._display_to_source(pct)
+            slot_start = self.view_start_pct + self.view_span_pct * slot / slots
+            pct = self._display_to_source(slot_start + self.view_span_pct / (2 * slots))
             if self._thumbnails:
-                thumb_index = min(len(self._thumbnails) - 1,
-                                  int(pct * len(self._thumbnails)))
+                count = self._thumbnail_count or len(self._thumbnails)
+                thumb_index = min(count - 1, int(pct * count))
+                last_index = len(self._thumbnails) - 1
+                # A partial strip keeps its source-time bins. The newest frame
+                # can paint sooner when it already falls within this tile.
+                if (thumb_index > last_index and not self.hide_deleted_segments
+                        and (last_index + 0.5) / count >= slot_start):
+                    thumb_index = last_index
+            else:
+                thumb_index = 0
+            if thumb_index < len(self._thumbnails):
                 source = self._thumbnails[thumb_index]
                 target = QRect(left, ty, max(1, right - left), th)
                 scaled = self._scaled_thumbnail(source, target.size())
@@ -1515,7 +1930,7 @@ class TrimSlider(QFrame):
                 painter.drawRect(x - 4, ty - 3, 8, th + 6)
 
         # Mini-map: full clip, deleted ranges, and the currently zoomed viewport.
-        overview_y, overview_h = 103, 7
+        overview_y, overview_h = self.height() - 13, 7
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(QColor(Colors.BORDER_HI)))
         painter.drawRect(pad, overview_y, tw, overview_h)
@@ -1532,7 +1947,7 @@ class TrimSlider(QFrame):
 
     def _paint_playhead(self, painter):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pad, tw, ty, th = 14, self.width() - 28, 22, 70
+        pad, tw, ty, th = 14, self.width() - 28, 22, max(70, self.height() - 46)
         view_end = self.view_start_pct + self.view_span_pct
 
         def x_for_pct(pct):
@@ -1550,6 +1965,28 @@ class TrimSlider(QFrame):
                 QPoint(ph_x, ty - 1),
             ]))
 
+    def _paint_highlight_markers(self, painter):
+        """Paint one cached geometry item per occupied pixel column."""
+
+        if not self._highlight_markers:
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        ty, th = 22, max(70, self.height() - 46)
+        for x, markers, available, _available_markers in self._highlight_geometry():
+            color = Colors.ACCENT if available else Colors.TEXT_MUTED
+            painter.setPen(QPen(QColor(color), 1 if available else 1))
+            painter.drawLine(x, ty - 7, x, ty + th + 5)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(color)))
+            painter.drawPolygon(QPolygon([
+                QPoint(x - 4, ty - 7), QPoint(x + 4, ty - 7),
+                QPoint(x, ty - 1),
+            ]))
+            if len(markers) > 1:
+                painter.setPen(QPen(QColor(color), 1))
+                painter.setFont(QFont(Fonts.BODY_FAMILY, 7))
+                painter.drawText(x + 4, ty + 11, f'+{len(markers) - 1}')
+
     def _pct_from_x(self, x: int) -> float:
         tw = self.width() - 28
         local = max(0.0, min(1.0, (x - 14) / max(tw, 1)))
@@ -1559,11 +1996,24 @@ class TrimSlider(QFrame):
         tw = self.width() - 28
         return self._display_to_source(max(0.0, min(1.0, (x - 14) / max(tw, 1))))
 
+    def _highlight_at(self, x: int, y: int):
+        if y < 12 or y > self.height() - 13:
+            return None
+        nearest = None
+        distance = 9
+        for marker_x, _markers, group_available, available_markers in self._highlight_geometry():
+            if abs(marker_x - x) <= distance:
+                if not group_available:
+                    continue
+                nearest = available_markers[0]
+                distance = abs(marker_x - x)
+        return nearest
+
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         event_pos = event.position().toPoint()
-        if event_pos.y() >= 98:
+        if event_pos.y() >= self.height() - 18:
             pct = self._overview_pct_from_x(event_pos.x())
             span = self.view_span_pct
             self.view_start_pct = max(0.0, min(1.0 - span, self._source_to_display(pct) - span / 2))
@@ -1585,6 +2035,14 @@ class TrimSlider(QFrame):
             self.dragging = 'end'
             self.range_edit_started.emit()
         else:
+            marker = self._highlight_at(event_pos.x(), event_pos.y())
+            if marker is not None:
+                if self.highlight_available(marker):
+                    marker_pct = self.highlight_position_pct(marker)
+                    self.playhead_pct = marker_pct
+                    self.highlight_activated.emit(marker.as_dict())
+                self.update()
+                return
             # The primary interaction is jump-to-click; the same gesture can
             # continue as a playhead scrub if the pointer moves.
             self.dragging = 'playhead'
@@ -1616,19 +2074,23 @@ class TrimSlider(QFrame):
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        was_playhead = self.dragging == 'playhead'
         was_range_edit = self.dragging in ('start', 'end')
+        if was_playhead:
+            pct = self._pct_from_x(event.position().toPoint().x())
+            if pct != self.playhead_pct:
+                self.seek_requested.emit(pct)
         self.dragging = None
-        if was_range_edit:
+        if was_playhead:
+            self.playhead_scrub_finished.emit()
+        elif was_range_edit:
             self.range_edit_finished.emit()
 
     def wheelEvent(self, event):
-        delta = event.angleDelta().y()
-        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            self.pan(-1 if delta > 0 else 1)
-        else:
-            anchor = self._pct_from_x(int(event.position().x()))
-            self.set_zoom(self.zoom_factor * (1.25 if delta > 0 else 0.8), anchor)
-        event.accept()
+        # Zoom and pan use the explicit timeline tools, not incidental wheel input.
+        event.ignore()
 
     def _context_menu_for_pct(self, pct: float) -> QMenu:
         """Build a segment menu targeted at source time, not stale selection."""
@@ -1987,6 +2449,8 @@ class LiveVideoPreview(CropPreviewOverlay):
         self._latest_video_frame = None
         self._latest_received_at = None
         self._latest_source_pts_ms = None
+        self._scrubbing = False
+        self._playback_height_limit = None
         self._active_preview_request = None
         self._active_preview_task = None
         self._pending_preview_request = None
@@ -2093,6 +2557,15 @@ class LiveVideoPreview(CropPreviewOverlay):
             self._enqueue_latest_frame()
         else:
             self._preview_stats['software_bypass_count'] += 1
+
+    def set_playback_height_limit(self, height: int | None) -> None:
+        """Refresh the settled software frame when its quality changes."""
+        if height == self._playback_height_limit:
+            return
+        self._playback_height_limit = height
+        self._preview_generation += 1
+        self._clear_presentation_barrier(clear_pending=True)
+        self._enqueue_latest_frame(force=isinstance(self._latest_video_frame, QImage))
 
     def set_playback_clock(self, position_ms: int | float | None) -> None:
         self._playback_clock_ms = (
@@ -2223,7 +2696,7 @@ class LiveVideoPreview(CropPreviewOverlay):
             self._invalidate_processed_frame()
         self.update()
 
-    def begin_source_generation(self):
+    def begin_source_generation(self, *, keep_frame: bool = False):
         """Forget decoded frames from the previous media source.
 
         The current player remains alive; only the preview generation changes.
@@ -2238,7 +2711,8 @@ class LiveVideoPreview(CropPreviewOverlay):
         self._latest_video_frame = None
         self._latest_received_at = None
         self._latest_source_pts_ms = None
-        self._frame_image = QImage()
+        if not keep_frame:
+            self._frame_image = QImage()
         self._prepared_frame = QImage()
         self._prepared_frame_serial = 0
         self._prepared_at = None
@@ -2308,6 +2782,16 @@ class LiveVideoPreview(CropPreviewOverlay):
         self._enqueue_latest_frame(force=True)
         return True
 
+    def retain_transition_frame(self, frame, position_ms: int) -> None:
+        """Present the last same-clip frame while a replacement source opens."""
+        if frame is None or not self._frame_image.isNull():
+            return
+        self._latest_video_frame = frame
+        self._latest_received_at = time.monotonic()
+        self._latest_source_pts_ms = float(position_ms)
+        self._frame_serial += 1
+        self._enqueue_latest_frame(force=True)
+
     def preview_performance_snapshot(self) -> dict:
         """Return bounded aggregate state suitable for diagnostics/tests."""
 
@@ -2318,6 +2802,7 @@ class LiveVideoPreview(CropPreviewOverlay):
         stats['preview_generation'] = self._preview_generation
         stats['has_real_frame'] = self._has_real_frame
         stats['software_preview_enabled'] = self._software_preview_enabled
+        stats['playback_height_limit'] = self._playback_height_limit
         stats['renderer_mode'] = (
             'software' if self._software_preview_enabled else 'native')
         stats['native_presentation_observable'] = False
@@ -2331,8 +2816,10 @@ class LiveVideoPreview(CropPreviewOverlay):
         return stats
 
     def set_edit_state(self, crop_rect, effects: dict | None,
-                       stretch_ratio: float, preview_enabled: bool = True):
+                       stretch_ratio: float, preview_enabled: bool = True,
+                       stretch_size: tuple[int, int] | None = None):
         ratio = max(0.25, min(4.0, float(stretch_ratio or 1.0)))
+        ratio = _stretch_preview_ratio(ratio, stretch_size, crop_rect, self._src_w, self._src_h)
         normalized_effects = _normalise_color_effects(effects)
         render_ratio = ratio if preview_enabled else 1.0
         render_effects = normalized_effects if preview_enabled else {}
@@ -2349,7 +2836,7 @@ class LiveVideoPreview(CropPreviewOverlay):
             self._clear_presentation_barrier(clear_pending=True)
             self._invalidate_processed_frame(clear_frame=False)
             self._reset_effect_budget()
-            self._enqueue_latest_frame()
+            self._enqueue_latest_frame(force=isinstance(self._latest_video_frame, QImage))
         self.update()
 
     def _invalidate_processed_frame(self, *, clear_frame: bool = True):
@@ -2378,8 +2865,8 @@ class LiveVideoPreview(CropPreviewOverlay):
         self._latest_video_frame = None
         self._latest_received_at = None
         self._latest_source_pts_ms = None
-        self._active_preview_request = None
-        self._active_preview_task = None
+        # The viewer can be reused before conversion exits. Keep its one
+        # active slot until the obsolete result releases it.
         self._frame_image = QImage()
         self._prepared_frame = QImage()
         self._poster_image = QImage()
@@ -2402,7 +2889,7 @@ class LiveVideoPreview(CropPreviewOverlay):
             self._invalidate_processed_frame(clear_frame=False)
             self.update()
             return
-        if self._preview_shutdown:
+        if self._preview_shutdown or self._scrubbing:
             return
         if not self._software_preview_enabled:
             return
@@ -2421,8 +2908,16 @@ class LiveVideoPreview(CropPreviewOverlay):
         self._enqueue_latest_frame()
 
     def _preview_target_size(self) -> QSize:
-        rect = self._video_display_rect()
-        return QSize(max(1, rect.width()), max(1, rect.height()))
+        size = self._video_display_rect().size()
+        height = self._playback_height_limit
+        if height is not None:
+            # Bound the work in both orientations, including stretched edits.
+            limit = QSize(round(height * 16 / 9), height)
+            if self._src_h > self._src_w:
+                limit.transpose()
+            if size.width() > limit.width() or size.height() > limit.height():
+                size.scale(limit, Qt.AspectRatioMode.KeepAspectRatio)
+        return size
 
     def _make_preview_request(self, *, force: bool = False):
         frame = self._latest_video_frame
@@ -2485,6 +2980,7 @@ class LiveVideoPreview(CropPreviewOverlay):
                     and not self._presentation_barrier_timer.isActive()):
                 self._presentation_barrier_timer.start()
             return
+        pool = _preview_frame_pool()
         self._active_preview_request = request
         task = _PreviewFrameTask(
             self, request['generation'], request['serial'], request['frame'],
@@ -2493,7 +2989,7 @@ class LiveVideoPreview(CropPreviewOverlay):
             request.get('force', False))
         task.signals.ready.connect(self._on_preview_result)
         self._active_preview_task = task
-        QThreadPool.globalInstance().start(task)
+        pool.start(task)
 
     def _on_preview_result(self, generation: int, serial: int, image: QImage,
                            elapsed_ms: float, error, metrics=None):
@@ -2775,6 +3271,7 @@ class StretchOverlay(QWidget):
         self._base_w = max(1, source_w)
         self._base_h = max(1, source_h)
         self._ratio = 1.0
+        self._output_size: tuple[int, int] | None = None
         self._drag_side: str | None = None
         self._drag_origin_x = 0
         self._drag_initial_ratio = 1.0
@@ -2794,8 +3291,9 @@ class StretchOverlay(QWidget):
         self._base_h = max(1, int(height))
         self.update()
 
-    def set_ratio(self, ratio: float):
+    def set_ratio(self, ratio: float, output_size: tuple[int, int] | None = None):
         self._ratio = max(0.25, min(4.0, float(ratio)))
+        self._output_size = output_size
         self.update()
 
     def set_active(self, active: bool):
@@ -2812,16 +3310,13 @@ class StretchOverlay(QWidget):
         # viewport remain clamped visually, while the label retains exact output.
         # Leave visible horizontal runway at 1× so a conventional 16:9 frame
         # can actually be dragged wider without immediately hitting the dialog.
-        base_w = min(int(available_w * 0.62), int(available_h * base_aspect))
-        base_h = min(available_h, int(base_w / max(base_aspect, 0.001)))
-        target_w = max(24, int(base_w * ratio))
-        if target_w > available_w:
-            scale = available_w / target_w
-            target_w = available_w
-            base_h = max(24, int(base_h * scale))
-        left = (self.width() - target_w) // 2
-        top = (self.height() - base_h) // 2
-        return QRect(left, top, target_w, base_h)
+        base_w = min(available_w * 0.62, available_h * base_aspect)
+        target_w, target_h = self._output_size or (self._base_w * ratio, self._base_h)
+        scale = min(base_w / self._base_w, available_w / target_w, available_h / target_h)
+        width, height = max(1, round(target_w * scale)), max(1, round(target_h * scale))
+        left = (self.width() - width) // 2
+        top = (self.height() - height) // 2
+        return QRect(left, top, width, height)
 
     def paintEvent(self, event):
         if not self._active:
@@ -2833,7 +3328,7 @@ class StretchOverlay(QWidget):
         painter.fillRect(self.rect(), QColor(Colors.SURFACE_1))
         if not self._preview_pixmap.isNull():
             # Drawing into the output rect deliberately ignores source aspect:
-            # this is the actual horizontal stretch the export will receive.
+            # this shows the aspect ratio the export will receive.
             painter.drawPixmap(rect, self._preview_pixmap, self._preview_pixmap.rect())
 
         painter.setPen(Qt.PenStyle.NoPen)
@@ -2854,9 +3349,9 @@ class StretchOverlay(QWidget):
             painter.drawRect(x - 1, rect.center().y() - 10, 2, 20)
             painter.setBrush(QBrush(QColor(Colors.ACCENT)))
 
-        target_w = max(2, int(self._base_w * self._ratio)) & ~1
-        target_h = self._base_h & ~1
-        label = f'{self._ratio:.2f}×   {target_w} × {target_h}'
+        target_w, target_h = self._output_size or (
+            max(2, int(self._base_w * self._ratio)) & ~1, max(2, self._base_h) & ~1)
+        label = f'{target_w} × {target_h} px'
         metrics = QFontMetrics(QFont(Fonts.BODY_FAMILY, 9, QFont.Weight.DemiBold))
         label_w = metrics.horizontalAdvance(label) + 20
         label_rect = QRect((self.width() - label_w) // 2, rect.bottom() + 10, label_w, 24)
@@ -2907,13 +3402,14 @@ class StretchDialog(QDialog):
 
     def __init__(self, clip_path: str, position_ms: int, source_w: int,
                  source_h: int, crop_rect=None, initial_ratio: float = 1.0,
-                 parent=None):
+                 parent=None, initial_size: tuple[int, int] | None = None):
         super().__init__(parent)
         self.setWindowTitle('Stretch video')
         self.setModal(True)
         self.setMinimumSize(680, 500)
         self.resize(760, 540)
         self.stretch_ratio = max(0.25, min(4.0, float(initial_ratio)))
+        self.stretch_size = initial_size
 
         if crop_rect:
             base_w, base_h = crop_rect[2], crop_rect[3]
@@ -2921,21 +3417,30 @@ class StretchDialog(QDialog):
             base_w, base_h = source_w, source_h
         self._base_w = max(1, int(base_w))
         self._base_h = max(1, int(base_h))
+        self._width_limits = _stretch_axis_limits(self._base_w)
+        self._height_limits = _stretch_axis_limits(self._base_h)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 18)
         root.setSpacing(12)
 
-        title_row = QHBoxLayout()
-        title_row.addStretch()
+        dimensions_row = QHBoxLayout()
+        dimensions_row.setSpacing(10)
+        self._width_input = self._add_dimension_input(dimensions_row, 'Width')
+        self._height_input = self._add_dimension_input(dimensions_row, 'Height')
+        dimensions_row.addStretch()
         self._dimensions = QLabel()
         self._dimensions.setObjectName('stretchDialogDimensions')
-        title_row.addWidget(self._dimensions)
-        root.addLayout(title_row)
+        dimensions_row.addWidget(self._dimensions)
+        root.addLayout(dimensions_row)
+
+        self._range_hint = QLabel()
+        self._range_hint.setObjectName('stretchDialogHint')
+        self._range_hint.setWordWrap(True)
+        root.addWidget(self._range_hint)
 
         self.preview = StretchOverlay(self._base_w, self._base_h)
-        self.preview.setMinimumHeight(350)
-        self.preview.set_ratio(self.stretch_ratio)
+        self.preview.setMinimumHeight(320)
         self.preview.set_preview_pixmap(
             self._extract_preview_frame(clip_path, position_ms, crop_rect))
         self.preview.set_active(True)
@@ -2944,7 +3449,7 @@ class StretchDialog(QDialog):
 
         controls = QHBoxLayout()
         controls.setSpacing(8)
-        reset_btn = QPushButton('Reset to source')
+        reset_btn = QPushButton('Reset to crop' if crop_rect else 'Reset to source')
         reset_btn.setObjectName('stretchDialogSecondary')
         reset_btn.clicked.connect(self._reset)
         controls.addWidget(reset_btn)
@@ -2953,18 +3458,31 @@ class StretchDialog(QDialog):
         cancel_btn.setObjectName('stretchDialogSecondary')
         cancel_btn.clicked.connect(self.reject)
         controls.addWidget(cancel_btn)
-        apply_btn = QPushButton('Apply stretch')
-        apply_btn.setObjectName('stretchDialogApply')
-        apply_btn.clicked.connect(self.accept)
-        controls.addWidget(apply_btn)
+        self._apply_btn = QPushButton('Apply stretch')
+        self._apply_btn.setObjectName('stretchDialogApply')
+        self._apply_btn.clicked.connect(self.accept)
+        controls.addWidget(self._apply_btn)
         root.addLayout(controls)
 
         set_theme_style(self, lambda: (f'''
             QDialog {{ background-color: {Colors.SHELL_BG}; }}
-            QLabel#stretchDialogTitle {{
+            QLabel[stretchDimensionLabel="true"] {{
                 color: {Colors.TEXT}; font-family: {Fonts.DISPLAY}; font-size: 13px;
                 font-weight: 600; letter-spacing: 0px; background: transparent;
             }}
+            QLineEdit[stretchDimensionInput="true"] {{
+                min-height: 32px; padding: 0 9px; background: {Colors.SURFACE_2};
+                color: {Colors.TEXT}; border: 1px solid {Colors.BORDER_HI};
+                border-radius: {Sizes.RADIUS_MD}px; font-family: {Fonts.BODY};
+                font-size: 13px; selection-background-color: {Colors.ACCENT};
+                selection-color: {Colors.BG};
+            }}
+            QLineEdit[stretchDimensionInput="true"]:focus {{ border-color: {Colors.ACCENT}; }}
+            QLabel#stretchDialogHint {{
+                color: {Colors.TEXT_DIM}; font-family: {Fonts.BODY}; font-size: 12px;
+                background: transparent;
+            }}
+            QLabel#stretchDialogHint[invalid="true"] {{ color: {Colors.WARNING}; }}
             QLabel#stretchDialogDimensions {{
                 color: {Colors.ACCENT}; font-family: {Fonts.BODY}; font-size: 11px;
                 background: transparent;
@@ -2986,9 +3504,30 @@ class StretchDialog(QDialog):
                 color: {Colors.BG};
             }}
             QPushButton#stretchDialogApply:hover {{ background: {Colors.TEXT}; }}
+            QPushButton#stretchDialogApply:disabled {{
+                background: {Colors.SURFACE_2}; border-color: {Colors.BORDER};
+                color: {Colors.TEXT_DIM};
+            }}
         '''))
         install_fthr_titlebar(self, 'Stretch video')
         self._update_dimensions()
+        self._width_input.textEdited.connect(self._on_dimensions_edited)
+        self._height_input.textEdited.connect(self._on_dimensions_edited)
+
+    def _add_dimension_input(self, layout: QHBoxLayout, axis: str) -> QLineEdit:
+        label = QLabel(f'&{axis}')
+        label.setProperty('stretchDimensionLabel', True)
+        field = QLineEdit()
+        field.setObjectName(f'stretch{axis}Input')
+        field.setProperty('stretchDimensionInput', True)
+        field.setAccessibleName(f'{axis} in pixels')
+        field.setValidator(QIntValidator(0, 99_999, field))
+        field.setMaxLength(5)
+        field.setFixedWidth(84)
+        label.setBuddy(field)
+        layout.addWidget(label)
+        layout.addWidget(field)
+        return field
 
     def _extract_preview_frame(self, clip_path: str, position_ms: int,
                                crop_rect) -> QPixmap:
@@ -3020,19 +3559,76 @@ class StretchDialog(QDialog):
             return QPixmap()
 
     def _on_ratio_changed(self, ratio: float):
-        self.stretch_ratio = ratio
+        if self.stretch_size is None:
+            self.stretch_ratio = ratio
+        else:
+            height = self.stretch_size[1]
+            low, high = self._width_limits
+            high = min(high, (_MAX_STRETCH_PIXELS // height) & ~1)
+            width = max(low, min(high, int(self._base_w * ratio) & ~1))
+            self.stretch_size = width, height
         self._update_dimensions()
 
     def _reset(self):
         self.stretch_ratio = 1.0
-        self.preview.set_ratio(1.0)
+        self.stretch_size = None
         self._update_dimensions()
 
     def _update_dimensions(self):
-        target_w = max(2, int(self._base_w * self.stretch_ratio)) & ~1
-        target_h = max(2, self._base_h) & ~1
-        self._dimensions.setText(
-            f'{self.stretch_ratio:.2f}×  ·  {target_w} × {target_h}')
+        width, height = self.stretch_size or (
+            max(2, int(self._base_w * self.stretch_ratio)) & ~1, max(2, self._base_h) & ~1)
+        self._width_input.setText(str(width))
+        self._height_input.setText(str(height))
+        self._refresh_dimensions_preview()
+        self._set_dimension_error('')
+
+    def _refresh_dimensions_preview(self):
+        ratio = (self.stretch_size[0] / self._base_w
+                 if self.stretch_size else self.stretch_ratio)
+        self.preview.set_ratio(ratio, self.stretch_size)
+        self._dimensions.setText('Custom resolution' if self.stretch_size else f'{ratio:.2f}× width')
+
+    def _set_dimension_error(self, error: str):
+        min_w, max_w = self._width_limits
+        min_h, max_h = self._height_limits
+        hint = (f'Even pixels · Width {min_w:,}–{max_w:,} · Height {min_h:,}–{max_h:,} · 9.4 MP max'
+                if min_w <= max_w and min_h <= max_h and min_w * min_h <= _MAX_STRETCH_PIXELS
+                else 'This frame size is outside the custom resolution limits.')
+        self._range_hint.setText(error or hint)
+        self._range_hint.setProperty('invalid', bool(error))
+        self._range_hint.style().unpolish(self._range_hint)
+        self._range_hint.style().polish(self._range_hint)
+        self._apply_btn.setEnabled(not error)
+
+    def _on_dimensions_edited(self):
+        try:
+            width = int(self._width_input.text())
+            height = int(self._height_input.text())
+        except ValueError:
+            self._set_dimension_error('Enter a width and height in pixels.')
+            return
+        if any(low > high for low, high in (self._width_limits, self._height_limits)):
+            self._set_dimension_error('This frame size is outside the custom resolution limits.')
+            return
+        for axis, value, (low, high) in (
+            ('Width', width, self._width_limits), ('Height', height, self._height_limits),
+        ):
+            if not low <= value <= high:
+                self._set_dimension_error(f'{axis} must be between {low:,} and {high:,} pixels.')
+                return
+        if width % 2 or height % 2:
+            self._set_dimension_error('Use even numbers for width and height.')
+            return
+        if not _valid_stretch_size((width, height)):
+            self._set_dimension_error(f'Use at most {_MAX_STRETCH_PIXELS:,} total pixels.')
+            return
+        self.stretch_size = width, height
+        self._refresh_dimensions_preview()
+        self._set_dimension_error('')
+
+    def accept(self):
+        if self._apply_btn.isEnabled():
+            super().accept()
 
 
 # _DragZone — proper QWidget subclass that initiates a file drag
@@ -3446,7 +4042,8 @@ class ShareModeDialog(QDialog):
         dc_btn.clicked.connect(lambda: self._select(True))
         root.addWidget(dc_btn)
 
-        custom = [preset for preset in self._preset_manager.custom()]
+        custom = [preset for preset in self._preset_manager.all()
+                  if preset.preset_id != 'discord']
         self._preset_combo = None
         if custom:
             preset_row = QHBoxLayout()
@@ -3524,7 +4121,7 @@ _share_windows = set()
 class ShareWindow(QDialog):
     """Non-modal export dialog with a draggable completed clip thumbnail.
 
-    Closing during export cancels the process. The ready preview animates
+    Closing during export cancels the process. The ready preview plays
     the FTHRClips watermark.
     """
 
@@ -3545,7 +4142,9 @@ class ShareWindow(QDialog):
                  stretch_ratio: float = 1.0,
                  speed_rate: float = 1.0,
                  preserve_pitch: bool = True,
-                 export_preset: ExportPreset | None = None, parent=None):
+                 export_preset: ExportPreset | None = None, parent=None,
+                 limiter_enabled: bool = True,
+                 stretch_size: tuple[int, int] | None = None):
         super().__init__(parent,
                          Qt.WindowType.FramelessWindowHint |
                          Qt.WindowType.Dialog)
@@ -3557,6 +4156,7 @@ class ShareWindow(QDialog):
         self._segments           = list(segments or [(start_s, end_s)])
         self._effects            = dict(effects or {})
         self._stretch_ratio      = max(0.25, min(4.0, float(stretch_ratio)))
+        self._stretch_size       = stretch_size
         self._speed_rate         = _normalise_speed(speed_rate)
         self._preserve_pitch     = bool(preserve_pitch)
         self._settings           = settings_info
@@ -3575,10 +4175,10 @@ class ShareWindow(QDialog):
         self._discord_mode = bool(
             discord_mode or (self._export_preset and
                              self._export_preset.preset_id == 'discord'))
-        self._popup_anim   = None
         self._source_volumes = dict(source_volumes or {})
         self._source_mutes = dict(source_mutes or {})
         self._master_volume = master_volume
+        self._limiter_enabled = limiter_enabled
         self._playback_sources = tuple(playback_sources)
         self._preserve_tracks = not discord_mode
         # Clip-local semantic keys and FFmpeg audio-stream positions. This is
@@ -3629,12 +4229,11 @@ class ShareWindow(QDialog):
                 frame = frame[max(0,y):y2, max(0,x):x2]
             if frame.size == 0:
                 return None
-            if abs(self._stretch_ratio - 1.0) > 0.005:
-                fh, fw = frame.shape[:2]
-                frame = cv2.resize(
-                    frame, (max(2, int(fw * self._stretch_ratio)), fh),
-                    interpolation=cv2.INTER_LINEAR)
             fh, fw = frame.shape[:2]
+            if self._stretch_size is not None:
+                fw, fh = self._stretch_size
+            elif abs(self._stretch_ratio - 1.0) > 0.005:
+                fw = max(2, int(fw * self._stretch_ratio))
             scale  = min(310 / max(fw, 1), 174 / max(fh, 1))
             nw, nh = max(1, int(fw * scale)), max(1, int(fh * scale))
             frame  = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
@@ -3642,6 +4241,7 @@ class ShareWindow(QDialog):
             qimg   = QImage(rgb.data, nw, nh, nw * 3, QImage.Format.Format_RGB888)
             return QPixmap.fromImage(qimg)
         except Exception:
+            # The poster is optional. An unreadable frame leaves the export dialog usable.
             return None
 
     def _build_ui(self):
@@ -3734,8 +4334,7 @@ class ShareWindow(QDialog):
             f'font-size: 9px; font-weight: 600; font-family: {Fonts.DISPLAY}; '
             'letter-spacing: 0px; padding: 4px 10px;'))
         self._popup_lbl.adjustSize()
-        _ph = self._popup_lbl.height()
-        self._popup_lbl.move(340, 174 - _ph - 10)   # start off-screen right
+        self._popup_lbl.hide()
 
     # Window dragging
 
@@ -3789,10 +4388,11 @@ class ShareWindow(QDialog):
         states = {
             source.source_id: SourceMixState(
                 gain_percent=self._source_volumes.get(source.source_id, 100),
-                muted=self._source_mutes.get(source.source_id, False))
+                muted=self._source_mutes.get(source.source_id, source.default_muted))
             for source in self._playback_sources
         }
-        return ffmpeg_mix_filter(self._playback_sources, states, self._master_volume)
+        return ffmpeg_mix_filter(self._playback_sources, states, self._master_volume,
+                                 limiter_enabled=self._limiter_enabled)
 
     def _export_worker(self):
         """Run share preparation/export and surface unexpected failures."""
@@ -3874,12 +4474,15 @@ class ShareWindow(QDialog):
         # copied, and resets the animation to this shared video's time zero.
         has_look_edits = (
             any(self._effects.values()) or self._watermark_enabled)
-        has_stretch = abs(self._stretch_ratio - 1.0) > 0.005
+        has_stretch = self._stretch_size is not None or abs(self._stretch_ratio - 1.0) > 0.005
         has_speed = abs(self._speed_rate - 1.0) > 1e-6
 
         if self._export_preset is not None:
             try:
                 source_info = probe_media(self._clip_path)
+                if self._stretch_size is not None:
+                    width, height = self._stretch_size
+                    source_info = replace(source_info, width=width, height=height)
                 export_plan = plan_export(
                     source_info, self._export_preset, duration_s=duration_s)
             except Exception as exc:
@@ -3899,16 +4502,19 @@ class ShareWindow(QDialog):
                 self, ffmpeg, self._start_s, self._end_s - self._start_s,
                 staged, cr, video_args, segments=self._segments,
                 effects=self._effects, stretch_ratio=self._stretch_ratio,
+                stretch_size=self._stretch_size,
                 audio_bitrate=f'{export_plan.audio_bitrate_kbps}k',
                 extra_video_filters=extra_filters,
                 force_video_encode=export_plan.reencode_video,
                 force_audio_encode=export_plan.reencode_audio)
-        elif has_timeline_edits or has_look_edits or has_stretch or has_speed:
+        elif (has_timeline_edits or has_look_edits or has_stretch or has_speed
+              or self._audio_tracks):
             cmd = ClipViewer._build_export_cmd(
                 self, ffmpeg, self._start_s, self._end_s - self._start_s,
                 staged, cr, VIDEO_PLACEHOLDER,
                 segments=self._segments,
                 effects=self._effects, stretch_ratio=self._stretch_ratio,
+                stretch_size=self._stretch_size,
                 audio_bitrate='320k')
         else:
             audio_filters, audio_out = self._build_audio_filter_chain()
@@ -4017,7 +4623,7 @@ class ShareWindow(QDialog):
             self._drag_zone.set_file(self._export_path)
             self._drag_hint.show()
             self._drag_hint.raise_()
-            QTimer.singleShot(300, self._animate_popup_in)
+            self._show_ready_toast()
         else:
             short = msg if len(msg) <= 44 else msg[:42] + '…'
             self._fname_lbl.setText(short)
@@ -4032,37 +4638,13 @@ class ShareWindow(QDialog):
                 'warning',
             )
 
-    # FTHRClips corner popup animation
-
-    def _animate_popup_in(self):
-        if self._cancelled:
-            return
-        lbl = self._popup_lbl
-        pw, ph = lbl.width(), lbl.height()
-        target_x = 340 - pw - 10
-        target_y = 174 - ph - 10
-        lbl.move(340, target_y)
-        lbl.raise_()
-        anim = QPropertyAnimation(lbl, b'pos', self)
-        anim.setDuration(380)
-        anim.setStartValue(QPoint(340, target_y))
-        anim.setEndValue(QPoint(target_x, target_y))
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.finished.connect(lambda: QTimer.singleShot(2500, self._animate_popup_out))
-        self._popup_anim = anim
-        anim.start()
-
-    def _animate_popup_out(self):
-        if self._cancelled:
-            return
-        lbl = self._popup_lbl
-        anim = QPropertyAnimation(lbl, b'pos', self)
-        anim.setDuration(280)
-        anim.setStartValue(QPoint(lbl.x(), lbl.y()))
-        anim.setEndValue(QPoint(340, lbl.y()))
-        anim.setEasingCurve(QEasingCurve.Type.InCubic)
-        self._popup_anim = anim
-        anim.start()
+    def _show_ready_toast(self):
+        label = self._popup_lbl
+        label.move(self._drag_zone.width() - label.width() - 10,
+                   self._drag_zone.height() - label.height() - 10)
+        label.show()
+        label.raise_()
+        QTimer.singleShot(2500, label, label.hide)
 
     # Cleanup on close
 
@@ -4092,6 +4674,7 @@ class ShareWindow(QDialog):
             try:
                 os.remove(pending)
             except OSError:
+                # A worker may still hold the incomplete output. Closing the dialog must proceed.
                 pass
         # QDialog.closeEvent calls reject(). Our reject routes back through
         # close() for cleanup, so delegating there recursively leaves the
@@ -4117,7 +4700,7 @@ class VolumePopup(QDialog):
     source_changed = Signal(str, int)       # (source_key, 0–100)
     source_muted = Signal(str, bool)        # (source_key, muted)
 
-    _SOURCES = [('master', 'MASTER')]
+    _SOURCES = [('master', 'Master')]
 
     def __init__(self, master_vol: int,
                  source_volumes: dict | None = None,
@@ -4129,7 +4712,7 @@ class VolumePopup(QDialog):
                          Qt.WindowType.FramelessWindowHint |
                          Qt.WindowType.Popup)
         set_theme_style(self, lambda: (f'QDialog {{ background-color: {Colors.SURFACE_1};'
-            f' border: 1px solid {Colors.BORDER_HI}; }}'))
+            f' border: 1px solid {Colors.BORDER_HI}; }}' + slider_qss()))
         self._sliders:  dict[str, QSlider] = {}
         self._values:   dict[str, QLabel]  = {}
         self._labels:   dict[str, QLabel]  = {}
@@ -4193,7 +4776,7 @@ class VolumePopup(QDialog):
 
             slider = ClickableSlider(Qt.Orientation.Horizontal)
             slider.setRange(0, 100)
-            slider.setFixedWidth(170)
+            slider.setFixedWidth(Sizes.SLIDER_COMPACT_W)
             if key == 'master':
                 slider.setValue(master_vol)
             else:
@@ -4237,15 +4820,7 @@ class VolumePopup(QDialog):
 
             root.addLayout(row)
 
-        set_theme_style(self, lambda: (self.styleSheet() + f'''
-            QSlider::groove:horizontal {{ background: {Colors.BORDER_HI}; height: 2px; }}
-            QSlider::handle:horizontal {{
-                background: {Colors.ACCENT}; width: 10px; height: 10px;
-                margin: -4px 0; border-radius: {Sizes.RADIUS_MD}px;
-            }}
-            QSlider::handle:horizontal:hover {{ background: {Colors.TEXT}; }}
-            QSlider::sub-page:horizontal {{ background: {Colors.ACCENT}; }}
-        '''))
+
 
     @staticmethod
     def _display_label(source: PlaybackSource) -> str:
@@ -4280,6 +4855,7 @@ class AudioMixPanel(QFrame):
     master_changed = Signal(int)            # 0–100
     source_changed = Signal(str, int)       # (source_key, 0–100)
     source_muted = Signal(str, bool)        # (source_key, muted)
+    source_removed = Signal(str)
 
     _SOURCES = [('master', 'MASTER')]
 
@@ -4292,11 +4868,12 @@ class AudioMixPanel(QFrame):
         super().__init__(parent)
         self.setObjectName('audioMixPanel')
         self._root = QVBoxLayout(self)
-        self._root.setContentsMargins(14, 4, 14, 14)
+        self._root.setContentsMargins(10, 4, 10, 10)
         self._root.setSpacing(8)
         self._sliders: dict[str, QSlider] = {}
         self._values: dict[str, QLabel] = {}
         self._labels: dict[str, QLabel] = {}
+        self._icons: dict[str, QLabel] = {}
         self._mute_buttons: dict[str, QPushButton] = {}
         self._row_order: list[str] = []
         self.set_state(master_vol, source_volumes or {}, source_mutes or {},
@@ -4323,6 +4900,7 @@ class AudioMixPanel(QFrame):
         self._sliders.clear()
         self._values.clear()
         self._labels.clear()
+        self._icons.clear()
         self._mute_buttons.clear()
         self._row_order.clear()
 
@@ -4339,7 +4917,20 @@ class AudioMixPanel(QFrame):
 
             header = QHBoxLayout()
             header.setSpacing(6)
+            icon = QLabel()
+            icon.setFixedSize(28, 28)
+            app_icon = (_running_windows_app_icon(source.persistent_identity)
+                        if source is not None and source.source_type == 'application' else None)
+            if app_icon is None:
+                app_icon = _load_themed_icon('sound.png', 24, Colors.TEXT_DIM)
+            icon.setPixmap(app_icon.pixmap(24, 24))
+            icon.setToolTip(label)
+            icon.setAccessibleName(label)
+            self._icons[key] = icon
+            header.addWidget(icon)
             name = QLabel(label)
+            name.setMinimumWidth(0)
+            name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             name.setObjectName('audioMixName')
             name.setToolTip(label)
             name.setAccessibleName(f'{label} source volume')
@@ -4352,7 +4943,7 @@ class AudioMixPanel(QFrame):
                             else int(self._source_volumes.get(key, 100)))
             value = QLabel(f'{slider_value}%')
             value.setObjectName('audioMixValue')
-            value.setFixedWidth(34)
+            value.setMinimumWidth(46)
             value.setAlignment(Qt.AlignmentFlag.AlignRight |
                                Qt.AlignmentFlag.AlignVCenter)
             if source is not None and not source.available:
@@ -4361,12 +4952,15 @@ class AudioMixPanel(QFrame):
             self._values[key] = value
             header.addWidget(value)
 
+            row_layout.addLayout(header)
+            controls = QHBoxLayout()
+            controls.setSpacing(6)
             if source is not None:
-                mute = QPushButton('MUTED' if self._source_mutes.get(key, False)
+                mute = QPushButton('MUTED' if self._source_mutes.get(key, source.default_muted)
                                    else 'MUTE')
                 mute.setObjectName('audioMixMute')
                 mute.setCheckable(True)
-                mute.setChecked(bool(self._source_mutes.get(key, False)))
+                mute.setChecked(bool(self._source_mutes.get(key, source.default_muted)))
                 mute.setFixedWidth(48)
                 mute.setAccessibleName(f'Mute {label}')
                 mute.setEnabled(source.available and self._live_preview)
@@ -4374,8 +4968,13 @@ class AudioMixPanel(QFrame):
                 mute.toggled.connect(
                     lambda checked, k=key, button=mute:
                     self._on_mute_toggled(k, button, checked))
-                header.addWidget(mute)
-            row_layout.addLayout(header)
+                controls.addWidget(mute)
+                remove = QPushButton('×')
+                remove.setFixedWidth(24)
+                remove.setToolTip(f'Remove {label} from this edit')
+                remove.setAccessibleName(f'Remove {label}')
+                remove.clicked.connect(lambda _checked=False, k=key: self.source_removed.emit(k))
+                controls.addWidget(remove)
 
             slider = ClickableSlider(Qt.Orientation.Horizontal)
             slider.setObjectName('audioMixSlider')
@@ -4388,7 +4987,8 @@ class AudioMixPanel(QFrame):
             slider.valueChanged.connect(
                 lambda value, k=key, lab=label: self._on_changed(k, value, lab))
             self._sliders[key] = slider
-            row_layout.addWidget(slider)
+            controls.insertWidget(0, slider, 1)
+            row_layout.addLayout(controls)
             self._root.addWidget(row)
 
         self._root.addStretch(1)
@@ -4415,6 +5015,8 @@ class ClipViewer(QDialog):
 
     _export_done     = Signal(bool, str)
     upload_requested = Signal(str)
+    library_flags_changed = Signal(str)
+    library_details_changed = Signal(str)
     export_error     = Signal(str, str, str)   # title, detail, level
     clip_navigation_requested = Signal(int)
     minimize_requested = Signal()
@@ -4425,16 +5027,59 @@ class ClipViewer(QDialog):
                  thumb_pixmap: QPixmap = None, settings_manager=None,
                  upload_enabled: bool = False, metadata_manager=None,
                  linked_import: bool = False, *, embedded: bool = False,
-                 autoplay: bool = False):
+                 autoplay: bool = False, upload_coordinator=None, trash_handler=None,
+                 _interface_sample=None):
         super().__init__(parent)
+        self._interface_sample = _interface_sample is not None
+        if self._interface_sample:
+            self._setup_interface_sample(clip_path, thumb_pixmap, _interface_sample)
+            return
         self._initialize_clip(clip_path, bridge, thumb_pixmap=thumb_pixmap,
                               settings_manager=settings_manager, upload_enabled=upload_enabled,
                               metadata_manager=metadata_manager, linked_import=linked_import,
-                              embedded=embedded, autoplay=autoplay)
+                              embedded=embedded, autoplay=autoplay,
+                              upload_coordinator=upload_coordinator, trash_handler=trash_handler)
+
+    @classmethod
+    def interface_sample(cls, poster, *, title='Sample clip.mp4', duration_ms=24000):
+        """Build the editor controls without allocating media players or workers."""
+        return cls(title, None, thumb_pixmap=poster, _interface_sample=duration_ms)
+
+    def _setup_interface_sample(self, title, poster, duration_ms):
+        self._embedded = True
+        self.clip_path = title
+        self.sm = self._mm = None
+        self._thumb_pixmap = poster
+        self._src_w, self._src_h = 1920, 1080
+        self._fps = 60.0
+        self.duration_ms = max(1, duration_ms)
+        self._file_date = datetime(2025, 1, 1, 12)
+        self._size_mb = 72.0
+        self._video_bitrate_bps = 24_000_000
+        self._total_bitrate_bps = 25_000_000
+        self._metadata_loaded = True
+        self._playback_sources = []
+        self._linked_import = self._upload_enabled = self._live_clip_preview = False
+        self._preview_quality = 'auto'
+        self._preserve_pitch = True
+        self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self._setup_ui()
+        self._playback_status_lbl.hide()
+        if poster is not None and not poster.isNull():
+            frame = poster.scaled(160, 90, Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation)
+            self.trim_slider._thumbnails = [frame] * 12
+        self._apply_styles()
+        self.resize(1152, 680)
+        self.layout().activate()
+        self._relayout_video()
 
     def _initialize_clip(self, clip_path, bridge, *, thumb_pixmap=None,
                          settings_manager=None, upload_enabled=False, metadata_manager=None,
-                         linked_import=False, embedded=True, autoplay=False):
+                         linked_import=False, embedded=True, autoplay=False,
+                         upload_coordinator=None, trash_handler=None):
+        self._trash_handler = trash_handler
+        self._trash_completion_token = None
         reusing = hasattr(self, 'player')
         if reusing:
             self._teardown_player(wait_for_workers=False)
@@ -4446,23 +5091,64 @@ class ClipViewer(QDialog):
         self._clip_receivers = []
         self._embedded = embedded
         self.clip_path       = clip_path
-        from core.playback_proxy import cached_playback_path
-        self._playback_path = cached_playback_path(clip_path)
+        try:
+            self._details_identity = dict(media_file_identity(clip_path))
+        except (OSError, TypeError, ValueError):
+            self._details_identity = None
+        self._details_flush_active = False
+        self._details_warning_active = False
+        self._details_tags_unavailable = False
+        self._last_details_error = None
+        self._suppress_details_warning = False
+        self._skip_detail_flush_on_teardown = False
+        self._library_generation = object()
+        self._library_flags = None
+        self._highlight_markers = []
+        self._highlight_error = None
+        self._highlight_generation = getattr(self, '_highlight_generation', 0) + 1
+        self._highlight_worker = None
+        from core.playback_proxy import (
+            cached_playback_path,
+            is_compatibility_cache_path,
+        )
+        self._preview_quality = _preview_quality_setting(settings_manager)
+        self._playback_path = cached_playback_path(clip_path, self._preview_quality)
+        self._compatibility_cache_active = is_compatibility_cache_path(
+            clip_path, self._playback_path)
         self._prepared_playback_path = None
         self._playback_source_worker = None
         self._proxy_cancel = threading.Event()
         self._proxy_receiver = None
         self._proxy_checked = False
+        self._compatibility_worker = None
+        self._compatibility_cancel = threading.Event()
+        self._compatibility_receiver = None
+        self._compatibility_generation = (
+            getattr(self, '_compatibility_generation', 0) + 1)
+        self._compatibility_checked = False
+        self._compatible_playback_path = None
         self.bridge          = bridge
         self.sm              = settings_manager
         self._mm             = metadata_manager
         self._upload_enabled = upload_enabled
+        previous_upload_coordinator = getattr(self, '_upload_coordinator', None)
+        if (previous_upload_coordinator is not None
+                and previous_upload_coordinator is not upload_coordinator):
+            try:
+                previous_upload_coordinator.status_changed.disconnect(
+                    self._on_upload_status)
+            except (AttributeError, RuntimeError):
+                # Rebinding can race Qt object teardown; a missing connection
+                # is already the desired state for the outgoing coordinator.
+                pass
+        self._upload_coordinator = upload_coordinator
         self._linked_import = linked_import
         self._closing = False
         self._teardown_complete = False
         self._prepare_cancel = threading.Event()
         self._media_ready = False
         self._audio_preparation_ready = False
+        self._audio_inspection_error = False
         self._playback_ready = False
         self._initial_frame_worker = None
         self._playback_preparing_at = time.monotonic()
@@ -4501,7 +5187,6 @@ class ClipViewer(QDialog):
             'native_presentation_observable': False,
         }
         self._renderer_resume_position_ms: int | None = None
-        self._renderer_resume_playing = False
         self._seek_generation = 0
         self._seek_anchor_ms: int | None = None
         self._seek_anchor_source_generation: int | None = None
@@ -4512,6 +5197,9 @@ class ClipViewer(QDialog):
         self._paused_seek_fallback_visible = False
         self._paused_seek_decode_worker = None
         self._pending_paused_seek_decode = None
+        self._scrub_preview_target_ms = None
+        self._scrub_preview_direction = 0
+        self._scrub_preview_worker = getattr(self, '_scrub_preview_worker', None)
         self._player_lifecycle_state = PlayerLifecycleState.PREPARING
         self._player_failure_detail = ''
         self._play_when_ready = False
@@ -4525,6 +5213,7 @@ class ClipViewer(QDialog):
             self.sm.get('clip_editor_live_preview', True)) if self.sm else True
         self._crop_rect    = None
         self._stretch_ratio = 1.0
+        self._stretch_size: tuple[int, int] | None = None
         self._speed_rate = 1.0
         self._preserve_pitch = True
         self._effects = {
@@ -4562,6 +5251,9 @@ class ClipViewer(QDialog):
         # FTHR manifest or actual container metadata. Imported media therefore
         # gets generic track labels instead of fabricated app identities.
         self._playback_sources: tuple[PlaybackSource, ...] = ()
+        self._limiter_enabled = True
+        self._removed_audio_sources = set()
+        self._audio_import_busy = False
         self._audio_tracks: tuple[tuple[str, int], ...] = ()
         self._audio_mixer: FFmpegPlaybackController | None = None
         self._audio_mixer_live = False
@@ -4638,14 +5330,16 @@ class ClipViewer(QDialog):
             self._export_done.connect(self._on_export_done)
             self._setup_ui()
             self._apply_styles()
+            self._refresh_highlight_markers()
         else:
             self._reset_clip_ui()
             self._create_media_player()
+        self._bind_upload_coordinator()
         self._refresh_quick_crop_btn()
 
-        # Non-playback assets are staged only while the player is idle. In
-        # particular, the timeline filmstrip must never open a competing video
-        # decoder during playback.
+        # Debounce optional work around playback startup and scrubbing.
+        # Filmstrips use the bounded, below-normal-priority media lane and
+        # may continue during playback; late audio preparation remains idle-only.
         self._timeline_prepare_timer = QTimer(self)
         self._timeline_prepare_timer.setSingleShot(True)
         self._timeline_prepare_timer.setInterval(300)
@@ -4683,14 +5377,6 @@ class ClipViewer(QDialog):
         self._sync_fullscreen_shortcut_enabled()
         self._update_history_controls()
 
-        self._fade_in_anim = None
-        if not embedded and not reduce_motion(self):
-            self.setWindowOpacity(0.0)
-            self._fade_in_anim = QPropertyAnimation(self, b'windowOpacity')
-            self._fade_in_anim.setDuration(180)
-            self._fade_in_anim.setStartValue(0.0)
-            self._fade_in_anim.setEndValue(1.0)
-            self._fade_in_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         self._ph_timer = QTimer(self)
         self._ph_timer.setInterval(80)
@@ -4708,6 +5394,10 @@ class ClipViewer(QDialog):
         self._paused_seek_fallback_timer.setInterval(300)
         self._paused_seek_fallback_timer.timeout.connect(
             self._on_paused_seek_fallback_timeout)
+        self._scrub_preview_timer = QTimer(self)
+        self._scrub_preview_timer.setSingleShot(True)
+        self._scrub_preview_timer.setInterval(_SCRUB_PREVIEW_INTERVAL_MS)
+        self._scrub_preview_timer.timeout.connect(self._start_scrub_preview)
 
         # Gain changes need to invalidate PCM already mixed ahead of the video
         # clock. Apply at most once per 40 ms while a slider is dragged.
@@ -4722,6 +5412,7 @@ class ClipViewer(QDialog):
         self._play_pause_busy = False
         if not reusing:
             self._audio_sources_discovered.connect(self._on_audio_sources_discovered)
+            self._external_audio_discovered.connect(self._on_external_audio_discovered)
         if reusing:
             self._restore_editor_state(self._capture_editor_state(), persist=False)
         self._restore_persisted_editor_draft()
@@ -4757,10 +5448,292 @@ class ClipViewer(QDialog):
 
     def load_clip(self, clip_path, **options):
         """Release media, then rebind the stable editor controls to a clip."""
+        restore_token = options.pop('_trash_restore_token', None)
+        pending = getattr(self, '_trash_pending_token', None)
+        if pending is not None and restore_token is not pending:
+            raise OSError('The editor is waiting for a Trash operation')
+        completion_token = getattr(self, '_trash_completion_token', None) if pending is not None else None
+        options.setdefault('trash_handler', getattr(self, '_trash_handler', None))
         worker = self._export_thread
         if worker is not None and worker.is_alive():
             raise RuntimeError('Cannot replace a clip while exporting')
         self._initialize_clip(clip_path, self.bridge, embedded=self._embedded, **options)
+        if pending is not None:
+            self._trash_completion_token = completion_token
+
+    def _read_clip_details(self):
+        meta = self._mm.get(self.clip_path) if self._mm else {
+            'tag': '', 'description': ''}
+        if not isinstance(meta, dict):
+            meta = {'tag': '', 'description': ''}
+        tag_text = meta.get('tag', '')
+        get_tags = getattr(self._mm, 'get_tags', None) if self._mm else None
+        self._details_tags_unavailable = False
+        if callable(get_tags):
+            try:
+                tag_text = format_tags_text(get_tags(self.clip_path))
+            except (OSError, TypeError, ValueError):
+                # A malformed canonical value must be visibly unavailable,
+                # while description-only saves still preserve it in storage.
+                tag_text = ''
+                self._details_tags_unavailable = True
+        return str(tag_text), str(meta.get('description', ''))
+
+    def _refresh_highlight_markers(self):
+        """Load one validated marker snapshot and refresh both editor views."""
+
+        panel = getattr(self, '_highlight_panel', None)
+        slider = getattr(self, 'trim_slider', None)
+        if panel is None or slider is None:
+            return
+        reader = getattr(self._mm, 'get_highlight_markers', None) if self._mm else None
+        if not callable(reader):
+            self._highlight_error = None
+            self._highlight_markers = []
+            slider.set_highlight_markers(())
+            panel.clear()
+            return
+        state_reader = (getattr(self._mm, 'get_highlight_state_snapshot', None)
+                        if self._mm else None)
+        expected_identity = getattr(self, '_details_identity', None)
+        if callable(state_reader):
+            try:
+                snapshot = state_reader(
+                    self.clip_path, expected_identity=expected_identity)
+                if 'library_highlights' not in snapshot:
+                    self._highlight_error = None
+                    self._highlight_markers = []
+                    slider.set_highlight_markers(())
+                    panel.clear()
+                    if Path(self.clip_path).suffix.casefold() != '.mp4':
+                        return
+                    self._start_highlight_fallback()
+                    return
+                markers = marker_dicts(decode_highlight_markers(
+                    snapshot['library_highlights'], allow_encoded=False))
+                slider.set_highlight_markers(markers)
+            except (OSError, RuntimeError, TypeError, ValueError, RecursionError) as error:
+                self._highlight_error = str(error)
+                self._highlight_markers = []
+                slider.set_highlight_markers(())
+                panel.set_error(f'Highlights unavailable: {self._highlight_error}')
+                return
+            self._highlight_error = None
+            self._highlight_markers = list(markers)
+            self._update_highlight_marker_availability()
+            return
+        presence_reader = (getattr(self._mm, 'has_highlight_markers', None)
+                           if self._mm else None)
+        if callable(presence_reader):
+            try:
+                try:
+                    field_present = bool(presence_reader(
+                        self.clip_path, fresh=True))
+                except TypeError:
+                    # Existing test doubles and legacy managers do not yet
+                    # expose the optional fresh snapshot keyword.
+                    field_present = bool(presence_reader(self.clip_path))
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                # A presence failure cannot prove SQL absence, so preserve the
+                # SQL reader's authoritative error path and do not scan media.
+                self._highlight_error = str(error)
+                self._highlight_markers = []
+                slider.set_highlight_markers(())
+                panel.set_error(f'Highlights unavailable: {self._highlight_error}')
+                return
+            if not field_present:
+                self._highlight_error = None
+                self._highlight_markers = []
+                slider.set_highlight_markers(())
+                panel.clear()
+                if Path(self.clip_path).suffix.casefold() != '.mp4':
+                    return
+                self._start_highlight_fallback()
+                return
+        try:
+            try:
+                markers = reader(self.clip_path, fresh=True)
+            except TypeError:
+                markers = reader(self.clip_path)
+            slider.set_highlight_markers(markers)
+        except (OSError, RuntimeError, TypeError, ValueError, RecursionError) as error:
+            self._highlight_error = str(error)
+            self._highlight_markers = []
+            slider.set_highlight_markers(())
+            panel.set_error(f'Highlights unavailable: {self._highlight_error}')
+            return
+        self._highlight_error = None
+        self._highlight_markers = list(markers)
+        self._update_highlight_marker_availability()
+
+    def _start_highlight_fallback(self):
+        """Read one SQL-absent embedded snapshot on the clip worker."""
+
+        if self._closing:
+            return
+        self._highlight_generation += 1
+        generation = self._highlight_generation
+        expected = getattr(self, '_details_identity', None)
+        worker = _ClipHighlightsWorker(
+            self.clip_path, generation, expected, self._prepare_cancel)
+        self._highlight_worker = worker
+        self._connect_clip_result(
+            worker.signals.ready, self._on_embedded_highlights_ready)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_embedded_highlights_ready(self, result):
+        if not isinstance(result, tuple) or len(result) != 5:
+            return
+        generation, path, identity, markers, error = result
+        if (self._closing or generation != self._highlight_generation
+                or os.path.normcase(os.path.abspath(str(path)))
+                != os.path.normcase(os.path.abspath(str(self.clip_path)))):
+            return
+        self._highlight_worker = None
+        try:
+            # Validate the queued result at the GUI apply boundary.  The
+            # worker-side check alone leaves a same-path replacement window.
+            current_identity = media_identity(self.clip_path)
+            captured_identity = getattr(self, '_details_identity', None)
+            state_reader = getattr(
+                self._mm, 'get_highlight_state_snapshot', None)
+            if (identity is None or not isinstance(captured_identity, dict)
+                    or current_identity != identity
+                    or current_identity != captured_identity):
+                return
+            if not callable(state_reader):
+                raise RuntimeError('Highlight SQL presence is unavailable')
+            # SQL may have been populated while the worker was reading. SQL
+            # presence is checked again before applying the read-only result.
+            snapshot = state_reader(
+                self.clip_path, expected_identity=current_identity)
+            if 'library_highlights' in snapshot:
+                self._refresh_highlight_markers()
+                return
+            if error:
+                self._highlight_error = str(error)
+                self._highlight_markers = []
+                self.trim_slider.set_highlight_markers(())
+                self._highlight_panel.set_error(
+                    f'Highlights unavailable: {self._highlight_error}')
+                return
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            self._highlight_error = str(exc)
+            self._highlight_markers = []
+            self.trim_slider.set_highlight_markers(())
+            self._highlight_panel.set_error(
+                f'Highlights unavailable: {self._highlight_error}')
+            return
+        self._highlight_error = None
+        self._highlight_markers = list(markers or ())
+        self.trim_slider.set_highlight_markers(self._highlight_markers)
+        self._update_highlight_marker_availability()
+
+    def _update_highlight_marker_availability(self):
+        """Recompute dim/available rows without re-reading metadata."""
+
+        panel = getattr(self, '_highlight_panel', None)
+        slider = getattr(self, 'trim_slider', None)
+        if panel is None or slider is None:
+            return
+        error = getattr(self, '_highlight_error', None)
+        if error:
+            panel.set_error(f'Highlights unavailable: {error}')
+            return
+        available = {
+            marker['marker_id'] for marker in self._highlight_markers
+            if slider.highlight_available(marker)
+        }
+        panel.set_markers(self._highlight_markers, available)
+
+    def _on_highlight_activated(self, marker):
+        """Seek the retained source position through the existing seek path."""
+
+        slider = self.trim_slider
+        if not slider.highlight_available(marker):
+            self._update_highlight_marker_availability()
+            return
+        pct = slider.highlight_position_pct(marker)
+        if pct is None:
+            return
+        slider.ensure_visible(pct, align_start=True)
+        slider.set_playhead(pct)
+        self._on_seek_requested(pct)
+
+    def refresh_library_details(self, path, *, details=None):
+        """Apply a grid's cached details to clean editor fields only.
+
+        The grid owns the metadata snapshot.  This method deliberately does
+        no manager or filesystem access and rejects rows from a replacement
+        file by requiring the identity captured when this clip was loaded.
+        """
+        if details is None or not isinstance(details, dict):
+            return False
+        try:
+            requested = os.path.normcase(os.path.abspath(os.path.normpath(os.fspath(path))))
+            loaded = os.path.normcase(os.path.abspath(os.path.normpath(os.fspath(self.clip_path))))
+        except (AttributeError, TypeError, ValueError):
+            # Invalid paths cannot be matched to the loaded clip safely.
+            return False
+        if requested != loaded:
+            return False
+        identity = details.get('identity')
+        expected = getattr(self, '_details_identity', None)
+        fields = ('st_dev', 'st_ino', 'size', 'mtime_ns')
+        if (not isinstance(identity, dict) or not isinstance(expected, dict)
+                or set(identity) != set(fields) or set(expected) != set(fields)
+                or any(type(identity[field]) is not int or type(expected[field]) is not int
+                       for field in fields)
+                or any(identity[field] != expected[field] for field in fields)):
+            return False
+        tag_edit = getattr(self, '_tag_edit', None)
+        description_edit = getattr(self, '_desc_edit', None)
+        if tag_edit is None or description_edit is None:
+            return False
+        tags_clean = not tag_edit.isModified()
+        description_clean = not description_edit.isModified()
+        if tags_clean:
+            error = details.get('error')
+            if error:
+                tag_text = ''
+                self._details_tags_unavailable = True
+            else:
+                try:
+                    tag_text = format_tags_text(details.get('tags', ()))
+                except (TypeError, ValueError):
+                    tag_text = ''
+                    self._details_tags_unavailable = True
+                else:
+                    self._details_tags_unavailable = False
+            tag_edit.blockSignals(True)
+            try:
+                tag_edit.setText(tag_text)
+                tag_edit.setModified(False)
+            finally:
+                tag_edit.blockSignals(False)
+            self._apply_detail_tag_status()
+        if description_clean:
+            description = details.get('description', '')
+            if not isinstance(description, str):
+                description = str(description)
+            description_edit.blockSignals(True)
+            try:
+                description_edit.setText(description)
+                description_edit.setModified(False)
+            finally:
+                description_edit.blockSignals(False)
+        return True
+
+    def _apply_detail_tag_status(self):
+        if not hasattr(self, '_tag_edit'):
+            return
+        if self._details_tags_unavailable:
+            self._tag_edit.setPlaceholderText('Stored tags unavailable')
+            self._tag_edit.setToolTip(
+                'Stored tags are malformed. Enter valid CSV tags to replace them.')
+        else:
+            self._tag_edit.setPlaceholderText('e.g. Gaming, Highlight …')
+            self._tag_edit.setToolTip('')
 
     def _reset_clip_ui(self):
         self._master_volume = int(self.sm.get('master_volume', 80)) if self.sm else 80
@@ -4774,9 +5747,10 @@ class ClipViewer(QDialog):
         self._title_label.setText(Path(self.clip_path).stem[:50])
         title = Path(self.clip_path).stem
         self._detail_title.setText(title if len(title) <= 38 else title[:36] + '…')
-        meta = self._mm.get(self.clip_path) if self._mm else {'tag': '', 'description': ''}
-        self._tag_edit.setText(meta['tag'])
-        self._desc_edit.setText(meta['description'])
+        tag_text, description = self._read_clip_details()
+        self._tag_edit.setText(tag_text)
+        self._apply_detail_tag_status()
+        self._desc_edit.setText(description)
         self._created_value.setText(self._file_date.strftime('%b %d, %Y  %H:%M'))
         self._size_value.setText(f'{self._size_mb:.1f} MB')
         location = str(Path(self.clip_path).parent)
@@ -4784,6 +5758,11 @@ class ClipViewer(QDialog):
         self._refresh_file_metadata_labels()
         self.time_label.setText(f'0:00 / {self._fmt(self.duration_ms)}')
         self._playback_status_lbl.setText('Preparing clip…')
+        self._sdr_preview_lbl.hide()
+        self.preview_quality_combo.blockSignals(True)
+        self.preview_quality_combo.setCurrentIndex(
+            self.preview_quality_combo.findData(self._preview_quality))
+        self.preview_quality_combo.blockSignals(False)
         self.play_btn.setChecked(False)
         self._set_playback_button_visual(False)
         self.upload_btn.setVisible(self._upload_enabled)
@@ -4792,7 +5771,7 @@ class ClipViewer(QDialog):
         self.export_btn.setText('Export')
         self.export_btn.setEnabled(True)
         self.export_btn.setStyleSheet('')
-        self.delete_btn.setText('Linked original — protected' if self._linked_import else 'Delete')
+        self.delete_btn.setText('Linked original — protected' if self._linked_import else 'Move to Trash')
         self.delete_btn.setEnabled(not self._linked_import)
         self.delete_btn.setToolTip(
             'Remove its import folder from FTHR; the original stays on disk.'
@@ -4809,6 +5788,9 @@ class ClipViewer(QDialog):
         slider.max_zoom_factor = max(8.0, min(2048.0, self.duration_ms / 5000.0))
         slider.set_preview_strip_enabled(bool(
             self.sm.get('timeline_preview_strip_enabled', True)) if self.sm else True)
+        slider._thumbnail_source = None
+        slider._thumbnail_count = 0
+        slider._thumbnail_complete = False
         slider._thumbnails.clear()
         slider._scaled_thumbnails.clear()
         slider._timeline_background = QPixmap()
@@ -4824,6 +5806,8 @@ class ClipViewer(QDialog):
             self._native_video_widget.resume_resources()
         preview = self.video_widget
         preview._preview_shutdown = False
+        preview._scrubbing = False
+        preview.set_playback_height_limit(None)
         preview.video_sink.videoFrameChanged.connect(preview._on_video_frame)
         preview.begin_source_generation()
         preview.set_source_size(self._src_w, self._src_h)
@@ -4833,6 +5817,8 @@ class ClipViewer(QDialog):
         preview.show()
         self._native_video_widget.hide()
         self._sidebar_scroll.verticalScrollBar().setValue(0)
+        self.refresh_library_flags()
+        self._refresh_highlight_markers()
 
     def _create_native_video_widget(self):
         if self._native_output_enabled and quick_preview_supported():
@@ -4888,6 +5874,7 @@ class ClipViewer(QDialog):
         close_btn.setObjectName('editorClose')
         close_btn.setFixedSize(40, 40)
         close_btn.clicked.connect(self._close)
+        self.close_editor_btn = close_btn
         hdr.addWidget(close_btn)
         root.addWidget(header)
 
@@ -4916,14 +5903,19 @@ class ClipViewer(QDialog):
         self._video_clip_frame.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        self.video_widget = LiveVideoPreview(
-            self._src_w, self._src_h, self._video_clip_frame)
-        self.video_widget.set_poster(self._thumb_pixmap)
+        if self._interface_sample:
+            self.video_widget = QLabel(self._video_clip_frame)
+            self.video_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            self.video_widget = LiveVideoPreview(
+                self._src_w, self._src_h, self._video_clip_frame)
+            self.video_widget.set_poster(self._thumb_pixmap)
         self.video_widget.setGeometry(0, 0, 1, 1)
 
         # Qt Quick keeps decoded video and edited presentation on the GPU.
         # Retain the native widget/software combination for unavailable GPUs.
-        self._create_native_video_widget()
+        if not self._interface_sample:
+            self._create_native_video_widget()
         # The native sink callback is bound at each source boundary below. Its
         # closure captures that source generation so queued callbacks from an
         # earlier clip cannot mutate this clip's counters or surface state.
@@ -4936,15 +5928,16 @@ class ClipViewer(QDialog):
 
         ctrl = QFrame()
         ctrl.setObjectName('ctrlBar')
+        self._studio_transport = ctrl
         ctrl.setFixedHeight(46)
         ctrl_lay = QHBoxLayout(ctrl)
-        ctrl_lay.setContentsMargins(16, 0, 16, 0)
-        ctrl_lay.setSpacing(12)
+        ctrl_lay.setContentsMargins(12, 0, 12, 0)
+        ctrl_lay.setSpacing(8)
 
         self.play_btn = QPushButton()
         self.play_btn.setObjectName('playBtn')
         self.play_btn.setCheckable(True)
-        self.play_btn.setFixedWidth(96)
+        self.play_btn.setMinimumWidth(52)
         self.play_btn.clicked.connect(self._toggle_play)
         self._play_icon = _load_themed_icon('play.png', 16)
         self._pause_icon = _load_themed_icon('pause.png', 16)
@@ -4964,8 +5957,31 @@ class ClipViewer(QDialog):
         self._playback_status_lbl.setObjectName('timeLabel')
         self._playback_status_lbl.setToolTip(
             'Loading the media pipeline and inspecting the clip audio.')
-        ctrl_lay.addWidget(self._playback_status_lbl)
-        ctrl_lay.addStretch()
+        self._sdr_preview_lbl = QLabel('SDR')
+        self._sdr_preview_lbl.setObjectName('timeLabel')
+        self._sdr_preview_lbl.setToolTip('HDR source is tone mapped for this editor preview.')
+        self._sdr_preview_lbl.hide()
+        ctrl_lay.addWidget(self._sdr_preview_lbl)
+        ctrl_lay.addWidget(self._playback_status_lbl, 1)
+        preview_label = QLabel('Preview')
+        preview_label.setObjectName('timeLabel')
+        self.preview_quality_combo = WheelSafeComboBox()
+        self.preview_quality_combo.setMinimumContentsLength(8)
+        self.preview_quality_combo.setFixedWidth(112)
+        self.preview_quality_combo.setAccessibleName('Preview quality')
+        self.preview_quality_combo.setToolTip(
+            'Preview quality. Preview copies prepare while playback is paused. '
+            'Original uses the source or its compatible preview.')
+        set_theme_style(self.preview_quality_combo, lambda: combo_qss(compact=True))
+        for label, quality in _PREVIEW_QUALITY_OPTIONS:
+            self.preview_quality_combo.addItem(label, quality)
+        self.preview_quality_combo.setCurrentIndex(
+            self.preview_quality_combo.findData(self._preview_quality))
+        preview_label.setBuddy(self.preview_quality_combo)
+        ctrl_lay.addWidget(preview_label)
+        ctrl_lay.addWidget(self.preview_quality_combo)
+        if not self._interface_sample:
+            self.preview_quality_combo.currentIndexChanged.connect(self._on_preview_quality_changed)
 
         # Audio state is rendered in the right sidebar's AUDIO MIX panel.
         # Keep the state here with the playback controls so discovery and
@@ -4976,6 +5992,8 @@ class ClipViewer(QDialog):
             self._master_volume = 80
         self._source_volumes: dict[str, int] = {}
         self._source_mutes: dict[str, bool] = {}
+        self._removed_audio_sources: set[str] = set()
+        self._audio_import_busy = False
         self._multitrack_audio = False
         self._volume_popup: VolumePopup | None = None
         vid_col.addWidget(ctrl)
@@ -4993,7 +6011,7 @@ class ClipViewer(QDialog):
         trim_hdr.addWidget(trim_lbl)
         trim_hdr.addStretch()
 
-        self.trim_range_lbl = QLabel(f'0:00 → {self._fmt(self.duration_ms)}')
+        self.trim_range_lbl = QLabel(f'0:00 – {self._fmt(self.duration_ms)}')
         self.trim_range_lbl.setObjectName('trimRangeLbl')
         trim_hdr.addWidget(self.trim_range_lbl)
         trim_lay.addLayout(trim_hdr)
@@ -5062,7 +6080,7 @@ class ClipViewer(QDialog):
         trim_tools.addWidget(self.delete_segment_btn)
         trim_lay.addLayout(trim_tools)
 
-        self.trim_slider = TrimSlider(self.duration_ms)
+        self.trim_slider = TrimSlider(self.duration_ms, maintain_cache=not self._interface_sample)
         self.trim_slider.set_hide_deleted_segments(bool(
             self.sm and self.sm.get('hide_deleted_timeline_segments', False)))
         self.trim_slider.set_preview_strip_enabled(bool(
@@ -5070,22 +6088,31 @@ class ClipViewer(QDialog):
         self.trim_slider.hide_deleted_changed.connect(self._on_timeline_display_changed)
         self.trim_slider.range_changed.connect(self._on_trim_changed)
         self.trim_slider.seek_requested.connect(self._on_seek_requested)
+        if not self._interface_sample:
+            self.trim_slider.playhead_scrub_finished.connect(self._on_playhead_scrub_finished)
         self.trim_slider.segments_changed.connect(self._on_segments_changed)
         self.trim_slider.selection_changed.connect(self._on_segment_selected)
         self.trim_slider.range_edit_started.connect(self._begin_trim_edit)
         self.trim_slider.range_edit_finished.connect(self._finish_trim_edit)
+        if not self._interface_sample:
+            self.trim_slider.range_edit_finished.connect(self._on_timeline_drag_finished)
         self.trim_slider.context_split_requested.connect(self._split_at_position)
         self.trim_slider.context_toggle_requested.connect(self._toggle_segment_at)
+        self.trim_slider.highlight_activated.connect(self._on_highlight_activated)
         self.trim_slider.zoom_changed.connect(
             lambda factor: self.timeline_zoom_lbl.setText(f'{int(round(factor * 100))}%'))
         trim_lay.addWidget(self.trim_slider)
-        vid_col.addWidget(trim_frame)
-        main.addLayout(vid_col, stretch=1)
+        self._studio_timeline = trim_frame
+        self._studio_video_column = QWidget()
+        self._studio_video_column.setMinimumWidth(280)
+        self._studio_video_column.setLayout(vid_col)
+        main.addWidget(self._studio_video_column, stretch=1)
 
         # Sidebar (Medal-style)
         sidebar = QFrame()
         sidebar.setObjectName('editorSidebar')
-        sidebar.setFixedWidth(280)
+        sidebar.setFixedWidth(300)
+        self._studio_audio_sidebar = sidebar
 
         # Editing controls can expand substantially, so the sidebar is a real
         # scroll surface instead of letting lower actions disappear off-screen.
@@ -5110,6 +6137,12 @@ class ClipViewer(QDialog):
         sb_outer.setSpacing(8)
         self._sidebar_scroll.setWidget(sidebar_content)
         sb_shell.addWidget(self._sidebar_scroll)
+
+        self._highlight_panel = HighlightMarkersPanel()
+        self._highlight_panel.marker_activated.connect(
+            self._on_highlight_activated)
+        sb_outer.addWidget(self._highlight_panel)
+        self._highlight_panel.clear()
 
         # PRIMARY ACTIONS ──
         self.share_btn = QPushButton('Share clip')
@@ -5152,7 +6185,7 @@ class ClipViewer(QDialog):
 
         # CLIP SPEED ──
         speed_panel, speed_body = self._build_collapsible_panel(
-            'CLIP SPEED', expanded=True)
+            'Speed', expanded=True)
         spb = QVBoxLayout()
         spb.setContentsMargins(14, 4, 14, 14)
         spb.setSpacing(8)
@@ -5168,7 +6201,7 @@ class ClipViewer(QDialog):
         for label, rate in SPEED_PRESETS:
             self.speed_combo.addItem(label, rate)
         self.speed_combo.setCurrentIndex(3)
-        set_theme_style(self.speed_combo, lambda: (combo_qss()))
+        set_theme_style(self.speed_combo, lambda: combo_qss(Colors.SURFACE_2, compact=True))
         self.speed_combo.currentIndexChanged.connect(self._on_speed_changed)
         spb.addWidget(self.speed_combo)
 
@@ -5185,7 +6218,7 @@ class ClipViewer(QDialog):
         sb_outer.addWidget(speed_panel)
 
         # EDIT TOOLS ──
-        edit_panel, edit_body = self._build_collapsible_panel('EDIT TOOLS', expanded=True)
+        edit_panel, edit_body = self._build_collapsible_panel('Video', expanded=True)
         epb = QVBoxLayout()
         epb.setContentsMargins(14, 4, 14, 14)
         epb.setSpacing(8)
@@ -5217,7 +6250,7 @@ class ClipViewer(QDialog):
         self.stretch_btn = QPushButton('Stretch video')
         self.stretch_btn.setObjectName('stretchBtn')
         self.stretch_btn.setFixedHeight(32)
-        self.stretch_btn.setToolTip('Open a crop-aware preview and drag either side')
+        self.stretch_btn.setToolTip('Drag either side or enter a width and height')
         self.stretch_btn.clicked.connect(self._open_stretch_dialog)
         stretch_row.addWidget(self.stretch_btn, stretch=1)
         self.reset_stretch_btn = QPushButton('Reset')
@@ -5236,7 +6269,7 @@ class ClipViewer(QDialog):
 
         # AUDIO MIX ──
         audio_panel, audio_body = self._build_collapsible_panel(
-            'AUDIO MIX', expanded=True)
+            'Audio mix', expanded=True)
         self._audio_mix_panel = AudioMixPanel(
             master_vol=self._master_volume,
             source_volumes=self._source_volumes,
@@ -5250,11 +6283,12 @@ class ClipViewer(QDialog):
             self._on_source_volume_changed)
         self._audio_mix_panel.source_muted.connect(
             self._on_source_muted)
+        self._audio_mix_panel.source_removed.connect(self._on_audio_source_removed)
         audio_body.addWidget(self._audio_mix_panel)
         sb_outer.addWidget(audio_panel)
 
         # VIDEO LOOK ──
-        look_panel, look_body = self._build_collapsible_panel('COLOR & EFFECTS', expanded=False)
+        look_panel, look_body = self._build_collapsible_panel('Color && effects', expanded=False)
         lpb = QVBoxLayout()
         lpb.setContentsMargins(14, 4, 14, 14)
         lpb.setSpacing(8)
@@ -5277,7 +6311,7 @@ class ClipViewer(QDialog):
         sb_outer.addWidget(look_panel)
 
         # CLIP DETAILS panel ──
-        details_panel, details_body = self._build_collapsible_panel('CLIP DETAILS', expanded=False)
+        details_panel, details_body = self._build_collapsible_panel('Clip details', expanded=False)
         dpb = QVBoxLayout()
         dpb.setContentsMargins(14, 4, 14, 14)
         dpb.setSpacing(10)
@@ -5296,33 +6330,35 @@ class ClipViewer(QDialog):
         dpb.addWidget(title_val)
 
         dpb.addWidget(self._kv_label('Tag'))
-        meta = self._mm.get(self.clip_path) if self._mm else {'tag': '', 'description': ''}
+        tag_text, description = self._read_clip_details()
         _edit_style = (
             f'QLineEdit#detailEdit {{ background: transparent; border: none;'
             f' border-bottom: 1px solid {Colors.TEXT_DIM}; color: {Colors.TEXT};'
             f' font-size: 12px; padding: 2px 0; }}'
             f'QLineEdit#detailEdit:focus {{ border-bottom-color: {Colors.ACCENT}; }}'
         )
-        tag_edit = self._tag_edit = QLineEdit(meta['tag'])
+        tag_edit = self._tag_edit = QLineEdit(tag_text)
+        self._apply_detail_tag_status()
         tag_edit.setPlaceholderText('e.g. Gaming, Highlight …')
+        self._apply_detail_tag_status()
         tag_edit.setObjectName('detailEdit')
         tag_edit.setStyleSheet(_edit_style)
-        tag_edit.editingFinished.connect(self._flush_clip_details)
+        tag_edit.editingFinished.connect(self._on_clip_details_editing_finished)
         dpb.addWidget(tag_edit)
 
         dpb.addWidget(self._kv_label('Description'))
-        desc_edit = self._desc_edit = QLineEdit(meta['description'])
+        desc_edit = self._desc_edit = QLineEdit(description)
         desc_edit.setPlaceholderText('Short clip description …')
         desc_edit.setObjectName('detailEdit')
         desc_edit.setStyleSheet(_edit_style)
-        desc_edit.editingFinished.connect(self._flush_clip_details)
+        desc_edit.editingFinished.connect(self._on_clip_details_editing_finished)
         dpb.addWidget(desc_edit)
 
         details_body.addLayout(dpb)
         sb_outer.addWidget(details_panel)
 
         # FILE DETAILS panel ──
-        file_panel, file_body = self._build_collapsible_panel('FILE DETAILS', expanded=False)
+        file_panel, file_body = self._build_collapsible_panel('File details', expanded=False)
         fpb = QVBoxLayout()
         fpb.setContentsMargins(14, 4, 14, 14)
         fpb.setSpacing(10)
@@ -5367,7 +6403,12 @@ class ClipViewer(QDialog):
 
         sb_outer.addStretch(1)
 
-        self.delete_btn = QPushButton('Delete')
+        self.favorite_btn = QPushButton('Add favorite')
+        self.favorite_btn.setObjectName('viewerFavoriteButton')
+        self.favorite_btn.setCheckable(True)
+        self.favorite_btn.clicked.connect(lambda: self._toggle_library_flag('favorite'))
+        sb_outer.addWidget(self.favorite_btn)
+        self.delete_btn = QPushButton('Move to Trash')
         self.delete_btn.setObjectName('deleteBtn')
         self.delete_btn.setFixedHeight(36)
         self.delete_btn.clicked.connect(self._delete_clip)
@@ -5377,11 +6418,86 @@ class ClipViewer(QDialog):
             self.delete_btn.setToolTip(
                 'Remove its import folder from FTHR; the original stays on disk.')
         sb_outer.addWidget(self.delete_btn)
+        self.refresh_library_flags()
 
+        # Studio layout: video tools / preview / audio and details, with the timeline
+        # spanning the complete window. Each inspector scrolls independently.
+        video_sidebar = QFrame()
+        video_sidebar.setObjectName('editorVideoSidebar')
+        video_sidebar.setFixedWidth(238)
+        self._studio_video_sidebar = video_sidebar
+        video_shell = QVBoxLayout(video_sidebar)
+        video_shell.setContentsMargins(0, 0, 0, 0)
+        self._video_tools_scroll = QScrollArea()
+        self._video_tools_scroll.setWidgetResizable(True)
+        self._video_tools_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._video_tools_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        video_content = QWidget()
+        video_content.setObjectName('editorSidebarContent')
+        video_content.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        video_tools = QVBoxLayout(video_content)
+        video_tools.setContentsMargins(10, 12, 10, 12)
+        video_tools.setSpacing(8)
+        from PySide6.QtWidgets import QGridLayout
+        self._studio_video_grid = QGridLayout()
+        self._studio_video_grid.setSpacing(8)
+        video_tools.addLayout(self._studio_video_grid)
+        # Keep metadata with Audio mix on the right; only editing tools
+        # participate in the adaptive video-tools grid on the left.
+        self._studio_video_panels = (edit_panel, speed_panel, look_panel)
+        self._studio_video_columns = 1
+        for index, panel in enumerate(self._studio_video_panels):
+            sb_outer.removeWidget(panel)
+            self._studio_video_grid.addWidget(panel, index, 0)
+        video_tools.addStretch(1)
+        for action in (self.favorite_btn, self.delete_btn):
+            sb_outer.removeWidget(action)
+            video_tools.addWidget(action)
+        self._video_tools_scroll.setWidget(video_content)
+        video_shell.addWidget(self._video_tools_scroll)
+        main.insertWidget(0, video_sidebar)
         main.addWidget(sidebar)
-        root.addLayout(main, stretch=1)
 
-        self._create_media_player()
+        actions = QFrame()
+        actions.setObjectName('editorActions')
+        actions_row = QHBoxLayout(actions)
+        actions_row.setContentsMargins(12, 6, 12, 6)
+        actions_row.setSpacing(8)
+        actions_row.addStretch(1)
+        for action in (self.export_jobs_btn, self.export_quality_combo,
+                       self.upload_btn, self.share_btn, self.export_btn):
+            sb_outer.removeWidget(action)
+            action.setFixedHeight(32)
+            action.setMinimumWidth(76)
+            actions_row.addWidget(action)
+        self.export_quality_combo.setFixedWidth(150)
+        self.share_btn.setText('Share')
+        self.share_btn.setFixedWidth(88)
+        self.export_btn.setFixedWidth(104)
+        self._studio_actions = actions
+        root.addWidget(actions)
+        root.addLayout(main, stretch=1)
+        root.addWidget(trim_frame)
+        self._studio_panels = (edit_panel, speed_panel, look_panel,
+                               audio_panel, details_panel, file_panel)
+        self._studio_video_panel = edit_panel
+        self._studio_speed_panel = speed_panel
+        self._studio_look_panel = look_panel
+        self._studio_audio_panel = audio_panel
+        self._studio_details_panel = details_panel
+        self._studio_file_panel = file_panel
+        self._studio_original_heights = tuple(
+            (widget, widget.minimumHeight())
+            for widget in (self._editor_header, self._studio_transport,
+                           self.share_btn, self.export_btn, self.upload_btn,
+                           self.export_quality_combo, self.speed_combo,
+                           self.crop_btn, self.quick_crop_btn, self.save_qc_btn,
+                           self.stretch_btn, self.reset_stretch_btn)
+            if 24 <= widget.minimumHeight() == widget.maximumHeight() <= 46)
+        self._update_studio_layout()
+
+        if not self._interface_sample:
+            self._create_media_player()
 
     def _create_media_player(self):
         self.player = QMediaPlayer(self)
@@ -5414,7 +6530,7 @@ class ClipViewer(QDialog):
         # Let the dialog paint its poster and controls before MediaFoundation
         # starts opening the source. This removes decoder startup from the
         # perceived click-to-editor latency.
-        self._later(0, self._set_media_source)
+        self._later(0, self._prepare_initial_media_source)
 
     # Event filter — keep the software video surface sized to the clip frame
 
@@ -5475,7 +6591,7 @@ class ClipViewer(QDialog):
             return False
         if self._crop_rect:
             return True
-        if abs(float(self._stretch_ratio) - 1.0) > 0.005:
+        if getattr(self, '_stretch_size', None) is not None or abs(self._stretch_ratio - 1.0) > 0.005:
             return True
         return any(int(value) != 0 for value in self._preview_color_effects().values())
 
@@ -5671,6 +6787,8 @@ class ClipViewer(QDialog):
                 is_playing = False
             seek_active = ClipViewer._seek_anchor_is_active(
                 self, source_generation=current_generation)
+            if not is_playing and getattr(self.video_widget, '_scrubbing', False):
+                return
             if seek_active and is_playing:
                 # A paused-seek guard must never filter normal playback frames.
                 ClipViewer._clear_seek_anchor(self)
@@ -5797,6 +6915,7 @@ class ClipViewer(QDialog):
                     != QMediaPlayer.PlaybackState.PlayingState):
                 self.player.play()
         except (RuntimeError, TypeError):
+            # The deferred renderer refresh can reach a player replaced during a source switch.
             pass
 
     def _connect_media_player_signals(self, player: QMediaPlayer) -> None:
@@ -5808,6 +6927,7 @@ class ClipViewer(QDialog):
         try:
             self._connect_clip_result(player.errorOccurred, self._on_player_error)
         except AttributeError:
+            # Older Qt bindings can lack the optional playback error signal.
             pass
 
     def _recreate_player_for_renderer(self, target: str, position: int,
@@ -5862,10 +6982,12 @@ class ClipViewer(QDialog):
             return
         wants_software = self._requires_software_video()
         if isinstance(native, QuickVideoPreview):
+            stretch = _stretch_preview_ratio(
+                self._stretch_ratio, self._stretch_size, self._crop_rect, self._src_w, self._src_h)
             native.set_edit_state(
                 self._crop_rect if self._live_clip_preview else None,
                 _normalise_color_effects(self._preview_color_effects()) if self._live_clip_preview else {},
-                self._stretch_ratio if self._live_clip_preview else 1.0,
+                stretch if self._live_clip_preview else 1.0,
                 self._src_w, self._src_h, Colors.BG, Colors.ACCENT)
         self._video_renderer = 'software' if wants_software else 'native'
         software.set_software_preview_enabled(wants_software)
@@ -5885,24 +7007,82 @@ class ClipViewer(QDialog):
         # Keep the poster/software frame visible until native has supplied a
         # real frame.  This preserves paused/first-frame behavior without
         # paying for CPU conversion during neutral playback.
-        if self._native_has_real_frame:
+        if (self._native_has_real_frame and not software._scrubbing
+                and not self._paused_seek_fallback_visible
+                and not ClipViewer._seek_anchor_is_active(self)):
             self._set_surface_visibility(native_visible=True)
         else:
             self._set_surface_visibility(native_visible=False)
         software.update()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_studio_layout()
+
+    def _update_studio_layout(self):
+        if (not hasattr(self, '_studio_panels')
+                or getattr(self, '_studio_layout_updating', False)):
+            return
+        self._studio_layout_updating = True
+        try:
+            designer = getattr(self, '_interface_editor_designer', None)
+            if designer is not None:
+                designer.prepare_editor_layout(self)
+            from ui.editor_layout import studio_layout_metrics
+            width, height = self.width(), self.height()
+            source_w, source_h = self._src_w, self._src_h
+            # Both preview renderers show the source with a crop overlay.
+            # Layout must follow that displayed surface, not export dimensions.
+            stretch = (_stretch_preview_ratio(
+                self._stretch_ratio, self._stretch_size, self._crop_rect, source_w, source_h)
+                if self._live_clip_preview else 1.0)
+            aspect = max(0.1, source_w * stretch / max(1, source_h))
+            left, right, timeline, text_scale = studio_layout_metrics(width, height, aspect)
+            self._studio_video_sidebar.setFixedWidth(left)
+            self._studio_audio_sidebar.setFixedWidth(right)
+            columns = 2 if left >= 620 else 1
+            if columns != self._studio_video_columns:
+                self._studio_video_columns = columns
+                for panel in self._studio_video_panels:
+                    self._studio_video_grid.removeWidget(panel)
+                positions = ((0, 0, 1), (0, 1, 1), (1, 0, 2))
+                for index, panel in enumerate(self._studio_video_panels):
+                    row, column, span = positions[index] if columns == 2 else (index, 0, 1)
+                    self._studio_video_grid.addWidget(panel, row, column, 1, span,
+                        Qt.AlignmentFlag.AlignTop)
+                self._studio_video_grid.setColumnStretch(0, 1)
+                self._studio_video_grid.setColumnStretch(1, 1 if columns == 2 else 0)
+            self.trim_slider.setFixedHeight(timeline)
+            for widget, original in self._studio_original_heights:
+                widget.setFixedHeight(round(original * text_scale))
+            if getattr(self, '_studio_text_scale', 1.0) != text_scale:
+                self._studio_text_scale = text_scale
+                self._apply_styles()
+            self._editor_header_h = self._editor_header.height()
+        finally:
+            self._studio_layout_updating = False
+
     def _relayout_video(self):
         """
         Position both video surfaces inside their clipping frame.
         """
-        cw = self._video_clip_frame.width()
-        ch = self._video_clip_frame.height()
+        bounds = self._video_clip_frame.rect()
+        inset = min(getattr(self, '_interface_preview_inset', 0),
+                    (min(bounds.width(), bounds.height()) - 1) // 2)
+        bounds = bounds.adjusted(inset, inset, -inset, -inset)
+        cw, ch = bounds.width(), bounds.height()
         if cw <= 0 or ch <= 0:
             return
 
-        self.video_widget.setGeometry(0, 0, cw, ch)
+        self.video_widget.setGeometry(bounds)
+        if self._interface_sample:
+            if self._thumb_pixmap is not None and not self._thumb_pixmap.isNull():
+                self.video_widget.setPixmap(self._thumb_pixmap.scaled(
+                    cw, ch, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation))
+            return
         if hasattr(self, '_native_video_widget'):
-            self._native_video_widget.setGeometry(0, 0, cw, ch)
+            self._native_video_widget.setGeometry(bounds)
         if self._video_renderer == 'software':
             self.video_widget._enqueue_latest_frame()
         self._refresh_live_preview()
@@ -5911,6 +7091,8 @@ class ClipViewer(QDialog):
         if self._closing:
             return
         try:
+            transition_frame = self._native_latest_frame
+            resume_position = self._renderer_resume_position_ms
             self._native_has_real_frame = False
             self._native_latest_frame = None
             self._native_latest_received_at = None
@@ -5923,9 +7105,13 @@ class ClipViewer(QDialog):
             seek_anchor_active = ClipViewer._seek_anchor_is_active(self)
             self._paused_seek_fallback_timer.stop()
             self._pending_paused_seek_decode = None
-            self.video_widget.begin_source_generation()
+            self._cancel_scrub_preview()
+            self.video_widget.begin_source_generation(
+                keep_frame=resume_position is not None)
             self.video_widget.begin_seek_generation(
                 getattr(self, '_seek_generation', 0))
+            if resume_position is not None:
+                self.video_widget.retain_transition_frame(transition_frame, resume_position)
             source_generation = getattr(
                 self.video_widget, '_source_generation', None)
             self._bind_native_video_frame_callback(source_generation)
@@ -5938,6 +7124,10 @@ class ClipViewer(QDialog):
                     source_generation=source_generation)
             self._playback_preparing_at = time.monotonic()
             emit_event('playback', 'media_requested', state='PREPARING')
+            label = getattr(self, '_sdr_preview_lbl', None)
+            if label is not None:
+                from core.playback_proxy import is_sdr_preview_path
+                label.setVisible(is_sdr_preview_path(self.clip_path, self._playback_path))
             self.player.setSource(QUrl.fromLocalFile(self._playback_path))
         except Exception as e:
             print(f'[ClipViewer] setSource failed: {e}')
@@ -5947,15 +7137,85 @@ class ClipViewer(QDialog):
                        error=DiagnosticError.PLAYBACK_INIT_FAILED,
                        detail=detail)
 
+    def _prepare_initial_media_source(self, *, require_compatible=False):
+        """Prepare the first media source without blocking the editor UI."""
+
+        if self._closing or (self._compatibility_checked and not require_compatible):
+            return
+        if self._playback_path != self.clip_path and not require_compatible:
+            self._compatibility_checked = True
+            self._set_media_source()
+            return
+        if self._compatibility_worker is not None:
+            return
+        token = (threading.Event() if require_compatible else self._compatibility_cancel)
+        self._compatibility_cancel = token
+        generation = self._compatibility_generation
+        worker = _CompatibilitySourceWorker(self.clip_path, token)
+        self._compatibility_worker = worker
+        self._compatibility_receiver = self._connect_clip_result(
+            worker.signals.ready,
+            lambda path: (
+                self._on_compatibility_source_ready(
+                    path, token, generation, require_compatible=True)
+                if require_compatible else
+                self._on_compatibility_source_ready(path, token, generation)),
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    def _cancel_compatibility_prepare(self):
+        token = getattr(self, '_compatibility_cancel', None)
+        if token is not None:
+            token.set()
+        receiver = getattr(self, '_compatibility_receiver', None)
+        if receiver is not None:
+            try:
+                self._clip_receivers.remove(receiver)
+            except (ValueError, AttributeError):
+                # Earlier teardown may have removed the receiver. Qt disposal still follows.
+                pass
+            receiver.deleteLater()
+            self._compatibility_receiver = None
+        self._compatibility_worker = None
+
+    def _on_compatibility_source_ready(self, path, token, generation, *, require_compatible=False):
+        if (self._closing or token.is_set()
+                or token is not self._compatibility_cancel
+                or generation != self._compatibility_generation):
+            return
+        self._cancel_compatibility_prepare()
+        self._compatibility_checked = True
+        self._compatible_playback_path = path
+        if require_compatible:
+            if path != self._playback_path:
+                self._prepared_playback_path = path
+                self._apply_prepared_playback_source(resume_playing=True)
+            self._schedule_playback_proxy()
+            return
+        self._playback_path = path
+        from core.playback_proxy import is_compatibility_cache_path
+        self._compatibility_cache_active = is_compatibility_cache_path(
+            self.clip_path, path)
+        timer = getattr(self, '_playback_stall_timer', None)
+        if timer is not None:
+            timer.start()
+        self._set_media_source()
+
     def _prepare_playback_source(self):
-        if (self._closing or self._playback_path != self.clip_path
+        if (self._closing
+                or (self._playback_path != self.clip_path
+                    and not getattr(self, '_compatibility_cache_active', False))
                 or self._playback_source_worker is not None or self._proxy_checked
+                or getattr(self, '_compatibility_worker', None) is not None
+                or getattr(self, '_preview_quality', 'auto') == 'original'
+                or getattr(getattr(self, 'trim_slider', None), 'dragging', None)
                 or not self._media_ready or self._play_when_ready
                 or self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState):
             return
         self._proxy_prepare_timer.stop()
         token = self._proxy_cancel = threading.Event()
-        worker = _PlaybackSourceWorker(self.clip_path, token)
+        worker = _PlaybackSourceWorker(
+            self.clip_path, token, getattr(self, '_preview_quality', 'auto'))
         self._playback_source_worker = worker
         self._proxy_receiver = self._connect_clip_result(worker.signals.ready, lambda path: (
             self._on_playback_source_ready(path) if not token.is_set() else None))
@@ -5964,6 +7224,7 @@ class ClipViewer(QDialog):
     def _schedule_playback_proxy(self):
         timer = getattr(self, '_proxy_prepare_timer', None)
         if (timer is not None and not self._closing and not self._proxy_checked
+                and getattr(self, '_preview_quality', 'auto') != 'original'
                 and self._playback_source_worker is None):
             timer.start(1500)
 
@@ -5989,12 +7250,61 @@ class ClipViewer(QDialog):
         self._prepared_playback_path = path
         self._apply_prepared_playback_source()
 
-    def _apply_prepared_playback_source(self):
+    def _on_preview_quality_changed(self):
+        from core.playback_proxy import cached_playback_path
+
+        if self._closing:
+            return
+        mode = self.preview_quality_combo.currentData()
+        if mode == self._preview_quality:
+            return
+        self._preview_quality = mode
+        if self.sm is not None:
+            self.sm.set('editor_preview_quality', mode)
+            self.sm.save_settings()
+        playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        self.video_widget.set_playback_height_limit(
+            _PREVIEW_QUALITY_HEIGHT.get(mode) if playing else None)
+        self._cancel_playback_proxy()
+        if self._compatibility_checked:
+            self._cancel_compatibility_prepare()
+        self._proxy_checked = False
+        self._prepared_playback_path = None
+        path = cached_playback_path(self.clip_path, mode)
+        if not self._compatibility_checked:
+            # The required compatibility worker may still be probing. An
+            # available preview can bypass it just as it would on clip open.
+            if path != self.clip_path:
+                self._cancel_compatibility_prepare()
+                self._compatibility_checked = True
+                self._prepared_playback_path = path
+                self._apply_prepared_playback_source(resume_playing=True)
+            return
+        if (path == self.clip_path and self._playback_path != self.clip_path
+                and self._compatible_playback_path != self.clip_path):
+            # The required copy may have been evicted independently of a
+            # warm performance proxy. Rebuild it before switching sources.
+            self._prepare_initial_media_source(require_compatible=True)
+            return
+        if path != self._playback_path:
+            self._prepared_playback_path = path
+            self._apply_prepared_playback_source(resume_playing=True)
+        self._schedule_playback_proxy()
+
+    def _apply_prepared_playback_source(self, *, resume_playing=False):
         if (self._closing or not self._prepared_playback_path
-                or self.player.playbackState() == QMediaPlayer.PlayingState):
+                or (getattr(getattr(self, 'trim_slider', None), 'dragging', None)
+                    and not resume_playing)):
+            return
+        playing = self.player.playbackState() == QMediaPlayer.PlayingState
+        if playing and not resume_playing:
             return
         if self._pending_seek_ms is not None:
             position = self._pending_seek_ms
+        elif playing:
+            position = int(self.player.position())
+        elif getattr(self, '_renderer_resume_position_ms', None) is not None:
+            position = self._renderer_resume_position_ms
         elif getattr(self, '_latest_paused_seek_ms', None) is not None:
             # The requested destination outlives its short stale-callback
             # guard, so slow source preparation cannot fall back to old player
@@ -6006,9 +7316,16 @@ class ClipViewer(QDialog):
         self._pending_seek_ms = None
         self._playback_path = self._prepared_playback_path
         self._prepared_playback_path = None
+        from core.playback_proxy import is_compatibility_cache_path
+        self._compatibility_cache_active = is_compatibility_cache_path(
+            self.clip_path, self._playback_path)
         self._renderer_resume_position_ms = position
         self._media_ready = False
         self._playback_ready = False
+        self._play_when_ready = playing or getattr(self, '_play_when_ready', False)
+        stall_timer = getattr(self, '_playback_stall_timer', None)
+        if stall_timer is not None:
+            stall_timer.start()
         self._set_player_state(PlayerLifecycleState.PREPARING)
         self._set_media_source()
 
@@ -6035,10 +7352,20 @@ class ClipViewer(QDialog):
                     detail='Loaded media has no video stream')
                 return
             self._media_ready = True
-            resume_position = self._renderer_resume_position_ms
-            if resume_position is None and self._pending_seek_ms is not None:
-                resume_position = self._pending_seek_ms
-                self._pending_seek_ms = None
+            native_source = getattr(self, '_native_audio_source_id', None)
+            if native_source is not None:
+                audio_index = dict(self._audio_tracks).get(native_source)
+                if not self._select_container_audio_track(audio_index):
+                    self._restart_audio_mixer()
+            resume_position = None
+            if getattr(self.video_widget, '_scrubbing', False):
+                if not self._scrub_preview_timer.isActive():
+                    self._scrub_preview_timer.start()
+            else:
+                resume_position = self._renderer_resume_position_ms
+                if self._pending_seek_ms is not None:
+                    resume_position = self._pending_seek_ms
+                    self._pending_seek_ms = None
             if resume_position is not None:
                 self._renderer_resume_position_ms = None
                 try:
@@ -6117,6 +7444,7 @@ class ClipViewer(QDialog):
         source_generation = getattr(self.video_widget, '_source_generation', None)
         if source_generation is None:
             return
+        pool = _frame_decode_pool()
         worker = _InitialFrameDecodeWorker(
             self._playback_path, source_generation, self._prepare_cancel)
         self._initial_frame_worker = worker
@@ -6125,7 +7453,7 @@ class ClipViewer(QDialog):
             lambda result, generation=seek_generation:
                 self._on_initial_decoded_frame(
                     result, seek_generation=generation))
-        _frame_decode_pool().start(worker)
+        pool.start(worker)
 
     def _on_initial_decoded_frame(self, result, *, seek_generation=None):
         """Publish a source-matched first frame while the player stays idle."""
@@ -6151,6 +7479,7 @@ class ClipViewer(QDialog):
         if self._closing or self._audio_preparation_ready:
             return
         self._audio_prepare_timed_out = True
+        self._audio_inspection_error = True
         self._audio_preparation_ready = True
         emit_event(
             'playback', 'audio_preparation_timeout', state='DEGRADED',
@@ -6197,6 +7526,11 @@ class ClipViewer(QDialog):
                     PlayerLifecycleState.CLOSED,
                 }):
             return
+        if getattr(self, '_compatibility_worker', None) is not None:
+            # Compatibility preparation owns its own cancellable process
+            # deadline. The decoder readiness window starts after setSource.
+            self._playback_stall_timer.start()
+            return
         started_at = self._playback_requested_at or getattr(
             self, '_playback_preparing_at', time.monotonic())
         emit_event(
@@ -6210,7 +7544,7 @@ class ClipViewer(QDialog):
 
     def _clear_ready_status(self):
         if (not self._closing and self._playback_ready
-                and self._playback_status_lbl.text() == 'READY'):
+                and self._playback_status_lbl.text() == 'Ready'):
             self._playback_status_lbl.clear()
 
     def set_timeline_preview_enabled(self, enabled):
@@ -6244,20 +7578,24 @@ class ClipViewer(QDialog):
                 or (not self.trim_slider.preview_strip_enabled
                     and not self._deferred_audio_mixer_sources)
                 or self._timeline_prepare_timer.isActive()
-                or (self.trim_slider._thumbnails
+                or ((self.trim_slider._thumbnail_complete or self.trim_slider._thumbnail_loading)
                     and not self._deferred_audio_mixer_sources)):
             return
         self._timeline_prepare_timer.start(max(0, int(delay_ms)))
 
     def _load_timeline_thumbnails_if_idle(self):
+        """Load after interaction settles, including during steady playback."""
         if self._closing:
             return
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self._pending_seek_ms is not None or self.trim_slider.dragging:
+            self._schedule_timeline_thumbnails(300)
             return
-        if self._deferred_audio_mixer_sources:
+        playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        if self._deferred_audio_mixer_sources and not playing:
             self._prepare_audio_mixer(self._deferred_audio_mixer_sources)
             return
-        if not self.trim_slider.preview_strip_enabled or self.trim_slider._thumbnails:
+        if (self._metadata_probe_pending or not self.trim_slider.preview_strip_enabled
+                or self.trim_slider._thumbnail_complete or self.trim_slider._thumbnail_loading):
             return
         duration_seconds = max(1.0, self.duration_ms / 1000.0)
         thumbnail_count = min(
@@ -6281,6 +7619,8 @@ class ClipViewer(QDialog):
             self._paused_seek_fallback_visible = False
             self._paused_seek_fallback_timer.stop()
             self.video_widget.set_playback_clock(position)
+            return
+        if getattr(self.video_widget, '_scrubbing', False):
             return
         if ClipViewer._seek_anchor_is_active(self):
             if abs(int(position) - self._seek_anchor_ms) > _SEEK_ACK_TOLERANCE_MS:
@@ -6320,6 +7660,7 @@ class ClipViewer(QDialog):
         if self._closing or not self._metadata_probe_pending:
             return
         self._metadata_probe_pending = False
+        self._schedule_timeline_thumbnails()
         if not metadata:
             self._refresh_file_metadata_labels()
             return
@@ -6350,6 +7691,7 @@ class ClipViewer(QDialog):
             f'{self._fmt(self._last_stable_position_ms)} / '
             f'{self._fmt(self.duration_ms)}')
         self._on_segments_changed()
+        self._update_highlight_marker_availability()
         self._update_crop_ui()
         self._refresh_live_preview(immediate=True)
 
@@ -6379,6 +7721,8 @@ class ClipViewer(QDialog):
         return self._effects
 
     def _refresh_live_preview(self, immediate: bool = False):
+        if hasattr(self, '_studio_panels'):
+            self._update_studio_layout()
         if not self._live_clip_preview:
             self._preview_update_pending = False
             self._preview_update_timer.stop()
@@ -6394,7 +7738,7 @@ class ClipViewer(QDialog):
             self._preview_update_timer.stop()
             self.video_widget.set_edit_state(
                 self._crop_rect, self._preview_color_effects(), self._stretch_ratio,
-                preview_enabled=True)
+                preview_enabled=True, stretch_size=self._stretch_size)
             self._update_video_renderer()
             return
         self._preview_update_pending = True
@@ -6408,7 +7752,7 @@ class ClipViewer(QDialog):
         self._preview_update_pending = False
         self.video_widget.set_edit_state(
             self._crop_rect, self._preview_color_effects(), self._stretch_ratio,
-            preview_enabled=True)
+            preview_enabled=True, stretch_size=self._stretch_size)
         self._update_video_renderer()
 
     def _build_effect_control(self, key: str, title: str,
@@ -6425,7 +7769,7 @@ class ClipViewer(QDialog):
         header.addStretch()
         value_label = QLabel('0')
         value_label.setObjectName('effectValue')
-        value_label.setFixedWidth(34)
+        value_label.setMinimumWidth(46)
         value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         header.addWidget(value_label)
         layout.addLayout(header)
@@ -6474,9 +7818,9 @@ class ClipViewer(QDialog):
         outer.addWidget(body_widget)
 
         def _toggle():
-            shown = body_widget.isVisible()
-            body_widget.setVisible(not shown)
-            header_btn.setExpanded(not shown)
+            shown = header_btn.isChecked()
+            body_widget.setVisible(shown)
+            header_btn.setExpanded(shown)
         header_btn.clicked.connect(_toggle)
 
         return panel, body_layout
@@ -6506,7 +7850,7 @@ class ClipViewer(QDialog):
                 border-bottom: 1px solid {Colors.SHELL_DIVIDER};
             }}
             QLabel#editorTitle {{
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px; font-weight: 600;
+                color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px; font-weight: 600;
                 font-family: {Fonts.DISPLAY}; letter-spacing: 0px;
                 background: transparent;
             }}
@@ -6531,7 +7875,7 @@ class ClipViewer(QDialog):
             QPushButton#playBtn {{
                 background-color: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};
                 border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px;
+                color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.DISPLAY}; font-weight: 600;
                 letter-spacing: 0px; padding: 5px 14px;
             }}
@@ -6540,21 +7884,11 @@ class ClipViewer(QDialog):
                 background-color: {Colors.ACCENT}; border-color: {Colors.ACCENT}; color: {Colors.BG};
             }}
             QLabel#timeLabel {{
-                color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_BODY}px;
+                color: {Colors.TEXT_DIM}; font-size: {round(Fonts.SIZE_BODY * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
-            QComboBox#speedCombo {{
-                min-width: 0px; max-width: 999px; min-height: 30px; max-height: 30px;
-                padding: 4px 8px; background-color: {Colors.SURFACE_2};
-                border: 1px solid {Colors.BORDER}; border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px;
-                font-family: {Fonts.DISPLAY}; font-weight: 600;
-            }}
-            QComboBox#speedCombo:hover, QComboBox#speedCombo:focus {{
-                border-color: {Colors.ACCENT}; color: {Colors.ACCENT};
-            }}
             QCheckBox#pitchToggle {{
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px;
+                color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
                 spacing: 8px; padding: 2px 0;
             }}
@@ -6567,17 +7901,17 @@ class ClipViewer(QDialog):
                 background-color: {Colors.ACCENT}; border-color: {Colors.ACCENT};
             }}
             QLabel#pitchHint {{
-                color: {Colors.TEXT_MUTED}; font-size: {Fonts.SIZE_MICRO}px;
+                color: {Colors.TEXT_MUTED}; font-size: {round(Fonts.SIZE_MICRO * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
             QLabel#volLabel {{
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_MICRO}px;
+                color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_MICRO * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; letter-spacing: 0px; background: transparent;
             }}
             QPushButton#volBtn {{
                 background-color: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};
                 border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px;
+                color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.DISPLAY}; font-weight: 600;
                 letter-spacing: 0px; padding: 4px 12px;
             }}
@@ -6588,15 +7922,15 @@ class ClipViewer(QDialog):
                 border-top: 1px solid {Colors.SHELL_DIVIDER};
             }}
             QLabel#trimLabel {{
-                color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px; font-weight: 600;
+                color: {Colors.TEXT_DIM}; font-size: {round(Fonts.SIZE_MICRO * getattr(self, '_studio_text_scale', 1.0))}px; font-weight: 600;
                 font-family: {Fonts.DISPLAY}; letter-spacing: 0px; background: transparent;
             }}
             QLabel#trimRangeLbl {{
-                color: {Colors.ACCENT}; font-size: {Fonts.SIZE_LABEL}px;
+                color: {Colors.ACCENT}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
             QLabel#timelineZoomLabel {{
-                color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_MICRO}px;
+                color: {Colors.TEXT_DIM}; font-size: {round(Fonts.SIZE_MICRO * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
             QPushButton#timelineTool {{
@@ -6609,7 +7943,7 @@ class ClipViewer(QDialog):
             QPushButton#timelineHistory {{
                 min-width: 48px; min-height: 24px; max-height: 24px; padding: 0 8px;
                 background-color: transparent; border: 1px solid {Colors.BORDER_HI};
-                border-radius: {Sizes.RADIUS_MD}px; color: {Colors.TEXT}; font-size: {Fonts.SIZE_MICRO}px;
+                border-radius: {Sizes.RADIUS_MD}px; color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_MICRO * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.DISPLAY}; font-weight: 600; letter-spacing: 0px;
             }}
             QPushButton#timelineHistory:hover {{ border-color: {Colors.ACCENT}; color: {Colors.ACCENT}; }}
@@ -6617,7 +7951,7 @@ class ClipViewer(QDialog):
             QPushButton#timelineAction, QPushButton#timelineActionDanger {{
                 min-height: 24px; max-height: 24px; padding: 0 9px;
                 background-color: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER_HI};
-                border-radius: {Sizes.RADIUS_MD}px; color: {Colors.TEXT}; font-size: {Fonts.SIZE_MICRO}px;
+                border-radius: {Sizes.RADIUS_MD}px; color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_MICRO * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.DISPLAY}; font-weight: 600; letter-spacing: 0px;
             }}
             QPushButton#timelineAction:hover {{ border-color: {Colors.ACCENT}; color: {Colors.ACCENT}; }}
@@ -6628,7 +7962,7 @@ class ClipViewer(QDialog):
             QPushButton#timelineActionDanger:disabled {{ color: {Colors.TEXT_MUTED}; border-color: {Colors.BORDER}; }}
 
             /* Sidebar */
-            QFrame#editorSidebar {{
+            QFrame#editorSidebar, QFrame#editorVideoSidebar, QFrame#editorActions {{
                 background-color: {Colors.SHELL_BG};
                 border-left: 1px solid {Colors.SHELL_DIVIDER};
             }}
@@ -6643,32 +7977,32 @@ class ClipViewer(QDialog):
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 
-            /* Primary "Share clip" — teal solid */
-            QPushButton#shareBtn {{
+            /* Primary export action */
+            QPushButton#exportBtn {{
                 background-color: {Colors.ACCENT}; border: none;
                 border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.BG}; font-size: {Fonts.SIZE_BODY_L}px;
+                color: {Colors.BG}; font-size: {round(Fonts.SIZE_BODY_L * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; font-weight: 600;
             }}
-            QPushButton#shareBtn:hover {{ background-color: {Colors.TEXT}; }}
-            QPushButton#shareBtn:pressed {{ background-color: {Colors.ACCENT_DIM}; color: {Colors.TEXT}; }}
+            QPushButton#exportBtn:hover {{ background-color: {Colors.TEXT}; }}
+            QPushButton#exportBtn:pressed {{ background-color: {Colors.ACCENT_DIM}; color: {Colors.TEXT}; }}
 
             /* Secondary "Export" / "Upload" — dark surface */
-            QPushButton#exportBtn, QPushButton#uploadBtn {{
+            QPushButton#shareBtn, QPushButton#uploadBtn {{
                 background-color: {Colors.SURFACE_3}; border: 1px solid {Colors.BORDER};
                 border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY_L}px;
+                color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_BODY_L * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; font-weight: 600;
             }}
-            QPushButton#exportBtn:hover, QPushButton#uploadBtn:hover {{ background-color: {Colors.BORDER}; border-color: {Colors.BORDER_HI}; }}
-            QPushButton#exportBtn:disabled, QPushButton#uploadBtn:disabled {{ background-color: {Colors.SURFACE_2}; color: {Colors.TEXT_MUTED}; }}
+            QPushButton#shareBtn:hover, QPushButton#uploadBtn:hover {{ background-color: {Colors.BORDER}; border-color: {Colors.BORDER_HI}; }}
+            QPushButton#exportBtn:disabled, QPushButton#shareBtn:disabled, QPushButton#uploadBtn:disabled {{ background-color: {Colors.SURFACE_2}; color: {Colors.TEXT_MUTED}; }}
 
             /* Crop / quick-crop */
             QPushButton#cropBtn, QPushButton#quickCropBtn, QPushButton#saveQcBtn,
             QPushButton#stretchBtn, QPushButton#resetStretchBtn, QPushButton#resetLookBtn {{
                 background-color: transparent; border: 1px solid {Colors.BORDER_HI};
                 border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px; font-weight: 600;
+                color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px; font-weight: 600;
                 font-family: {Fonts.DISPLAY}; letter-spacing: 0px;
             }}
             QPushButton#cropBtn:hover, QPushButton#quickCropBtn:hover, QPushButton#saveQcBtn:enabled:hover,
@@ -6682,7 +8016,7 @@ class ClipViewer(QDialog):
             QPushButton#quickCropBtn[saved="true"] {{ border-color: {Colors.ACCENT}; color: {Colors.ACCENT}; }}
 
             QLabel#cropInfoLbl {{
-                color: {Colors.ACCENT}; font-size: {Fonts.SIZE_MICRO}px;
+                color: {Colors.ACCENT}; font-size: {round(Fonts.SIZE_MICRO * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
             QFrame#effectControl, QFrame#audioMixControl {{
@@ -6690,24 +8024,24 @@ class ClipViewer(QDialog):
             }}
             QFrame#audioMixPanel {{ background: transparent; border: none; }}
             QLabel#effectName {{
-                color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_LABEL}px;
+                color: {Colors.TEXT_DIM}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
             QLabel#effectValue {{
-                color: {Colors.ACCENT}; font-size: {Fonts.SIZE_LABEL}px;
+                color: {Colors.ACCENT}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
             QLabel#audioMixName {{
-                color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_LABEL}px;
+                color: {Colors.TEXT_DIM}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
             QLabel#audioMixValue {{
-                color: {Colors.ACCENT}; font-size: {Fonts.SIZE_LABEL}px;
+                color: {Colors.ACCENT}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
             QPushButton#audioMixMute {{
                 background: transparent; border: none;
-                color: {Colors.TEXT_MUTED}; font-size: {Fonts.SIZE_MICRO}px;
+                color: {Colors.TEXT_MUTED}; font-size: {round(Fonts.SIZE_MICRO * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.DISPLAY}; font-weight: 600;
                 letter-spacing: 0px; padding: 0;
             }}
@@ -6725,7 +8059,7 @@ class ClipViewer(QDialog):
             }}
             QPushButton#panelHeader {{
                 background-color: transparent; border: none;
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_LABEL}px;
+                color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.DISPLAY}; font-weight: 600;
                 letter-spacing: {Fonts.TRACK_LABEL}px;
                 padding: 10px 12px; text-align: left;
@@ -6735,15 +8069,15 @@ class ClipViewer(QDialog):
 
             /* Key/value rows inside panels */
             QLabel#detailKey {{
-                color: {Colors.TEXT_DIM}; font-size: {Fonts.SIZE_LABEL}px; font-weight: 600;
+                color: {Colors.TEXT_DIM}; font-size: {round(Fonts.SIZE_LABEL * getattr(self, '_studio_text_scale', 1.0))}px; font-weight: 600;
                 font-family: {Fonts.BODY}; letter-spacing: 0px; background: transparent;
             }}
             QLabel#detailVal {{
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY}px;
+                color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_BODY * getattr(self, '_studio_text_scale', 1.0))}px;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
             QLabel#detailValBig {{
-                color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY_L}px; font-weight: 600;
+                color: {Colors.TEXT}; font-size: {round(Fonts.SIZE_BODY_L * getattr(self, '_studio_text_scale', 1.0))}px; font-weight: 600;
                 font-family: {Fonts.BODY}; background: transparent;
             }}
 
@@ -6751,19 +8085,12 @@ class ClipViewer(QDialog):
             QPushButton#deleteBtn {{
                 background: transparent; border: 1px solid {Colors.DELETE};
                 border-radius: {Sizes.RADIUS_MD}px;
-                color: {Colors.DELETE}; font-size: {Fonts.SIZE_BODY_L}px; font-weight: 600;
+                color: {Colors.DELETE}; font-size: {round(Fonts.SIZE_BODY_L * getattr(self, '_studio_text_scale', 1.0))}px; font-weight: 600;
                 font-family: {Fonts.BODY};
             }}
             QPushButton#deleteBtn:hover {{ background-color: {Colors.DELETE}; color: {Colors.TEXT}; }}
 
-            QSlider::groove:horizontal {{ background: {Colors.BORDER}; height: 2px; }}
-            QSlider::handle:horizontal {{
-                background: {Colors.ACCENT}; width: 10px; height: 10px;
-                margin: -4px 0; border-radius: {Sizes.RADIUS_MD}px;
-            }}
-            QSlider::handle:horizontal:hover {{ background: {Colors.TEXT}; }}
-            QSlider::sub-page:horizontal {{ background: {Colors.ACCENT}; }}
-        '''))
+        ''' + slider_qss()))
 
     # Reversible editor history
 
@@ -6806,15 +8133,71 @@ class ClipViewer(QDialog):
             self._last_persisted_snapshot = state
             self._draft_dirty = False
 
+    def _warn_clip_details_error(self, error):
+        if (getattr(self, '_details_warning_active', False)
+                or getattr(self, '_suppress_details_warning', False)):
+            return
+        self._details_warning_active = True
+        try:
+            detail = str(error).strip()[:500] or 'The clip details could not be saved.'
+            FthrMessageDialog.warning(
+                self, 'Clip details unchanged', detail, plain_text=True)
+        finally:
+            self._details_warning_active = False
+
+    def _on_clip_details_editing_finished(self):
+        if (getattr(self, '_details_flush_active', False)
+                or getattr(self, '_details_warning_active', False)):
+            return
+        try:
+            self._flush_clip_details()
+        except (OSError, TypeError, ValueError) as error:
+            self._warn_clip_details_error(error)
+
     def _flush_clip_details(self):
+        """Persist modified details, retaining dirty fields on any failure."""
         if self._mm is None or not hasattr(self, '_tag_edit'):
-            return
-        if not (self._tag_edit.isModified() or self._desc_edit.isModified()):
-            return
-        self._mm.set(self.clip_path, tag=self._tag_edit.text().strip(),
-                     description=self._desc_edit.text().strip())
-        self._tag_edit.setModified(False)
-        self._desc_edit.setModified(False)
+            return True
+        if getattr(self, '_details_flush_active', False):
+            return True
+        tag_modified = self._tag_edit.isModified()
+        description_modified = self._desc_edit.isModified()
+        if not (tag_modified or description_modified):
+            return True
+        self._details_flush_active = True
+        try:
+            description = self._desc_edit.text() if description_modified else None
+            setter = getattr(self._mm, 'set_details', None)
+            if callable(setter):
+                tags = parse_tags_text(self._tag_edit.text()) if tag_modified else None
+                if self._details_identity is None:
+                    raise OSError('The loaded clip identity is unavailable')
+                setter(
+                    self.clip_path,
+                    tags=tags,
+                    description=description,
+                    expected_identity=dict(self._details_identity))
+            else:
+                # Keep the old manager integration contract for lightweight
+                # hosts that have not adopted set_details yet.
+                self._mm.set(
+                    self.clip_path,
+                    tag=self._tag_edit.text() if tag_modified else None,
+                    description=description)
+            self._tag_edit.setModified(False)
+            self._desc_edit.setModified(False)
+            self._last_details_error = None
+            if tag_modified:
+                self._details_tags_unavailable = False
+                apply_status = getattr(self, '_apply_detail_tag_status', None)
+                if callable(apply_status):
+                    apply_status()
+            signal = getattr(self, 'library_details_changed', None)
+            if signal is not None:
+                signal.emit(self.clip_path)
+            return True
+        finally:
+            self._details_flush_active = False
 
     def _capture_editor_state(self) -> EditorSnapshot:
         crop_rect = tuple(self._crop_rect) if self._crop_rect else None
@@ -6831,6 +8214,14 @@ class ClipViewer(QDialog):
                                  for key, value in self._effects.items())),
             speed_rate=_normalise_speed(getattr(self, '_speed_rate', 1.0)),
             preserve_pitch=bool(getattr(self, '_preserve_pitch', True)),
+            master_volume=getattr(self, '_master_volume', 80),
+            source_volumes=tuple(sorted(getattr(self, '_source_volumes', {}).items())),
+            source_mutes=tuple(sorted(getattr(self, '_source_mutes', {}).items())),
+            imported_sources=tuple(source for source in getattr(self, '_playback_sources', ())
+                                   if source.media_path),
+            removed_audio_sources=tuple(sorted(getattr(self, '_removed_audio_sources', ()))),
+            limiter_enabled=getattr(self, '_limiter_enabled', True),
+            stretch_size=getattr(self, '_stretch_size', None),
         )
 
     def _commit_editor_change(self, before: EditorSnapshot):
@@ -6859,6 +8250,7 @@ class ClipViewer(QDialog):
             self.trim_slider.update()
             self._crop_rect = state.crop_rect
             self._stretch_ratio = state.stretch_ratio
+            self._stretch_size = state.stretch_size
             self._speed_rate = _normalise_speed(state.speed_rate)
             self._preserve_pitch = bool(state.preserve_pitch)
             self._effects = dict(state.effects)
@@ -6877,6 +8269,34 @@ class ClipViewer(QDialog):
                 self.preserve_pitch_toggle.setChecked(self._preserve_pitch)
                 self.preserve_pitch_toggle.blockSignals(False)
                 self._update_pitch_hint()
+            if hasattr(self, '_playback_sources'):
+                old_imports = tuple(source for source in self._playback_sources if source.media_path)
+                old_limiter = self._limiter_enabled
+                self._limiter_enabled = state.limiter_enabled
+                self._playback_sources = tuple(
+                    source for source in self._playback_sources if not source.media_path
+                ) + state.imported_sources
+                self._source_volumes = dict(state.source_volumes)
+                self._source_mutes = dict(state.source_mutes)
+                self._removed_audio_sources = set(state.removed_audio_sources)
+                self._master_volume = state.master_volume
+                for source in self._playback_sources:
+                    self._source_volumes.setdefault(source.source_id, 100)
+                    self._source_mutes.setdefault(source.source_id, source.default_muted)
+                self._update_audio_track_index()
+                if ((old_imports != state.imported_sources or old_limiter != self._limiter_enabled)
+                        and (self._audio_preparation_ready or self._audio_mixer is not None)):
+                    self._restart_audio_mixer()
+                elif self._audio_mixer is not None:
+                    self._audio_mixer.set_master_percent(self._master_volume)
+                    for source in self._playback_sources:
+                        self._audio_mixer.set_source_state(
+                            source.source_id, self._source_volumes[source.source_id],
+                            self._source_mutes[source.source_id])
+                    self._schedule_mix_refresh()
+                else:
+                    self._apply_container_audio_volume()
+                self._refresh_audio_mix_panel()
             apply_rate = getattr(self, '_apply_playback_rate', None)
             if hasattr(self, 'player') and callable(apply_rate):
                 apply_rate()
@@ -6955,6 +8375,7 @@ class ClipViewer(QDialog):
             if callable(set_pitch_compensation):
                 set_pitch_compensation(preserve_pitch)
         except (AttributeError, RuntimeError, TypeError, ValueError):
+            # Pitch compensation depends on backend support. The mixer fallback is selected below.
             pass
         try:
             self.player.setPlaybackRate(speed)
@@ -6964,11 +8385,17 @@ class ClipViewer(QDialog):
         # while still coupling pitch to rate.  Keep its cheap direct path at
         # 1×, but move a direct track to our FFmpeg path whenever a changed
         # speed must preserve pitch.
-        if (preserve_pitch and abs(speed - 1.0) > 1e-6
-                and getattr(self, '_audio_mixer', None) is None
-                and getattr(self, '_playback_sources', ())):
-            self._prepare_audio_mixer(self._playback_sources)
-        mixer = getattr(self, '_audio_mixer', None)
+        needs_pitch_processing = self._needs_audio_pitch_processing()
+        mixer = self._audio_mixer
+        if (needs_pitch_processing and mixer is None
+                and (self._native_audio_source_id is not None or self._deferred_audio_mixer_sources)):
+            self._restart_audio_mixer()
+            return
+        if (not needs_pitch_processing and (mixer is not None or self._deferred_audio_mixer_sources)
+                and (source := self._single_dry_audio_source()) is not None
+                and self._select_container_audio_track(source.audio_index)):
+            self._restart_audio_mixer()
+            return
         if mixer is not None:
             try:
                 mixer.set_playback_rate(
@@ -7119,8 +8546,6 @@ class ClipViewer(QDialog):
                     self._flush_pending_seek()
                     self._playback_requested_at = time.monotonic()
                     emit_event('playback', 'play_requested', state='REQUESTED')
-                    self._timeline_prepare_timer.stop()
-                    self.trim_slider.cancel_thumbnail_loading()
                     position = self.player.position()
                     if state == QMediaPlayer.PlaybackState.PausedState:
                         anchor = max(0, int(position))
@@ -7162,11 +8587,13 @@ class ClipViewer(QDialog):
         """Keep the icon/text legible against the button's checked state."""
 
         if playing is None:
+            self.play_btn.setAccessibleName('Cancel queued playback')
             self.play_btn.setIcon(QIcon())
-            self.play_btn.setText('Preparing…')
+            self.play_btn.setText('…')
             return
         icon = (self._pause_active_icon if playing else self._play_icon)
         label = 'PAUSE' if playing else 'PLAY'
+        self.play_btn.setAccessibleName(label.title())
         if icon.isNull():
             self.play_btn.setIcon(QIcon())
             self.play_btn.setText(label)
@@ -7184,7 +8611,11 @@ class ClipViewer(QDialog):
             return
         # Keep the button visually consistent with whatever the player ends up
         # doing — including auto-stop at end of clip.
-        if state == QMediaPlayer.PlaybackState.PlayingState:
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        if playing:
+            self._cancel_scrub_preview()
+            self.video_widget.set_playback_height_limit(
+                _PREVIEW_QUALITY_HEIGHT.get(self._preview_quality))
             ClipViewer._cancel_playback_proxy(self)
             ClipViewer._clear_seek_anchor(self)
             self._latest_paused_seek_ms = None
@@ -7200,8 +8631,9 @@ class ClipViewer(QDialog):
                 elapsed_ms=(round(
                     (time.monotonic() - self._playback_requested_at) * 1000)
                     if self._playback_requested_at else None))
-            self._timeline_prepare_timer.stop()
-            self.trim_slider.cancel_thumbnail_loading()
+            # Autoplay must not starve the filmstrip for the entire clip.
+            # Keep existing work, or start it once playback startup settles.
+            self._schedule_timeline_thumbnails(750)
             if not self._ph_timer.isActive():
                 self._ph_timer.start()
             if self._audio_mixer is not None:
@@ -7213,6 +8645,7 @@ class ClipViewer(QDialog):
             self.play_btn.blockSignals(False)
             self._set_playback_button_visual(True)
         else:
+            self.video_widget.set_playback_height_limit(None)
             self._set_player_state(
                 PlayerLifecycleState.PAUSED
                 if state == QMediaPlayer.PlaybackState.PausedState
@@ -7224,7 +8657,18 @@ class ClipViewer(QDialog):
                 state=('PAUSED' if state == QMediaPlayer.PlaybackState.PausedState
                        else 'STOPPED'))
             self._ph_timer.stop()
-            self._update_playhead()
+            if self._media_ready:
+                self._update_playhead()
+            if (state == QMediaPlayer.PlaybackState.PausedState
+                    and self._media_ready and self._native_output_enabled
+                    and not self._native_has_real_frame
+                    and self._latest_paused_seek_ms is None):
+                # A quick pause after switching paths can beat the first
+                # native frame. Give the settled position the same fallback.
+                target = int(self.player.position())
+                self._latest_paused_seek_ms = target
+                self._begin_exact_seek(target)
+                self._paused_seek_fallback_timer.start()
             if self._audio_mixer is not None:
                 self._audio_mixer.pause()
             # PausedState OR StoppedState — both show the play glyph.
@@ -7233,8 +8677,8 @@ class ClipViewer(QDialog):
             self.play_btn.blockSignals(False)
             self._set_playback_button_visual(False)
             # A rapid pause/resume should only touch the already-open player.
-            # Give the user a generous idle window before preparing any late
-            # audio mixer or opening OpenCV's second decoder for the filmstrip.
+            # Give the user an idle window before preparing late audio or
+            # reopening the filmstrip decoder.
             delay = (1500 if state == QMediaPlayer.PlaybackState.PausedState
                      else 300)
             self._schedule_timeline_thumbnails(delay)
@@ -7243,9 +8687,12 @@ class ClipViewer(QDialog):
                 self._later(0, self._apply_prepared_playback_source)
 
     def _update_playhead(self):
+        if getattr(getattr(self, 'video_widget', None), '_scrubbing', False):
+            return
         try:
             pos = self.player.position()
         except Exception:
+            # A timer tick can arrive after the player is released during close.
             return
         display_pos = self._guarded_display_position(pos)
         if self.duration_ms > 0 and self.trim_slider.dragging != 'playhead':
@@ -7286,7 +8733,6 @@ class ClipViewer(QDialog):
         self.trim_slider.cancel_thumbnail_loading()
         self._pending_seek_ms = max(0, min(self.duration_ms,
                                             int(pct * self.duration_ms)))
-        self._seek_generation = getattr(self, '_seek_generation', 0) + 1
         self._latest_paused_seek_ms = self._pending_seek_ms
         self._seek_position_acknowledged = False
         self._seek_frame_acknowledged = False
@@ -7294,36 +8740,122 @@ class ClipViewer(QDialog):
         if fallback_timer is not None:
             fallback_timer.stop()
         self._pending_paused_seek_decode = None
-        begin_seek = getattr(
-            getattr(self, 'video_widget', None), 'begin_seek_generation', None)
-        if callable(begin_seek):
-            begin_seek(self._seek_generation)
-        ClipViewer._set_seek_anchor(
-            self, self._pending_seek_ms,
-            source_generation=getattr(
-                getattr(self, 'video_widget', None), '_source_generation', None))
         try:
             is_playing = (self.player.playbackState()
                           == QMediaPlayer.PlaybackState.PlayingState)
         except (AttributeError, RuntimeError, TypeError):
             is_playing = False
+        scrubbing = (
+            not is_playing and getattr(self.trim_slider, 'dragging', None) == 'playhead')
+        if scrubbing:
+            self._queue_scrub_preview(self._pending_seek_ms)
+        else:
+            ClipViewer._begin_exact_seek(self, self._pending_seek_ms)
         if (not is_playing and getattr(self, '_native_output_enabled', False)):
-            self._paused_seek_fallback_visible = False
+            if not scrubbing:
+                self._paused_seek_fallback_visible = False
             set_visibility = getattr(self, '_set_surface_visibility', None)
             if callable(set_visibility):
                 set_visibility(native_visible=False)
         self._resume_anchor_ms = None
         self._last_stable_position_ms = self._pending_seek_ms
         self.trim_slider.set_playhead(pct)
-        # A running single-shot timer is restarted here, making this a true
-        # debounce.  The previous throttle-style behaviour issued a native
-        # seek every 50 ms during a scrub even when the preceding seek had not
-        # settled yet, which could leave both video and audio pipelines
-        # repeatedly flushing the same deterministic point.
-        self._seek_timer.start()
+        if scrubbing:
+            self.time_label.setText(
+                f'{self._fmt(self._pending_seek_ms)} / {self._fmt(self.duration_ms)}')
+            self._seek_timer.stop()
+            self._proxy_prepare_timer.stop()
+        else:
+            # Non-drag seeks stay debounced to avoid repeated native flushes.
+            self._seek_timer.start()
 
-        if not is_playing:
+        if not is_playing and not scrubbing:
             ClipViewer._schedule_playback_proxy(self)
+        if getattr(self, '_playback_ready', False):
+            self._schedule_timeline_thumbnails(750 if is_playing else 300)
+
+    def _begin_exact_seek(self, target_ms: int) -> None:
+        self._seek_generation = getattr(self, '_seek_generation', 0) + 1
+        preview = getattr(self, 'video_widget', None)
+        begin_seek = getattr(preview, 'begin_seek_generation', None)
+        if callable(begin_seek):
+            begin_seek(self._seek_generation)
+        ClipViewer._set_seek_anchor(
+            self, target_ms, source_generation=getattr(preview, '_source_generation', None))
+
+    def _queue_scrub_preview(self, target_ms: int) -> None:
+        previous = self._scrub_preview_target_ms
+        direction = self._scrub_preview_direction
+        if previous is not None and previous != target_ms:
+            direction = 1 if target_ms > previous else -1
+        reversed_direction = direction * self._scrub_preview_direction < 0
+        if not self.video_widget._scrubbing:
+            self._cancel_playback_proxy()
+        if not self.video_widget._scrubbing or reversed_direction:
+            # Continuous motion can show the last completed sample. Starting
+            # a new gesture or reversing invalidates all work from that sweep.
+            self._cancel_scrub_preview()
+            self._begin_exact_seek(target_ms)
+            self.video_widget._scrubbing = True
+        self._scrub_preview_direction = direction
+        self._scrub_preview_target_ms = target_ms
+        if (self._media_ready and self._scrub_preview_worker is None
+                and not self._scrub_preview_timer.isActive()):
+            self._scrub_preview_timer.start()
+
+    def _start_scrub_preview(self) -> None:
+        if (self._closing or not self._media_ready or not self.video_widget._scrubbing
+                or self._scrub_preview_worker is not None
+                or self._scrub_preview_target_ms is None):
+            return
+        target = self._scrub_preview_target_ms
+        pool = _frame_decode_pool()
+        worker = _ScrubFrameDecodeWorker(
+            self._playback_path, self.video_widget._source_generation,
+            self._seek_generation, target, threading.Event())
+        self._scrub_preview_worker = worker
+        # The signal is GUI-owned and Qt disconnects it on widget deletion.
+        worker.signals.ready.connect(self._on_scrub_preview_decoded)
+        pool.start(worker)
+
+    @Slot(object)
+    def _on_scrub_preview_decoded(self, result) -> None:
+        token, source_generation, seek_generation, target_ms, image = result
+        worker = self._scrub_preview_worker
+        if worker is None or token is not worker.cancelled:
+            return
+        self._scrub_preview_worker = None
+        preview = self.video_widget
+        if self._closing or not preview._scrubbing:
+            return
+        if not token.is_set():
+            preview.publish_seek_decoded_image(
+                source_generation, seek_generation, target_ms, image)
+        if self._scrub_preview_target_ms != target_ms or token.is_set():
+            if not self._scrub_preview_timer.isActive():
+                self._scrub_preview_timer.start()
+
+    def _cancel_scrub_preview(self) -> None:
+        self._scrub_preview_timer.stop()
+        self._scrub_preview_target_ms = None
+        self._scrub_preview_direction = 0
+        if self._scrub_preview_worker is not None:
+            self._scrub_preview_worker.cancelled.set()
+        self.video_widget._scrubbing = False
+
+    def _on_playhead_scrub_finished(self) -> None:
+        self._seek_timer.stop()
+        if self.video_widget._scrubbing:
+            self._cancel_scrub_preview()
+            if self._pending_seek_ms is not None:
+                self._begin_exact_seek(self._pending_seek_ms)
+        self._flush_pending_seek()
+        self._on_timeline_drag_finished()
+
+    def _on_timeline_drag_finished(self) -> None:
+        self._schedule_playback_proxy()
+        if self._prepared_playback_path:
+            self._later(0, self._apply_prepared_playback_source)
 
     def _flush_pending_seek(self):
         if self._pending_seek_ms is None:
@@ -7334,6 +8866,7 @@ class ClipViewer(QDialog):
             # the latest target once the backend can accept a seek.
             return
         self._pending_seek_ms = None
+        self._renderer_resume_position_ms = None
         self._latest_paused_seek_ms = target
         ClipViewer._set_seek_anchor(
             self, target,
@@ -7399,12 +8932,13 @@ class ClipViewer(QDialog):
             # Without a trustworthy paused state, avoid a decode that could
             # race active playback and publish an obsolete still frame.
             return
+        pool = _frame_decode_pool()
         worker = _PausedSeekFrameDecodeWorker(
             path, source_generation, seek_generation, target_ms,
             self._prepare_cancel)
         self._paused_seek_decode_worker = worker
         self._connect_clip_result(worker.signals.ready, self._on_paused_seek_frame_decoded)
-        _frame_decode_pool().start(worker)
+        pool.start(worker)
 
     def _on_paused_seek_frame_decoded(self, result) -> None:
         """Publish only the latest paused target; reject stale worker results."""
@@ -7448,10 +8982,17 @@ class ClipViewer(QDialog):
         # through the Qt event loop.
         if (not self._closing and self._playback_path != self.clip_path):
             # A deleted/corrupt disposable preview cannot invalidate the clip.
-            from core.playback_proxy import discard_playback_cache
+            from core.playback_proxy import cached_playback_path, discard_playback_cache
             discard_playback_cache(self.clip_path, self._playback_path)
-            self._prepared_playback_path = self.clip_path
-            self._later(0, self._apply_prepared_playback_source)
+            self._cancel_playback_proxy()
+            self._proxy_checked = True
+            self._prepared_playback_path = cached_playback_path(self.clip_path, 'original')
+            if self._prepared_playback_path == self._playback_path:
+                self._prepared_playback_path = self.clip_path
+            failed_path = self._playback_path
+            self._later(0, lambda: (
+                self._apply_prepared_playback_source(resume_playing=True)
+                if failed_path == self._playback_path else None))
             return
         try:
             err_str = self.player.errorString()
@@ -7479,12 +9020,19 @@ class ClipViewer(QDialog):
             master_vol=self._master_volume,
             source_volumes=self._source_volumes,
             source_mutes=self._source_mutes,
-            source_tracks=self._playback_sources,
+            source_tracks=tuple(source for source in self._playback_sources
+                                if source.source_id not in self._removed_audio_sources),
             live_preview=(self._audio_mixer_live
                           or self._native_audio_source_id is not None),
         )
+        # Capture warnings remain available without a permanent diagnostic
+        # block in the editor. The mixer itself still owns fallback behavior.
+        warnings = tuple(dict.fromkeys(source.capture_warning for source in self._playback_sources
+                                       if source.capture_warning))
+        panel.setToolTip(' '.join(warnings))
 
     def _on_master_volume_changed(self, value: int):
+        before = self._capture_editor_state()
         self._master_volume = value
         if self._audio_mixer is not None:
             self._audio_mixer.set_master_percent(value)
@@ -7495,35 +9043,228 @@ class ClipViewer(QDialog):
         if self.sm:
             self.sm.set('master_volume', value)
             self.sm.save_settings()
+        self._commit_editor_change(before)
 
     def _on_source_volume_changed(self, key: str, value: int):
+        before = self._capture_editor_state()
         self._source_volumes[key] = value
         if self._audio_mixer is not None:
             self._audio_mixer.set_source_state(key, gain_percent=value)
             if self._audio_mixer_live:
                 self._schedule_mix_refresh()
-        if key == self._native_audio_source_id:
+        if not self._audio_mixer_live:
             self._apply_container_audio_volume()
+        self._commit_editor_change(before)
 
     def _on_source_muted(self, key: str, muted: bool):
+        before = self._capture_editor_state()
         self._source_mutes[key] = muted
         if self._audio_mixer is not None:
             self._audio_mixer.set_source_state(key, muted=muted)
             if self._audio_mixer_live:
                 self._schedule_mix_refresh()
-        if key == self._native_audio_source_id:
+        if not self._audio_mixer_live:
             self._apply_container_audio_volume()
+        self._commit_editor_change(before)
+
+    def _on_limiter_changed(self, enabled: bool):
+        if self._restoring_state:
+            return
+        before = self._capture_editor_state()
+        self._limiter_enabled = enabled
+        self._restart_audio_mixer()
+        self._commit_editor_change(before)
+
+    def _update_audio_track_index(self):
+        self._audio_tracks = tuple(
+            (source.source_id, source.audio_index) for source in self._playback_sources
+            if source.available and source.audio_index is not None)
+        self._multitrack_audio = bool(self._audio_tracks)
+
+    def _on_audio_source_removed(self, source_id: str):
+        before = self._capture_editor_state()
+        source = next((source for source in self._playback_sources
+                       if source.source_id == source_id), None)
+        if source is None:
+            return
+        if source.media_path:
+            self._playback_sources = tuple(source for source in self._playback_sources
+                                            if source.source_id != source_id)
+            self._source_volumes.pop(source_id, None)
+            self._source_mutes.pop(source_id, None)
+            self._update_audio_track_index()
+            self._restart_audio_mixer()
+        else:
+            self._removed_audio_sources.add(source_id)
+            self._source_mutes[source_id] = True
+            if self._audio_mixer is not None:
+                self._audio_mixer.set_source_state(source_id, muted=True)
+                self._schedule_mix_refresh()
+            if not self._audio_mixer_live:
+                self._apply_container_audio_volume()
+        self._refresh_audio_mix_panel()
+        self._commit_editor_change(before)
+
+    _external_audio_discovered = Signal(object, str, object)
+
+    def _add_audio_file(self):
+        if self._audio_import_busy or not self._audio_preparation_ready:
+            return
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, 'Add audio tracks', '',
+            'Audio (*.wav *.flac *.mp3 *.m4a *.aac *.ogg *.opus *.wma);;All files (*)')
+        if not paths:
+            return
+        remaining = MAX_IMPORTED_AUDIO_TRACKS - sum(
+            bool(source.media_path) for source in self._playback_sources)
+        if remaining <= 0:
+            QMessageBox.information(self, 'Audio tracks', 'Up to eight imported tracks are supported.')
+            return
+        self._audio_import_busy = True
+        self._refresh_audio_mix_panel()
+        token = self._prepare_cancel
+        signal = self._external_audio_discovered
+
+        def inspect():
+            sources = []
+            try:
+                for path in paths:
+                    if token.is_set():
+                        return
+                    path = os.path.abspath(path)
+                    if not os.path.isfile(path):
+                        raise PlaybackError('The selected audio file is unavailable.')
+                    streams = probe_audio_streams(path, token)
+                    if not streams:
+                        raise PlaybackError(f'No audio stream in {os.path.basename(path)}.')
+                    for stream in streams:
+                        if len(sources) >= remaining:
+                            raise PlaybackError('The selection exceeds the eight imported track limit.')
+                        label = os.path.basename(path)
+                        if len(streams) > 1:
+                            label += f' — {stream.title or f"Track {stream.audio_index + 1}"}'
+                        sources.append(PlaybackSource(
+                            f'import:{uuid4()}', label, 'track', stream.container_index,
+                            stream.audio_index, media_path=path,
+                            input_gain_percent=stream.gain_percent, mono=stream.mono))
+                if not token.is_set():
+                    signal.emit(tuple(sources), '', token)
+            except (OSError, PlaybackError) as error:
+                if not token.is_set():
+                    try:
+                        signal.emit((), str(error), token)
+                    except RuntimeError:
+                        pass  # The editor was destroyed during cancellation.
+            except RuntimeError:
+                pass  # A cancelled editor may already have released its signals.
+
+        threading.Thread(target=inspect, name='FTHR-audio-import', daemon=True).start()
+
+    def _on_external_audio_discovered(self, sources, error: str, token):
+        if self._closing or token is not self._prepare_cancel or token.is_set():
+            return
+        self._audio_import_busy = False
+        if error:
+            self._refresh_audio_mix_panel()
+            QMessageBox.warning(self, 'Could not add audio', error)
+            return
+        before = self._capture_editor_state()
+        self._playback_sources += tuple(sources)
+        for source in sources:
+            self._source_volumes[source.source_id] = 100
+            self._source_mutes[source.source_id] = source.default_muted
+        self._update_audio_track_index()
+        self._restart_audio_mixer()
+        self._refresh_audio_mix_panel()
+        self._commit_editor_change(before)
+
+    def _restart_audio_mixer(self):
+        mixer = self._audio_mixer
+        self._audio_mixer = None
+        self._audio_mixer_live = False
+        self._native_audio_source_id = None
+        self._deferred_audio_mixer_sources = ()
+        if mixer is not None:
+            mixer.stop_async()
+        if self._activate_direct_audio():
+            return
+        if self._audio_tracks:
+            self._prepare_audio_mixer(self._playback_sources)
+        else:
+            self._audio_preparation_ready = True
+            self.audio_output.setMuted(True)
+            self._update_playback_readiness()
+        self._refresh_audio_mix_panel()
+
+    def _needs_audio_pitch_processing(self) -> bool:
+        return self._preserve_pitch and abs(self._speed_rate - 1.0) > 1e-6
+
+    def _single_dry_audio_source(self) -> PlaybackSource | None:
+        sources = self._playback_sources
+        if any(source.media_path or source.mix_role != 'direct'
+               or source.display_name.casefold() == 'system audio (backup)'
+               for source in sources):
+            return None
+        # An unavailable manifest row without an ordinal does not represent
+        # a second stored track. A track that failed decoding still does.
+        tracks = tuple(source for source in sources if source.audio_index is not None)
+        if len(tracks) != 1:
+            return None
+        source = tracks[0]
+        if (not source.available or source.input_gain_percent != 100
+                or source.mono or source.effect_filter_snapshot):
+            return None
+        return source
+
+    def _select_container_audio_track(self, audio_index: int | None) -> bool:
+        if not self._media_ready:
+            return True  # The loaded-media callback will select the track.
+        if audio_index is None or not 0 <= audio_index < len(self.player.audioTracks()):
+            return False
+        if self.player.activeAudioTrack() != audio_index:
+            self.player.setActiveAudioTrack(audio_index)
+        return self.player.activeAudioTrack() == audio_index
+
+    def _activate_direct_audio(self) -> bool:
+        # Dry preview uses the container samples. The master limiter still
+        # applies to the FFmpeg mix and to export.
+        if self._needs_audio_pitch_processing():
+            return False
+        source = self._single_dry_audio_source()
+        if source is None or not self._select_container_audio_track(source.audio_index):
+            return False
+        self._deferred_audio_mixer_sources = ()
+        self._native_audio_source_id = source.source_id
+        self._audio_preparation_ready = True
+        self._audio_prepare_deadline.stop()
+        emit_event('playback', 'audio_initialized', state='READY',
+                   backend='qt-container', source_count=1)
+        self._apply_container_audio_volume()
+        self._update_playback_readiness()
+        self._refresh_audio_mix_panel()
+        return True
 
     def _apply_container_audio_volume(self):
+        if self._audio_mixer_live:
+            return
         source_gain = 1.0
         source_id = self._native_audio_source_id
+        if source_id is None and self._media_ready:
+            # While a mixer initializes (or if it fails), Qt may still be
+            # playing the embedded track. Carry over direct track edits while
+            # leaving the raw fallback available for special mix roles.
+            active_track = self.player.activeAudioTrack()
+            source_id = next((source.source_id for source in self._playback_sources
+                              if source.audio_index == active_track and not source.media_path
+                              and source.mix_role == 'direct' and not source.default_muted), None)
+        muted = False
         if source_id is not None:
-            source_gain = (
-                0.0 if self._source_mutes.get(source_id, False)
-                else self._source_volumes.get(source_id, 100) / 100.0)
-        self.audio_output.setMuted(False)
+            muted = (source_id in self._removed_audio_sources
+                     or self._source_mutes.get(source_id, False))
+            source_gain = self._source_volumes.get(source_id, 100) / 100.0
         self.audio_output.setVolume(
             max(0.0, min(1.0, self._master_volume / 100.0 * source_gain)))
+        self.audio_output.setMuted(muted)
 
     def _schedule_mix_refresh(self):
         if not self._mix_refresh_timer.isActive():
@@ -7555,6 +9296,7 @@ class ClipViewer(QDialog):
             try:
                 signal.emit(sources, detail, cancelled)
             except RuntimeError:
+                # The editor may be destroyed after the cancellation check and before delivery.
                 return
 
         threading.Thread(target=_worker, name='FTHR-audio-probe', daemon=True).start()
@@ -7575,10 +9317,13 @@ class ClipViewer(QDialog):
                 'playback', 'audio_probe_failed', state='DEGRADED',
                 error=DiagnosticError.AUDIO_OUTPUT_INIT_FAILED,
                 detail=error)
+            self._audio_inspection_error = True
             self._audio_preparation_ready = True
             self._update_playback_readiness()
             return
-        self._playback_sources = tuple(sources)
+        self._audio_inspection_error = False
+        self._playback_sources = tuple(sources) + tuple(
+            source for source in self._playback_sources if source.media_path)
         emit_event(
             'playback', 'audio_sources_discovered',
             source_count=len(self._playback_sources),
@@ -7591,27 +9336,13 @@ class ClipViewer(QDialog):
         self._multitrack_audio = bool(self._audio_tracks)
         for source in self._playback_sources:
             self._source_volumes.setdefault(source.source_id, 100)
-            self._source_mutes.setdefault(source.source_id, False)
+            self._source_mutes.setdefault(source.source_id, source.default_muted)
         available = tuple(
             source for source in self._playback_sources
             if source.available and source.audio_index is not None)
-        # A single ordinary track stays on QMediaPlayer at 1×. On the Windows
-        # backend its pitch-compensation request is only advisory, however, so
-        # changed-speed preview promotes it to the controlled FFmpeg path.
-        if len(available) == 1 and available[0].mix_role == 'direct':
-            if (bool(getattr(self, '_preserve_pitch', True))
-                    and abs(_normalise_speed(self._speed_rate) - 1.0) > 1e-6):
-                self._native_audio_source_id = None
-                self._prepare_audio_mixer(self._playback_sources)
-            else:
-                self._native_audio_source_id = (
-                    available[0].source_id if available[0].editable else None)
-                self._audio_preparation_ready = True
-                emit_event('playback', 'audio_initialized', state='READY',
-                           backend='qt-container')
-                self._apply_container_audio_volume()
-                self._update_playback_readiness()
-        elif available:
+        if available:
+            if self._activate_direct_audio():
+                return
             self._native_audio_source_id = None
             if (self._audio_prepare_timed_out
                     and self.player.playbackState()
@@ -7644,11 +9375,16 @@ class ClipViewer(QDialog):
         self._playback_status_lbl.setText('Preparing audio…')
         try:
             self._audio_mixer = FFmpegPlaybackController(
-                self.clip_path, sources, self)
-            self._connect_clip_result(self._audio_mixer.ready_changed, self._on_audio_mixer_ready)
-            self._connect_clip_result(self._audio_mixer.audio_failed, self._on_audio_mixer_failed)
-            self._connect_clip_result(self._audio_mixer.source_failed, self._on_audio_source_failed)
-            self._connect_clip_result(self._audio_mixer.reached_eof, self._on_audio_mixer_eof)
+                self.clip_path, sources, self, limiter_enabled=self._limiter_enabled)
+            current_mixer = self._audio_mixer
+            for signal, callback in (
+                    (current_mixer.ready_changed, self._on_audio_mixer_ready),
+                    (current_mixer.audio_failed, self._on_audio_mixer_failed),
+                    (current_mixer.source_failed, self._on_audio_source_failed),
+                    (current_mixer.reached_eof, self._on_audio_mixer_eof)):
+                self._connect_clip_result(
+                    signal, lambda *args, owner=current_mixer, handler=callback:
+                    handler(*args) if self._audio_mixer is owner else None)
             self._audio_mixer.set_master_percent(self._master_volume)
             for source in sources:
                 self._audio_mixer.set_source_state(
@@ -7684,10 +9420,10 @@ class ClipViewer(QDialog):
                        backend='ffmpeg-qtaudiosink')
             # Switch only after the custom path has proven it can decode. This
             # prevents a missed/failed readiness signal from stranding Qt at 0.
+            self.audio_output.setMuted(True)
             if (self.player.playbackState()
                     == QMediaPlayer.PlaybackState.PlayingState):
                 self._audio_mixer.play(int(self.player.position()))
-            self.audio_output.setMuted(True)
             self._audio_preparation_ready = True
             self._update_playback_readiness()
             self._refresh_audio_mix_panel()
@@ -7732,6 +9468,9 @@ class ClipViewer(QDialog):
         self._playback_sources = tuple(
             replace(source, available=False) if source.source_id == source_id else source
             for source in self._playback_sources)
+        update_index = getattr(self, '_update_audio_track_index', None)
+        if callable(update_index):
+            update_index()
         refresh_panel = getattr(self, '_refresh_audio_mix_panel', None)
         if callable(refresh_panel):
             refresh_panel()
@@ -7792,6 +9531,7 @@ class ClipViewer(QDialog):
         if self.sm is not None:
             self.sm.set('hide_deleted_timeline_segments', bool(enabled))
             self.sm.save_settings()
+        self._update_highlight_marker_availability()
 
     def _on_segments_changed(self):
         selected = self.trim_slider.segments[self.trim_slider.selected_segment]
@@ -7802,6 +9542,8 @@ class ClipViewer(QDialog):
         self.trim_range_lbl.setText(
             f'{self._fmt(kept_duration)} kept  ·  {cut_count} cut'
             f'{"s" if cut_count != 1 else ""}')
+
+        self._update_highlight_marker_availability()
 
     def _kept_segments_ms(self) -> list[tuple[int, int]]:
         return [
@@ -7816,7 +9558,7 @@ class ClipViewer(QDialog):
     def _on_trim_changed(self, start_pct: float, end_pct: float):
         s = int(start_pct * self.duration_ms)
         e = int(end_pct   * self.duration_ms)
-        self.trim_range_lbl.setText(f'{self._fmt(s)} → {self._fmt(e)}')
+        self.trim_range_lbl.setText(f'{self._fmt(s)} – {self._fmt(e)}')
         try:
             position = self.player.position()
         except Exception:
@@ -7827,6 +9569,7 @@ class ClipViewer(QDialog):
             target = next((start for start, _ in self._kept_segments_ms()), s)
             self.trim_slider.ensure_visible(target / self.duration_ms, align_start=True)
             self._on_seek_requested(target / self.duration_ms)
+        self._update_highlight_marker_availability()
         self._schedule_editor_draft_save()
 
     # Color effects / stretch
@@ -7869,22 +9612,32 @@ class ClipViewer(QDialog):
             self._src_h,
             crop_rect=self._crop_rect,
             initial_ratio=self._stretch_ratio,
+            initial_size=self._stretch_size,
             parent=self,
         )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._on_stretch_changed(dialog.stretch_ratio)
-            self._commit_editor_change(before)
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self._stretch_size = dialog.stretch_size
+                self._on_stretch_changed(dialog.stretch_ratio)
+                self._commit_editor_change(before)
+        finally:
+            dialog.deleteLater()
         if was_playing:
             self._toggle_play()
 
     def _on_stretch_changed(self, ratio: float):
         self._stretch_ratio = max(0.25, min(4.0, float(ratio)))
+        if self._stretch_size is None:
+            self.stretch_btn.setText('Stretch video')
+        else:
+            width, height = self._stretch_size
+            self.stretch_btn.setText(f'Stretch · {width} × {height}')
         self._refresh_live_preview(immediate=True)
 
     def _reset_stretch(self):
         before = self._capture_editor_state()
-        self._stretch_ratio = 1.0
-        self._refresh_live_preview(immediate=True)
+        self._stretch_size = None
+        self._on_stretch_changed(1.0)
         self._commit_editor_change(before)
 
     # Crop
@@ -7895,14 +9648,23 @@ class ClipViewer(QDialog):
             self.player.pause()
         before = self._capture_editor_state()
         dlg = CropDialog(self.clip_path, initial_crop=self._crop_rect, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._crop_rect = dlg.crop_rect
-            self._update_crop_ui()
-            self._commit_editor_change(before)
+        try:
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self._crop_rect = dlg.crop_rect
+                self._update_crop_ui()
+                self._commit_editor_change(before)
+        finally:
+            dlg.deleteLater()
         if was_playing:
             self._toggle_play()
 
     def _update_crop_ui(self):
+        if self._stretch_size is not None and self._metadata_loaded:
+            width, height = self._crop_rect[2:] if self._crop_rect else (self._src_w, self._src_h)
+            bounded = _bound_stretch_size(self._stretch_size, width, height)
+            if bounded is None:
+                self._stretch_ratio = 1.0
+            self._stretch_size = bounded
         if self._crop_rect:
             x, y, w, h = self._crop_rect
             self.crop_info_lbl.setText(f'{w} × {h}')
@@ -7967,6 +9729,151 @@ class ClipViewer(QDialog):
 
     # Export
 
+    def _bind_upload_coordinator(self):
+        coordinator = getattr(self, '_upload_coordinator', None)
+        bound = getattr(self, '_upload_status_coordinator', None)
+        if bound is not None:
+            try:
+                bound.status_changed.disconnect(self._on_upload_status)
+            except (AttributeError, RuntimeError):
+                # Qt may have removed the connection with the deleted page;
+                # continue with a fresh source-scoped binding below.
+                pass
+        self._upload_status_coordinator = None
+        if coordinator is None:
+            return
+        try:
+            coordinator.status_changed.connect(self._on_upload_status)
+            self._upload_status_coordinator = coordinator
+        except (AttributeError, RuntimeError):
+            self._upload_coordinator = None
+
+    def _on_upload_status(self, source: str, status: str):
+        if os.path.normcase(str(source)) != os.path.normcase(str(self.clip_path)):
+            return
+        if not getattr(self, '_upload_enabled', False) or not hasattr(self, 'upload_btn'):
+            return
+        if status == 'exporting':
+            self.upload_btn.setText('Exporting for upload…')
+            self.upload_btn.setEnabled(False)
+        elif status == 'queued':
+            self.upload_btn.setText('Queued')
+            self.upload_btn.setEnabled(False)
+            self._later(2500, lambda: (
+                self.upload_btn.setText('Upload'),
+                self.upload_btn.setEnabled(True),
+            ))
+        elif status == 'error':
+            self.upload_btn.setText('Upload')
+            self.upload_btn.setEnabled(True)
+
+    def _upload_is_neutral(self, segments: list[tuple[float, float]]) -> bool:
+        """Return true only for a known, unchanged source state."""
+        if (not self._audio_preparation_ready
+                or bool(getattr(self, '_audio_inspection_error', False))
+                or not bool(getattr(self, '_metadata_loaded', False))
+                or int(getattr(self, 'duration_ms', 0)) <= 0):
+            return False
+        if len(segments) != 1:
+            return False
+        start, end = segments[0]
+        if (abs(start * 1000.0) >= 0.5
+                or abs(end * 1000.0 - self.duration_ms) >= 0.5):
+            return False
+        if (self._crop_rect is not None or getattr(self, '_stretch_size', None) is not None
+                or abs(float(self._stretch_ratio) - 1.0) > 0.005):
+            return False
+        if abs(_normalise_speed(self._speed_rate) - 1.0) > 1e-6:
+            return False
+        if any(int(value) != 0 for value in self._effects.values()):
+            return False
+        if bool((self.sm or {}).get('watermark_enabled', False)):
+            return False
+        # The shipped default is 80%; it is a real export mix choice and must
+        # not be treated as a neutral source fast-path.
+        if int(getattr(self, '_master_volume', 100)) != 100:
+            return False
+        if any(int(value) != 100 for value in self._source_volumes.values()):
+            return False
+        if any(bool(value) for value in self._source_mutes.values()):
+            return False
+        if any(source.media_path or source.mix_role in {'base', 'delta', 'backup'}
+               for source in getattr(self, '_playback_sources', ())):
+            return False
+        sources = tuple(source for source in getattr(self, '_playback_sources', ()) if source.available)
+        if sources and getattr(self, '_limiter_enabled', False):
+            return False
+        if (len(sources) > 1 or any(source.codec == 'pcm_f32le'
+                or source.input_gain_percent != 100 or source.mono for source in sources)):
+            return False
+        return True
+
+    def _build_upload_request(self):
+        from core.editor_upload import EditorUploadRequest
+        from core.export_encoding import VIDEO_PLACEHOLDER, normalize_quality
+
+        if (not bool(getattr(self, '_metadata_loaded', False))
+                or int(getattr(self, 'duration_ms', 0)) <= 0):
+            raise RuntimeError(
+                'Clip metadata is still loading; upload becomes available when it is ready.')
+        segments = tuple((float(start), float(end))
+                         for start, end in self._kept_segments_seconds())
+        if not segments or sum(end - start for start, end in segments) < .1:
+            raise ValueError('The edit has no kept segments.')
+        source = str(self.clip_path)
+        quality = normalize_quality(self.export_quality_combo.currentData())
+        kept_duration = sum(end - start for start, end in segments)
+        neutral = self._upload_is_neutral(list(segments))
+        if neutral:
+            return EditorUploadRequest(
+                source=source, directory=Path(source).parent, quality=quality,
+                duration=kept_duration,
+                build_command=lambda output: [output], validate=lambda *_: None,
+                edited=False, audio_ready=True, segment_count=len(segments),
+                kept_duration_seconds=round(kept_duration, 3))
+        ffmpeg = get_ffmpeg_exe()
+        crop_rect = (tuple(self._crop_rect) if self._crop_rect is not None else None)
+        effects = tuple(sorted((str(key), int(value))
+                               for key, value in self._effects.items()))
+        stretch_ratio = float(self._stretch_ratio)
+        stretch_size = getattr(self, '_stretch_size', None)
+        speed_rate = _normalise_speed(self._speed_rate)
+        preserve_pitch = bool(self._preserve_pitch)
+        playback_sources = tuple(self._playback_sources)
+        audio_tracks = tuple(self._audio_tracks)
+        source_volumes = MappingProxyType(dict(self._source_volumes))
+        source_mutes = MappingProxyType(dict(self._source_mutes))
+        master_volume = int(self._master_volume)
+        watermark_enabled = bool((self.sm or {}).get('watermark_enabled', False))
+        frozen_settings = MappingProxyType({'watermark_enabled': watermark_enabled})
+        state = _UploadBuildState(
+            clip_path=source, sm=frozen_settings,
+            _watermark_enabled=watermark_enabled, _speed_rate=speed_rate,
+            _preserve_pitch=preserve_pitch, _audio_tracks=audio_tracks,
+            _playback_sources=playback_sources, _source_volumes=source_volumes,
+            _source_mutes=source_mutes, _master_volume=master_volume,
+            _limiter_enabled=getattr(self, '_limiter_enabled', True))
+        effects_dict = dict(effects)
+
+        def build_command(staged: str):
+            return ClipViewer._build_export_cmd(
+                state, ffmpeg, segments[0][0], segments[-1][1] - segments[0][0],
+                staged, crop_rect, VIDEO_PLACEHOLDER,
+                segments=list(segments), effects=effects_dict,
+                stretch_ratio=stretch_ratio, stretch_size=stretch_size, audio_bitrate='320k')
+
+        directory = clips_directory_from(self.sm) / 'Exported'
+        return EditorUploadRequest(
+            source=source, directory=directory, quality=quality,
+            duration=_speed_adjusted_duration(kept_duration, speed_rate),
+            build_command=build_command,
+            validate=lambda path, cancel_event: _validate_export_output(
+                path, ffmpeg, cancel_event),
+            edited=True,
+            audio_ready=bool(self._audio_preparation_ready
+                             and not self._audio_inspection_error),
+            segment_count=len(segments), kept_duration_seconds=round(kept_duration, 3))
+
     def _on_upload_click(self):
         # Don't show 'Queued' when the manager will silently drop the
         # request — the user would believe the clip was uploaded.
@@ -7979,13 +9886,29 @@ class ClipViewer(QDialog):
             )
             self._later(2500, lambda: self.upload_btn.setText('Upload'))
             return
-        self.upload_requested.emit(self.clip_path)
-        self.upload_btn.setText('Queued')
-        self.upload_btn.setEnabled(False)
-        self._later(2500, lambda: (
-            self.upload_btn.setText('Upload'),
-            self.upload_btn.setEnabled(True),
-        ))
+        segments = self._kept_segments_seconds()
+        coordinator = getattr(self, '_upload_coordinator', None)
+        if coordinator is None:
+            if self._upload_is_neutral(segments):
+                self.upload_requested.emit(self.clip_path)
+                self.upload_btn.setText('Queued')
+                self.upload_btn.setEnabled(False)
+                self._later(2500, lambda: (
+                    self.upload_btn.setText('Upload'),
+                    self.upload_btn.setEnabled(True),
+                ))
+                return
+            self.export_error.emit(
+                'UPLOAD EXPORT UNAVAILABLE',
+                'Edited clips require the application upload coordinator.',
+                'warning')
+            return
+        try:
+            request = self._build_upload_request()
+            coordinator.submit(request)
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            self._on_upload_status(self.clip_path, 'error')
+            self.export_error.emit('UPLOAD EXPORT UNAVAILABLE', str(error), 'warning')
 
     def _update_export_jobs_status(self):
         from core.export_queue import tasks
@@ -8028,7 +9951,8 @@ class ClipViewer(QDialog):
                     ffmpeg, segments[0][0], segments[-1][1] - segments[0][0],
                     staged, self._crop_rect, VIDEO_PLACEHOLDER,
                     segments=segments, effects=dict(self._effects),
-                    stretch_ratio=self._stretch_ratio, audio_bitrate='320k'),
+                    stretch_ratio=self._stretch_ratio, stretch_size=self._stretch_size,
+                    audio_bitrate='320k'),
                 _speed_adjusted_duration(kept_duration, self._speed_rate),
                 lambda path, cancel_event: _validate_export_output(path, ffmpeg, cancel_event),
                 kind='editor', segment_count=len(segments),
@@ -8049,13 +9973,23 @@ class ClipViewer(QDialog):
                           audio_bitrate: str = '192k',
                           extra_video_filters: list[str] | None = None,
                           force_video_encode: bool = False,
-                          force_audio_encode: bool = False) -> list:
+                          force_audio_encode: bool = False,
+                          stretch_size: tuple[int, int] | None = None) -> list:
         """Build the editor export command.
 
         Use video_args when edits require re-encoding; stream-copy compatible
         video when no visual transform is needed.
         """
         clip_path = getattr(self, 'clip_path', getattr(self, '_clip_path', ''))
+        for source in getattr(self, '_playback_sources', ()):
+            if source.media_path and (not source.available or not os.path.isfile(source.media_path)):
+                raise ValueError(f'Imported audio is unavailable: {source.display_name}. '
+                                 'Remove the track or restore its file before exporting.')
+        known_sources = getattr(self, '_playback_sources', ())
+        if (known_sources and not any(source.available for source in known_sources)
+                and any(not getattr(self, '_source_mutes', {}).get(source.source_id, False)
+                        for source in known_sources)):
+            raise ValueError('The audio sources are unavailable; reopen the clip before exporting.')
         selected_segments = list(segments or [(start_s, start_s + duration_s)])
         selected_segments = [
             (max(0.0, float(start)), max(0.0, float(end)))
@@ -8068,7 +10002,7 @@ class ClipViewer(QDialog):
         speed_audio = _speed_audio_chain(
             speed_rate, bool(getattr(self, '_preserve_pitch', True)))
         video_filters = _video_filter_chain(
-            crop_rect, effects, stretch_ratio, speed_rate=speed_rate)
+            crop_rect, effects, stretch_ratio, speed_rate=speed_rate, stretch_size=stretch_size)
         video_filters.extend(extra_video_filters or [])
         settings = getattr(self, 'sm', None)
         if settings is not None:
@@ -8083,6 +10017,7 @@ class ClipViewer(QDialog):
         # the efficient stream-copy path used by the editor before this feature.
         if len(selected_segments) > 1:
             base = [ffmpeg, '-y', '-i', clip_path]
+            base += audio_input_arguments(getattr(self, '_playback_sources', ()))
             filters: list[str] = []
             video_labels: list[str] = []
             for index, (segment_start, segment_end) in enumerate(selected_segments):
@@ -8100,14 +10035,16 @@ class ClipViewer(QDialog):
                     gain_percent=getattr(self, '_source_volumes', {}).get(
                         source.source_id, 100),
                     muted=getattr(self, '_source_mutes', {}).get(
-                        source.source_id, False))
+                        source.source_id, source.default_muted))
                 for source in getattr(self, '_playback_sources', ())
             }
-            has_audio = bool(getattr(self, '_playback_sources', ()))
+            has_audio = any(source.available and source.audio_index is not None
+                            for source in getattr(self, '_playback_sources', ()))
             if use_audio_filter:
                 mix_filters, audio_source = ffmpeg_mix_filter(
                     getattr(self, '_playback_sources', ()), states,
-                    getattr(self, '_master_volume', 100), output_label='amixed')
+                    getattr(self, '_master_volume', 100), output_label='amixed',
+                    limiter_enabled=getattr(self, '_limiter_enabled', True))
                 filters.extend(mix_filters)
                 has_audio = audio_source is not None
                 if has_audio:
@@ -8160,13 +10097,15 @@ class ClipViewer(QDialog):
             cmd += video_args
             if has_audio and audio_labels:
                 cmd += ['-c:a', 'aac', '-b:a', audio_bitrate, '-shortest']
+                cmd += mixed_output_metadata()
             cmd.append(out_path)
             return cmd
 
         segment_start, segment_end = selected_segments[0]
-        base = [ffmpeg, '-y', '-ss', str(segment_start), '-i', clip_path,
-                '-t', str(_speed_adjusted_duration(
-                    segment_end - segment_start, speed_rate))]
+        base = [ffmpeg, '-y', '-ss', str(segment_start), '-i', clip_path]
+        base += audio_input_arguments(getattr(self, '_playback_sources', ()), segment_start)
+        base += ['-t', str(_speed_adjusted_duration(
+            segment_end - segment_start, speed_rate))]
 
         if not use_video_filter and not use_audio_filter:
             if not force_video_encode and not force_audio_encode:
@@ -8192,11 +10131,12 @@ class ClipViewer(QDialog):
             states = {
                 source.source_id: SourceMixState(
                     gain_percent=self._source_volumes.get(source.source_id, 100),
-                    muted=self._source_mutes.get(source.source_id, False))
+                    muted=self._source_mutes.get(source.source_id, source.default_muted))
                 for source in self._playback_sources
             }
             audio_filters, audio_output = ffmpeg_mix_filter(
-                self._playback_sources, states, self._master_volume)
+                self._playback_sources, states, self._master_volume,
+                limiter_enabled=getattr(self, '_limiter_enabled', True))
             filters.extend(audio_filters)
             if audio_output and speed_audio:
                 filters.append(f'{audio_output}{speed_audio}[aspeed]')
@@ -8215,6 +10155,8 @@ class ClipViewer(QDialog):
             if speed_audio and not use_audio_filter:
                 cmd += ['-af', speed_audio]
             cmd += ['-c:a', 'aac', '-b:a', audio_bitrate]
+            if use_audio_filter:
+                cmd += mixed_output_metadata()
         else:
             cmd += ['-c:a', 'copy']
 
@@ -8280,6 +10222,7 @@ class ClipViewer(QDialog):
             segments=segments,
             effects=effects,
             stretch_ratio=stretch_ratio,
+            stretch_size=getattr(self, '_stretch_size', None),
             audio_bitrate='320k',
         )
 
@@ -8377,6 +10320,7 @@ class ClipViewer(QDialog):
 
     def _show_share_overlay(self):
         dlg = ShareModeDialog(self.sm, parent=self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.mode_selected.connect(self._open_share_window)
         dlg.preset_selected.connect(self._open_share_preset)
         dlg.show()
@@ -8430,9 +10374,11 @@ class ClipViewer(QDialog):
             segments=segments,
             effects=dict(self._effects),
             stretch_ratio=self._stretch_ratio,
+            stretch_size=self._stretch_size,
             speed_rate=self._speed_rate,
             preserve_pitch=self._preserve_pitch,
             export_preset=export_preset,
+            limiter_enabled=self._limiter_enabled,
             parent=None,
         )
         sw.export_error.connect(self.export_error)
@@ -8448,104 +10394,145 @@ class ClipViewer(QDialog):
 
     # Delete
 
+    def refresh_library_flags(self):
+        reader = getattr(self._mm, 'get_library_flags', None)
+        self._library_flags = None
+        try:
+            if callable(reader):
+                self._library_flags = reader(self.clip_path)
+        except (OSError, ValueError, TypeError):
+            pass  # Other editor features remain usable; deletion stays fail-closed.
+        flags = self._library_flags
+        self.favorite_btn.setEnabled(flags is not None)
+        self.favorite_btn.setChecked(bool(flags and flags['favorite']))
+        self.favorite_btn.setText('Remove favorite' if flags and flags['favorite'] else 'Add favorite')
+        self.favorite_btn.setAccessibleName(self.favorite_btn.text())
+        self.favorite_btn.setToolTip('Remove favorite to allow deletion.' if flags and flags['favorite']
+                                     else 'Favorites are kept out of Trash and automatic cleanup.')
+        self.delete_btn.setEnabled(flags is not None and not flags['protected'] and not self._linked_import)
+        self.delete_btn.setToolTip('Remove favorite before moving this clip to Trash.' if flags and flags['favorite']
+                                   else 'Linked originals are kept.' if self._linked_import else
+                                   'Move to recoverable Trash' if flags is not None else 'Protection unavailable; deletion blocked')
+
+    def _toggle_library_flag(self, flag):
+        path, generation = self.clip_path, self._library_generation
+        if self._closing:
+            return
+        try:
+            reader = getattr(self._mm, 'get_library_flags', None)
+            setter = getattr(self._mm, 'set_library_flags', None)
+            if not callable(reader) or not callable(setter):
+                raise OSError('Library protection is unavailable')
+            flags = reader(path)
+            value = not flags[flag]
+            if self.clip_path != path or self._library_generation is not generation or self._closing:
+                return
+            setter(path, **{flag: value})
+            self.refresh_library_flags()
+            self.library_flags_changed.emit(path)
+        except (OSError, ValueError, TypeError) as error:
+            self.refresh_library_flags()
+            FthrMessageDialog.warning(self, 'Library flags unchanged', str(error))
+
+    def _capture_delete_session(self):
+        state = self.capture_session_state()
+        if not isinstance(state, dict):
+            raise OSError('The editor session could not be preserved; deletion was cancelled')
+        self._delete_session_snapshot = state
+        if self._flush_editor_draft() is False or (
+                self._draft_dirty and not self._discard_editor_draft):
+            raise OSError('The current editor draft could not be saved; deletion was cancelled')
+        if self._flush_clip_details() is False:
+            raise OSError('The clip details could not be saved; deletion was cancelled')
+        if self._tag_edit.isModified() or self._desc_edit.isModified():
+            raise OSError('The clip details could not be saved; deletion was cancelled')
+        return state
+
+    def _restore_delete_session(self, path, identity, state, *, trash_restore_token=None, trash_handler=None):
+        if self.clip_path != path:
+            raise OSError('The editor now displays another clip; its session was not replaced')
+        if media_file_identity(path) != identity:
+            raise OSError('The source changed; its replacement was not opened')
+        # Guard refusal may come from another manager's freshly committed
+        # protection change. Reload that authoritative state before rebinding UI.
+        self._mm.reload()
+        if media_file_identity(path) != identity:
+            raise OSError('The source changed; its replacement was not opened')
+        options = dict(settings_manager=self.sm, metadata_manager=self._mm,
+                       upload_enabled=self._upload_enabled, linked_import=self._linked_import,
+                       upload_coordinator=self._upload_coordinator, autoplay=False,
+                       trash_handler=trash_handler if trash_handler is not None else getattr(self, '_trash_handler', None))
+        if trash_restore_token is not None:
+            options['_trash_restore_token'] = trash_restore_token
+        self.load_clip(path, **options)
+        self.restore_session_state(state)
+        self._delete_session_snapshot = None
+
     def _delete_clip(self):
-        from core.export_queue import tasks
-        source = os.path.normcase(os.path.abspath(self.clip_path))
-        busy = any(not task.done and os.path.normcase(os.path.abspath(task.source)) == source
-                   for task in tasks())
-        busy = busy or any(share._export_thread is not None and share._export_thread.is_alive()
-                           and os.path.normcase(os.path.abspath(share.clip_path)) == source
-                           for share in _share_windows)
-        if busy:
-            FthrMessageDialog.information(self, 'Export in progress',
-                'Finish or cancel this clip’s exports before deleting the source.')
+        if getattr(self, '_trash_pending_token', None) is not None:
             return
-        imported_roots = (
-            self.sm.get('imported_clip_folders', []) if self.sm else [])
-        ownership = classify_media_path(
-            self.clip_path, clips_directory_from(self.sm), imported_roots)
-        if self._linked_import or ownership is not MediaOwnership.FTHR_OWNED:
-            FthrMessageDialog.information(
-                self,
-                'Linked Original Protected',
-                'This clip is linked from another folder. FTHR will not '
-                'delete the original with the generic Delete action.',
-            )
+        path, generation = self.clip_path, self._library_generation
+        if self._linked_import:
+            FthrMessageDialog.information(self, 'Original retained',
+                                         'Linked and imported originals cannot be moved to this library Trash.',
+                                         plain_text=True)
             return
-        reply = FthrMessageDialog.question(
-            self, 'Delete Clip',
-            f'Delete {os.path.basename(self.clip_path)}?\nThis cannot be undone.',
-        )
-        if not reply:
-            return
-        from core.ffmpeg_playback import finish_audio_cleanup
-        if not finish_audio_cleanup(self.clip_path):
-            FthrMessageDialog.information(
-                self, 'Clip is closing', 'Wait for the previous editor to finish closing, then retry.')
-            return
-
-        # Release the MediaFoundation handle before deleting.
-        # On Windows, player.stop() alone doesn't free the file handle —
-        # setSource(QUrl()) is required to detach the media pipeline entirely.
-        # Without this, os.remove() fails with WinError 32 immediately.
-        self._teardown_player()
-        if not finish_audio_cleanup(self.clip_path):
-            FthrMessageDialog.information(
-                self, 'Clip is closing', 'Wait for the editor to finish closing, then retry.')
+        handler = getattr(self, '_trash_handler', None)
+        if not callable(handler):
+            FthrMessageDialog.warning(self, 'Trash unavailable',
+                                     'The library Trash service is unavailable. This file was kept.', plain_text=True)
             return
         try:
-            from PySide6.QtCore import QUrl as _QUrl
-            self.player.setSource(_QUrl())
-        except Exception:
-            pass
+            identity = media_file_identity(path)
+            guard = getattr(self._mm, 'delete_guard', None)
+            if not callable(guard):
+                raise OSError('Library protection is unavailable; the file was kept')
+            with guard(path, expected_identity=identity):
+                pass  # Do not tear down the editor before fresh protection passes.
+        except (OSError, ValueError, TypeError) as error:
+            FthrMessageDialog.warning(self, 'Move to Trash blocked', str(error), plain_text=True)
+            return
+        if not FthrMessageDialog.question(self, 'Move to Trash',
+                                         f'Move {Path(path).name} to Trash? You can restore it later.',
+                                         plain_text=True):
+            return
+        if self.clip_path != path or self._library_generation is not generation:
+            return
+        token = object()
+        self._trash_pending_token = token
+        self._trash_completion_token = token
+        self.setEnabled(False)
+        finished = False
 
-        # Compute cache paths before deleting (needs mtime while file still exists)
-        cache_path = None
-        dur_path = None
+        def completed(result):
+            nonlocal finished
+            if finished:
+                return
+            finished = True
+            from shiboken6 import isValid
+            if (not isValid(self) or self.clip_path != path
+                    or getattr(self, '_trash_completion_token', None) is not token):
+                return
+            if not result.succeeded:
+                FthrMessageDialog.warning(self, 'Move to Trash incomplete',
+                                         result.error or 'The original was retained for recovery.', plain_text=True)
         try:
-            from ui.clip_grid import _get_cached_thumb_path, _get_cached_duration_path
-            cache_path = _get_cached_thumb_path(self.clip_path)
-            dur_path = _get_cached_duration_path(cache_path)
-        except Exception:
-            pass
-
-        import time as _time
-        for attempt in range(3):
-            try:
-                os.remove(self.clip_path)
-                for p in (cache_path, dur_path):
-                    if p:
-                        try:
-                            os.remove(p)
-                        except OSError:
-                            pass
-                self._discard_editor_draft = True
-                self._draft_save_timer.stop()
-                clear_draft = getattr(self._mm, 'clear_editor_draft', None)
-                if callable(clear_draft):
-                    try:
-                        clear_draft(self.clip_path)
-                    except (OSError, TypeError, ValueError) as error:
-                        print(f'[ClipViewer] editor draft cleanup failed: {error}')
-                self.accept()
-                return
-            except OSError as e:
-                if getattr(e, 'winerror', 0) == 32:
-                    if attempt < 2:
-                        _time.sleep(0.2)
-                        continue
-                    FthrMessageDialog.warning(
-                        self, 'Delete Failed',
-                        f'"{os.path.basename(self.clip_path)}" is still in use.\n\n'
-                        'Wait for any active clip save or upload to finish, then try again.',
-                    )
-                    return
-                FthrMessageDialog.warning(self, 'Delete Failed', str(e))
-                return
+            handler(path, identity, completed, editor_page=self)
+        except Exception as error:
+            # A synchronous rejection may have completed before its handler raised.
+            if not finished and self._trash_pending_token is token and not self._closing:
+                self._trash_pending_token = None
+                self.setEnabled(True)
+            from core.clip_metadata_types import MutationResult, FileOperationState
+            completed(MutationResult('', FileOperationState.ROLLED_BACK, path, path, str(error)))
 
     # Close / cleanup
 
     def _close(self):
+        if getattr(self, '_trash_pending_token', None) is not None:
+            return
+        if not self._prepare_detail_boundary():
+            return
         worker = getattr(self, '_export_thread', None)
         if worker is not None and worker.is_alive():
             self._closing = True
@@ -8571,23 +10558,47 @@ class ClipViewer(QDialog):
         self._teardown_player(wait_for_workers=False)
         self.reject()
 
+    def _prepare_detail_boundary(self):
+        try:
+            if self._flush_clip_details() is False:
+                return False
+        except (OSError, TypeError, ValueError) as error:
+            self._warn_clip_details_error(error)
+            return False
+        return True
+
     def _retry_close_after_export(self):
         self._close_wait_pending = False
         self._close()
 
     def reject(self):
         """Ensure every dialog rejection releases multimedia resources."""
+        if getattr(self, '_trash_pending_token', None) is not None:
+            return
+        if not self._prepare_detail_boundary():
+            return False
 
         self._teardown_player()
         super().reject()
+        return True
 
     def accept(self):
         """Ensure accept/delete paths use the same idempotent teardown."""
+        if getattr(self, '_trash_pending_token', None) is not None:
+            return
+        if not self._prepare_detail_boundary():
+            return False
 
         self._teardown_player()
         super().accept()
+        return True
 
     def closeEvent(self, event):
+        event.ignore()
+        if getattr(self, '_trash_pending_token', None) is not None:
+            return
+        if not self._prepare_detail_boundary():
+            return
         self._draft_save_timer.stop()
         self._flush_editor_draft()
         self._teardown_player()
@@ -8596,7 +10607,9 @@ class ClipViewer(QDialog):
     def _teardown_player(self, *, wait_for_workers=True):
         if self._teardown_complete:
             return
-        self._flush_clip_details()
+        if not getattr(self, '_skip_detail_flush_on_teardown', False):
+            if self._flush_clip_details() is False:
+                raise OSError('The clip details could not be saved')
         flush_draft = getattr(self, "_flush_editor_draft", None)
         if callable(flush_draft):
             flush_draft()
@@ -8609,6 +10622,9 @@ class ClipViewer(QDialog):
         self._set_player_state(PlayerLifecycleState.CLOSING)
         self._closing = True
         self._prepare_cancel.set()
+        if hasattr(self, '_scrub_preview_timer'):
+            self._cancel_scrub_preview()
+        ClipViewer._cancel_compatibility_prepare(self)
         ClipViewer._cancel_playback_proxy(self)
         for receiver in getattr(self, '_clip_receivers', ()):
             receiver.deleteLater()
@@ -8635,10 +10651,12 @@ class ClipViewer(QDialog):
         try:
             self._timeline_prepare_timer.stop()
         except Exception:
+            # A partially constructed viewer may close before timeline preparation is scheduled.
             pass
         try:
             self._audio_prepare_deadline.stop()
         except Exception:
+            # The audio preparation timer may already have been destroyed with its Qt parent.
             pass
         try:
             self._playback_stall_timer.stop()
@@ -8649,6 +10667,7 @@ class ClipViewer(QDialog):
         try:
             self.trim_slider.cancel_thumbnail_loading()
         except Exception:
+            # The trim slider may already be gone. Continue releasing the player and mixer.
             pass
         # Stop timers first so no late tick can re-issue a seek into a player
         # we are about to release. Each call is wrapped because Qt can raise
@@ -8656,6 +10675,7 @@ class ClipViewer(QDialog):
         try:
             self._seek_timer.stop()
         except Exception:
+            # An already deleted seek timer cannot issue more seeks.
             pass
         try:
             self._mix_refresh_timer.stop()
@@ -8666,10 +10686,12 @@ class ClipViewer(QDialog):
         try:
             self._preview_update_timer.stop()
         except Exception:
+            # A deleted preview timer has no pending preview tick to stop.
             pass
         try:
             self._draft_save_timer.stop()
         except Exception:
+            # A deleted draft timer cannot deliver a deferred save callback.
             pass
         self._preview_update_pending = False
         self._pending_seek_ms = None
@@ -8685,10 +10707,12 @@ class ClipViewer(QDialog):
         try:
             self._ph_timer.stop()
         except Exception:
+            # A deleted playhead timer has no position updates left to cancel.
             pass
         try:
             self.player.stop()
         except Exception:
+            # The player may already have been released during close. Detach surviving resources below.
             pass
         if self._audio_mixer is not None:
             mixer = self._audio_mixer
@@ -8708,18 +10732,22 @@ class ClipViewer(QDialog):
         try:
             self.player.setVideoOutput(None)
         except (RuntimeError, TypeError):
+            # A player already deleted by Qt has no video output left to detach.
             pass
         try:
             self.player.setAudioOutput(None)
         except (RuntimeError, TypeError):
+            # A player already deleted by Qt has no audio output left to detach.
             pass
         try:
             self.player.setSource(QUrl())
         except (RuntimeError, TypeError):
+            # Clearing the media URL is best effort once Qt has started deleting the player.
             pass
         try:
             self.video_widget.shutdown()
         except (RuntimeError, TypeError):
+            # Qt may have already destroyed the software surface with its parent.
             pass
         try:
             native_sink = self._native_video_widget.videoSink()
@@ -8739,6 +10767,7 @@ class ClipViewer(QDialog):
         try:
             self.audio_output.setMuted(True)
         except (RuntimeError, TypeError):
+            # A deleted audio output can no longer play sound after close.
             pass
         if self._diagnostic_player_counted:
             self._diagnostic_player_counted = False
@@ -8771,8 +10800,6 @@ class ClipViewer(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if self._fade_in_anim is not None:
-            self._fade_in_anim.start()
         if not self._embedded and not self._native_style_applied:
             self._native_style_applied = True
             self._later(0, self._apply_native_style)
@@ -8799,6 +10826,7 @@ class ClipViewer(QDialog):
                         if hit is not None:
                             return True, hit
             except Exception:
+                # If native hit testing fails, leave the event unhandled for Qt.
                 pass
         return False, 0
 
@@ -8893,6 +10921,7 @@ class ClipViewer(QDialog):
         self.play_btn.setChecked(False)
         self._set_playback_button_visual(False)
         self.time_label.setText(f'{self._fmt(position)} / {self._fmt(self.duration_ms)}')
+        self._refresh_highlight_markers()
 
 
     def _set_selected_segment_deleted(self, deleted):

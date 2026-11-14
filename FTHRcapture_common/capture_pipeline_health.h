@@ -114,6 +114,38 @@ struct Snapshot {
     bool has_pending_work = false;
 };
 
+enum class OutputCadence { NotObserved, OnTarget, Degraded };
+
+inline const char* OutputCadenceName(OutputCadence value) noexcept {
+    switch (value) {
+    case OutputCadence::NotObserved: return "NOT_OBSERVED";
+    case OutputCadence::OnTarget: return "ON_TARGET";
+    case OutputCadence::Degraded: return "DEGRADED_OUTPUT_CADENCE";
+    }
+    return "UNKNOWN";
+}
+
+inline OutputCadence ClassifyOutputCadence(
+    const Snapshot& snapshot, uint64_t output_frames,
+    bool warmed_up, bool interval_interrupted) noexcept {
+    const double expected_frames = snapshot.expected_fps
+        * (static_cast<double>(snapshot.observation_interval_ms) / 1000.0);
+    if (!warmed_up || interval_interrupted || snapshot.backend_failed
+        || snapshot.intentional_pause_or_recovery || snapshot.interval_generation_resets
+        || snapshot.interval_recovery_attempts || snapshot.observation_interval_ms < 5000
+        || !std::isfinite(expected_frames) || expected_frames <= 0.0
+        || snapshot.source_age_ms > kEncoderOutputStallThresholdMs
+        || snapshot.encoder_submission_age_ms > kEncoderOutputStallThresholdMs
+        || snapshot.encoded_output_age_ms > kEncoderOutputStallThresholdMs
+        || !output_frames
+        // Sparse/unchanged sources cannot establish a sustained pacing loss.
+        || static_cast<double>(snapshot.accepted_source_frame_delta) < expected_frames * 0.10) {
+        return OutputCadence::NotObserved;
+    }
+    return static_cast<double>(output_frames) < expected_frames * 0.90
+        ? OutputCadence::Degraded : OutputCadence::OnTarget;
+}
+
 inline uint64_t SaturatingDifference(
     uint64_t minuend, uint64_t subtrahend) noexcept {
     return minuend > subtrahend ? minuend - subtrahend : 0;

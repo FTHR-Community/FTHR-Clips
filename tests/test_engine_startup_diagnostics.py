@@ -97,3 +97,13 @@ def test_non_win32_launch_error_is_not_mislabeled_as_winerror():
     assert diagnostic['native_failure']['error_domain'] == 'os_error'
     assert diagnostic['native_failure']['win32_error_decimal'] is None
     assert diagnostic['native_failure']['symbolic_error'] is None
+
+
+def test_low_resource_warning_explains_attempt_without_reporting_failure():
+    from core.engine_startup_diagnostics import extract_startup_warnings
+    warnings = extract_startup_warnings(
+        'FTHR_STARTUP_WARNING: LOW_REPLAY_RAM: Replay RAM estimate: 806 MiB; '
+        'available budget: 128 MiB. Trying anyway; capture or saving may fail.\n')
+    assert len(warnings) == 1
+    assert warnings[0].code == 'LOW_REPLAY_RAM'
+    assert 'Trying anyway' in warnings[0].detail

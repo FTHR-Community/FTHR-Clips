@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 
 #include "windows_audio_session_registry.h"
+#include "audio_process_tree.h"
 
 #include <algorithm>
 #include <cctype>
@@ -112,21 +113,20 @@ std::wstring ExecutableDescription(const std::wstring& path) {
     return {};
 }
 
-ExecutableMetadata ExecutableMetadataForProcess(uint32_t process_id) {
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+std::wstring ProcessImagePath(HANDLE process) {
     if (!process) return {};
     std::wstring path(32768, L'\0');
     DWORD length = static_cast<DWORD>(path.size());
     const bool ok = QueryFullProcessImageNameW(process, 0, path.data(), &length) != FALSE;
-    CloseHandle(process);
     if (!ok || length == 0) return {};
     path.resize(length);
-    return {std::filesystem::path(path).filename().wstring(),
-            ExecutableDescription(path)};
+    return path;
 }
 
-std::wstring ExecutableBasename(uint32_t process_id) {
-    return ExecutableMetadataForProcess(process_id).basename;
+ExecutableMetadata ExecutableMetadataForProcess(HANDLE process) {
+    const auto path = ProcessImagePath(process);
+    return {std::filesystem::path(path).filename().wstring(),
+            ExecutableDescription(path)};
 }
 
 std::wstring SessionInstanceKey(IAudioSessionControl2* control) {
@@ -138,44 +138,100 @@ std::wstring SessionInstanceKey(IAudioSessionControl2* control) {
     return result;
 }
 
-uint32_t ParentProcessId(uint32_t process_id) {
-    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) return 0;
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    uint32_t parent = 0;
-    if (Process32FirstW(snapshot, &entry)) {
-        do {
-            if (entry.th32ProcessID == process_id) {
-                parent = entry.th32ParentProcessID;
-                break;
-            }
-        } while (Process32NextW(snapshot, &entry));
+uint64_t FileTimeValue(FILETIME time) noexcept {
+    return (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+}
+
+struct ProcessTreeSnapshot {
+    struct ProcessStamp {
+        HANDLE handle = nullptr;
+        uint64_t created = 0;
+
+        ~ProcessStamp() { if (handle) CloseHandle(handle); }
+        ProcessStamp() = default;
+        ProcessStamp(const ProcessStamp&) = delete;
+        ProcessStamp& operator=(const ProcessStamp&) = delete;
+    };
+
+    std::map<uint32_t, PROCESSENTRY32W> entries;
+    // Keep handles to validated processes for the lifetime of this refresh.
+    std::map<uint32_t, ProcessStamp> processes;
+    uint64_t started_at = 0;
+
+    ProcessTreeSnapshot() {
+        FILETIME time{};
+        GetSystemTimePreciseAsFileTime(&time);
+        started_at = FileTimeValue(time);
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return;
+        PROCESSENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                entries.emplace(entry.th32ProcessID, entry);
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
     }
-    CloseHandle(snapshot);
-    return parent;
+
+    const ProcessStamp& Inspect(uint32_t pid) {
+        auto [entry, inserted] = processes.try_emplace(pid);
+        auto& stamp = entry->second;
+        if (!inserted) return stamp;
+        stamp.handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!stamp.handle) return stamp;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (GetProcessTimes(stamp.handle, &created, &exited, &kernel, &user))
+            stamp.created = FileTimeValue(created);
+        return stamp;
+    }
+
+    uint32_t Parent(uint32_t child) {
+        const auto entry = entries.find(child);
+        if (entry == entries.end()) return 0;
+        const uint32_t parent = entry->second.th32ParentProcessID;
+        if (!parent || parent == child || !entries.count(parent)) return 0;
+        return IsVerifiedWindowsAudioParent(
+            Inspect(child).created, Inspect(parent).created, started_at) ? parent : 0;
+    }
+};
+
+uint32_t AnnouncedAudioUiPid() {
+    wchar_t value[16]{};
+    const DWORD length = GetEnvironmentVariableW(
+        L"FTHR_AUDIO_UI_PID", value, ARRAYSIZE(value));
+    if (!length || length >= ARRAYSIZE(value)) return 0;
+    uint64_t pid = 0;
+    for (DWORD i = 0; i < length; ++i) {
+        if (value[i] < L'0' || value[i] > L'9') return 0;
+        pid = pid * 10 + static_cast<unsigned>(value[i] - L'0');
+        if (pid > UINT32_MAX) return 0;
+    }
+    return static_cast<uint32_t>(pid);
 }
 
-bool IsFthrProcess(uint32_t process_id) {
-    const uint32_t current = GetCurrentProcessId();
-    // The native engine owns no render audio of its own. Its direct parent is
-    // the Qt desktop process, whose notification sounds and editor preview
-    // must never be fed back into newly captured application stems.
-    static const uint32_t parent = ParentProcessId(current);
-    return process_id == current || (parent != 0 && process_id == parent);
+bool IsInFthrAudioTree(uint32_t pid, uint32_t root, ProcessTreeSnapshot& processes) {
+    if (!root) return false;
+    for (uint32_t depth = 0; pid && depth < 64; ++depth) {
+        if (pid == root) return true;
+        pid = processes.Parent(pid);
+    }
+    return false;
 }
 
-uint32_t ProcessGroupRoot(uint32_t process_id, const std::wstring& executable_basename) {
+uint32_t ProcessGroupRoot(uint32_t process_id, const std::wstring& executable_basename,
+                          uint32_t ui_pid, ProcessTreeSnapshot& processes) {
     const std::wstring wanted = ToLower(executable_basename);
     uint32_t root = process_id;
     uint32_t cursor = process_id;
     // Only merge a child into an ancestor when the executable identity agrees.
     // That makes launcher/game boundaries conservative rather than guessing.
     for (uint32_t depth = 0; depth < 32; ++depth) {
-        const uint32_t parent = ParentProcessId(cursor);
-        if (parent == 0 || parent == cursor) break;
-        const std::wstring parent_name = ExecutableBasename(parent);
-        if (parent_name.empty() || ToLower(parent_name) != wanted) break;
+        const uint32_t parent = processes.Parent(cursor);
+        if (parent == 0 || ToLower(processes.entries.at(parent).szExeFile) != wanted) break;
+        // A same-name launcher can own both the UI tree and an independent
+        // renderer. Keep that renderer disjoint from the broad excluded mix.
+        if (IsInFthrAudioTree(ui_pid, parent, processes)) break;
         root = parent;
         cursor = parent;
     }
@@ -217,6 +273,29 @@ bool IsWindowsProcessLoopbackBuildSupported(uint32_t os_build) {
     return os_build >= kProcessLoopbackMinimumBuild;
 }
 
+bool IsVerifiedWindowsAudioParent(uint64_t child_created, uint64_t parent_created,
+                                  uint64_t snapshot_started) noexcept {
+    // A replacement PID born after its child cannot be the original parent.
+    // Reject processes created during or after enumeration as well so a
+    // recycled child cannot inherit an older snapshot entry.
+    return parent_created > 0 && parent_created < child_created
+        && child_created < snapshot_started;
+}
+
+bool IsFthrAudioUiParent(uint32_t verified_parent, uint32_t announced_ui,
+                         const std::wstring& parent_image,
+                         const std::wstring& engine_image) {
+    if (!verified_parent) return false;
+    // Source-mode Python has no unique image name. The UI identifies itself
+    // in the launch environment, and only its verified direct child trusts it.
+    if (verified_parent == announced_ui) return true;
+    const std::filesystem::path ui_path(parent_image);
+    if (ToLower(ui_path.filename().wstring()) != L"fthrclips.exe") return false;
+    const auto packaged_engine = ui_path.parent_path()
+        / L"_internal" / L"engine" / ui_path.filename();
+    return ToLower(packaged_engine.wstring()) == ToLower(engine_image);
+}
+
 std::string NormalizeWindowsExecutableIdentity(const std::wstring& executable_basename) {
     std::wstring identity = ToLower(executable_basename);
     const std::wstring suffix = L".exe";
@@ -236,6 +315,7 @@ std::string ResolveWindowsAudioSourceName(
     const std::wstring& executable_description) {
     const std::string identity = NormalizeWindowsExecutableIdentity(executable_basename);
     if (identity == "valorant-win64-shipping") return "VALORANT";
+    if (identity == "overwatch") return "Overwatch";
     if (identity == "fpsaimtrainer" || identity == "fpsaimtrainer-win64-shipping")
         return "KovaaK's";
     if (identity == "discord") return "Discord";
@@ -276,6 +356,53 @@ std::string BuildWindowsRuntimeGroupKey(uint32_t root_process_id,
     const std::string identity = NormalizeWindowsExecutableIdentity(executable_basename);
     if (identity.empty() || root_process_id == 0) return {};
     return identity + "#" + std::to_string(root_process_id);
+}
+
+void GroupWindowsAudioSessionTrees(
+    std::map<std::string, WindowsAudioSessionDescriptor>& groups,
+    const std::function<uint32_t(uint32_t)>& parent_process) {
+    std::vector<uint32_t> roots;
+    std::map<uint32_t, std::string> key_by_root;
+    for (const auto& [key, descriptor] : groups) {
+        roots.push_back(descriptor.process_id);
+        key_by_root[descriptor.process_id] = key;
+    }
+    auto owners = AudioProcessTreeOwners(roots, parent_process);
+    std::set<uint32_t> conflicting_launchers;
+    for (const auto& [_, descriptor] : groups) {
+        const uint32_t owner = owners.at(descriptor.process_id);
+        if (owner == descriptor.process_id) continue;
+        const auto& ancestor = groups.at(key_by_root.at(owner));
+        if (ancestor.identity.persistent_identity == "steam"
+                && descriptor.identity.persistent_identity != "steam"
+                && descriptor.identity.persistent_identity != "steamwebhelper") {
+            conflicting_launchers.insert(owner);
+        }
+    }
+    if (!conflicting_launchers.empty()) {
+        // WASAPI INCLUDE also captures descendants. A Steam client root would
+        // contain both its own audio and the separately identified game.
+        // Drop that broad root so the game and disjoint Steam helpers can be
+        // captured once each. The endpoint mix still contains client audio.
+        for (const uint32_t launcher : conflicting_launchers)
+            groups.erase(key_by_root.at(launcher));
+        roots.erase(std::remove_if(roots.begin(), roots.end(), [&](uint32_t root) {
+            return conflicting_launchers.count(root) != 0;
+        }), roots.end());
+        owners = AudioProcessTreeOwners(roots, parent_process);
+    }
+    std::vector<std::string> nested;
+    for (const auto& [key, descriptor] : groups) {
+        const auto owner = owners.at(descriptor.process_id);
+        if (owner == descriptor.process_id) continue;
+        auto& group = groups.at(key_by_root.at(owner));
+        group.currently_active = group.currently_active || descriptor.currently_active;
+        if (group.identity.display_name.find(" (+ child apps)") == std::string::npos)
+            group.identity.display_name = SanitizeAudioSourceText(
+                group.identity.display_name.substr(0, 64) + " (+ child apps)", 80);
+        nested.push_back(key);
+    }
+    for (const auto& key : nested) groups.erase(key);
 }
 
 class WindowsAudioSessionRegistry::SessionNotification final
@@ -371,7 +498,43 @@ struct WindowsAudioSessionRegistry::EndpointRegistration {
     }
 };
 
-WindowsAudioSessionRegistry::WindowsAudioSessionRegistry() = default;
+void ExcludeWindowsAudioSessionTrees(
+    std::map<std::string, WindowsAudioSessionDescriptor>& groups,
+    const std::vector<std::string>& excluded_identities,
+    const std::function<uint32_t(uint32_t)>& parent_process,
+    const std::vector<uint32_t>& excluded_processes) {
+    std::set<uint32_t> excluded_roots(excluded_processes.begin(), excluded_processes.end());
+    std::set<uint32_t> forbidden_roots;
+    for (const auto& [key, descriptor] : groups) {
+        if (std::find(excluded_identities.begin(), excluded_identities.end(),
+                      descriptor.identity.persistent_identity) == excluded_identities.end()) continue;
+        excluded_roots.insert(descriptor.process_id);
+    }
+    for (uint32_t root : excluded_roots) {
+        uint32_t cursor = root;
+        for (uint32_t depth = 0; cursor && depth < 64; ++depth) {
+            if (!forbidden_roots.insert(cursor).second) break;
+            const uint32_t parent = parent_process(cursor);
+            if (parent == cursor) break;
+            cursor = parent;
+        }
+    }
+    for (auto it = groups.begin(); it != groups.end();) {
+        bool excluded = forbidden_roots.count(it->second.process_id) != 0;
+        uint32_t cursor = it->second.process_id;
+        for (uint32_t depth = 0; !excluded && cursor && depth < 64; ++depth) {
+            excluded = excluded_roots.count(cursor) != 0;
+            const uint32_t parent = parent_process(cursor);
+            if (parent == cursor) break;
+            cursor = parent;
+        }
+        if (excluded) it = groups.erase(it);
+        else ++it;
+    }
+}
+
+WindowsAudioSessionRegistry::WindowsAudioSessionRegistry(std::vector<std::string> excluded_identities)
+    : excluded_identities_(std::move(excluded_identities)) {}
 
 WindowsAudioSessionRegistry::~WindowsAudioSessionRegistry() {
     Stop();
@@ -491,7 +654,7 @@ bool WindowsAudioSessionRegistry::RefreshEndpoints() {
 bool WindowsAudioSessionRegistry::Refresh(WindowsAudioSessionUpdate* update) {
     if (!update || !RefreshEndpoints()) return false;
 
-    std::map<std::string, WindowsAudioSessionDescriptor> groups;
+    std::map<uint32_t, bool> session_activity;
     std::map<std::wstring, bool> live_session_instances;
     uint32_t enumerated_endpoints = 0;
     for (const auto& endpoint : endpoint_registrations_) {
@@ -529,27 +692,10 @@ bool WindowsAudioSessionRegistry::Refresh(WindowsAudioSessionUpdate* update) {
             }
             DWORD pid = 0;
             if (FAILED(control2->GetProcessId(&pid)) || pid == 0) continue;
-            if (IsFthrProcess(pid)) continue;
-            const ExecutableMetadata executable = ExecutableMetadataForProcess(pid);
-            if (executable.basename.empty()) continue;
-            const uint32_t root_pid = ProcessGroupRoot(pid, executable.basename);
-            const std::string group_key = BuildWindowsRuntimeGroupKey(
-                root_pid, executable.basename);
-            if (group_key.empty()) continue;
-
-            auto [it, inserted] = groups.emplace(
-                group_key, WindowsAudioSessionDescriptor{});
-            auto& descriptor = it->second;
-            if (inserted) {
-                descriptor.process_id = pid;
-                descriptor.process_group_root_id = root_pid;
-                descriptor.runtime_group_key = group_key;
-                descriptor.identity = IdentityForProcess(
-                    pid, executable.basename, executable.description);
-            }
             AudioSessionState state = AudioSessionStateInactive;
-            if (SUCCEEDED(control->GetState(&state)) && state == AudioSessionStateActive)
-                descriptor.currently_active = true;
+            auto& active = session_activity[pid];
+            active = active || (SUCCEEDED(control->GetState(&state))
+                && state == AudioSessionStateActive);
         }
     }
     if (enumerated_endpoints == 0) {
@@ -560,6 +706,68 @@ bool WindowsAudioSessionRegistry::Refresh(WindowsAudioSessionUpdate* update) {
         if (!live_session_instances.count(it->first)) it = session_events_.erase(it);
         else ++it;
     }
+
+    // A newly created card can start a WASAPI session during enumeration.
+    // Snapshot after discovery so its process ancestry is visible immediately.
+    ProcessTreeSnapshot processes;
+    const uint32_t engine_pid = GetCurrentProcessId();
+    const uint32_t parent = processes.Parent(engine_pid);
+    const uint32_t ui_pid = IsFthrAudioUiParent(parent, AnnouncedAudioUiPid(),
+        parent ? ProcessImagePath(processes.Inspect(parent).handle) : std::wstring{},
+        ProcessImagePath(GetCurrentProcess())) ? parent : 0;
+    std::map<std::string, WindowsAudioSessionDescriptor> groups;
+    for (const auto& [pid, active] : session_activity) {
+        if (pid == engine_pid || IsInFthrAudioTree(pid, ui_pid, processes)) continue;
+        const ExecutableMetadata executable =
+            ExecutableMetadataForProcess(processes.Inspect(pid).handle);
+        if (executable.basename.empty()) continue;
+        const uint32_t root_pid = ProcessGroupRoot(pid, executable.basename, ui_pid, processes);
+        const std::string group_key = BuildWindowsRuntimeGroupKey(root_pid, executable.basename);
+        if (group_key.empty()) continue;
+
+        auto [it, inserted] = groups.try_emplace(group_key);
+        auto& descriptor = it->second;
+        if (inserted) {
+            // Target the entire grouped application so browsers and other
+            // applications with sibling audio processes share one stem.
+            descriptor.process_id = root_pid;
+            descriptor.process_group_root_id = root_pid;
+            descriptor.runtime_group_key = group_key;
+            descriptor.identity = IdentityForProcess(
+                pid, executable.basename, executable.description);
+        }
+        descriptor.currently_active = descriptor.currently_active || active;
+    }
+
+    const auto parent_process = [&](uint32_t pid) { return processes.Parent(pid); };
+    if (ui_pid) ExcludeWindowsAudioSessionTrees(groups, {}, parent_process, {ui_pid});
+
+    if (!excluded_identities_.empty()) {
+        // Inspect executable names even when the excluded parent has no audio
+        // session. A differently named renderer still belongs to its tree.
+        if (processes.entries.empty()) {
+            // No unfiltered fallback is safe when tree identity is unavailable.
+            groups.clear();
+        } else {
+            std::vector<uint32_t> excluded_processes;
+            for (const auto& [pid, entry] : processes.entries) {
+                const auto identity = NormalizeWindowsExecutableIdentity(entry.szExeFile);
+                if (std::find(excluded_identities_.begin(), excluded_identities_.end(),
+                              identity) != excluded_identities_.end()) {
+                    excluded_processes.push_back(pid);
+                }
+            }
+            // The user blacklist retains its conservative raw-snapshot
+            // policy even if an excluded process denies process-time access.
+            ExcludeWindowsAudioSessionTrees(groups, excluded_identities_,
+                [&](uint32_t pid) {
+                    const auto entry = processes.entries.find(pid);
+                    return entry == processes.entries.end()
+                        ? 0u : entry->second.th32ParentProcessID;
+                }, excluded_processes);
+        }
+    }
+    GroupWindowsAudioSessionTrees(groups, parent_process);
 
     std::map<std::string, bool> previous;
     for (const auto& session : current_) previous.emplace(session.runtime_group_key, true);

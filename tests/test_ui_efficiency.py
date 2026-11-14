@@ -4,19 +4,15 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QEvent, QRect
+from PySide6.QtCore import QRect
 from PySide6.QtGui import QColor, QImage, QPixmap
-from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 from core.encoder_capabilities import EncoderCapability
 from core.settings_manager import SettingsManager
 from main import _SettingsPage
 from ui.camera_overlay_editor import UnifiedOverlayPreview, _IMAGE_PREVIEW_CACHE
 from ui.clip_viewer import TrimSlider, TimelineSegment
-from ui.hover_transition import HoverTransitions
 from ui.keyboard_overlay_preview import KeyboardSourcePreview
-from ui.motion import set_reduce_motion
-from ui.shell_transitions import ShellPageStack
 from ui.timeline_segments import TimelineSegments
 
 
@@ -29,7 +25,6 @@ def settings_page(qtbot, monkeypatch, tmp_path):
     page = _SettingsPage(SettingsManager())
     qtbot.addWidget(page)
     yield page
-    set_reduce_motion(False)
 
 
 def _capabilities():
@@ -89,7 +84,7 @@ def test_performance_first_encoder_apply_does_not_construct_clip(settings_page):
     assert page.encoder_preset_combo.currentData() == 6
 
 
-def test_pending_encoder_and_codec_changes_survive_lazy_performance_page(settings_page):
+def test_auto_applied_encoder_and_codec_changes_survive_lazy_performance_page(settings_page):
     page = settings_page
     page.sm.set('encoder_pref', 'nvenc')
     page._on_encoder_capabilities_ready(_capabilities())
@@ -99,8 +94,6 @@ def test_pending_encoder_and_codec_changes_survive_lazy_performance_page(setting
     page.stack.setCurrentIndex(5)
     assert page.codec_combo.currentData() == 'hevc'
     assert page.performance_encoder_preset_combo.currentData() == 6
-    assert not page.performance_encoder_apply_btn.isHidden()
-    page._on_encoder_apply()
     assert page.sm.get('codec_pref') == 'hevc'
     assert page.sm.get('encoder_preset') == 6
 
@@ -222,50 +215,6 @@ def test_live_overlay_update_skips_nonintersecting_layers(qtbot, tmp_path, monke
     rendered = preview.grab().toImage()
     point = preview._pixel_rect_for('image:0').center().toPoint()
     assert rendered.pixelColor(point).red() > 150
-
-
-def test_reduce_motion_persists_stops_active_slides_and_skips_new_snapshots(
-        settings_page, qtbot, monkeypatch):
-    page = settings_page
-    page.resize(1100, 720)
-    page.show()
-    page.stack.setCurrentIndex(5)
-    assert page.stack._slide is not None
-    page.reduce_ui_animations_check.setChecked(True)
-    assert page.stack._slide is None
-    assert page.stack.currentWidget().geometry() == page.stack.rect()
-    restored = SettingsManager()
-    assert restored.get('reduce_ui_animations') is True
-    monkeypatch.setattr(page.stack, 'grab', lambda *args: pytest.fail('snapshot in reduced motion'))
-    page.stack.setCurrentIndex(1)
-    assert page.stack._slide is None
-    shell = ShellPageStack(page)
-    qtbot.addWidget(shell)
-    shell.addWidget(QWidget())
-    shell.addWidget(QWidget())
-    shell.show()
-    monkeypatch.setattr(shell, 'grab', lambda *args: pytest.fail('snapshot in reduced motion'))
-    shell.setCurrentIndex(1)
-    assert shell._slide is None
-
-
-def test_reduce_motion_hover_is_immediate_and_cleans_existing_fade(settings_page, qtbot):
-    page = settings_page
-    page.show()
-    button = QPushButton('Hover', page)
-    button.show()
-    transitions = HoverTransitions(QApplication.instance())
-    try:
-        QApplication.sendEvent(button, QEvent(QEvent.Type.Enter))
-        assert button._hover_fade is not None
-        page.reduce_ui_animations_check.setChecked(True)
-        assert button._hover_fade is None
-        QApplication.sendEvent(button, QEvent(QEvent.Type.Leave))
-        QApplication.sendEvent(button, QEvent(QEvent.Type.Enter))
-        assert button._hover_fade is None
-    finally:
-        QApplication.instance().removeEventFilter(transitions)
-        transitions.deleteLater()
 
 
 def test_segment_mapping_reuses_lists_until_field_or_structure_edit(qtbot):

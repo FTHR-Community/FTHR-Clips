@@ -118,6 +118,31 @@ def test_detector_requires_two_stable_observations_before_emitting():
     assert detected == [candidate]
 
 
+def test_explicit_reconsideration_reemits_game_and_rejects_queued_old_result():
+    detector = ForegroundGameDetector(stable_polls=2, window_provider=lambda _: None)
+    detected = []
+    detector.game_detected.connect(detected.append)
+    candidate = _window()
+    detector._observe(candidate)
+    detector._observe(candidate)
+    old_token = detector._stop_event
+    detector.reconsider_current_game()
+    detector._publish_observation((old_token, candidate, False))
+    detector._observe(candidate, stop_event=old_token)
+    detector._observe(candidate)
+    assert detected == [candidate]
+    detector._observe(candidate)
+    assert detected == [candidate, candidate]
+
+
+def test_reconsideration_does_not_revive_stopped_detector():
+    detector = ForegroundGameDetector(window_provider=lambda _: None)
+    detector.stop()
+    token = detector._stop_event
+    detector.reconsider_current_game()
+    assert detector._stop_event is token and token.is_set()
+
+
 def test_detector_reemits_same_game_after_monitor_resolution_change():
     detector = ForegroundGameDetector(
         stable_polls=2, window_provider=lambda _pid: None)
@@ -186,3 +211,55 @@ def test_blacklist_takes_precedence_over_manual_and_automatic_detection(monkeypa
     detector._stop_event.clear()
     detector._run()
     assert detected == [candidate]
+
+
+class _ReadinessUser32:
+    def __init__(self, *, valid=True, visible=True, minimized=False,
+                 client=(1920, 1080), client_ok=True):
+        self.valid, self.visible, self.minimized = valid, visible, minimized
+        self.client, self.client_ok = client, client_ok
+
+    def IsWindow(self, hwnd):
+        return self.valid
+
+    def IsWindowVisible(self, hwnd):
+        return self.visible
+
+    def IsIconic(self, hwnd):
+        return self.minimized
+
+    def GetClientRect(self, hwnd, rect):
+        rect._obj.right, rect._obj.bottom = self.client
+        return self.client_ok
+
+    def GetForegroundWindow(self):
+        return 101
+
+
+def test_capture_readiness_requires_restored_positive_client_area(monkeypatch):
+    from core import game_detector as module
+    for options in ({'valid': False}, {'visible': False}, {'minimized': True},
+                    {'client': (0, 0)}, {'client': (1920, 0)},
+                    {'client_ok': False}):
+        monkeypatch.setattr(module, '_USER32', _ReadinessUser32(**options))
+        assert not module.is_capture_window_renderable(101)
+    monkeypatch.setattr(module, '_USER32', _ReadinessUser32())
+    assert module.is_capture_window_renderable(101)
+    assert not module.is_capture_window_renderable(0)
+
+
+def test_minimized_foreground_never_emits_capture_candidate(monkeypatch):
+    from core import game_detector as module
+    monkeypatch.setattr(module, '_USER32', _ReadinessUser32(minimized=True))
+    reads = []
+    monkeypatch.setattr(module, 'get_window_info', lambda *args: reads.append(args))
+    assert module.get_foreground_window() is None
+    assert reads == []
+
+
+def test_restored_foreground_uses_existing_identity_reader(monkeypatch):
+    from core import game_detector as module
+    monkeypatch.setattr(module, '_USER32', _ReadinessUser32())
+    candidate = _window()
+    monkeypatch.setattr(module, 'get_window_info', lambda hwnd, pid: candidate)
+    assert module.get_foreground_window(999) is candidate
