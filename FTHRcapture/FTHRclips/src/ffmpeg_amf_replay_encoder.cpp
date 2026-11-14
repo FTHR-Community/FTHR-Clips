@@ -32,13 +32,36 @@ extern "C" {
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace fthr {
 namespace {
 
 using NalSpan = std::pair<const uint8_t*, int>;
+
+constexpr int kInputTextureRetries = 100;
+
+struct InputTexturePool {
+    std::mutex mutex;
+    std::vector<ID3D11Texture2D*> textures;
+    std::vector<bool> busy;
+};
+
+struct InputTextureLease {
+    std::shared_ptr<InputTexturePool> pool;
+    size_t index;
+};
+
+void ReleaseInputTexture(void* opaque, uint8_t*) {
+    std::unique_ptr<InputTextureLease> lease(
+        static_cast<InputTextureLease*>(opaque));
+    std::lock_guard<std::mutex> lock(lease->pool->mutex);
+    lease->pool->busy[lease->index] = false;
+}
 
 const AmfCodecSelection kH264Amf{
     VideoCodec::H264,
@@ -297,11 +320,10 @@ public:
         frames_context->sw_format = AV_PIX_FMT_BGRA;
         frames_context->width = static_cast<int>(output_width_);
         frames_context->height = static_cast<int>(output_height_);
-        // This pinned D3D11 hwcontext requires a non-zero fixed pool. Eight
-        // slices cover AMF async_depth=4 plus the prepared input and transient
-        // references. Each submitted AVFrame retains its array slice until AMF
-        // releases it; capture never maps this GPU-only texture array.
-        frames_context->initial_pool_size = kAmfFramePoolCapacity;
+        // AMF scrambles BGRA input read from texture array slices on AMD, and
+        // a pool of N frames is one N-slice array. The context only anchors
+        // the codec; input frames wrap separate single textures instead.
+        frames_context->initial_pool_size = 1;
         result = av_hwframe_ctx_init(hw_frames_ctx_);
         if (result < 0) {
             error = "could not initialize FFmpeg D3D11 hardware frame context: "
@@ -386,6 +408,7 @@ public:
         }
         d3d11_device_ = shared_device;
         if (!CreateConversionPipeline(shared_device, shared_context, config.fps, error)
+            || !AllocateInputTextures(error)
             || !PrepareInputFrame(error)) {
             Reset();
             return false;
@@ -658,6 +681,14 @@ public:
         if (codec_context_) avcodec_free_context(&codec_context_);
         if (hw_frames_ctx_) av_buffer_unref(&hw_frames_ctx_);
         if (hw_device_ctx_) av_buffer_unref(&hw_device_ctx_);
+        if (input_pool_) {
+            std::lock_guard<std::mutex> lock(input_pool_->mutex);
+            for (auto* texture : input_pool_->textures) {
+                if (texture) texture->Release();
+            }
+            input_pool_->textures.clear();
+        }
+        input_pool_.reset();
         if (converter_output_view_) converter_output_view_->Release();
         if (converter_texture_) converter_texture_->Release();
         if (video_processor_) video_processor_->Release();
@@ -803,26 +834,84 @@ private:
         return diagnostics::FormatHResultFailure(operation, result);
     }
 
+    bool AllocateInputTextures(std::string& error) {
+        input_pool_ = std::make_shared<InputTexturePool>();
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = output_width_;
+        description.Height = output_height_;
+        description.MipLevels = 1;
+        description.ArraySize = 1;
+        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        for (uint32_t index = 0; index < kAmfFramePoolCapacity; ++index) {
+            ID3D11Texture2D* texture = nullptr;
+            const HRESULT result = d3d11_device_->CreateTexture2D(
+                &description, nullptr, &texture);
+            if (FAILED(result) || !texture) {
+                error = HResultString("AMF input texture creation", result);
+                return false;
+            }
+            input_pool_->textures.push_back(texture);
+            input_pool_->busy.push_back(false);
+        }
+        return true;
+    }
+
     bool PrepareInputFrame(std::string& error) {
-        if (!frame_ || !hw_frames_ctx_) {
-            error = "AMF input frame or hardware pool is unavailable";
+        if (!frame_ || !hw_frames_ctx_ || !input_pool_) {
+            error = "AMF input frame or texture pool is unavailable";
             return false;
         }
         av_frame_unref(frame_);
-        const int result = av_hwframe_get_buffer(hw_frames_ctx_, frame_, 0);
-        if (result < 0) {
-            error = std::string("could not acquire AMD D3D11 input texture: ")
-                + AvErrorString(result);
+
+        const size_t count = input_pool_->busy.size();
+        size_t index = count;
+        for (int attempt = 0; attempt <= kInputTextureRetries; ++attempt) {
+            {
+                std::lock_guard<std::mutex> lock(input_pool_->mutex);
+                for (size_t slot = 0; slot < count; ++slot) {
+                    if (!input_pool_->busy[slot]) {
+                        input_pool_->busy[slot] = true;
+                        index = slot;
+                        break;
+                    }
+                }
+            }
+            if (index < count) break;
+            Sleep(1);
+        }
+        if (index >= count) {
+            error = "could not acquire AMD D3D11 input texture: all textures are in flight";
             return false;
         }
-        if (frame_->format != AV_PIX_FMT_D3D11 || !frame_->data[0]) {
-            error = "FFmpeg hardware pool did not return a D3D11 texture";
+
+        ID3D11Texture2D* texture = input_pool_->textures[index];
+        auto* lease = new InputTextureLease{input_pool_, index};
+        AVBufferRef* buffer = av_buffer_create(
+            reinterpret_cast<uint8_t*>(texture), 1,
+            ReleaseInputTexture, lease, 0);
+        if (!buffer) {
+            ReleaseInputTexture(lease, nullptr);
+            error = "could not wrap AMD D3D11 input texture";
+            return false;
+        }
+        frame_->buf[0] = buffer;
+        frame_->data[0] = reinterpret_cast<uint8_t*>(texture);
+        frame_->data[1] = nullptr;
+        frame_->format = AV_PIX_FMT_D3D11;
+        frame_->width = static_cast<int>(output_width_);
+        frame_->height = static_cast<int>(output_height_);
+        frame_->hw_frames_ctx = av_buffer_ref(hw_frames_ctx_);
+        if (!frame_->hw_frames_ctx) {
             av_frame_unref(frame_);
+            error = "could not retain FFmpeg hardware frame context";
             return false;
         }
         return true;
     }
 
+    std::shared_ptr<InputTexturePool> input_pool_;
     const AmfCodecSelection* selection_ = nullptr;
     AVBufferRef* hw_device_ctx_ = nullptr;
     AVBufferRef* hw_frames_ctx_ = nullptr;
