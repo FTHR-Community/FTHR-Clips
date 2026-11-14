@@ -37,11 +37,11 @@ struct WindowsCaptureStartupPlan {
 };
 
 // A cached WGC item-size mismatch has the same source semantics as a fresh
-// frame ContentSize mismatch: monitor capture can be reconfigured, while a
-// selected window remains a backend failure only.
-constexpr uint32_t WgcSizeMismatchHealthFlags(bool monitor_item) noexcept {
-    return CAPTURE_HEALTH_BACKEND_FAILED
-        | (monitor_item ? CAPTURE_HEALTH_RECONFIGURE_REQUIRED : 0u);
+// frame ContentSize mismatch. Both monitors and windows are restarted at the
+// new size: a window that is resized (or switches between windowed and
+// borderless) keeps the same HWND, so the user's selected source is unchanged.
+constexpr uint32_t WgcSizeMismatchHealthFlags(bool /*monitor_item*/) noexcept {
+    return CAPTURE_HEALTH_BACKEND_FAILED | CAPTURE_HEALTH_RECONFIGURE_REQUIRED;
 }
 
 // Select only startup paths that preserve the user's selected source. The
