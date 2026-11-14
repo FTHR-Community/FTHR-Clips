@@ -149,6 +149,14 @@ def check_source(report: Report) -> None:
             'in-use closure is limited to FTHR executables')
     require(report, source, 'RestartApplications=no',
             'installer never silently relaunches a capture session')
+    require(report, source, "NavNextLabel.Caption := 'CONTINUE';",
+            'applications-in-use page labels the continue button CONTINUE')
+    require(report, source,
+            'if (WizardForm.CurPageID = wpPreparing) and '
+            'WizardForm.NextButton.Enabled then',
+            'applications-in-use page cancels through its own CANCEL button')
+    require(report, source, "NavBackLabel.Caption := 'CANCEL';",
+            'applications-in-use page shows CANCEL where BACK normally is')
     require(report, source, 'function PrepareToInstall(var NeedsRestart: Boolean): String;',
             'downgrade decision is explicit')
     require(report, source, "'/ALLOWDOWNGRADE'", 'explicit downgrade override is documented in code')

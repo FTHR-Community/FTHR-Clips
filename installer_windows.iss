@@ -278,7 +278,10 @@ end;
 
 procedure BackPanelClick(Sender: TObject);
 begin
-  if WizardForm.BackButton.Enabled then
+  // With applications in use the left button is CANCEL, not BACK.
+  if (WizardForm.CurPageID = wpPreparing) and WizardForm.NextButton.Enabled then
+    WizardForm.CancelButton.OnClick(WizardForm.CancelButton)
+  else if WizardForm.BackButton.Enabled then
     WizardForm.BackButton.OnClick(WizardForm.BackButton);
 end;
 
@@ -1257,6 +1260,7 @@ begin
   else UpdateSteps(3);
   NavBackBorder.Visible := False;
   NavNextBorder.Visible := False;
+  NavBackLabel.Caption := 'BACK';
 
   if CurPageID = ConsentPage.ID then begin
     WizardForm.BackButton.Enabled := False;
@@ -1289,9 +1293,16 @@ begin
     WizardForm.PreparingLabel.Width := WizardForm.InnerNotebook.Width - ScaleX(96);
     ApplyTextStyle(WizardForm.PreparingLabel, 10, InstallerText, False);
     WizardForm.PreparingLabel.AdjustHeight;
-    NavBackBorder.Visible := WizardForm.BackButton.Enabled;
     NavNextBorder.Visible := True;
-    NavNextLabel.Caption := 'CANCEL';
+    if WizardForm.NextButton.Enabled then begin
+      // Applications are in use and Setup may close them: offer a real way out.
+      NavBackLabel.Caption := 'CANCEL';
+      NavBackBorder.Visible := True;
+      NavNextLabel.Caption := 'CONTINUE';
+    end else begin
+      NavBackBorder.Visible := WizardForm.BackButton.Enabled;
+      NavNextLabel.Caption := 'CANCEL';
+    end;
   end else if CurPageID = wpInstalling then begin
     WizardForm.BackButton.Enabled := False;
   end else begin
@@ -1302,7 +1313,8 @@ begin
   end;
 
   StyleBoxButton(NavBackBorder, NavBackFill, NavBackLabel, False,
-    WizardForm.BackButton.Enabled);
+    WizardForm.BackButton.Enabled or
+    ((CurPageID = wpPreparing) and WizardForm.NextButton.Enabled));
   StyleBoxButton(NavNextBorder, NavNextFill, NavNextLabel, True,
     WizardForm.NextButton.Enabled or
     ((CurPageID = wpPreparing) and WizardForm.CancelButton.Enabled));
