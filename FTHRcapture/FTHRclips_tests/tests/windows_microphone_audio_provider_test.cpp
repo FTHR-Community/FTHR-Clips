@@ -1,3 +1,5 @@
+#include "audio_device_tracks.h"
+#include "audio_source_model.h"
 #include "audio_timeline.h"
 #include "audio_signal_metrics.h"
 #include "windows_microphone_audio_provider.h"
@@ -193,9 +195,60 @@ void MonoDownmixCentersStereoWithoutClamping() {
         "capture gain is applied once after mono downmix");
 }
 
+void DeviceTrackArgumentParsesNamedEndpoints() {
+    const auto tracks = fthr::ParseAudioDeviceTracks(
+        "Chat;{0.0.0.00000000}.{aaaa}|Game;{0.0.0.00000000}.{bbbb}");
+    CheckMicrophone(tracks.size() == 2, "two device entries produce two tracks");
+    CheckMicrophone(tracks[0].name == "Chat"
+            && tracks[0].endpoint_id == L"{0.0.0.00000000}.{aaaa}",
+        "device track keeps its name and exact endpoint id");
+    CheckMicrophone(tracks[1].name == "Game", "second device keeps its own name");
+}
+
+void DeviceTrackArgumentRejectsBadEntries() {
+    CheckMicrophone(fthr::ParseAudioDeviceTracks("").empty(),
+        "empty argument means no device tracks");
+    const auto tracks = fthr::ParseAudioDeviceTracks(
+        "no-separator|Empty;|;{id-1}|Dup;{id-1}|  Spaced  ;  {id-2}  ");
+    CheckMicrophone(tracks.size() == 2, "entries without an id or a separator are dropped");
+    CheckMicrophone(tracks[0].name == "Audio Device 1" && tracks[0].endpoint_id == L"{id-1}",
+        "a blank name falls back to a numbered label and duplicate ids are ignored");
+    CheckMicrophone(tracks[1].name == "Spaced" && tracks[1].endpoint_id == L"{id-2}",
+        "names and ids are trimmed");
+}
+
+void DeviceTrackNamesStayManifestSafe() {
+    const auto tracks = fthr::ParseAudioDeviceTracks("Chat & Game\"x;{id}|Ã¤;{id2}");
+    CheckMicrophone(tracks.size() == 2 && tracks[0].name == "Chat Game x",
+        "characters a manifest would reject are replaced");
+    CheckMicrophone(tracks[1].name == "Audio Device 2",
+        "a name that sanitizes to nothing gets the numbered fallback");
+}
+
+void DeviceTrackListIsBounded() {
+    std::string argument;
+    for (int index = 0; index < 9; ++index) {
+        if (index > 0) argument += '|';
+        argument += "D" + std::to_string(index) + ";{id-" + std::to_string(index) + "}";
+    }
+    CheckMicrophone(fthr::ParseAudioDeviceTracks(argument).size() == fthr::kMaxAudioDeviceTracks,
+        "only the supported number of device tracks is accepted");
+    const auto longest = fthr::ParseAudioDeviceTracks(std::string(200, 'x') + ";{id}");
+    CheckMicrophone(longest.size() == 1
+            && longest[0].name.size() == fthr::kMaxAudioDeviceTrackNameBytes,
+        "long track names are truncated");
+    CheckMicrophone(fthr::kMaxClipAudioTracks
+            >= 1 + 1 + fthr::kMaxRetainedAudioSources + fthr::kMaxAudioDeviceTracks,
+        "a clip can carry default mix, microphone, every stem and every device track");
+}
+
 }  // namespace
 
 int RunWindowsMicrophoneAudioProviderTests() {
+    DeviceTrackArgumentParsesNamedEndpoints();
+    DeviceTrackArgumentRejectsBadEntries();
+    DeviceTrackNamesStayManifestSafe();
+    DeviceTrackListIsBounded();
     QpcTimelineKeepsLateSourcesAtTheirRealOffset();
     EncoderDelayStaysSignedInManifestTimeline();
     DriftCorrectionIsSmallAndBounded();

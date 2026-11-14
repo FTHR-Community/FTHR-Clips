@@ -45,6 +45,10 @@ struct WindowsMicrophoneAudioProviderConfig {
     // Empty only when use_default_endpoint is true.
     std::wstring endpoint_id;
     bool use_default_endpoint = true;
+    // Captures what an output (render) endpoint plays instead of a capture
+    // endpoint. Requires an explicit endpoint_id; idle gaps are filled with
+    // silence because loopback delivers no packets while nothing plays.
+    bool loopback = false;
     uint32_t retention_seconds = 30;
     // Canonical 48 kHz stereo AAC is intentionally lower bitrate than the
     // Default Mix: a microphone is normally voice, while the stereo channel

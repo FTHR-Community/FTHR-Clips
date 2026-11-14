@@ -309,7 +309,7 @@ struct WindowsMicrophoneAudioProvider::Impl {
             return false;
         }
         ComPtr<IMMDevice> device;
-        if (config.use_default_endpoint) {
+        if (config.use_default_endpoint && !config.loopback) {
             hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
         } else if (!config.endpoint_id.empty()) {
             hr = enumerator->GetDevice(config.endpoint_id.c_str(), &device);
@@ -354,8 +354,10 @@ struct WindowsMicrophoneAudioProvider::Impl {
             SetError("microphone sample event creation failed");
             return false;
         }
+        const DWORD stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+            | (config.loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0);
         hr = session->audio_client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, session->format, nullptr);
+            stream_flags, 0, 0, session->format, nullptr);
         if (SUCCEEDED(hr)) hr = session->audio_client->SetEventHandle(session->sample_event);
         if (SUCCEEDED(hr)) hr = session->audio_client->GetService(IID_PPV_ARGS(&session->capture_client));
         if (FAILED(hr)) {
@@ -611,12 +613,33 @@ struct WindowsMicrophoneAudioProvider::Impl {
         return true;
     }
 
+    // Keeps a loopback track continuous while the device is idle. Silence is
+    // appended in whole encoder blocks and only for time that has already
+    // elapsed, so the next real packet lines up without a timeline repair.
+    bool FillIdleSilence() {
+        if (!encoder || next_timeline_100ns == 0) return true;
+        const uint64_t now = CurrentAudioTimeline100ns();
+        constexpr uint64_t kIdleMargin100ns = 3'000'000ULL;
+        if (now <= next_timeline_100ns + kIdleMargin100ns) return true;
+        const uint64_t gap = now - kIdleMargin100ns - next_timeline_100ns;
+        const uint32_t frames = static_cast<uint32_t>(
+            (gap * kCanonicalAudioSampleRate) / 10'000'000ULL);
+        if (frames == 0) return true;
+        if (!SubmitCanonicalSilence(frames)) return false;
+        next_timeline_100ns += (static_cast<uint64_t>(frames) * 10'000'000ULL)
+            / kCanonicalAudioSampleRate;
+        return true;
+    }
+
     HRESULT CaptureSession(MicrophoneSession* session) {
         while (!StopRequested()) {
             HANDLE waits[] = {stop_event, session->sample_event};
             const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, kCaptureWaitMs);
             if (wait == WAIT_OBJECT_0) return S_FALSE;
-            if (wait == WAIT_TIMEOUT) continue;
+            if (wait == WAIT_TIMEOUT) {
+                if (config.loopback && !FillIdleSilence()) return E_FAIL;
+                continue;
+            }
             if (wait != WAIT_OBJECT_0 + 1) return E_FAIL;
             UINT32 packet_frames = 0;
             HRESULT hr = session->capture_client->GetNextPacketSize(&packet_frames);

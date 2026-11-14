@@ -787,6 +787,8 @@ namespace fthr {
         bitrate_kbps_ = config.bitrate_kbps;
         scaling_mode_ = (config.scaling_mode == CaptureConfig::ScalingModeEnum::FIT) ? 1u : 0u;
         separate_audio_enabled_ = config.separate_audio_enabled;
+        application_audio_tracks_enabled_ = config.application_audio_tracks_enabled;
+        omit_default_mix_track_ = !config.audio_device_tracks.empty();
         monitor_device_path_ = monitor::NormalizeMonitorDevicePath(
             config.monitor_device_path);
         capture_loop_iterations_.store(0);
@@ -1360,7 +1362,52 @@ namespace fthr {
                 }
             }
 
-            if (separate_audio_enabled_) {
+            device_audio_tracks_.clear();
+            for (size_t device_index = 0;
+                 device_index < config.audio_device_tracks.size(); ++device_index) {
+                const auto& device = config.audio_device_tracks[device_index];
+                std::string device_uuid;
+                std::string device_uuid_error;
+                if (!CreateAudioManifestTransactionId(&device_uuid, &device_uuid_error)) {
+                    std::cerr << "[CaptureEngine] Could not create device track UUID: "
+                        << device_uuid_error << std::endl;
+                    continue;
+                }
+                DeviceAudioTrack track;
+                track.metadata.identity.id = AudioSourceId{device_uuid};
+                track.metadata.identity.type = AudioSourceType::System;
+                track.metadata.identity.persistent_identity =
+                    "device-track-" + std::to_string(device_index + 1);
+                track.metadata.identity.display_name = device.name;
+                track.metadata.identity.icon_reference = "system-audio";
+                track.metadata.format = {
+                    kCanonicalAudioSampleRate, kCanonicalAudioChannels, "fltp"};
+                track.metadata.state.health = AudioSourceHealth::Discovered;
+
+                WindowsMicrophoneAudioProviderConfig device_config;
+                device_config.generation = capture_generation_.load(
+                    std::memory_order_relaxed) + 1;
+                device_config.endpoint_id = device.endpoint_id;
+                device_config.use_default_endpoint = false;
+                device_config.loopback = true;
+                device_config.retention_seconds = buffer_seconds_;
+                device_config.bitrate_kbps = 128;
+                device_config.source = track.metadata;
+                device_config.replay_pause_clock = replay_pause_clock_;
+                track.provider = std::make_unique<WindowsMicrophoneAudioProvider>(
+                    std::move(device_config));
+                if (!track.provider->Start()) {
+                    std::cerr << "[CaptureEngine] Device track '" << device.name
+                        << "' did not start: " << track.provider->last_error()
+                        << std::endl;
+                    continue;
+                }
+                std::cout << "[CaptureEngine] Device track '" << device.name
+                    << "' capturing." << std::endl;
+                device_audio_tracks_.push_back(std::move(track));
+            }
+
+            if (application_audio_tracks_enabled_) {
                 application_audio_source_manager_ =
                     std::make_unique<WindowsApplicationAudioSourceManager>(
                         capture_generation_.load(std::memory_order_relaxed) + 1,
@@ -1393,7 +1440,7 @@ namespace fthr {
             std::cout << "[CaptureEngine] Audio routing: system mix + microphone"
                       << (application_audio_source_manager_
                           ? " + application stems."
-                          : (separate_audio_enabled_
+                          : (application_audio_tracks_enabled_
                               ? " (application stems unavailable)."
                               : "."))
                       << std::endl;
@@ -1401,6 +1448,7 @@ namespace fthr {
         }
 
         if (!audio_active_ && !microphone_audio_source_
+                && device_audio_tracks_.empty()
                 && !application_audio_source_manager_) {
             std::cout << "[CaptureEngine] Running in video-only mode." << std::endl;
         }
@@ -1579,6 +1627,7 @@ namespace fthr {
             application_audio_source_manager_->Stop();
             application_audio_source_manager_.reset();
         }
+        device_audio_tracks_.clear();
         if (audio_active_) {
             microphone_audio_source_.reset();
             audio_capture_.Stop();
@@ -2936,7 +2985,8 @@ namespace fthr {
                                 origin_qpc,
                                 default_mix_track.snapshot.last_pts_samples,
                                 sample_rate);
-                        task.encoded_audio_tracks.push_back(std::move(default_mix_track));
+                        if (!omit_default_mix_track_)
+                            task.encoded_audio_tracks.push_back(std::move(default_mix_track));
                         std::cout << "[SaveClip] Persistent AAC snapshot: "
                             << task.encoded_audio_snapshot.packets.size()
                             << " packets, PTS "
@@ -2976,7 +3026,22 @@ namespace fthr {
                         }
                     }
                 }
-                if (separate_audio_enabled_ && application_audio_source_manager_) {
+                for (auto& device_track : device_audio_tracks_) {
+                    if (const auto track = device_track.provider->TakeTrackForInterval(
+                            start_qpc_s, end_qpc_s, device_track.metadata)) {
+                        task.encoded_audio_tracks.push_back(*track);
+                    } else {
+                        const auto info = device_track.provider->runtime_info();
+                        std::cerr << "[SaveClip] Device track '"
+                            << device_track.metadata.identity.display_name
+                            << "' has no audio for this clip (packets="
+                            << info.packet_count << ", failed=" << info.failed
+                            << ", error='" << device_track.provider->last_error()
+                            << "')" << std::endl;
+                    }
+                }
+                if (application_audio_tracks_enabled_
+                        && application_audio_source_manager_) {
                     const auto application_tracks =
                         application_audio_source_manager_->TakeTracksForInterval(
                             start_qpc_s, end_qpc_s);
@@ -3081,7 +3146,8 @@ namespace fthr {
             const EncodedAudioTrack* microphone_track = nullptr;
             for (const auto& track : task.encoded_audio_tracks) {
                 if (!system_track
-                        && track.source.identity.type == AudioSourceType::System) {
+                        && track.source.identity.type == AudioSourceType::System
+                        && track.source.identity.persistent_identity == "default-mix") {
                     system_track = &track;
                 } else if (!microphone_track
                         && track.source.identity.type == AudioSourceType::Microphone) {
@@ -3927,16 +3993,12 @@ namespace fthr {
                     avformat_free_context(fmt_ctx);
                     return false;
                 }
-                const bool is_default_mix = index == 0;
-                if (is_default_mix
-                        && (contract.source.identity.type != AudioSourceType::System
-                            || contract.source.identity.persistent_identity != "default-mix"
-                            || contract.source.identity.display_name != "Default Mix")) {
-                    SetEngineError(task.shared_memory,
-                        L"The Default Mix track is missing from the audio capture contract.");
-                    avformat_free_context(fmt_ctx);
-                    return false;
-                }
+                // The aggregate Default Mix is optional: a broken endpoint or a
+                // several-devices recording must not stop the other tracks.
+                const bool is_default_mix = index == 0
+                    && contract.source.identity.type == AudioSourceType::System
+                    && contract.source.identity.persistent_identity == "default-mix"
+                    && contract.source.identity.display_name == "Default Mix";
                 append_persistent_track(contract, is_default_mix);
             }
             if (mux_audio_tracks.empty()) {

@@ -16,7 +16,10 @@ inline constexpr uint32_t kMaxRetainedAudioSources = 8;
 // Default Mix is mandatory compatibility audio, not an application-source
 // admission. A completed clip can therefore carry it, a native Microphone,
 // and the eight real application stems permitted by the AUDIT-050 source cap.
-inline constexpr uint32_t kMaxClipAudioTracks = kMaxRetainedAudioSources + 2;
+// User-added playback devices are additional tracks on top of that.
+inline constexpr uint32_t kMaxDeviceAudioTracks = 4;
+inline constexpr uint32_t kMaxClipAudioTracks =
+    kMaxRetainedAudioSources + 2 + kMaxDeviceAudioTracks;
 
 enum class AudioSourceType : uint8_t {
     Application,

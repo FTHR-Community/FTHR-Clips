@@ -34,6 +34,7 @@
 #include "audio_packet_ring.h"
 #include "audio_timeline.h"
 #include "windows_microphone_audio_provider.h"
+#include "audio_device_tracks.h"
 #include "windows_process_loopback_audio_provider.h"
 #include "continuous_recording_writer.h"
 #include "audio_ring_buffer.h"   // AudioRingBuffer (raw float32 PCM)
@@ -95,6 +96,12 @@ namespace fthr {
         uint32_t microphone_gain_percent = 100;
         std::wstring playback_endpoint_id;
         bool microphone_mono = false;
+
+        // argv[26]: extra playback devices recorded as their own tracks.
+        std::vector<AudioDeviceTrackConfig> audio_device_tracks;
+        // argv[27]: record one track per running program. Defaults to
+        // separate_audio_enabled when the argument is absent.
+        bool application_audio_tracks_enabled = false;
 
         // Optional per-game crop in normalized source coordinates. It is
         // resolved to safe pixel geometry after the capture source opens and
@@ -356,6 +363,15 @@ namespace fthr {
         // or the frozen Shared Memory v4 boundary.
         std::unique_ptr<WindowsMicrophoneAudioProvider> microphone_audio_source_;
         AudioSourceMetadata               microphone_audio_metadata_;
+        // Extra playback devices captured by loopback, one clip track each.
+        struct DeviceAudioTrack {
+            std::unique_ptr<WindowsMicrophoneAudioProvider> provider;
+            AudioSourceMetadata metadata;
+        };
+        std::vector<DeviceAudioTrack>     device_audio_tracks_;
+        bool                              application_audio_tracks_enabled_ = false;
+        // Several-devices recording replaces the aggregate Default Mix track.
+        bool                              omit_default_mix_track_ = false;
         // Process-loopback application stems are opt-in and exist only for
         // separate-audio generations. The manager owns every provider and is
         // stopped before the system/microphone audio teardown.

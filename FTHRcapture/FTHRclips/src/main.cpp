@@ -273,6 +273,10 @@ int main(int argc, char* argv[]) {
     config.microphone_endpoint_id = ParseArgUtf8(argc, argv, 15);
     config.playback_endpoint_id = ParseArgUtf8(argc, argv, 24);
     config.microphone_mono = ParseArgU32(argc, argv, 25, 0) != 0;
+    config.audio_device_tracks = fthr::ParseAudioDeviceTracks(
+        Utf8FromWide(ParseArgUtf8(argc, argv, 26)));
+    config.application_audio_tracks_enabled = ParseArgU32(argc, argv, 27,
+        config.separate_audio_enabled ? 1 : 0) != 0;
     config.microphone_gain_percent = std::min<uint32_t>(
         ParseArgU32(argc, argv, 16, 100), 200);
     switch (ParseArgU32(argc, argv, 17, 0)) {

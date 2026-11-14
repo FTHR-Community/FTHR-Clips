@@ -195,7 +195,7 @@ bool WriteClipAudioManifest(
     const std::vector<EncodedAudioTrack>& tracks,
     std::string* error) {
     if (tracks.empty() || tracks.size() > kMaxClipAudioTracks || !IsUuid(transaction_id)) {
-        if (error) *error = "audio manifest needs one to ten tracks and a valid transaction UUID";
+        if (error) *error = "audio manifest needs one to fourteen tracks and a valid transaction UUID";
         return false;
     }
     std::string media_hash;

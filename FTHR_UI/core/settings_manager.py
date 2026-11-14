@@ -262,6 +262,11 @@ class SettingsManager:
             # default. Separated streams are an explicit opt-in because they
             # require a multi-track editor/export path.
             'audio_capture_mode':      'combined',
+            # Extra playback devices recorded as own tracks: [{'id','name'}].
+            'audio_device_tracks':     [],
+            # None follows the separated mode; True/False is an explicit
+            # choice for per-program tracks.
+            'per_app_audio_tracks':    None,
             # Visual notification card. Sound cues remain active when this
             # is disabled because they are handled by the same sound-only
             # helper process.
