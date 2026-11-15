@@ -21,6 +21,10 @@ After installing, enable **RNNoise microphone noise reduction** in Audio / Micro
 
 Open **Settings → Audio** to enable and configure Gary Mode below microphone monitoring. Adjust MIN/MAX on the live-level meter. Existing Gary preferences are reused, so installation does not necessarily turn the effect on. Enable audio capture for its desktop response. Disabling the plugin removes its controls and overlay while retaining preferences.
 
+## Christmas theme 
+
+make everything jolly :D
+
 ## Verification
 
 i tested it, works on my machine. If it doesn't work for you it's user error.
