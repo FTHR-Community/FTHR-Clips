@@ -11,13 +11,6 @@ Open **Settings → Plugins** and drop a ZIP, or use **Choose ZIP…**. Click **
 - **Theme packs** are available to apply while enabled. **Apply theme** replaces the current customization with an editable copy of the pack theme. Export your current theme from **Customize** first if you want to keep a copy. Updating, disabling, or uninstalling the plugin leaves the applied customization intact.
 - **Feature plugins** run Python code inside the app. Only install packages from authors you trust: they have the app's permissions. Enabled features start automatically with the app, including when it starts in the tray. Ultra Performance Mode pauses feature plugins until it is turned off. Disabling, removing, or exiting stops their runtime. An update restarts an active feature if the feature ZIP changed. Use **Settings** on an installed feature's row to configure it.
 
-Try the sample packs in [examples/plugins](../examples/plugins). Use local ZIPs from authors you trust. The optional uploader is managed through the app’s upload settings; it uses a separate package format.
-
-### Harmless installation test
-
-Drop [fthr-test-plugin.zip](../examples/plugins/fthr-test-plugin.zip) into the Plugins page. It appears as **FTHR Test Plugin** and can be enabled, disabled, updated, or removed. It contains only a manifest, runs no code, and contributes no themes or presets. Installation only records the plugin in the plugin manager.
-
-To make your own no-operation test package, ZIP [test-plugin-manifest.json](../examples/plugins/test-plugin-manifest.json) at the archive root under the name `manifest.json`. Its type is `test` and its `contributes` object must be empty. Only an optional declared cover may accompany the manifest.
 
 ## Package format
 
