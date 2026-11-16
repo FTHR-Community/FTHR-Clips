@@ -73,11 +73,11 @@ def test_main_window_constructs_with_side_effect_boundaries(
     qtbot.addWidget(window)
 
     assert window.centralWidget() is not None
-    assert window.windowTitle().startswith('FTHR Clips')
+    assert window.windowTitle().startswith('FTHRClips')
     assert window.styleSheet()
     assert window.settings_manager.config_file.parent == tmp_path / '.fthr'
     assert window.close_btn is not window.power_btn
-    assert window.power_btn.toolTip() == 'Shut down FTHR Clips and stop capture'
+    assert window.power_btn.toolTip() == 'Shut down FTHRClips and stop capture'
     window._on_close_to_tray_changed(False)
     assert window.power_btn.isHidden()
     window._on_close_to_tray_changed(True)

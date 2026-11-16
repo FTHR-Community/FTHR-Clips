@@ -126,7 +126,7 @@ def prepare_socket_path(path: str) -> None:
             f'remove another user\'s socket.')
     if _is_live_socket(path):
         raise RuntimeDirError(
-            f'{path} is already in use by a running FTHR Clips instance.')
+            f'{path} is already in use by a running FTHRClips instance.')
 
     # Stale socket, ours, nobody home.
     try:

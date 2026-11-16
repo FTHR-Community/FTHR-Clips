@@ -462,7 +462,7 @@ def _source_identity(media_path):
             manifest = file_identity(manifest_path_for(media_path))
         except FileNotFoundError:
             manifest = None
-        return media, manifest
+        return media, manifest, Path(media_path).name
     except OSError:
         # Missing/unstatable media cannot be cached; normal discovery reports it.
         return None
@@ -480,9 +480,10 @@ def discover_playback_sources(media_path: str, cancelled: threading.Event | None
             cached = _SOURCE_CACHE.get(key)
             if cached is not None:
                 _SOURCE_CACHE.move_to_end(key)
-                # Cache probing, not plugin settings. Each newly opened clip
-                # receives a fresh immutable graph shared by preview/export.
-                return tuple(replace(source, effect_filter_snapshot=None) for source in cached)
+        if cached is not None:
+            # Cache probing, not plugin settings. Each newly opened clip
+            # receives a fresh immutable graph shared by preview/export.
+            return tuple(replace(source, effect_filter_snapshot=None) for source in cached)
     streams = (probe_audio_streams(media_path) if cancelled is None
                else probe_audio_streams(media_path, cancelled))
     if cancelled is not None and cancelled.is_set():
@@ -493,7 +494,9 @@ def discover_playback_sources(media_path: str, cancelled: threading.Event | None
     except InterruptedError as error:
         raise PlaybackError('audio source validation cancelled') from error
     sources = build_playback_sources(manifest, streams)
-    if (key is not None and key == _source_identity(media_path)
+    # An existing sidecar can fall back after a transient read or hash failure.
+    if (key is not None and (manifest is not None or key[1] is None)
+            and key == _source_identity(media_path)
             and (cancelled is None or not cancelled.is_set())):
         with _SOURCE_CACHE_LOCK:
             _SOURCE_CACHE[key] = sources
@@ -736,6 +739,7 @@ class FFmpegPlaybackController(QObject):
         # perceived as a deterministic double hit after a timeline seek.
         self._sync_holding = False
         self._stopping = False
+        self._preparation_result: tuple[bool, str] | None = None
         self._async_stop = False
         self.decode_finished.connect(self._finish_async_stop)
         self._output_device, self._output_format, self._encode_for_device = self._select_output_format()
@@ -792,12 +796,20 @@ class FFmpegPlaybackController(QObject):
             return ([source_gain(source, self._states, self.sources) for source in self.sources],
                     self._master_gain)
 
+    @property
+    def preparation_result(self) -> tuple[bool, str] | None:
+        """Latest preparation result, available even if its signal already fired."""
+        return self._preparation_result
+
     def _worker_ready(self, error: str | None) -> None:
         if not self._stopping:
-            self.ready_changed.emit(error is None, error or '')
+            result = (error is None, error or '')
+            self._preparation_result = result
+            self.ready_changed.emit(*result)
 
     def _worker_failed(self, error: str) -> None:
         if not self._stopping:
+            self._preparation_result = (False, error)
             self.audio_failed.emit(error)
 
     def set_master_percent(self, value: int) -> None:

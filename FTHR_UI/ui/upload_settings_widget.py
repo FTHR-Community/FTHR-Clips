@@ -571,7 +571,7 @@ class UploadSettingsWidget(QWidget):
                 title='Install FTHR Upload Extension',
                 explanation=(
                     'This separately packaged component contains all provider network '
-                    'code. FTHR Clips Core remains upload-free.'),
+                    'code. FTHRClips Core remains upload-free.'),
                 terms=terms,
                 privacy=privacy,
                 install_label='ACCEPT & INSTALL UPLOADER',

@@ -683,6 +683,7 @@ class DiagnosticSession:
         self.session_dir = self.root / f'session-{timestamp}-{self.short_id}'
         self.events_path = self.session_dir / 'events.jsonl'
         self.engine_log_path = self.session_dir / 'engine.log'
+        self._previous_session_dir: Path | None = None
         self._marker_path = self.root / _MARKER_NAME
         self._max_event_bytes = int(max_event_bytes)
         self._retained_sessions = max(1, int(retained_sessions))
@@ -717,6 +718,7 @@ class DiagnosticSession:
         self.root.mkdir(parents=True, exist_ok=True)
         self.session_dir.mkdir(parents=True, exist_ok=False)
         previous = self._read_previous_marker()
+        self._select_previous_session(previous)
         self._write_marker()
         self._enforce_retention()
         self._writer_thread = threading.Thread(
@@ -733,6 +735,78 @@ class DiagnosticSession:
                 'session_id': previous.get('session_id', 'unavailable'),
             })
         return self
+
+    @staticmethod
+    def _retained_session_identity(directory: Path) -> str | None:
+        if not re.fullmatch(r'session-\d{8}T\d{6}Z-[0-9a-f]{8}', directory.name):
+            return None
+        try:
+            events = directory / 'events.jsonl'
+            if events.is_symlink() or events.stat().st_nlink != 1:
+                return None
+            with events.open('r', encoding='utf-8') as handle:
+                first = json.loads(handle.readline(8192))
+            identity = str(uuid.UUID(first['session_id']))
+            if (first.get('event') == 'session_started'
+                    and directory.name.endswith('-' + identity.split('-')[0])):
+                return identity
+        except (OSError, ValueError, TypeError, KeyError):
+            # Missing/corrupt session evidence is not exported as trusted history.
+            pass
+        return None
+
+    def _select_previous_session(self, marker: Mapping[str, Any] | None) -> None:
+        """Keep one bounded, local prior session; never follow linked folders."""
+        try:
+            root = self.root.resolve()
+            candidates = [path for path in self.root.glob('session-*')
+                          if path != self.session_dir and path.is_dir()
+                          and not path.is_symlink()
+                          and not getattr(path, 'is_junction', lambda: False)()
+                          and path.resolve().parent == root
+                          and self._retained_session_identity(path)]
+            if marker:
+                try:
+                    short_id = str(uuid.UUID(str(marker.get('session_id')))).split('-')[0]
+                except (ValueError, TypeError, AttributeError):
+                    short_id = ''
+                matched = [path for path in candidates if short_id and path.name.endswith('-' + short_id)]
+                if matched:
+                    candidates = matched
+            if candidates:
+                self._previous_session_dir = max(candidates, key=lambda path: path.stat().st_mtime)
+        except OSError:
+            # Diagnostic history must not prevent launch on an unavailable disk.
+            self._previous_session_dir = None
+
+    def _previous_session_export(self) -> dict[str, str]:
+        directory = self._previous_session_dir
+        if directory is None:
+            return {}
+        try:
+            if (directory.is_symlink()
+                    or getattr(directory, 'is_junction', lambda: False)()
+                    or directory.resolve().parent != self.root.resolve()):
+                return {}
+            identity = self._retained_session_identity(directory)
+            if identity is None:
+                return {}
+            result = {}
+            for name in ('events.jsonl', 'engine.log'):
+                path = directory / name
+                if (path.is_file() and not path.is_symlink()
+                        and path.stat().st_nlink == 1
+                        and path.resolve().parent == directory.resolve()):
+                    result['previous-session/' + name] = _read_bounded_tail(
+                        path, MAX_EXPORTED_LOG_BYTES)
+            if result:
+                result['previous-session/identity.json'] = json.dumps({
+                    'session_id': identity,
+                    'relationship': 'previous local session; events contain full session IDs',
+                }, indent=2) + '\n'
+            return result
+        except OSError:
+            return {}
 
     def _read_previous_marker(self) -> dict[str, Any] | None:
         try:
@@ -824,6 +898,9 @@ class DiagnosticSession:
                     'height': fields.get('encoder_height', 'unavailable:not_reported'),
                 },
             )
+        elif event == 'duration_confirmed':
+            self.merge_summary('actual_configuration',
+                               replay_duration_seconds=fields.get('effective_seconds'))
         elif event == 'capture_health_snapshot':
             self.update_summary('native_capture_health', fields)
         elif event == 'audio_health_snapshot':
@@ -914,6 +991,7 @@ class DiagnosticSession:
             destination = destination.with_suffix('.zip')
         destination.parent.mkdir(parents=True, exist_ok=True)
         summary = self.summary()
+        previous_files = self._previous_session_export()
         summary['export'] = {
             'created_utc': self._wall_clock(),
             'files': [
@@ -921,18 +999,20 @@ class DiagnosticSession:
                 'engine.log', 'README.txt',
             ],
         }
+        summary['export']['files'].extend(previous_files)
         events = _read_bounded_tail(self.events_path, self._max_event_bytes)
         ui_log = _read_bounded_tail(Path(ui_log_path), MAX_EXPORTED_LOG_BYTES)
         engine_log = _read_bounded_tail(
             self.engine_log_path, MAX_EXPORTED_LOG_BYTES)
         readme = (
-            'FTHR Clips Diagnostic Report\n'
+            'FTHRClips Diagnostic Report\n'
             '============================\n\n'
             'This ZIP was explicitly exported by the user for alpha support.\n'
             'It contains bounded diagnostic events and logs only. It does not\n'
             'contain clips, screenshots, audio, credentials, browser data, or\n'
             'an arbitrary filesystem listing. Paths and known secrets are\n'
-            'redacted. The report is never uploaded automatically.\n')
+            'redacted. The report is never uploaded automatically.\n'
+            'When available, previous-session/ contains bounded logs from the preceding local session.\n')
         temporary = destination.with_suffix(destination.suffix + '.tmp')
         try:
             with zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as archive:
@@ -944,6 +1024,8 @@ class DiagnosticSession:
                 archive.writestr('ui.log', ui_log)
                 archive.writestr('engine.log', engine_log)
                 archive.writestr('README.txt', readme)
+                for name, contents in previous_files.items():
+                    archive.writestr(name, contents)
             os.replace(temporary, destination)
         finally:
             try:

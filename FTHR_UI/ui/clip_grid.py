@@ -1031,6 +1031,7 @@ class _CardSelectionOutline(QWidget):
 
 class ClipThumbnail(QFrame):
     clicked = Signal(str)
+    preload_requested = Signal(str)
     opened = Signal(str, QPixmap, QRect)
     deleted = Signal(str)
     renamed = Signal(str, str)
@@ -1980,6 +1981,8 @@ class ClipThumbnail(QFrame):
     def enterEvent(self, event):
         if hasattr(self, '_play_icon'):
             self._play_icon.setVisible(self.ready and not self._mutation_busy)
+        if self.is_video and self.ready and not self._mutation_busy:
+            self.preload_requested.emit(self.file_path)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -2048,6 +2051,7 @@ class ClipThumbnail(QFrame):
 class ClipGrid(QWidget):
     overlap_merge_requested = Signal(object)
     clip_clicked          = Signal(str)
+    clip_preload_requested = Signal(str)
     clip_opened           = Signal(str, QPixmap, QRect)
     screenshot_clicked    = Signal(str)
     clip_upload_requested = Signal(str)
@@ -5922,6 +5926,7 @@ class ClipGrid(QWidget):
                 parent=parent or self._sections_host, metadata_manager=self._metadata_manager)
             thumb.library_flags_changed.connect(self._on_library_flags_changed)
             thumb.opened.connect(self.clip_opened.emit)
+            thumb.preload_requested.connect(self.clip_preload_requested.emit)
             thumb.overlap_requested.connect(self._request_overlap_merge)
             thumb.clicked.connect(self.clip_clicked.emit if is_video else self.screenshot_clicked.emit)
             thumb._prepare_mutation = self._prepare_card_mutation

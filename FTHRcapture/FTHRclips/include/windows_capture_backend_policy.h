@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include "shared_memory.h"
@@ -68,6 +69,68 @@ constexpr uint32_t WgcSizeMismatchHealthFlags(bool monitor_item) noexcept {
     (void)monitor_item;
     return CAPTURE_HEALTH_BACKEND_FAILED | CAPTURE_HEALTH_RECONFIGURE_REQUIRED;
 }
+
+enum class WgcMonitorGeometryAction {
+    Capture,
+    Wait,
+    Resume,
+    Reconfigure,
+};
+
+class WgcMonitorGeometry {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    WgcMonitorGeometry(int32_t width, int32_t height) noexcept
+        : expected_width_(width), expected_height_(height) {}
+
+    bool Matches(int32_t width, int32_t height) const noexcept {
+        return width == expected_width_ && height == expected_height_;
+    }
+
+    WgcMonitorGeometryAction Observe(int32_t width, int32_t height,
+                                    bool fresh_matching_frame,
+                                    Clock::time_point now) noexcept {
+        const bool matches = Matches(width, height);
+        if (matches && !pending_) return WgcMonitorGeometryAction::Capture;
+        if (matches && fresh_matching_frame) {
+            Reset();
+            return WgcMonitorGeometryAction::Resume;
+        }
+        if (!pending_) {
+            pending_ = true;
+            started_ = now;
+        }
+        if (width != width_ || height != height_) {
+            width_ = width;
+            height_ = height;
+            stable_since_ = now;
+        }
+        // Display modes can briefly expose different dimensions on focus
+        // changes. Zero-sized and flapping sources have a bounded wait too.
+        if ((!matches && width > 0 && height > 0
+                && now - stable_since_ >= std::chrono::milliseconds(400))
+            || now - started_ >= std::chrono::seconds(2)) {
+            return WgcMonitorGeometryAction::Reconfigure;
+        }
+        return WgcMonitorGeometryAction::Wait;
+    }
+
+    void Reset() noexcept {
+        pending_ = false;
+        width_ = 0;
+        height_ = 0;
+    }
+
+private:
+    const int32_t expected_width_;
+    const int32_t expected_height_;
+    int32_t width_ = 0;
+    int32_t height_ = 0;
+    bool pending_ = false;
+    Clock::time_point started_{};
+    Clock::time_point stable_since_{};
+};
 
 // Select only startup paths that preserve the user's selected source. The
 // The only automatic fallback is desktop DXGI to WGC on the same resolved

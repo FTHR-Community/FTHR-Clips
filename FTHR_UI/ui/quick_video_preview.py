@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import sys
 
 from PySide6.QtCore import QUrl, Signal, Slot, Qt
 from PySide6.QtGui import QColor, QVector4D
@@ -13,13 +14,21 @@ from PySide6.QtWidgets import QApplication
 class QuickVideoPreview(QQuickWidget):
     gpu_failed = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, defer_scene=False):
         super().__init__(parent)
         # QQuickWidget honors this at hide time. Changing it only after the
         # widget is already hidden leaves its scene graph allocated on Windows.
         self.quickWindow().setPersistentSceneGraph(False)
         self.gpu_ready = True
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
+        self.quickWindow().sceneGraphError.connect(self._scene_graph_error)
+        self.quickWindow().sceneGraphInitialized.connect(
+            self._check_backend, Qt.ConnectionType.QueuedConnection)
+        if not defer_scene:
+            self.initialize_scene()
+
+    def initialize_scene(self):
+        """Load the editor scene into an existing Qt Quick surface."""
         self.setSource(QUrl.fromLocalFile(str(
             Path(__file__).with_name('qml') / 'VideoPreview.qml')))
         if self.status() == QQuickWidget.Status.Error:
@@ -28,9 +37,6 @@ class QuickVideoPreview(QQuickWidget):
             raise RuntimeError(detail)
         self.rootObject().shaderFailed.connect(self._shader_failed)
         self.statusChanged.connect(self._check_status)
-        self.quickWindow().sceneGraphError.connect(self._scene_graph_error)
-        self.quickWindow().sceneGraphInitialized.connect(
-            self._check_backend, Qt.ConnectionType.QueuedConnection)
 
     def release_idle_resources(self):
         if not self.isVisible():
@@ -91,3 +97,15 @@ def quick_preview_supported():
     return (QApplication.platformName() not in ('offscreen', 'minimal')
             and os.environ.get('QT_QUICK_BACKEND', '').lower() != 'software'
             and (Path(__file__).with_name('qml') / 'color.frag.qsb').is_file())
+
+
+def prepare_editor_preview(window):
+    """Select the editor window's graphics backend before its native handle exists."""
+    if sys.platform != 'win32' or not quick_preview_supported():
+        return None
+    # A late first QQuickWidget can replace the visible top-level HWND when
+    # Qt switches it from a raster surface to a Direct3D surface.
+    preview = QuickVideoPreview(window, defer_scene=True)
+    preview.setGeometry(0, 0, 1, 1)
+    preview.hide()
+    return preview

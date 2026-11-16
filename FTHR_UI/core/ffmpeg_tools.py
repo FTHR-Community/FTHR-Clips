@@ -91,7 +91,7 @@ def get_ffmpeg_exe() -> str:
         return _cached_exe
 
     raise FFmpegUnavailable(
-        'No ffmpeg binary found. FTHR Clips ships one next to the capture '
+        'No ffmpeg binary found. FTHRClips ships one next to the capture '
         'engine; if this is a source checkout, run the build script or install '
         'ffmpeg and make sure it is on your PATH. Watermark, webcam '
         'overlay and clip export need it.'
@@ -121,7 +121,7 @@ def get_ffprobe_exe() -> str:
         _cached_probe = found
         return _cached_probe
     raise FFmpegUnavailable(
-        'No ffprobe binary found. FTHR Clips ships one with its reviewed '
+        'No ffprobe binary found. FTHRClips ships one with its reviewed '
         'FFmpeg runtime; imported multi-track clips need it for honest track labels.'
     )
 

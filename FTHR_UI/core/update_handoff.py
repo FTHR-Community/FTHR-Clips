@@ -44,7 +44,7 @@ try {{
     $shell = New-Object -ComObject WScript.Shell
     $null = $shell.Popup(('The update installer could not start. ' + $_.Exception.Message +
         ' Your downloaded installer is still in ' + {_literal(path.parent)}),
-        0, 'FTHR Clips update', 16)
+        0, 'FTHRClips update', 16)
     exit 1
 }}
 """

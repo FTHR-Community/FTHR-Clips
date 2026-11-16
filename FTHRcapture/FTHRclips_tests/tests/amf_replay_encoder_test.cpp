@@ -1345,6 +1345,145 @@ void Nv12HardwarePoolRemainsBoundedWithoutClaimingAmfEncoding() {
     device->Release();
 }
 
+void AmfVideoProcessorScalesShaderResourceOnlyCapture() {
+    using Microsoft::WRL::ComPtr;
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    const HRESULT created = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+        nullptr, 0, D3D11_SDK_VERSION, device.GetAddressOf(), nullptr, context.GetAddressOf());
+    if (FAILED(created)) {
+        std::cout << "AMF resize test skipped: hardware D3D11 video device unavailable\n";
+        return;
+    }
+    ComPtr<ID3D11VideoDevice> video_device;
+    ComPtr<ID3D11VideoContext> video_context;
+    CheckAmf(SUCCEEDED(device.As(&video_device)) && SUCCEEDED(context.As(&video_context)),
+        "resize test obtains the hardware video device and context");
+    LogPoolTestAdapter(device.Get(), "HARDWARE, BGRA video processor resize");
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+    content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    content.InputFrameRate = content.OutputFrameRate = {60, 1};
+    content.InputWidth = 1600;
+    content.InputHeight = 900;
+    content.OutputWidth = 1280;
+    content.OutputHeight = 720;
+    content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+    ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+    UINT format_support = 0;
+    if (FAILED(video_device->CreateVideoProcessorEnumerator(&content, enumerator.GetAddressOf()))
+        || FAILED(enumerator->CheckVideoProcessorFormat(DXGI_FORMAT_B8G8R8A8_UNORM, &format_support))
+        || !(format_support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT)
+        || !(format_support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT)) {
+        std::cout << "AMF resize test skipped: hardware BGRA video processing unavailable\n";
+        return;
+    }
+    ComPtr<ID3D11VideoProcessor> processor;
+    CheckAmf(SUCCEEDED(video_device->CreateVideoProcessor(enumerator.Get(), 0, processor.GetAddressOf())),
+        "resize test creates real video processor");
+    const RECT source_rect{0, 0, static_cast<LONG>(content.InputWidth),
+        static_cast<LONG>(content.InputHeight)};
+    const RECT target_rect{0, 0, static_cast<LONG>(content.OutputWidth),
+        static_cast<LONG>(content.OutputHeight)};
+    video_context->VideoProcessorSetStreamFrameFormat(processor.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+    video_context->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &source_rect);
+    video_context->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &target_rect);
+    video_context->VideoProcessorSetOutputTargetRect(processor.Get(), TRUE, &target_rect);
+    video_context->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
+
+    fthr::detail::AmfVideoProcessorInput input;
+    CheckAmf(SUCCEEDED(input.Initialize(device.Get(), video_device.Get(), enumerator.Get(),
+        content.InputWidth, content.InputHeight)), "real reusable BGRA input view initializes before frame preparation");
+
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = content.InputWidth;
+    description.Height = content.InputHeight;
+    description.MipLevels = 1;
+    description.ArraySize = 2;
+    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_DEFAULT;
+    description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> capture;
+    CheckAmf(SUCCEEDED(device->CreateTexture2D(&description, nullptr, capture.GetAddressOf())),
+        "resize test creates a shader-resource-only source");
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC direct_description{};
+    direct_description.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    const HRESULT direct_result = video_device->CreateVideoProcessorInputView(
+        capture.Get(), enumerator.Get(), &direct_description, nullptr);
+    std::cout << "Shader-resource-only direct video input view check HRESULT=0x"
+              << std::hex << static_cast<uint32_t>(direct_result) << std::dec << '\n';
+
+    D3D11_TEXTURE2D_DESC output_description = description;
+    output_description.Width = content.OutputWidth;
+    output_description.Height = content.OutputHeight;
+    output_description.ArraySize = 1;
+    output_description.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> output;
+    ComPtr<ID3D11VideoProcessorOutputView> output_view;
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC view_description{};
+    view_description.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    CheckAmf(SUCCEEDED(device->CreateTexture2D(&output_description, nullptr, output.GetAddressOf()))
+        && SUCCEEDED(video_device->CreateVideoProcessorOutputView(output.Get(), enumerator.Get(),
+            &view_description, output_view.GetAddressOf())), "resize test creates a 1280x720 output view");
+
+    output_description.BindFlags = 0;
+    output_description.Usage = D3D11_USAGE_STAGING;
+    output_description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> readback;
+    CheckAmf(SUCCEEDED(device->CreateTexture2D(&output_description, nullptr, readback.GetAddressOf())),
+        "resize test creates a readback texture for pixel verification");
+    ComPtr<ID3D11VideoProcessorInputView> first_view;
+    for (UINT slice = 0; slice < description.ArraySize; ++slice) {
+        const uint8_t gray = slice == 0 ? 48 : 192;
+        const uint32_t bgra = 0xff000000 | (gray * 0x00010101u);
+        const std::vector<uint32_t> pixels(description.Width * description.Height, bgra);
+        context->UpdateSubresource(capture.Get(), slice, nullptr, pixels.data(), description.Width * 4, 0);
+
+        ComPtr<ID3D11VideoProcessorInputView> view;
+        CheckAmf(SUCCEEDED(input.Prepare(context.Get(), video_device.Get(), enumerator.Get(), capture.Get(),
+            description, slice, view.GetAddressOf())) && view, "shader-resource-only slice prepares a valid input view");
+        if (!first_view) first_view = view;
+        ComPtr<ID3D11Resource> view_resource;
+        view->GetResource(view_resource.GetAddressOf());
+        CheckAmf(view.Get() == first_view.Get() && view_resource.Get() != capture.Get(),
+            "shader-resource-only frames reuse one intermediate view and texture");
+
+        D3D11_VIDEO_PROCESSOR_STREAM stream{};
+        stream.Enable = TRUE;
+        stream.pInputSurface = view.Get();
+        CheckAmf(SUCCEEDED(video_context->VideoProcessorBlt(processor.Get(), output_view.Get(), 0, 1, &stream)),
+            "hardware video processor scales the copied BGRA frame to 720p");
+        context->CopyResource(readback.Get(), output.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        CheckAmf(SUCCEEDED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped)),
+            "resized pixels can be read back");
+        const auto* pixel = static_cast<const uint8_t*>(mapped.pData)
+            + (output_description.Height / 2) * mapped.RowPitch + (output_description.Width / 2) * 4;
+        CheckAmf(std::abs(int(pixel[0]) - gray) <= 16 && std::abs(int(pixel[1]) - gray) <= 16
+            && std::abs(int(pixel[2]) - gray) <= 16, "scaled pixels match the current source array slice");
+        context->Unmap(readback.Get(), 0);
+    }
+
+    description.ArraySize = 1;
+    description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> compatible;
+    ComPtr<ID3D11VideoProcessorInputView> direct_view;
+    CheckAmf(SUCCEEDED(device->CreateTexture2D(&description, nullptr, compatible.GetAddressOf()))
+        && SUCCEEDED(input.Prepare(context.Get(), video_device.Get(), enumerator.Get(), compatible.Get(),
+            description, 0, direct_view.GetAddressOf())) && direct_view,
+        "compatible BGRA source prepares for resizing");
+    ComPtr<ID3D11Resource> direct_resource;
+    direct_view->GetResource(direct_resource.GetAddressOf());
+    CheckAmf(direct_resource.Get() == compatible.Get(), "compatible BGRA source needs no intermediate GPU copy");
+    input.Reset();
+    direct_view.Reset();
+    CheckAmf(input.Prepare(context.Get(), video_device.Get(), enumerator.Get(), compatible.Get(),
+        description, 0, direct_view.GetAddressOf()) == E_UNEXPECTED && !direct_view,
+        "resize input cannot be reused after reset until reinitialized");
+}
+
 } // namespace
 
 int RunAmfReplayEncoderTests() {
@@ -1379,6 +1518,7 @@ int RunAmfReplayEncoderTests() {
     BoundedSingleTexturePoolWarpFactoryContractAlwaysRuns();
     Nv12PoolValidatesFormatGeometryAndFailureLifetime();
     Nv12HardwarePoolRemainsBoundedWithoutClaimingAmfEncoding();
+    AmfVideoProcessorScalesShaderResourceOnlyCapture();
     std::cout << "FTHRclips AMF tests completed ("
               << amf_checks << " checks)" << std::endl;
     return amf_checks;

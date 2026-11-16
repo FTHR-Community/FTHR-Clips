@@ -48,7 +48,7 @@ def setup_file_logging(*, startup_policy_result=None):
         sys.stdout = _LogTee(sys.stdout, log_file)
         sys.stderr = _LogTee(sys.stderr, log_file)
         from version import __version__
-        print(f'\n===== FTHR Clips {__version__} started '
+        print(f'\n===== FTHRClips {__version__} started '
               f'{datetime.now():%Y-%m-%d %H:%M:%S} ({sys.platform}) =====')
         from core import diagnostics
         diagnostics.configure(log_file=log_file)

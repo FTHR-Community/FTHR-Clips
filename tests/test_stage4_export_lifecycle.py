@@ -5,8 +5,9 @@ from pathlib import Path
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 
-from core.export_lifecycle import ExportJob, ExportState
+from core.export_lifecycle import ExportJob, ExportResult, ExportState
 from ui.clip_viewer import ClipViewer
 
 
@@ -151,6 +152,16 @@ def test_export_job_preserves_bounded_stderr_on_nonzero_exit(tmp_path):
     assert result.state is ExportState.FAILED
     assert result.returncode == 7
     assert len(result.stderr_tail) <= 256
+
+
+def test_export_failure_message_keeps_ffmpeg_stderr_for_a_nonzero_exit():
+    result = ExportResult(
+        ExportState.FAILED, 'FFmpeg exited with code 7', 7,
+        'Opening encoder\nDevice unavailable\n\n')
+
+    assert result.failure_message() == 'FFmpeg exited with code 7\nDevice unavailable'
+    assert result.failure_message(full_stderr=True) == (
+        'FFmpeg exited with code 7\nOpening encoder\nDevice unavailable')
 
 
 def test_export_job_cancel_before_launch_is_terminal(tmp_path):
@@ -374,7 +385,7 @@ def test_export_job_validation_cancellation_cleans_staged(tmp_path):
     staged = tmp_path / 'job.partial.mp4'
     final = tmp_path / 'job.mp4'
     staged.write_bytes(b'valid')
-    process = _FakeProcess()
+    process = _FakeProcess(stderr='Encoded one frame\n')
     cancel = threading.Event()
 
     def validate(_path, cancel_event):
@@ -389,6 +400,7 @@ def test_export_job_validation_cancellation_cleans_staged(tmp_path):
 
     assert result.state is ExportState.CANCELLED
     assert result.detail == 'Export cancelled'
+    assert result.failure_message() == 'Export cancelled'
     assert not staged.exists()
     assert not final.exists()
 
@@ -413,6 +425,35 @@ def test_editor_worker_preparation_exception_is_terminal(monkeypatch):
     ClipViewer._export_worker(viewer, 0.0, 1.0, 'clip.mp4', None)
 
     assert emitted == [(False, 'RuntimeError: command preparation failed')]
+
+
+def test_editor_worker_reports_validation_error_after_successful_encode(
+        monkeypatch, tmp_path):
+    emitted, events = [], []
+    viewer = SimpleNamespace(
+        _build_export_cmd=lambda **kwargs: ['ffmpeg', kwargs['out_path']],
+        _export_done=SimpleNamespace(emit=lambda *args: emitted.append(args)),
+    )
+    result = ExportResult(
+        ExportState.FAILED, 'Exported audio could not be decoded', 0,
+        'Encoded one frame')
+    monkeypatch.setattr('ui.clip_viewer.get_ffmpeg_exe', lambda: 'ffmpeg')
+    monkeypatch.setattr('ui.clip_viewer.maximum_quality_video_args', lambda _ffmpeg: [])
+    monkeypatch.setattr(
+        'ui.clip_viewer.ExportJob',
+        lambda *_args, **_kwargs: SimpleNamespace(run=lambda **_kwargs: result))
+    monkeypatch.setattr('ui.clip_viewer.emit_event',
+                        lambda *args, **kwargs: events.append((args, kwargs)))
+    out = tmp_path / 'out.mp4'
+
+    ClipViewer._export_worker_impl(viewer, 0.0, 1.0, str(out), None)
+
+    assert emitted == [(False, 'Exported audio could not be decoded')]
+    terminal = next(fields for args, fields in events if args == ('export', 'terminal'))
+    assert terminal['state'] == 'FAILED'
+    assert terminal['exit_code'] == 0
+    assert terminal['detail'] == 'Exported audio could not be decoded'
+    assert terminal['stderr_tail'] == 'Encoded one frame'
 
 
 def test_export_job_supports_sequential_jobs(tmp_path):

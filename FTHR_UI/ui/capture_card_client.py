@@ -5,6 +5,7 @@ main-process finalization and library scans.
 """
 
 import math
+import json
 import os
 import sys
 import subprocess
@@ -44,6 +45,8 @@ class CaptureCardClient:
     def _launch(self):
         try:
             env = dict(os.environ)
+            from core.theme_manager import ThemeManager
+            env['FTHR_CARD_APPEARANCE'] = json.dumps(ThemeManager().runtime_appearance_snapshot())
             # Popen's encoding controls the parent pipe only. The detached
             # Python child otherwise decodes redirected stdin with the Windows
             # locale (e.g. cp1252), corrupting names such as KovaaK’s.

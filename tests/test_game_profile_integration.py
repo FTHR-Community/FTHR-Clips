@@ -512,7 +512,8 @@ def test_failed_backend_restarts_identical_accepted_settings(monkeypatch, flags)
     monkeypatch.setattr(main.QTimer, 'singleShot',
                         lambda delay, callback: callbacks.append((delay, callback)))
     original_status = bridge.get_status
-    bridge.get_status = lambda: dict(original_status(), capture_health_flags=flags)
+    bridge.get_status = lambda: dict(original_status(), capture_health_flags=flags,
+                                     is_recording=False)
     host._prepare_next_capture_request = lambda _purpose: request
     host._capture_pending_text = lambda: 'RECOVERING CAPTURE'
     host._owns_engine_attempt = partial(main.MainWindow._owns_engine_attempt, host)

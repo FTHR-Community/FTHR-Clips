@@ -1,19 +1,20 @@
 {
   "component": "FFmpeg",
-  "version": "n8.1.2-21-gce3c09c101",
+  "version": "n8.1.3-35-gf1acb0a266",
   "release_branch": "8.1",
-  "build_date": "2026-06-30",
+  "build_date": "2026-11-16",
   "license": "LGPL v3 or later",
   "source": {
-    "project": "BtbN/FFmpeg-Builds",
-    "release_tag": "autobuild-2026-06-30-13-34",
-    "asset": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1.zip",
-    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1.zip",
-    "sha256": "27bcaf58b5140171dfe838a0b365d12c60607d71fc168424456410bad6a834da"
+    "project": "FFmpeg-Builds/FFmpeg-Builds",
+    "release_tag": "autobuild-2026-11-16-15-29",
+    "asset": "ffmpeg-n8.1.3-35-gf1acb0a266-win64-lgpl-shared-8.1.zip",
+    "url": "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-16-15-29/ffmpeg-n8.1.3-35-gf1acb0a266-win64-lgpl-shared-8.1.zip",
+    "sha256": "dd923de0811e9a26f13142e22f30a9e555454e0dd0561785bcca23b8809a58a0",
+    "size_bytes": 80289577
   },
   "platform": "win64",
   "arch": "x86_64",
-  "retrieved": "2026-08-05",
+  "retrieved": "2026-11-16",
   "forbidden_flags_absent": [
     "--enable-gpl",
     "--enable-nonfree",
@@ -32,15 +33,15 @@
     "av1": "libsvtav1 / libaom-av1 / librav1e (BSD)"
   },
   "shipped_files_sha256": {
-    "avcodec-62.dll": "cb6a577e64c1c52877bd831c266eb276578de1d88413174b5c888846608de5d0",
-    "avdevice-62.dll": "353c3b75419d4da8e44fe463a0fe73fc1d19663c604619b9886183baaad2731a",
-    "avfilter-11.dll": "e62a6cc728ed461f09cb1f4878e3fef0e497dbd524079a4dd44828479b90ab20",
-    "avformat-62.dll": "4a85e712c6ecfa1dba40b1eed97cf7d7aa231270de09ad0a5ff6ad6a504e21a6",
-    "avutil-60.dll": "14799bb047d9db1338cadc53e7ffec56f3fbd506ae02c1286ca972fe94ce6566",
-    "ffmpeg.exe": "abe4f6dc7ca6d807c9492e56f96db9030d7c5faba942254aa00d4474042048d4",
-    "ffplay.exe": "435edb5419d86879b5f368299ac9c85bfd573ae3e0cc2a7edc002f08b7f1b9ae",
-    "ffprobe.exe": "f1b2041be46d1d2e1e2f77f950de6fe624cdf65b692c04f880b6ce81e99e03a1",
-    "swresample-6.dll": "b920b9173f3d25917c8fe15b4127b068b037456d24a1560df22080df434720d3",
-    "swscale-9.dll": "e128459c6aa1b0165d7c6eca51b45612051c20619cd8eb6e1cfa1e497206b53b"
+    "avcodec-62.dll": "60060219f755de8561409a529ce53b21a2c72fc3d4621b366d49b9254ed0df6b",
+    "avdevice-62.dll": "5113558a660c117b6b1faa14e3015e64519c5a3cb9287354315d0be5fccc2593",
+    "avfilter-11.dll": "75f683492b5866f39152297cb61839d7f032962d7fa63c4e77858947f91e1bb1",
+    "avformat-62.dll": "196977f74012df70ea6c638f199ecc7504a683bd755af322aebe463b18e9b9c5",
+    "avutil-60.dll": "22c964bca3b239e463f0d156bc3786c145463073f27f72d762ab55981cedab47",
+    "ffmpeg.exe": "3f5de55652794e6da0be877d2c7e6076298e9ddcac62c9daf0070d3ba2ad94f2",
+    "ffplay.exe": "1777d3fb8029c87e6d018b015debf35670ed40b7ea1b38acef8367ce160eae80",
+    "ffprobe.exe": "7110bfac57e0b5808ce3876a5dc4fa89df3f305f4d00c6ca45454766eabe46e8",
+    "swresample-6.dll": "00422269c0f0a58fb24da0aa11e5a85dfacf1ee2e29631c7d3f3f380f746651e",
+    "swscale-9.dll": "2a05374b410bb1ec39d2f827455df6b24ce65e09f1de49078c6e827125c6de06"
   }
 }

@@ -50,9 +50,9 @@ media and the separately licensed Oswald font are documented under
 
 | | |
 |---|---|
-| **Version** | `n8.1.2-21-gce3c09c101` (release branch 8.1, build dated 2026-06-30) |
-| **Source** | [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), release `autobuild-2026-06-30-13-34`, asset `ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-shared-8.1.zip` |
-| **SHA-256 (zip)** | `27bcaf58b5140171…` — full value recorded in [`tools/ffmpeg_manifest.json`](tools/ffmpeg_manifest.json) |
+| **Version** | `n8.1.3-35-gf1acb0a266` (release branch 8.1, build dated 2026-11-16) |
+| **Source** | [FFmpeg-Builds/FFmpeg-Builds](https://github.com/FFmpeg-Builds/FFmpeg-Builds), release `autobuild-2026-11-16-15-29`, asset `ffmpeg-n8.1.3-35-gf1acb0a266-win64-lgpl-shared-8.1.zip` |
+| **SHA-256 (zip)** | `dd923de0811e9a26…` — full value recorded in [`tools/ffmpeg_manifest.json`](tools/ffmpeg_manifest.json) |
 | **Licence** | **LGPL v3 or later** — self-reported by the binary as `libavcodec license: LGPL version 3 or later` |
 | **Linkage** | Dynamic. The C++ engine links the import libraries; the DLLs ship beside it. The Python UI shells out to `ffmpeg.exe`. |
 | **Used for** | Video/audio encoding and muxing in the capture engine; mic mux, multiband audio mix, watermark, webcam overlay, clip export/share in the UI. |

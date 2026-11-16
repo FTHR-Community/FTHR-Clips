@@ -130,7 +130,7 @@ def test_context_cannot_unregister_another_plugin_effect():
 def test_cached_discovery_resnapshots_effect_when_clip_reopens(monkeypatch, effect):
     from core import ffmpeg_playback as playback
     from core.playback_mix_model import ProbedAudioStream
-    identity = object()
+    identity = (object(), None, 'fake.wav')
     probes = []
     monkeypatch.setattr(playback, '_source_identity', lambda path: identity)
     monkeypatch.setattr(playback, 'probe_audio_streams', lambda path: probes.append(path) or [

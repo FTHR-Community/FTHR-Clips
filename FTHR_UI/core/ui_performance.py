@@ -2,6 +2,10 @@
 
 # Impact is an estimate of avoidable UI work, not a benchmark percentage.
 UI_OPTIONS = (
+    ('editor_fast_open_enabled', False, 'Faster editor opening', 'High',
+     'On: prepare one visible or hovered clip in advance and keep its video '
+     'player ready. Uses extra memory and background processing. Preparation '
+     'pauses outside the library, in the background, and during manual recordings or clip saves.'),
     ('clip_editor_enabled', True, 'Full clip editor', 'Very high',
      'Off: open clips in a simple video player with playback and volume controls, '
      'without the editing tools. Clips already open in the editor stay as they are.'),

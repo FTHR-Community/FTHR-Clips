@@ -113,6 +113,12 @@ msbuild FTHRcapture\FTHRcapture.sln `
 
 Output: `FTHRcapture\x64\Release\FTHRclips.exe`.
 
+If a running development app holds the default output DLLs open, build the
+solution with an explicit absolute `/p:OutDir=...` directory. Set
+`FTHR_NATIVE_BUILD_DIR` to that same directory before running PyInstaller or
+the installer build entrypoint. The spec requires both `FTHRclips.exe` and
+`FTHRPlaybackMixer.dll` there and packages them together.
+
 > The engine links against the FFmpeg DLLs in
 > `FTHRclips\third_party\ffmpeg\bin\`. A post-build step copies them next to the
 > exe. If you run the exe before rebuilding, copy `*.dll` from that folder into
@@ -184,7 +190,7 @@ python tools/build_windows_installer.py
 
 It verifies the Microsoft VC++ redistributable, the bundle licence manifest,
 and the Windows lifecycle contract before invoking Inno Setup. Output:
-`Output\FTHRClips-Setup-2.0.0-alpha-x64.exe` for the current version.
+`Output\FTHRClips-Setup-2.1.2-x64.exe` for the current version.
 
 The frameless, app-style setup starts with a required Privacy Policy checkbox
 linking to `https://policies.fthrclips.com`, then presents the application and

@@ -401,6 +401,35 @@ void AutomaticBudgetUsesCaptureRequirements() {
     RemoveReplayTestDirectory(folder);
 }
 
+void AutomaticDurationAdaptsWithoutRelaxingAdmission() {
+    using namespace fthr;
+    ReplayStorageConfig config;
+    config.mode = ReplayStorageMode::Memory;
+    config.automatic_budget = true;
+    const uint32_t requested = 47;
+    for (const uint64_t ceiling : {221 * kMiB, 369 * kMiB}) {
+        const auto effective = EffectiveAutomaticReplaySeconds(config, ceiling, requested, 60, 25000, 2);
+        Check(effective >= 5 && effective < requested);
+        Check(RequiredCaptureReplayMemory(config, ceiling, effective, 60, 25000, 2) <= ceiling);
+        Check(RequiredCaptureReplayMemory(config, ceiling, effective + 1, 60, 25000, 2) > ceiling);
+        std::string error;
+        auto storage = CreateCaptureReplayStorage(config, ceiling, effective, 60, 25000, 2, error);
+        Check(storage && error.empty());
+        Check(storage->memory_budget()->total_limit() <= ceiling);
+        Check(!storage->memory_budget()->TryAcquire(ReplayMemoryUse::Ring, ceiling + 1));
+    }
+    Check(EffectiveAutomaticReplaySeconds(config, 8192 * kMiB, requested, 60, 25000, 2) == requested);
+    Check(EffectiveAutomaticReplaySeconds(config, 32 * kMiB, requested, 60, 25000, 2) == requested);
+    config.allow_low_resources = true;
+    Check(EffectiveAutomaticReplaySeconds(config, 221 * kMiB, requested, 60, 25000, 2) == requested);
+    config.allow_low_resources = false;
+    config.automatic_budget = false;
+    Check(EffectiveAutomaticReplaySeconds(config, 221 * kMiB, requested, 60, 25000, 2) == requested);
+    config.automatic_budget = true;
+    config.mode = ReplayStorageMode::Disk;
+    Check(EffectiveAutomaticReplaySeconds(config, 221 * kMiB, requested, 60, 25000, 2) == requested);
+}
+
 void LowResourceAdmissionStaysBounded() {
     using namespace fthr;
     Check(ReplayAvailableMemoryBudget(1024 * kMiB) == 768 * kMiB);
@@ -595,6 +624,7 @@ int RunReplayMemoryBudgetTests() {
     static_assert(!std::is_copy_constructible<fthr::EncodedRingSnapshot>::value,
                   "A copied snapshot must never reuse the original memory admission");
     AdmissionPreservesRequestedSettings();
+    AutomaticDurationAdaptsWithoutRelaxingAdmission();
     LowResourceAdmissionStaysBounded();
     ReservationsAreAtomicAndProtectCapture();
     SavesRetainAdmissionUntilPayloadIsReleased();

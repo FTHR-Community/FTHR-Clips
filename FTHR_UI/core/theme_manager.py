@@ -371,13 +371,35 @@ class ThemeManager:
     def get_color(self, token: str) -> str:
         # The '#ff00ff' fallback is deliberate: if you ever see screaming magenta
         # in the UI, it means a token name got typo'd somewhere. Loud on purpose.
-        return self._data['colors'].get(token, DEFAULT_COLORS.get(token, '#ff00ff'))
+        return self.get_all_colors().get(token, DEFAULT_COLORS.get(token, '#ff00ff'))
+
+    def set_runtime_appearance(self, owner, appearance: dict) -> None:
+        """Install a reversible plugin overlay; never write it into theme.json."""
+        current = getattr(self, '_runtime_appearance_owner', None)
+        if current is not None and current is not owner:
+            raise RuntimeError('Another appearance plugin is already active.')
+        from copy import deepcopy
+        self._runtime_appearance = deepcopy(appearance)
+        self._runtime_appearance_owner = owner
+
+    def clear_runtime_appearance(self, owner) -> None:
+        if getattr(self, '_runtime_appearance_owner', None) is owner:
+            self._runtime_appearance = {}
+            self._runtime_appearance_owner = None
+
+    def _runtime_values(self, group):
+        return getattr(self, '_runtime_appearance', {}).get(group, {})
+
+    def runtime_appearance_snapshot(self):
+        """JSON-compatible values for the detached notification process."""
+        from copy import deepcopy
+        return deepcopy(getattr(self, '_runtime_appearance', {}))
 
     def set_color(self, token: str, hex_value: str):
         self._data['colors'][token] = hex_value
 
     def get_all_colors(self) -> dict[str, str]:
-        return dict(self._data['colors'])
+        return {**self._data['colors'], **self._runtime_values('colors')}
 
     def reset_color(self, token: str):
         if token in DEFAULT_COLORS:
@@ -418,6 +440,9 @@ class ThemeManager:
     # Sound access
 
     def get_custom_sound_path(self, key: str) -> Optional[Path]:
+        override = self._runtime_values('sound_paths').get(key)
+        if override and Path(override).is_file():
+            return Path(override)
         rel = self._data['sounds'].get(key)
         if rel:
             full = self._sounds_dir / rel
@@ -469,15 +494,15 @@ class ThemeManager:
     # Capture card color access
 
     def get_capture_card_color(self, key: str) -> str:
-        return self._data.get('capture_card', {}).get(
-            key, DEFAULT_CAPTURE_CARD_COLORS.get(key, '#ffffff'))
+        return self.get_all_capture_card_colors().get(key, '#ffffff')
 
     def set_capture_card_color(self, key: str, hex_color: str):
         self._data.setdefault('capture_card', dict(DEFAULT_CAPTURE_CARD_COLORS))
         self._data['capture_card'][key] = hex_color
 
     def get_all_capture_card_colors(self) -> dict[str, str]:
-        return {**DEFAULT_CAPTURE_CARD_COLORS, **self._data.get('capture_card', {})}
+        return {**DEFAULT_CAPTURE_CARD_COLORS, **self._data.get('capture_card', {}),
+                **self._runtime_values('capture_card')}
 
     def reset_capture_card_colors(self):
         self._data['capture_card'] = dict(DEFAULT_CAPTURE_CARD_COLORS)
@@ -485,11 +510,10 @@ class ThemeManager:
     # Typography access
 
     def get_font(self, role: str) -> str:
-        return str(self._data.get('fonts', {}).get(
-            role, DEFAULT_FONTS.get(role, '')))
+        return str(self.get_fonts().get(role, ''))
 
     def get_fonts(self) -> dict[str, str]:
-        return {**DEFAULT_FONTS, **self._data.get('fonts', {})}
+        return {**DEFAULT_FONTS, **self._data.get('fonts', {}), **self._runtime_values('fonts')}
 
     def set_font(self, role: str, family: str) -> None:
         if role not in DEFAULT_FONTS:
@@ -523,6 +547,9 @@ class ThemeManager:
             path = self._fonts_dir / Path(str(rel_name)).name
             if path.is_file():
                 result[str(family)] = path
+        for family, filename in self._runtime_values('font_paths').items():
+            if Path(filename).is_file():
+                result[family] = Path(filename)
         return result
 
     # Export / Import

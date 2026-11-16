@@ -111,6 +111,14 @@ def editor_shell(qtbot, monkeypatch, tmp_path):
     root.settings_gear_btn.clicked.connect(lambda: root._set_main_page(1))
     root.trash_sidebar_btn.clicked.connect(lambda: root._set_main_page(2))
     root.show()
+    def wait_for_editor_page():
+        qtbot.waitUntil(lambda: root._active_clip_viewer is not None
+                       and root._active_clip_viewer.clip_page is not None
+                       and not root._active_clip_viewer.clip_pending)
+        # Media is deliberately stubbed above. Navigation tests begin after
+        # loading; loading-state behavior has its own real readiness tests.
+        root._active_clip_viewer._remove_poster()
+    root.wait_for_editor_page = wait_for_editor_page
     yield root
     root._shutdown_requested = True
     if root._active_clip_viewer is not None:
@@ -121,6 +129,8 @@ def editor_shell(qtbot, monkeypatch, tmp_path):
 
 def _open(root, index=0):
     root._on_clip_opened(root.paths[index], QPixmap(), QRect())
+    if root._active_clip_viewer is not None:
+        root.wait_for_editor_page()
     return root._active_clip_viewer
 
 

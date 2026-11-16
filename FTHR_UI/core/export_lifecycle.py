@@ -73,6 +73,18 @@ class ExportResult:
     def succeeded(self) -> bool:
         return self.state is ExportState.COMPLETED
 
+    def failure_message(self, *, full_stderr: bool = False) -> str:
+        if self.succeeded:
+            return ''
+        detail = self.detail or 'Export failed'
+        if self.state is not ExportState.FAILED or not self.returncode:
+            return detail
+
+        stderr = self.stderr_tail.strip()
+        if stderr and not full_stderr:
+            stderr = stderr.splitlines()[-1].strip()
+        return f'{detail}\n{stderr}' if stderr else detail
+
 
 class ExportJob:
     """Run an export, validate its staged output, then publish the final path.
@@ -354,6 +366,7 @@ class ExportJob:
     def run(self, *, duration: float | None = None) -> ExportResult:
         started = self._clock()
         process = None
+        returncode = None
         readers: list[threading.Thread] = []
         reader_streams = []
         try:
@@ -474,7 +487,7 @@ class ExportJob:
             self._discard_staged()
             self._discard_new_final()
             return ExportResult(
-                ExportState.FAILED, str(error), None, self._stderr_tail(),
+                ExportState.FAILED, str(error), returncode, self._stderr_tail(),
                 max(0.0, self._clock() - started))
         finally:
             # Every return path, including cancellation and timeout, must

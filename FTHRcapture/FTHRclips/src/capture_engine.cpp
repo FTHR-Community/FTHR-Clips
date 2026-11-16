@@ -843,6 +843,7 @@ namespace fthr {
         allow_replay_gaps_ = config.allow_replay_gaps;
         allow_low_fps_clips_ = config.allow_low_fps_clips;
         buffer_seconds_ = config.buffer_seconds;
+        replay_duration_adapted_ = false;
         capture_mode_ = config.capture_mode;
         capture_cursor_ = config.capture_cursor;
         configured_target_width_ = config.target_width;
@@ -1161,6 +1162,21 @@ namespace fthr {
             std::string error;
             const uint64_t memory_ceiling_bytes = replay_config.automatic_budget
                 ? ReplayAvailableMemoryBudget(available_bytes) : memory_plan.total_bytes;
+            const uint32_t requested_seconds = buffer_seconds_;
+            buffer_seconds_ = EffectiveAutomaticReplaySeconds(replay_config, memory_ceiling_bytes,
+                requested_seconds, fps_, bitrate_kbps_, audio_tracks);
+            if (buffer_seconds_ != requested_seconds) {
+                replay_duration_adapted_ = true;
+                std::cout << "FTHR_STARTUP_WARNING: REPLAY_DURATION_REDUCED: "
+                          << "Replay history temporarily reduced from " << requested_seconds
+                          << "s to " << buffer_seconds_
+                          << "s to fit available memory. Recording quality and saved preferences are unchanged."
+                          << std::endl;
+                std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"replay_memory\","
+                          << "\"event\":\"duration_adapted\",\"requested_seconds\":" << requested_seconds
+                          << ",\"effective_seconds\":" << buffer_seconds_
+                          << ",\"memory_ceiling_bytes\":" << memory_ceiling_bytes << '}' << std::endl;
+            }
             replay_storage_ = CreateCaptureReplayStorage(replay_config, memory_ceiling_bytes,
                 buffer_seconds_, fps_, bitrate_kbps_, audio_tracks, error);
             if (!replay_storage_)
@@ -1762,6 +1778,10 @@ namespace fthr {
                 && !application_audio_source_manager_) {
             std::cout << "[CaptureEngine] Running in video-only mode." << std::endl;
         }
+
+        std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"replay_memory\","
+                  << "\"event\":\"duration_confirmed\",\"requested_seconds\":" << config.buffer_seconds
+                  << ",\"effective_seconds\":" << buffer_seconds_ << '}' << std::endl;
 
         std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\","
                   << "\"event\":\"adapter_topology_resolved\","
@@ -3026,6 +3046,15 @@ namespace fthr {
 
     bool CaptureEngine::SaveClip(const wchar_t* path, uint32_t duration_seconds,
         SharedMemoryLayout* shared_memory) try {
+
+        // Ring capacity includes decoder pre-roll; it must not become visible
+        // history beyond the matching audio retention after RAM adaptation.
+        if (replay_duration_adapted_ && duration_seconds > buffer_seconds_) {
+            std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
+                      << "\"event\":\"duration_limited_to_replay\",\"requested_seconds\":" << duration_seconds
+                      << ",\"effective_seconds\":" << buffer_seconds_ << '}' << std::endl;
+            duration_seconds = buffer_seconds_;
+        }
 
         const auto save_request_started = std::chrono::steady_clock::now();
         // Allocate the request identity before any readiness gate so a rejected
@@ -7417,6 +7446,8 @@ namespace fthr {
         }
         uint32_t consecutive_frame_errors = 0;
         CaptureFocusPolicy focus_policy;
+        WgcMonitorGeometry monitor_geometry(
+            static_cast<int32_t>(width_), static_cast<int32_t>(height_));
         LARGE_INTEGER focus_frequency{};
         QueryPerformanceFrequency(&focus_frequency);
         int64_t foreground_since_100ns = 0;
@@ -7687,7 +7718,7 @@ namespace fthr {
                 }
                 const bool window_paused = window_state == wgc::WindowState::Paused;
                 const bool source_paused = focus.paused || window_paused;
-                if (replay_pause_clock_) {
+                if (replay_pause_clock_ && !wgc_state_->monitor_item) {
                     replay_pause_clock_->Observe(source_paused, raw_focus_time);
                 }
                 // Keep this raw boundary independent of compact replay time so
@@ -7734,6 +7765,7 @@ namespace fthr {
                     capture_health_flags_.fetch_and(~CAPTURE_HEALTH_PAUSED);
                 }
                 bool new_image = false;
+                std::optional<winrt::Windows::Graphics::SizeInt32> monitor_frame_size;
                 uint32_t requested_pool_width = 0;
                 uint32_t requested_pool_height = 0;
                 // Drain both slots at each tick. Notifications can coalesce;
@@ -7751,34 +7783,10 @@ namespace fthr {
                             < foreground_since_100ns) continue;
                     current_frame_api = "Direct3D11CaptureFrame::ContentSize";
                     const auto content_size = frame.ContentSize();
-                    if (wgc_state_->monitor_item
-                        && (content_size.Width != static_cast<int32_t>(width_)
-                            || content_size.Height != static_cast<int32_t>(height_))) {
-                        const char* source_kind = wgc_state_->monitor_item
-                            ? "monitor" : "window";
-                        std::cerr << "[CaptureThread/WGC] capture " << source_kind
-                                  << " dimensions changed from " << width_ << "x"
-                                  << height_ << " to " << content_size.Width << "x"
-                                  << content_size.Height << std::endl;
-                        std::cout << "FTHR_DIAGNOSTIC_EVENT {"
-                                  << "\"subsystem\":\"capture\","
-                                  << "\"event\":\"runtime_failed\","
-                                  << "\"state\":\"FAILED\","
-                                  << "\"error_code\":\"CAPTURE_WGC_RUNTIME_FAILED\","
-                                  << "\"api_call\":\"Direct3D11CaptureFrame::ContentSize\","
-                                  << "\"source_kind\":\"" << source_kind << "\","
-                                  << "\"expected_width\":" << width_ << ','
-                                  << "\"expected_height\":" << height_ << ','
-                                  << "\"actual_width\":" << content_size.Width << ','
-                                  << "\"actual_height\":" << content_size.Height << "}"
-                                  << std::endl;
-                        SetCaptureFailure(std::string("WGC ") + source_kind
-                            + " dimensions changed; a fresh capture generation is required");
-                        capture_health_flags_.store(WgcSizeMismatchHealthFlags(
-                            wgc_state_->monitor_item));
-                        ClearReplayForRecovery();
-                        running_.store(false);
-                        break;
+                    if (wgc_state_->monitor_item) {
+                        monitor_frame_size = content_size;
+                        if (!monitor_geometry.Matches(content_size.Width, content_size.Height))
+                            continue;
                     }
                     if (!wgc_state_->monitor_item) {
                         if (content_size.Width <= 0 || content_size.Height <= 0) {
@@ -7939,7 +7947,60 @@ namespace fthr {
                     if (result == PoolRecreateResult::Fatal) break;
                     continue;
                 }
-                if (source_paused) continue;
+                if (source_paused) {
+                    if (wgc_state_->monitor_item) {
+                        monitor_geometry.Reset();
+                        capture_health_flags_.fetch_and(~CAPTURE_HEALTH_RECOVERING);
+                        if (replay_pause_clock_)
+                            replay_pause_clock_->Observe(true, raw_focus_time);
+                    }
+                    continue;
+                }
+                if (wgc_state_->monitor_item) {
+                    current_frame_api = "GraphicsCaptureItem::Size(monitor)";
+                    const auto item_size = wgc_state_->item.Size();
+                    // Either source can lead the display transition. Require
+                    // both to agree before accepting a matching fresh frame.
+                    const auto observed = monitor_geometry.Matches(
+                        item_size.Width, item_size.Height) && monitor_frame_size
+                        ? *monitor_frame_size : item_size;
+                    const auto geometry = monitor_geometry.Observe(
+                        observed.Width, observed.Height, new_image, tick_now);
+                    if (replay_pause_clock_)
+                        replay_pause_clock_->Observe(
+                            geometry == WgcMonitorGeometryAction::Wait
+                                || geometry == WgcMonitorGeometryAction::Reconfigure,
+                            raw_focus_time);
+                    if (geometry == WgcMonitorGeometryAction::Wait) {
+                        capture_health_flags_.fetch_or(CAPTURE_HEALTH_RECOVERING);
+                        latest_texture = nullptr;
+                        readback_queue.Reset();
+                        converted_image_valid = false;
+                        continue;
+                    }
+                    if (geometry == WgcMonitorGeometryAction::Reconfigure) {
+                        SetCaptureFailure(
+                            "WGC monitor geometry requires a fresh capture generation.");
+                        capture_health_flags_.store(WgcSizeMismatchHealthFlags(true));
+                        ClearReplayForRecovery();
+                        std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\","
+                                  << "\"event\":\"wgc_monitor_reconfiguration_required\","
+                                  << "\"state\":\"RECOVERING\","
+                                  << "\"expected_width\":" << width_ << ','
+                                  << "\"expected_height\":" << height_ << ','
+                                  << "\"actual_width\":" << observed.Width << ','
+                                  << "\"actual_height\":" << observed.Height << '}'
+                                  << std::endl;
+                        running_.store(false);
+                        break;
+                    }
+                    if (geometry == WgcMonitorGeometryAction::Resume) {
+                        // Matching geometry keeps the encoder and any active
+                        // recording on the same generation.
+                        if (replay_encoder_) replay_encoder_->RequestKeyframe();
+                        capture_health_flags_.fetch_and(~CAPTURE_HEALTH_RECOVERING);
+                    }
+                }
                 if (window_restore_pending && !new_image) {
                     capture_health_flags_.fetch_or(CAPTURE_HEALTH_PAUSED);
                     continue;
@@ -7986,26 +8047,7 @@ namespace fthr {
                     continue;
                 }
 
-                if (wgc_state_->monitor_item) {
-                    // Preserve existing monitor topology semantics. Window
-                    // capture never polls GraphicsCaptureItem::Size here;
-                    // Win32 client dimensions are only a change signal.
-                    current_frame_api =
-                        "GraphicsCaptureItem::Size(monitor post-frame poll)";
-                    const auto post_live_size = wgc_state_->item.Size();
-                    if (post_live_size.Width != static_cast<int32_t>(width_)
-                        || post_live_size.Height != static_cast<int32_t>(height_)) {
-                        std::cerr << "[CaptureThread/WGC] source size changed from "
-                                  << width_ << "x" << height_ << " to "
-                                  << post_live_size.Width << "x" << post_live_size.Height
-                                  << std::endl;
-                        SetCaptureFailure("WGC source dimensions changed; restart required");
-                        capture_health_flags_.store(WgcSizeMismatchHealthFlags(true));
-                        ClearReplayForRecovery();
-                        running_.store(false);
-                        break;
-                    }
-                } else {
+                if (!wgc_state_->monitor_item) {
                     const HWND hwnd = reinterpret_cast<HWND>(target_hwnd_);
                     RECT client{};
                     const bool has_client_area = GetClientRect(hwnd, &client)
@@ -8260,22 +8302,29 @@ namespace fthr {
                 consecutive_frame_errors = 0;
 
             } catch (winrt::hresult_error const& e) {
+                const HRESULT hr = e.code().value;
+                const bool reconfigure = hr == DXGI_ERROR_DEVICE_REMOVED
+                    || hr == DXGI_ERROR_DEVICE_RESET
+                    || hr == DXGI_ERROR_ACCESS_LOST;
                 std::cerr << "[CaptureThread/WGC] Frame error: 0x"
-                          << std::hex << e.code().value << std::dec << std::endl;
-                if (++consecutive_frame_errors >= 30) {
-                    std::cerr << "[CaptureThread/WGC] Too many consecutive frame errors"
-                              << std::endl;
+                          << std::hex << hr << std::dec << std::endl;
+                if (++consecutive_frame_errors >= 30 || reconfigure) {
+                    SetCaptureFailure(diagnostics::FormatHResultFailure(current_frame_api, hr));
                     std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\","
                               << "\"event\":\"runtime_failed\","
                               << "\"state\":\"FAILED\","
                               << "\"error_code\":\"CAPTURE_WGC_RUNTIME_FAILED\","
                               << "\"native_failure\":"
                               << diagnostics::HResultFailureJson(
-                                     current_frame_api, e.code().value)
+                                     current_frame_api, hr)
+                              << ",\"reconfigure_required\":"
+                              << (reconfigure ? "true" : "false")
                               << ",\"consecutive_failures\":"
                               << consecutive_frame_errors << "}"
                               << std::endl;
-                    capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED);
+                    capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED
+                        | (reconfigure ? CAPTURE_HEALTH_RECONFIGURE_REQUIRED : 0u));
+                    ClearReplayForRecovery();
                     running_.store(false);
                 }
             }

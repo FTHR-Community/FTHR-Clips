@@ -9,7 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize('spec_name', ['FTHR.spec'])
+@pytest.mark.parametrize('spec_name', ['FTHR.spec', 'FTHR_linux.spec'])
 def test_shared_video_ui_is_not_excluded_from_packaging(spec_name):
     tree = ast.parse((ROOT / spec_name).read_text(encoding='utf-8'))
     analysis = next(
@@ -60,7 +60,7 @@ def test_shared_interface_assets_have_linux_package_paths():
 
 
 @pytest.mark.parametrize('spec_name, platform', [
-    ('FTHR.spec', 'windows'),
+    ('FTHR.spec', 'windows'), ('FTHR_linux.spec', 'linux'),
 ])
 def test_runtime_filter_preserves_app_qml_and_only_reviewed_qt_modules(spec_name, platform):
     tree = ast.parse((ROOT / spec_name).read_text(encoding='utf-8'))

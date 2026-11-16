@@ -49,32 +49,42 @@ def hdr_color_from_stream(stream):
 
 def probe_hdr(source, cancelled=None):
     """Bounded identity-keyed metadata probe, called only by background jobs."""
+    return inspect_hdr(source, cancelled)[1]
+
+
+def inspect_hdr(source, cancelled=None) -> tuple[bool, HdrColor | None]:
+    """Report whether HDR inspection completed along with any detected color."""
     cancelled = cancelled or threading.Event()
+    if cancelled.is_set():
+        return False, None
     try:
         identity = file_identity(source)
         with _lock:
             if identity in _cache:
                 _cache.move_to_end(identity)
-                return _cache[identity]
+                return True, _cache[identity]
         result = run_media_process(
             [get_ffprobe_exe(), '-v', 'error', '-select_streams', 'v:0',
              '-show_entries', 'stream=color_transfer,color_primaries,color_space,color_range:stream_side_data',
              '-of', 'json', str(source)], cancelled, timeout_seconds=4)
         if result is None or result[0] or cancelled.is_set():
-            return None
+            return False, None
         streams = json.loads(result[1]).get('streams', [])
         if not streams:
-            return None
+            return False, None
         color = hdr_color_from_stream(streams[0])
-        if file_identity(source) != identity:
-            return None
+        if file_identity(source) != identity or cancelled.is_set():
+            return False, None
+        if result[2]:
+            # Preserve detected color while allowing an incomplete probe to retry.
+            return False, color
         with _lock:
             _cache[identity] = color
             while len(_cache) > 128:
                 _cache.popitem(last=False)
-        return color
+        return True, color
     except (OSError, RuntimeError, ValueError, TypeError, AttributeError, IndexError):
-        return None
+        return False, None
 
 
 def sdr_tonemap_filter(color):

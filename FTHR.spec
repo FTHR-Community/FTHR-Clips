@@ -3,6 +3,7 @@
 # Run on Windows: pyinstaller FTHR.spec --clean
 from pathlib import Path
 import glob as _glob
+import os as _os
 import sys as _sys
 
 ROOT       = Path(SPECPATH)
@@ -81,6 +82,16 @@ ENGINE_EXE = (max(_existing_engines, key=lambda path: path.stat().st_mtime)
               if _existing_engines else _ENGINE_CANDIDATES[0])
 PLAYBACK_MIXER = (
     ROOT / 'FTHRcapture' / 'x64' / 'Release' / 'FTHRPlaybackMixer.dll')
+
+# An explicit native output directory keeps packaging reproducible when a
+# running development app holds the usual Release DLLs open on Windows.
+if _os.environ.get('FTHR_NATIVE_BUILD_DIR'):
+    _native_dir = Path(_os.environ['FTHR_NATIVE_BUILD_DIR']).resolve()
+    ENGINE_EXE = _native_dir / 'FTHRclips.exe'
+    PLAYBACK_MIXER = _native_dir / 'FTHRPlaybackMixer.dll'
+    for _native_file in (ENGINE_EXE, PLAYBACK_MIXER):
+        if not _native_file.is_file():
+            raise FileNotFoundError(f'Missing explicitly selected native artifact: {_native_file}')
 
 # FFmpeg DLLs the C++ engine links against on Windows
 _FFMPEG_BIN  = ROOT / 'FTHRcapture' / 'FTHRclips' / 'third_party' / 'ffmpeg' / 'bin'

@@ -492,3 +492,87 @@ def test_session_ids_are_random_valid_uuids(tmp_path):
     finally:
         first.close(clean=False)
         second.close(clean=True)
+
+
+def test_export_preserves_previous_engine_failure_after_restart(tmp_path):
+    first = DiagnosticSession('test', root=tmp_path).start()
+    first.engine_log_path.write_text('AMF failure token=secret-value\n', encoding='utf-8')
+    first.emit('encoder', 'runtime_failed', detail='conversion failed')
+    first.close(clean=False)
+    second = DiagnosticSession('test', root=tmp_path).start()
+    try:
+        output = second.export_zip(tmp_path / 'report.zip', ui_log_path=tmp_path / 'missing')
+        with zipfile.ZipFile(output) as archive:
+            assert 'FileNotFoundError' in archive.read('engine.log').decode()
+            prior = archive.read('previous-session/engine.log').decode()
+            assert 'AMF failure' in prior and 'secret-value' not in prior
+            events = archive.read('previous-session/events.jsonl').decode()
+            assert first.session_id in events and 'runtime_failed' in events
+            summary = json.loads(archive.read('diagnostic-summary.json'))
+            assert 'previous-session/engine.log' in summary['export']['files']
+    finally:
+        second.close()
+
+
+def test_previous_export_ignores_arbitrary_files_and_linked_logs(tmp_path):
+    first = DiagnosticSession('test', root=tmp_path).start()
+    first.close()
+    (first.session_dir / 'private.txt').write_text('not diagnostics')
+    second = DiagnosticSession('test', root=tmp_path).start()
+    try:
+        files = second._previous_session_export()
+        assert 'previous-session/events.jsonl' in files
+        assert not any('private' in name for name in files)
+        outside = tmp_path.parent / (tmp_path.name + '-secret.log')
+        outside.write_text('private content')
+        try:
+            (first.session_dir / 'engine.log').symlink_to(outside)
+        except OSError:
+            pass  # Windows may disallow symlink creation for this test user.
+        else:
+            assert 'previous-session/engine.log' not in second._previous_session_export()
+        finally:
+            outside.unlink()
+    finally:
+        second.close()
+
+
+def test_adapted_duration_is_recorded_as_actual_not_requested(tmp_path):
+    session = DiagnosticSession('test', root=tmp_path).start()
+    try:
+        session.merge_summary('requested_configuration', replay_duration_seconds=47)
+        session.emit_native({'subsystem': 'replay_memory', 'event': 'duration_confirmed',
+                             'requested_seconds': 47, 'effective_seconds': 22})
+        summary = session.summary()
+        assert summary['requested_configuration']['replay_duration_seconds'] == 47
+        assert summary['actual_configuration']['replay_duration_seconds'] == 22
+        session.emit_native({'subsystem': 'replay_memory', 'event': 'duration_confirmed',
+                             'requested_seconds': 47, 'effective_seconds': 47})
+        assert session.summary()['actual_configuration']['replay_duration_seconds'] == 47
+    finally:
+        session.close()
+
+
+def test_previous_export_rejects_unowned_session_directory(tmp_path):
+    directory = tmp_path / 'session-private-name'
+    directory.mkdir()
+    (directory / 'engine.log').write_text('not app diagnostics')
+    session = DiagnosticSession('test', root=tmp_path).start()
+    try:
+        assert session._previous_session_export() == {}
+    finally:
+        session.close()
+
+
+def test_previous_export_rejects_hard_linked_log(tmp_path):
+    import os
+    first = DiagnosticSession('test', root=tmp_path).start()
+    first.close()
+    other = tmp_path / 'unrelated.txt'
+    other.write_text('not app diagnostics')
+    os.link(other, first.engine_log_path)
+    second = DiagnosticSession('test', root=tmp_path).start()
+    try:
+        assert 'previous-session/engine.log' not in second._previous_session_export()
+    finally:
+        second.close()

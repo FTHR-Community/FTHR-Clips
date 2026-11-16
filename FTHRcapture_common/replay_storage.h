@@ -452,9 +452,11 @@ inline std::string DescribeAutomaticReplayBudget(const ReplayStorage& storage) {
     return detail;
 }
 
-inline std::shared_ptr<ReplayStorage> CreateCaptureReplayStorage(
-    ReplayStorageConfig config, uint64_t memory_ceiling_bytes, uint32_t seconds,
-    uint32_t fps, uint32_t bitrate_kbps, uint32_t audio_tracks, std::string& error) {
+// Use the same estimate for adaptive duration and admission. No allocations or
+// mutable system-memory samples: one capture generation gets one stable plan.
+inline uint64_t RequiredCaptureReplayMemory(
+    const ReplayStorageConfig& config, uint64_t memory_ceiling_bytes,
+    uint32_t seconds, uint32_t fps, uint32_t bitrate_kbps, uint32_t audio_tracks) {
     const bool disk = config.mode == ReplayStorageMode::Disk;
     const uint64_t history = EstimateReplayRingBytes(seconds, bitrate_kbps, audio_tracks);
     const uint64_t metadata = (static_cast<uint64_t>(seconds) + 5)
@@ -469,6 +471,40 @@ inline std::shared_ptr<ReplayStorage> CreateCaptureReplayStorage(
         // The other quarter of the budget covers snapshot metadata and muxing scratch.
         required_memory_bytes = std::max(required_memory_bytes, 4 * (metadata + 8 * kReplayMiB));
     }
+    return required_memory_bytes;
+}
+
+// Automatic RAM mode can retain less history under pressure without changing
+// user preferences, quality, or explicit budgets. Keep at least five seconds;
+// if even that cannot fit, retain the normal actionable admission failure.
+inline uint32_t EffectiveAutomaticReplaySeconds(
+    const ReplayStorageConfig& config, uint64_t memory_ceiling_bytes,
+    uint32_t requested, uint32_t fps, uint32_t bitrate_kbps, uint32_t audio_tracks) {
+    if (config.mode != ReplayStorageMode::Memory || !config.automatic_budget
+        || config.allow_low_resources || requested < 5 || requested > 900
+        || !fps || fps > 360 || !bitrate_kbps || bitrate_kbps > 200000
+        || audio_tracks > 128) return requested;
+    const auto fits = [&](uint32_t seconds) {
+        return RequiredCaptureReplayMemory(config, memory_ceiling_bytes,
+            seconds, fps, bitrate_kbps, audio_tracks) <= memory_ceiling_bytes;
+    };
+    if (fits(requested) || !fits(5)) return requested;
+    uint32_t low = 5, high = requested;
+    while (low < high) {
+        const uint32_t middle = low + (high - low + 1) / 2;
+        if (fits(middle)) low = middle;
+        else high = middle - 1;
+    }
+    return low;
+}
+
+inline std::shared_ptr<ReplayStorage> CreateCaptureReplayStorage(
+    ReplayStorageConfig config, uint64_t memory_ceiling_bytes, uint32_t seconds,
+    uint32_t fps, uint32_t bitrate_kbps, uint32_t audio_tracks, std::string& error) {
+    const bool disk = config.mode == ReplayStorageMode::Disk;
+    const uint64_t history = EstimateReplayRingBytes(seconds, bitrate_kbps, audio_tracks);
+    const uint64_t required_memory_bytes = RequiredCaptureReplayMemory(
+        config, memory_ceiling_bytes, seconds, fps, bitrate_kbps, audio_tracks);
     // Estimates reserve peak history plus a simultaneous save, not an upfront allocation.
     // Opt-in admission retains finite runtime budgets and ordinary allocation/write errors.
     auto capacity_check = [&](bool low, const char* code, const std::string& detail) {

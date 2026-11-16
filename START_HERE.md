@@ -1,4 +1,4 @@
-# FTHR Clips 2.1.0 — Windows source
+# FTHR Clips 2.1.2 — Windows source
 
 Snapshot: 14 November 2026. See [BUILDING.md](BUILDING.md) for Windows prerequisites, dependency verification, build and test commands.
 

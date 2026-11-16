@@ -16,6 +16,7 @@ import struct
 import tempfile
 import threading
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 from typing import BinaryIO, Iterable
 
@@ -42,6 +43,12 @@ _REJECTED_PROTECTED_TYPES = frozenset({
 
 class Mp4TimingError(ValueError):
     """Raised for an invalid source/destination API contract."""
+
+
+class Mp4NormalizationResult(Enum):
+    NORMALIZED = auto()
+    UNCHANGED = auto()
+    UNAVAILABLE = auto()
 
 
 class _Reject(Exception):
@@ -653,11 +660,20 @@ def normalize_mp4_presentation(
     partially written destination is removed.  Existing destinations and
     source/path I/O failures raise ``ValueError`` or ``OSError``.
     """
+    return (normalize_mp4_presentation_result(source, destination, cancelled)
+            is Mp4NormalizationResult.NORMALIZED)
+
+
+def normalize_mp4_presentation_result(
+        source: str | Path,
+        destination: str | Path,
+        cancelled: threading.Event | None = None) -> Mp4NormalizationResult:
+    """Distinguish a validated no-op from an incomplete or rejected rewrite."""
     source_path = Path(source)
     destination_path = Path(destination)
     _validate_paths(source_path, destination_path)
     if _cancelled(cancelled):
-        return False
+        return Mp4NormalizationResult.UNAVAILABLE
 
     created_destination = False
     successful = False
@@ -666,7 +682,7 @@ def normalize_mp4_presentation(
             initial_path_identity = _file_identity(source_path.stat())
             initial_fd_identity = _file_identity(os.fstat(source_file.fileno()))
             if initial_path_identity != initial_fd_identity:
-                return False
+                return Mp4NormalizationResult.UNAVAILABLE
             file_size = initial_fd_identity.size
             top_level, moov_info, parsed_moov = _inspect_source_file(
                 source_file, file_size, cancelled)
@@ -679,14 +695,14 @@ def normalize_mp4_presentation(
                     for box in top_level if box.typ == b'mdat'
                 ],
             )
-            if normalized_moov is None:
-                return False
             if not _same_source_identity(source_path, source_file,
                                           initial_path_identity,
                                           initial_fd_identity):
-                return False
+                return Mp4NormalizationResult.UNAVAILABLE
             if _cancelled(cancelled):
-                return False
+                return Mp4NormalizationResult.UNAVAILABLE
+            if normalized_moov is None:
+                return Mp4NormalizationResult.UNCHANGED
 
             with destination_path.open('xb') as destination_file:
                 created_destination = True
@@ -695,34 +711,34 @@ def normalize_mp4_presentation(
                     if box.typ == b'moov':
                         if not _copy_range(source_file, destination_file, cursor,
                                            box.offset - cursor, cancelled):
-                            return False
+                            return Mp4NormalizationResult.UNAVAILABLE
                         if _cancelled(cancelled):
-                            return False
+                            return Mp4NormalizationResult.UNAVAILABLE
                         destination_file.write(normalized_moov)
                         cursor = box.offset + box.size
                     else:
                         if not _copy_range(source_file, destination_file, cursor,
                                            box.offset - cursor, cancelled):
-                            return False
+                            return Mp4NormalizationResult.UNAVAILABLE
                         if not _copy_range(source_file, destination_file,
                                            box.offset, box.size, cancelled):
-                            return False
+                            return Mp4NormalizationResult.UNAVAILABLE
                         cursor = box.offset + box.size
                 if cursor != file_size:
                     _reject('copy did not cover the source file')
                 if _cancelled(cancelled):
-                    return False
+                    return Mp4NormalizationResult.UNAVAILABLE
                 destination_file.flush()
                 os.fsync(destination_file.fileno())
             if not _same_source_identity(source_path, source_file,
                                          initial_path_identity,
                                          initial_fd_identity):
-                return False
+                return Mp4NormalizationResult.UNAVAILABLE
             successful = True
-            return True
+            return Mp4NormalizationResult.NORMALIZED
     except _Reject:
         # Unsupported or malformed bounded structure means no output.
-        return False
+        return Mp4NormalizationResult.UNAVAILABLE
     finally:
         if created_destination and not successful:
             try:

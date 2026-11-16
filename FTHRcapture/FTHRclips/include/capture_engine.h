@@ -356,6 +356,7 @@ namespace fthr {
         bool allow_replay_gaps_ = false;
         bool allow_low_fps_clips_ = true;
         uint32_t buffer_seconds_;
+        bool replay_duration_adapted_ = false;
         CaptureConfig::CaptureModeEnum capture_mode_ =
             CaptureConfig::CaptureModeEnum::DESKTOP;
         uint32_t configured_target_width_ = 0;

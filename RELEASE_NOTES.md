@@ -1,4 +1,18 @@
-# FTHR Clips 2.1.0
+# FTHR Clips 2.1.2
+
+## 16 November 2026 — FFmpeg maintenance and export diagnostics
+
+- Update the Windows LGPL shared FFmpeg runtime, development headers, and import libraries to 8.1.3-35, including upstream decoder security fixes.
+- Preserve validation and finalization failure reasons in export errors and diagnostics instead of replacing them with normal FFmpeg output.
+
+## 15 November 2026 — capture recovery and AMD scaling
+
+- Correct GPU texture preparation for AMD video scaling while preserving the native-resolution fast path.
+- Recover from transient monitor geometry changes and serialize bounded retries after persistent display/device changes; prevent heartbeat polling from bypassing retry limits.
+- Protect active saves and manual recordings, and cancel queued recovery when capture intent changes.
+- In automatic RAM mode, reduce replay duration to fit available memory without changing recording quality or saved preferences. Show the effective duration and keep audio/video presentation aligned.
+- Include validated, bounded previous-session engine logs in diagnostic exports and report the confirmed replay duration after each restart.
+- Native regression checks and Intel/NVIDIA window-capture fixtures pass. Radeon 780M encoding and protected Fortnite mode transitions still require qualification on that hardware.
 
 ## 11 November 2026 — opt-in update checks
 

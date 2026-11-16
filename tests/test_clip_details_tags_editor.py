@@ -43,6 +43,7 @@ def b1_editor_shell(editor_shell):
 
 def open_editor(root, index=0):
     root._on_clip_opened(root.paths[index], QPixmap(), QRect())
+    root.wait_for_editor_page()
     return root._active_clip_viewer
 
 

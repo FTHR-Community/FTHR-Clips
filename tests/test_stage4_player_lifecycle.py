@@ -253,6 +253,8 @@ def test_fifty_teardown_cycles_are_idempotent_and_close_state(qtbot):
         )
         viewer._set_player_state = ClipViewer._set_player_state.__get__(viewer)
         viewer._flush_clip_details = lambda: None
+        viewer._discard_preloaded_audio_mixer = (
+            ClipViewer._discard_preloaded_audio_mixer.__get__(viewer))
         viewer._teardown_player = ClipViewer._teardown_player.__get__(viewer)
         viewer._teardown_player()
         viewer._teardown_player()

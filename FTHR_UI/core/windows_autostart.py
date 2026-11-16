@@ -1,4 +1,4 @@
-"""Truthful, per-user Windows autostart registration for FTHR Clips.
+"""Truthful, per-user Windows autostart registration for FTHRClips.
 
 The registry is the authority.  The settings UI never persists a second copy
 of this state, because a user or an uninstaller can remove the Run value while

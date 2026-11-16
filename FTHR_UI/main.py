@@ -3582,6 +3582,7 @@ class MainWindow(QMainWindow):
         if self._ui_ready:
             return
         self._setup_ui()
+        MainWindow._publish_replay_duration_warning(self)
         self._ensure_plugin_runtime()
         self._settings_page_widget.plugin_runtime = self._plugin_runtime
         plugin_page = self._settings_page_widget.__dict__.get('plugin_settings_widget')
@@ -3636,7 +3637,7 @@ class MainWindow(QMainWindow):
             return False
 
         tray = QSystemTrayIcon(icon, self)
-        tray.setToolTip('FTHR Clips — replay capture is running')
+        tray.setToolTip('FTHRClips — replay capture is running')
         menu = QMenu()
         open_action = QAction('Open FTHR', menu)
         open_action.triggered.connect(self.restore_main_window)
@@ -3905,7 +3906,7 @@ class MainWindow(QMainWindow):
         self._load_logo()
         self._logo_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         tb.addWidget(self._logo_label)
-        brand = QLabel('FTHR Clips')
+        brand = QLabel('FTHRClips')
         set_theme_style(brand, lambda: (f'color: {Colors.TEXT}; font-family: {Fonts.BRAND}; '
             f'font-size: {Fonts.SIZE_BODY_L}px; font-weight: 700; background: transparent;'))
         tb.addWidget(brand)
@@ -4064,9 +4065,9 @@ class MainWindow(QMainWindow):
             self.power_btn.setIcon(_load_icon('shutdown.png', 18))
         self.power_btn.setIconSize(QSize(18, 18))
         self.power_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.power_btn.setToolTip('Shut down FTHR Clips and stop capture')
+        self.power_btn.setToolTip('Shut down FTHRClips and stop capture')
         self.power_btn.setAccessibleName(
-            'Shut down FTHR Clips and stop background capture')
+            'Shut down FTHRClips and stop background capture')
         self.power_btn.clicked.connect(self.request_full_exit)
         self.power_btn.setVisible(
             sys.platform == 'win32'
@@ -4159,6 +4160,9 @@ class MainWindow(QMainWindow):
                                   metadata_manager=self.clip_metadata_manager, autostart=False)
         self.clip_grid.set_readiness_checker(self._clip_readiness.can_access)
         self.clip_grid.clip_opened.connect(self._on_clip_opened)
+        from ui.editor_preload_policy import EditorPreloadPolicy
+        self._editor_preload = EditorPreloadPolicy(self)
+        self.clip_grid.clip_preload_requested.connect(self._editor_preload.request)
         self.clip_grid.overlap_merge_requested.connect(self._on_overlap_merge_requested)
         self.clip_grid.screenshot_clicked.connect(_show_in_file_manager)
         self.clip_grid.bulk_export_requested.connect(self._export_library_originals)
@@ -4880,6 +4884,9 @@ class MainWindow(QMainWindow):
             self._background_ui_paused or index != 1)
         self.clip_grid.set_background_paused(
             self._background_ui_paused or index != 0)
+        preload = getattr(self, '_editor_preload', None)
+        if preload is not None:
+            preload.refresh()
         if (index == 2 and previous_index != 2
                 and hasattr(self, '_library_trash_page')):
             self._library_trash_page.refresh()
@@ -5372,6 +5379,9 @@ class MainWindow(QMainWindow):
         return ''
 
     def _reserve_clip_paths(self, paths):
+        preload = getattr(self, '_editor_preload', None)
+        if preload is not None:
+            preload.clear(suspend=True)
         paths = tuple(paths)
         from core.export_queue import acquire_local_mutations, release_local_mutations
         upload = self.upload_manager.acquire_local_mutations(paths)
@@ -5443,6 +5453,9 @@ class MainWindow(QMainWindow):
             self._remove_editor_session(session)
 
     def _prepare_clip_mutation(self, path: str) -> str:
+        preload = getattr(self, '_editor_preload', None)
+        if preload is not None:
+            preload.clear(suspend=True)
         paths = (path,)
         reason = self._clip_mutation_reason(paths)
         if reason:
@@ -5649,6 +5662,9 @@ class MainWindow(QMainWindow):
                                          automatic=False, preserve_favorites=False,
                                          detailed=False, captured_clip_id=None,
                                          explicit_review=False, adopt_legacy=False):
+        preload = getattr(self, '_editor_preload', None)
+        if preload is not None:
+            preload.clear(suspend=True)
         from core.library_ownership import MediaOwnership, classify_media_path, media_file_identity
         from core.clip_metadata_types import BindingState, TrashStatus
         from core.clip_readiness import ClipReadinessState
@@ -10171,6 +10187,10 @@ class MainWindow(QMainWindow):
                 self._publish_capture_profile_status(
                     pending=False, message='')
             return False
+        # A consumed request describes the active configuration. Reapplying it
+        # on a failed heartbeat would bypass the bounded recovery owner.
+        if getattr(self, '_latest_capture_intent_consumed', False):
+            return False
         request = self._desired_capture_request
         if request is None:
             return False
@@ -12541,7 +12561,11 @@ class MainWindow(QMainWindow):
                                 process_generation=_my_gen,
                                 native_capture_generation=(
                                     'unavailable:status_not_polled'))
+                            MainWindow._update_replay_duration_warning(
+                                self, startup_warnings)
                             for warning in startup_warnings:
+                                if warning.code == 'REPLAY_DURATION_REDUCED':
+                                    continue
                                 warning_action = (
                                     ('EDIT GAME CROP', self._toggle_game_detection)
                                     if warning.code.startswith('CROP_') else
@@ -12994,13 +13018,42 @@ class MainWindow(QMainWindow):
         return bool(
             flags & int(CaptureHealthFlag.RECONFIGURE_REQUIRED
                         | CaptureHealthFlag.BACKEND_FAILED)
-            and not getattr(self, '_shutdown_requested', False)
-            and not getattr(self, '_shutdown_complete', False)
+            and not MainWindow._display_mode_recovery_blocked(self)
             and getattr(self, '_display_mode_restart_pending', False)
-            and getattr(self, '_manual_record_state', 'idle') == 'idle'
             and getattr(self, '_display_mode_restart_pending_generation', None)
             == generation
             and getattr(self, '_engine_process_generation', None) == generation)
+
+    def _display_mode_recovery_blocked(self) -> bool:
+        settings_timer = getattr(self, '_capture_settings_timer', None)
+        settings_pending = getattr(settings_timer, 'isActive', None)
+        intent_state = getattr(self, '_latest_capture_intent_state', 'none')
+        return bool(
+            getattr(self, '_shutdown_requested', False)
+            or getattr(self, '_shutdown_complete', False)
+            or getattr(self, '_restart_pending', False)
+            or getattr(self, '_capture_settings_applying', False)
+            or getattr(self, '_wgc_capture_change_pending', False)
+            or not getattr(self, '_file_operations_ready', True)
+            or (callable(settings_pending) and settings_pending())
+            or intent_state in {'invalid', 'terminal'}
+            or (intent_state in {'resolving', 'valid', 'queued'}
+                and not getattr(self, '_latest_capture_intent_consumed', True))
+            or _admission_call(self, '_admission_transition_active')
+            or MainWindow._capture_resources_busy(self))
+
+    def _maybe_reset_display_mode_recovery_budget(self) -> None:
+        if not getattr(self, '_display_mode_restart_times', None):
+            return
+        health = getattr(self, '_capture_health', None)
+        snapshot = getattr(self, '_capture_health_snapshot', None)
+        threshold = CaptureHealthMonitor.RECOVERY_BUDGET_RESET_S
+        healthy_since = getattr(health, '_healthy_since', None)
+        if (getattr(snapshot, 'state', None) == CaptureHealthState.HEALTHY
+                and getattr(health, '_fresh_duration_s', 0.0) >= threshold
+                and healthy_since is not None
+                and time.monotonic() - healthy_since >= threshold):
+            self._display_mode_restart_times = []
 
     def _schedule_engine_failure_recovery(self, kind: str) -> bool:
         """Retry a dead process, never a merely motionless capture source.
@@ -13066,42 +13119,40 @@ class MainWindow(QMainWindow):
         recovery_flags = int(CaptureHealthFlag.RECONFIGURE_REQUIRED
                              | CaptureHealthFlag.BACKEND_FAILED)
         if (sys.platform != 'win32'
-                or getattr(self, '_shutdown_requested', False)
-                or getattr(self, '_shutdown_complete', False)
                 or not status.get('connected')
+                or status.get('is_recording')
                 or not int(status.get('capture_health_flags', 0) or 0) & recovery_flags
-                or getattr(self, '_manual_record_state', 'idle') != 'idle'
-                or getattr(self, '_restart_pending', False)
-                or getattr(self, '_capture_settings_applying', False)):
+                or MainWindow._display_mode_recovery_blocked(self)):
             return
         generation = getattr(self, '_engine_gen', None)
+        process = getattr(self, 'engine_process', None)
+        bridge = getattr(self, 'bridge', None)
+        if generation is None or process is None or bridge is None:
+            return
         if getattr(self, '_display_mode_restart_pending', False):
             return
         if getattr(self, '_display_mode_restart_generation', None) == generation:
             return
 
-        # This method runs before the next capture-health observation. Use the
-        # preceding observed snapshot to reset the incident budget at the
-        # first failure poll; the delayed callback will see the failed state.
-        health = getattr(self, '_capture_health', None)
-        snapshot = getattr(self, '_capture_health_snapshot', None)
-        health_state = getattr(getattr(snapshot, 'state', None), 'value',
-                               getattr(snapshot, 'state', None))
-        fresh_duration = getattr(health, '_fresh_duration_s', 0.0)
+        # The preceding health snapshot still contains the progress preceding
+        # this failure. The next observation can clear that evidence.
+        MainWindow._maybe_reset_display_mode_recovery_budget(self)
         attempts = list(getattr(self, '_display_mode_restart_times', []))
-        if (health_state == CaptureHealthState.HEALTHY.value
-                and fresh_duration >= 30.0):
-            # Fresh duration accumulates only intervals bracketed by actual
-            # frame-count progress; a single recently seen frame cannot reset.
-            attempts = []
-            self._display_mode_restart_times = []
         if len(attempts) >= 3:
             return
+        native_generation = status.get('capture_generation')
         self._display_mode_restart_generation = generation
         self._display_mode_restart_pending = True
         self._display_mode_restart_pending_generation = generation
-        process, bridge = self.engine_process, self.bridge
-        source_revision = int(getattr(self, '_source_authority_revision', 0))
+        def current_intent():
+            return (
+                getattr(self, '_capture_intent_revision', 0),
+                getattr(self, '_source_intent_revision', 0),
+                getattr(self, '_source_authority_revision', 0),
+                getattr(self, '_admission_epoch', 0),
+            )
+
+        intent = current_intent()
         settings = self.settings_manager
         source_mode = settings.get('capture_mode', 'desktop')
         source_hwnd = settings.get('target_hwnd', 0)
@@ -13110,23 +13161,30 @@ class MainWindow(QMainWindow):
         source_window = (get_window_info(int(source_hwnd), own_pid=os.getpid())
                          if source_mode == 'window' and source_hwnd else None)
         source_signature = getattr(source_window, 'capture_signature', None)
+
+        def owns_recovery():
+            return (
+                self._owns_engine_attempt(generation, process, bridge)
+                and current_intent() == intent
+                and not MainWindow._display_mode_recovery_blocked(self)
+                and self.settings_manager is settings
+                and settings.get('capture_mode', 'desktop') == source_mode
+                and settings.get('target_hwnd', 0) == source_hwnd
+                and settings.get('target_window_identity') == source_identity
+                and settings.get('capture_source_authority', 'manual') == source_authority
+            )
+
         def restart():
             attempted = False
             try:
-                if not (not getattr(self, '_shutdown_requested', False)
-                        and not getattr(self, '_shutdown_complete', False)
-                        and self._owns_engine_attempt(generation, process, bridge)
-                        and source_revision == int(getattr(
-                            self, '_source_authority_revision', 0))
-                        and settings.get('capture_mode', 'desktop') == source_mode
-                        and settings.get('target_hwnd', 0) == source_hwnd
-                        and settings.get('target_window_identity') == source_identity
-                        and settings.get('capture_source_authority', 'manual')
-                        == source_authority
-                        and getattr(self, '_manual_record_state', 'idle') == 'idle'
-                        and not getattr(self, '_restart_pending', False)
-                        and int(bridge.get_status().get('capture_health_flags', 0) or 0)
-                        & recovery_flags):
+                if not owns_recovery():
+                    return
+                live_status = bridge.get_status()
+                flags = int(live_status.get('capture_health_flags', 0) or 0)
+                if (live_status.get('connected') is False
+                        or live_status.get('is_recording')
+                        or live_status.get('capture_generation') != native_generation
+                        or not flags & recovery_flags):
                     return
                 if source_mode == 'window' and source_hwnd:
                     live_window = get_window_info(
@@ -13137,14 +13195,21 @@ class MainWindow(QMainWindow):
                         # Defer geometry changes while the operator is resizing or
                         # moving the target; retry a fresh stability window without
                         # spending recovery budget.
-                        if getattr(self, '_display_mode_restart_generation', None) == generation:
-                            self._display_mode_restart_generation = None
                         return
+                # Window and bridge probes can invoke external providers.
+                if not owns_recovery():
+                    return
                 attempts = list(getattr(self, '_display_mode_restart_times', []))
                 if len(attempts) >= 3:
                     return
                 self._display_mode_restart_times = attempts + [time.monotonic()]
                 attempted = True
+                reason = ('capture_reconfigure'
+                          if flags & int(CaptureHealthFlag.RECONFIGURE_REQUIRED)
+                          else 'capture_backend_failed')
+                emit_event('engine', 'automatic_restart', state='RECOVERING',
+                           reason=reason, attempt=len(attempts) + 1,
+                           process_generation=generation)
                 self._restart_capture_engine()
             finally:
                 if getattr(self, '_display_mode_restart_pending_generation', None) == generation:
@@ -13154,7 +13219,7 @@ class MainWindow(QMainWindow):
                             and getattr(self, '_display_mode_restart_generation', None)
                             == generation):
                         self._display_mode_restart_generation = None
-        QTimer.singleShot(750, restart)
+        QTimer.singleShot(750 * (2 ** len(attempts)), restart)
 
     def _on_encoder_config_changed(self):
         self._queue_capture_settings_restart()
@@ -13347,6 +13412,9 @@ class MainWindow(QMainWindow):
             self._stop_manual_recording()
 
     def _start_manual_recording(self):
+        preload = getattr(self, '_editor_preload', None)
+        if preload is not None:
+            preload.clear(suspend=True)
         if (getattr(self, '_shutdown_requested', False)
                 or getattr(self, '_shutdown_complete', False)
                 or _admission_call(self, '_admission_transition_active')):
@@ -14365,6 +14433,9 @@ class MainWindow(QMainWindow):
     # Save clip
 
     def _save_clip(self, duration_seconds: int = 30):
+        preload = getattr(self, '_editor_preload', None)
+        if preload is not None:
+            preload.clear(suspend=True)
         if _admission_call(self, '_admission_transition_active'):
             self._show_save_busy_feedback()
             return
@@ -15653,7 +15724,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(2000, self._update_status)
 
     def _open_clips_folder(self):
-        """Open the configured FTHR clips folder in the platform file manager."""
+        """Open the configured FTHRClips folder in the platform file manager."""
         try:
             folder = ensure_storage_directory(
                 clips_directory_from(self.settings_manager))
@@ -17496,6 +17567,7 @@ class MainWindow(QMainWindow):
                 generation=backend_generation,
             )
             self._capture_health_snapshot = snapshot
+            MainWindow._maybe_reset_display_mode_recovery_budget(self)
             healthy_since = getattr(self._capture_health, '_healthy_since', None)
             if (snapshot.state is CaptureHealthState.HEALTHY
                     and healthy_since is not None
@@ -17950,6 +18022,9 @@ class MainWindow(QMainWindow):
         if paused == self._background_ui_paused and not force:
             return
         self._background_ui_paused = paused
+        preload = getattr(self, '_editor_preload', None)
+        if preload is not None:
+            preload.refresh()
         if not self._ui_ready:
             return
 
@@ -18028,6 +18103,7 @@ class MainWindow(QMainWindow):
         self._show_editor_session(self._add_editor_session(clip_path), QPixmap())
 
     def _on_clip_opened(self, clip_path: str, thumb_pixmap: QPixmap, card_global_rect: QRect):
+        emit_event('playback', 'editor_open_requested')
         if getattr(self, '_ultra_performance', False) or self._editor_trash_pending():
             return
         if not self._clip_readiness.can_access(clip_path):
@@ -18111,6 +18187,26 @@ class MainWindow(QMainWindow):
             self._basic_clip_viewer = None
 
     # Error bar
+
+    def _update_replay_duration_warning(self, startup_warnings) -> None:
+        self._replay_duration_warning = next((item for item in startup_warnings
+                                             if item.code == 'REPLAY_DURATION_REDUCED'), None)
+        MainWindow._publish_replay_duration_warning(self)
+
+    def _publish_replay_duration_warning(self) -> None:
+        error_bar = getattr(self, 'error_bar', None)
+        if error_bar is None:
+            return
+        warning = getattr(self, '_replay_duration_warning', None)
+        key = 'replay-duration-reduced'
+        if (warning is None
+                or not self.settings_manager.get('error_notifications_enabled', True)):
+            error_bar.remove_by_key(key)
+            return
+        error_bar.push(
+            warning.title, warning.detail, 'warning',
+            [('OPEN STORAGE SETTINGS', lambda: self._open_settings_category(10))],
+            key=key, dismiss_on_action=False)
 
     def _show_hotkey_warning(self, title: str, detail: str,
                              level: str) -> None:
@@ -18666,6 +18762,9 @@ class MainWindow(QMainWindow):
 
     def _perform_full_shutdown(self) -> None:
         """One idempotent, bounded shutdown sequence for tray and app exit."""
+        preload = getattr(self, '_editor_preload', None)
+        if preload is not None:
+            preload.shutdown()
         if self._shutdown_complete:
             return
         forced_route = bool(getattr(self, '_shutdown_forced', False))
@@ -18782,7 +18881,8 @@ class MainWindow(QMainWindow):
                         log_error = getattr(logger, 'error', None)
                         if callable(log_error):
                             log_error('EditorDetailsSaveFailed: %s', detail)
-                page._skip_detail_flush_on_teardown = True
+                if page is not None:
+                    page._skip_detail_flush_on_teardown = True
                 active_viewer._teardown_player()
                 active_viewer.deleteLater()
             except (AttributeError, RuntimeError, TypeError):
@@ -18813,7 +18913,8 @@ class MainWindow(QMainWindow):
                     if flush_result is False and parked_error is None:
                         parked_error = getattr(
                             parked_page, '_last_details_error', None)
-                parked_page._skip_detail_flush_on_teardown = True
+                if parked_page is not None:
+                    parked_page._skip_detail_flush_on_teardown = True
                 parked._teardown_player()
             except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
                 if parked_error is None:
@@ -18987,6 +19088,9 @@ class MainWindow(QMainWindow):
                        upload_enabled=upload_on, metadata_manager=self.clip_metadata_manager,
                        linked_import=self.clip_grid.is_linked_import(clip_path),
                        upload_coordinator=upload_coordinator, trash_handler=self._request_clip_trash)
+        preload = getattr(self, '_editor_preload', None)
+        if preload is not None:
+            options['preloaded_media'] = preload.take(clip_path)
         viewer = getattr(self, '_parked_editor_shell', None)
         reused = viewer is not None
         if reused:
@@ -18999,6 +19103,10 @@ class MainWindow(QMainWindow):
                 if callable(warn):
                     warn(error)
                 return
+            finally:
+                prepared = options.get('preloaded_media')
+                if prepared is not None:
+                    prepared.dispose()
             if not replaced:
                 return
             self._parked_editor_shell = None
@@ -19006,11 +19114,19 @@ class MainWindow(QMainWindow):
             # bit and skips the platform maximize geometry negotiation.
             viewer.setWindowState(Qt.WindowState.WindowNoState)
         else:
-            viewer = ClipEditorWindow(clip_path, self.bridge, self,
-                                      session_state=session.state, **options)
-        viewer.clip_page._trash_handler = self._request_clip_trash
+            try:
+                viewer = ClipEditorWindow(clip_path, self.bridge, self,
+                                          session_state=session.state,
+                                          defer_initial_clip=True, **options)
+            except Exception:
+                prepared = options.get('preloaded_media')
+                if prepared is not None:
+                    prepared.dispose()
+                raise
         viewer.editor_session = session
         if not reused:
+            viewer.clip_open_failed.connect(
+                lambda detail: self.push_error('COULD NOT OPEN CLIP', detail))
             # Keep the legacy page signal for standalone/compatibility
             # fastpaths; the coordinator has its own completion signal.
             viewer.upload_requested.connect(self.upload_manager.enqueue_upload)
@@ -19108,7 +19224,8 @@ class MainWindow(QMainWindow):
     def _navigate_editor_clip(self, viewer, step):
         if self._editor_trash_pending():
             return
-        if viewer is not self._active_clip_viewer or viewer._closing:
+        if (viewer is not self._active_clip_viewer
+                or getattr(viewer, 'clip_pending', False) or viewer._closing):
             return
         destination = self.clip_grid.adjacent_clip(viewer.clip_path, step)
         if destination is not None:
@@ -24043,6 +24160,9 @@ class _SettingsPage(QWidget):
 
     def _apply_ui_performance_runtime(self):
         from ui.clip_viewer import ClipViewer, _TIMELINE_IMAGE_CACHE, _TIMELINE_CACHE_LOCK
+        preload = getattr(self.window(), '_editor_preload', None)
+        if preload is not None:
+            preload.refresh()
         self.background_ui_pause_changed.emit(bool(self.sm.get('pause_ui_in_background', True)))
         timeline = bool(self.sm.get('timeline_preview_strip_enabled', True))
         for widget in QApplication.instance().allWidgets():
@@ -24506,8 +24626,8 @@ def main():
         # fallback explanation instead.
         FthrMessageDialog.warning(
             None,
-            'FTHR Clips is already running',
-            'FTHR Clips is already open.\n\n'
+            'FTHRClips is already running',
+            'FTHRClips is already open.\n\n'
             'Look for the window on your other monitors or in the system tray. '
             'If you believe this is wrong, end the running FTHRClips process '
             'and start it again.',

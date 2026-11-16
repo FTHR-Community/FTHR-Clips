@@ -5,9 +5,9 @@ includedir=${prefix}/include
 
 Name: libswscale
 Description: FFmpeg image rescaling library
-Version: 9.5.102
+Version: 9.5.103
 Requires: 
-Requires.private: libavutil >= 60.26.102
+Requires.private: libavutil >= 60.26.103
 Conflicts:
 Libs: -L${libdir}  -lswscale 
 Cflags: -I${includedir}

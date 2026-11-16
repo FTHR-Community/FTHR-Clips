@@ -224,11 +224,11 @@ def test_compatibility_cache_is_atomic_identity_bound_and_preferred_after_full_p
     def normalize(input_path, output_path, cancelled):
         calls.append((input_path, output_path))
         if cancelled.is_set():
-            return False
+            return mp4_timing.Mp4NormalizationResult.UNAVAILABLE
         Path(output_path).write_bytes(b'zero-empty normalized')
-        return True
+        return mp4_timing.Mp4NormalizationResult.NORMALIZED
 
-    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation', normalize)
+    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation_result', normalize)
     result = playback_proxy.prepare_compatibility_path(str(source), threading.Event())
     assert result != str(source)
     assert Path(result).read_bytes() == b'zero-empty normalized'
@@ -258,7 +258,7 @@ def test_compatibility_preparation_is_windows_only_and_cancellation_leaves_no_pa
         raise AssertionError('Linux playback must keep the native path')
 
     monkeypatch.setattr(playback_proxy.sys, 'platform', 'linux')
-    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation', unexpected)
+    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation_result', unexpected)
     assert playback_proxy.prepare_compatibility_path(
         str(source), threading.Event()) == str(source)
     assert calls == []
@@ -279,9 +279,10 @@ def _write_compatibility_cache(source, monkeypatch, tmp_path):
     def normalize(input_path, output_path, cancelled):
         assert input_path == str(source)
         Path(output_path).write_bytes(b'normalized')
-        return not cancelled.is_set()
+        assert not cancelled.is_set()
+        return mp4_timing.Mp4NormalizationResult.NORMALIZED
 
-    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation', normalize)
+    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation_result', normalize)
     return playback_proxy.prepare_compatibility_path(
         str(source), threading.Event())
 
@@ -474,7 +475,7 @@ def test_compatibility_cache_rejects_source_or_output_over_size_bound(
         raise AssertionError('oversized source must be rejected before copy')
 
     from core import mp4_timing
-    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation', unexpected)
+    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation_result', unexpected)
     assert playback_proxy.prepare_compatibility_path(
         str(source), threading.Event()) == str(source)
     assert called == []
@@ -483,9 +484,9 @@ def test_compatibility_cache_rejects_source_or_output_over_size_bound(
 
     def too_large(input_path, output_path, cancelled):
         Path(output_path).write_bytes(b'x' * 101)
-        return True
+        return mp4_timing.Mp4NormalizationResult.NORMALIZED
 
-    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation', too_large)
+    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation_result', too_large)
     assert playback_proxy.prepare_compatibility_path(
         str(source), threading.Event()) == str(source)
     assert not list((tmp_path / 'playback' / 'compatibility').glob('*.mp4'))
@@ -501,7 +502,8 @@ def test_native_audio_does_not_need_compatibility_remux(
     monkeypatch.setattr(playback_proxy, 'CACHE_DIR', tmp_path / 'playback')
     monkeypatch.setattr(playback_proxy.sys, 'platform', 'win32')
     monkeypatch.setattr(playback_proxy, 'get_ffprobe_exe', lambda: 'ffprobe')
-    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation', lambda *_: False)
+    monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation_result',
+                        lambda *_: mp4_timing.Mp4NormalizationResult.UNCHANGED)
 
     def run(command, *_args, **_kwargs):
         assert command[0] == 'ffprobe'
@@ -523,8 +525,8 @@ def test_incomplete_pcm_remux_never_enters_cache(
     source.write_bytes(b'original')
     monkeypatch.setattr(playback_proxy, 'CACHE_DIR', tmp_path / 'playback')
     monkeypatch.setattr(playback_proxy.sys, 'platform', 'win32')
-    monkeypatch.setattr(playback_proxy, '_probe_playback_streams',
-                        lambda *_: [{'codec_type': 'audio', 'codec_tag_string': 'fpcm'}])
+    monkeypatch.setattr(playback_proxy, '_inspect_playback_streams',
+                        lambda *_: (True, [{'codec_type': 'audio', 'codec_tag_string': 'fpcm'}]))
     monkeypatch.setattr(playback_proxy, 'get_ffmpeg_exe', lambda: 'ffmpeg')
     monkeypatch.setattr(mp4_timing, 'normalize_mp4_presentation_in_place', lambda *_: False)
 

@@ -625,27 +625,21 @@ public:
                 error = "AMF video processor resources are unavailable";
                 return false;
             }
-            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_description{};
-            input_description.FourCC = 0;
-            input_description.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-            input_description.Texture2D.MipSlice = source_subresource % mip_levels;
-            input_description.Texture2D.ArraySlice = source_subresource / mip_levels;
-            ID3D11VideoProcessorInputView* input_view = nullptr;
-            HRESULT result = video_device_->CreateVideoProcessorInputView(
-                source, video_processor_enumerator_, &input_description, &input_view);
-            if (FAILED(result) || !input_view) {
-                error = HResultString(
-                    "ID3D11VideoDevice::CreateVideoProcessorInputView", result);
-                ReportFailure("CreateVideoProcessorInputView", false, 0, true, result);
+            Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> input_view;
+            HRESULT result = conversion_input_.Prepare(copy_context_, video_device_,
+                video_processor_enumerator_, source, source_description, source_subresource,
+                input_view.GetAddressOf());
+            if (FAILED(result)) {
+                error = HResultString("AMF video processor input preparation", result);
+                ReportFailure("PrepareVideoProcessorInput", false, 0, true, result);
                 return false;
             }
             D3D11_VIDEO_PROCESSOR_STREAM stream{};
             stream.Enable = TRUE;
             stream.OutputIndex = 0;
-            stream.pInputSurface = input_view;
+            stream.pInputSurface = input_view.Get();
             result = video_context_->VideoProcessorBlt(
                 video_processor_, converter_output_view_, 0, 1, &stream);
-            input_view->Release();
             if (FAILED(result)) {
                 error = HResultString("ID3D11VideoContext::VideoProcessorBlt", result);
                 ReportFailure("VideoProcessorBlt", false, 0, true, result);
@@ -818,6 +812,7 @@ public:
         if (codec_context_) avcodec_free_context(&codec_context_);
         if (hw_frames_ctx_) av_buffer_unref(&hw_frames_ctx_);
         if (hw_device_ctx_) av_buffer_unref(&hw_device_ctx_);
+        conversion_input_.Reset();
         if (converter_output_view_) converter_output_view_->Release();
         if (converter_texture_) converter_texture_->Release();
         if (video_processor_) video_processor_->Release();
@@ -968,6 +963,13 @@ private:
             return false;
         }
         if (nv12_comparison_ && !ConfigureNv12ColorConversion(error)) return false;
+        result = conversion_input_.Initialize(shared_device, video_device_,
+            video_processor_enumerator_, source_width_, source_height_);
+        if (FAILED(result)) {
+            error = HResultString("AMF video processor input copy initialization", result);
+            ReportFailure("InitializeVideoProcessorInputCopy", false, 0, true, result);
+            return false;
+        }
         D3D11_TEXTURE2D_DESC converter_description{};
         converter_description.Width = output_width_;
         converter_description.Height = output_height_;
@@ -1133,6 +1135,7 @@ private:
     ID3D11VideoContext* video_context_ = nullptr;
     ID3D11VideoProcessorEnumerator* video_processor_enumerator_ = nullptr;
     ID3D11VideoProcessor* video_processor_ = nullptr;
+    detail::AmfVideoProcessorInput conversion_input_;
     ID3D11Texture2D* converter_texture_ = nullptr;
     ID3D11VideoProcessorOutputView* converter_output_view_ = nullptr;
     ID3D11DeviceContext* copy_context_ = nullptr;
@@ -1180,6 +1183,73 @@ EncodedVideoConfig BuildAmfVideoConfig(
 }
 
 namespace detail {
+
+HRESULT AmfVideoProcessorInput::Initialize(ID3D11Device* device, ID3D11VideoDevice* video_device,
+    ID3D11VideoProcessorEnumerator* enumerator, UINT width, UINT height) noexcept {
+    Reset();
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = width;
+    description.Height = height;
+    description.MipLevels = 1;
+    description.ArraySize = 1;
+    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_DEFAULT;
+    description.BindFlags = D3D11_BIND_RENDER_TARGET;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    HRESULT result = device->CreateTexture2D(&description, nullptr, texture.GetAddressOf());
+    if (FAILED(result)) return result;
+
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC view_description{};
+    view_description.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    result = video_device->CreateVideoProcessorInputView(
+        texture.Get(), enumerator, &view_description, copy_view_.GetAddressOf());
+    if (FAILED(result)) return result;
+
+    copy_texture_ = std::move(texture);
+    copy_description_ = description;
+    return S_OK;
+}
+
+HRESULT AmfVideoProcessorInput::Prepare(ID3D11DeviceContext* context, ID3D11VideoDevice* video_device,
+    ID3D11VideoProcessorEnumerator* enumerator, ID3D11Texture2D* source,
+    const D3D11_TEXTURE2D_DESC& description, UINT subresource,
+    ID3D11VideoProcessorInputView** view) noexcept {
+    *view = nullptr;
+    if (!copy_view_) return E_UNEXPECTED;
+    if (!description.MipLevels || subresource / description.MipLevels >= description.ArraySize
+        || description.SampleDesc.Count != 1 || description.SampleDesc.Quality != 0) {
+        return E_INVALIDARG;
+    }
+
+    // CreateVideoProcessorInputView requires default usage and a supported GPU
+    // bind flag (or no flags). WGC's shader-resource-only surface needs a copy.
+    constexpr UINT video_input_bind_flags = D3D11_BIND_DECODER | D3D11_BIND_VIDEO_ENCODER
+        | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+    if (description.Usage == D3D11_USAGE_DEFAULT
+        && (!description.BindFlags || (description.BindFlags & video_input_bind_flags))) {
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC view_description{};
+        view_description.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        view_description.Texture2D.MipSlice = subresource % description.MipLevels;
+        view_description.Texture2D.ArraySlice = subresource / description.MipLevels;
+        const HRESULT result = video_device->CreateVideoProcessorInputView(
+            source, enumerator, &view_description, view);
+        if (result != E_INVALIDARG && result != DXGI_ERROR_UNSUPPORTED) return result;
+    }
+
+    if (!CanDirectCopyBgra(description, subresource, copy_description_, 0)) {
+        return E_INVALIDARG;
+    }
+    context->CopySubresourceRegion(copy_texture_.Get(), 0, 0, 0, 0, source, subresource, nullptr);
+    return copy_view_.CopyTo(view);
+}
+
+void AmfVideoProcessorInput::Reset() noexcept {
+    copy_view_.Reset();
+    copy_texture_.Reset();
+    copy_description_ = {};
+}
 
 int InstallAmfSingleTexturePool(AVHWFramesContext* frames, ID3D11Device* device,
     std::shared_ptr<AmfInputPoolDiagnostics> diagnostics,

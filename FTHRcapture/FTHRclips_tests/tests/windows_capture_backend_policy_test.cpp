@@ -124,6 +124,42 @@ void RotationPolicyAcceptsOnlyIdentityOrUnspecified() {
         "rotated output modes are rejected before capture startup");
 }
 
+void WgcMonitorGeometryDebouncesFocusTransitions() {
+    using namespace std::chrono_literals;
+    using Action = fthr::WgcMonitorGeometryAction;
+    const auto start = fthr::WgcMonitorGeometry::Clock::time_point{};
+    fthr::WgcMonitorGeometry geometry(1920, 1080);
+    CheckBackendPolicy(geometry.Observe(1920, 1080, false, start) == Action::Capture,
+        "a static display can use the cached frame while geometry still matches");
+    CheckBackendPolicy(geometry.Observe(1600, 900, false, start) == Action::Wait,
+        "a mode switch drops incompatible frames before requesting recovery");
+    CheckBackendPolicy(geometry.Observe(1920, 1080, false, start + 250ms) == Action::Wait,
+        "the old item size alone does not release the frame gate");
+    CheckBackendPolicy(geometry.Observe(1920, 1080, true, start + 350ms) == Action::Resume,
+        "a matching fresh frame cancels transient recovery");
+    CheckBackendPolicy(geometry.Observe(1600, 900, false, start + 1s) == Action::Wait
+            && geometry.Observe(1600, 900, false, start + 1400ms) == Action::Reconfigure,
+        "a sustained new mode requires a fresh capture generation");
+}
+
+void WgcMonitorGeometryCannotWaitIndefinitely() {
+    using namespace std::chrono_literals;
+    using Action = fthr::WgcMonitorGeometryAction;
+    const auto start = fthr::WgcMonitorGeometry::Clock::time_point{};
+    fthr::WgcMonitorGeometry geometry(1600, 900);
+    CheckBackendPolicy(geometry.Observe(0, 0, false, start) == Action::Wait
+            && geometry.Observe(0, 0, false, start + 2s) == Action::Reconfigure,
+        "zero-sized content has a bounded wait");
+    geometry.Reset();
+    for (int step = 0; step < 10; ++step) {
+        const int width = step % 2 == 0 ? 1920 : 1280;
+        CheckBackendPolicy(geometry.Observe(width, 1080, false, start + step * 200ms)
+                == Action::Wait, "alternating modes wait for stable geometry");
+    }
+    CheckBackendPolicy(geometry.Observe(1920, 1080, false, start + 2s) == Action::Reconfigure,
+        "alternating modes cannot keep capture in recovery indefinitely");
+}
+
 }  // namespace
 
 int RunWindowsCaptureBackendPolicyTests() {
@@ -147,6 +183,8 @@ int RunWindowsCaptureBackendPolicyTests() {
     ProtectedWindowsPauseWithoutChangingTheCaptureSource();
     MissingCaptureTargetsHaveStableStartupErrorIdentity();
     WgcSizeMismatchPreservesSourceSpecificRecoveryPolicy();
+    WgcMonitorGeometryDebouncesFocusTransitions();
+    WgcMonitorGeometryCannotWaitIndefinitely();
     RotationPolicyAcceptsOnlyIdentityOrUnspecified();
     const auto excluded = fthr::PlanWindowsCaptureStartup(false, false, false,
         fthr::WindowsCaptureBackendPreference::Auto, false);

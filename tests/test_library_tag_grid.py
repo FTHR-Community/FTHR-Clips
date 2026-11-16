@@ -94,8 +94,8 @@ def _answer_menu(monkeypatch, answer):
 
 def _open_editor(root, path):
     root._on_clip_opened(str(path), QPixmap(), QRect())
-    shell = root._active_clip_viewer
-    return getattr(shell, "clip_page", shell)
+    root.wait_for_editor_page()
+    return root._active_clip_viewer.clip_page
 
 
 @pytest.mark.parametrize("tag_grid", [120], indirect=True)

@@ -5,6 +5,7 @@ See handle() for command names, fields, and optional hold durations.
 """
 
 import math
+import json
 import sys
 import os
 
@@ -54,6 +55,13 @@ class _StdinReader(QThread):
 def main():
     configure_qt_style()
     app = QApplication(sys.argv)
+    from core.theme_manager import ThemeManager
+    try:
+        appearance = json.loads(os.environ.get('FTHR_CARD_APPEARANCE', '{}'))
+        if isinstance(appearance, dict) and appearance:
+            ThemeManager().set_runtime_appearance(app, appearance)
+    except (ValueError, TypeError):
+        pass
     apply_app_style(app)
     card = CaptureCard(
         visuals_enabled=os.environ.get('FTHR_CARD_VISUALS_ENABLED', '1')
@@ -149,6 +157,7 @@ def main():
 
     ret = app.exec()
     reader.wait(1000)
+    ThemeManager().clear_runtime_appearance(app)
     sys.exit(ret)
 
 

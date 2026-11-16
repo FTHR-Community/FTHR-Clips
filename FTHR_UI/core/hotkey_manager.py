@@ -1330,7 +1330,7 @@ class HotkeyManager(QObject):
             self.error_occurred.emit(
                 'GLOBAL HOTKEYS UNAVAILABLE',
                 linux_tools.missing_message('nc') +
-                ' Without it, compositor binds cannot reach FTHR Clips.',
+                ' Without it, compositor binds cannot reach FTHRClips.',
                 'error',
             )
             return
@@ -1391,8 +1391,8 @@ class HotkeyManager(QObject):
     def _write_hyprland_config(self) -> None:
         """Write ~/.config/hypr/fthr-hotkeys.conf with current hotkeys."""
         lines = [
-            '# FTHR Clips hotkeys — auto-generated, do not edit manually.',
-            '# Change hotkeys inside FTHR Clips → Hotkeys menu.',
+            '# FTHRClips hotkeys — auto-generated, do not edit manually.',
+            '# Change hotkeys inside FTHRClips → Hotkeys menu.',
             self._build_bind_line('save_clip'),
             self._build_bind_line('save_screenshot'),
         ]
@@ -1422,7 +1422,7 @@ class HotkeyManager(QObject):
             return
         if 'fthr-hotkeys.conf' in content or 'fthr_hotkey.sock' in content:
             return
-        source_line = f'\n# FTHR Clips hotkeys (auto-added)\nsource = {_FTHR_HYPR_CONF}\n'
+        source_line = f'\n# FTHRClips hotkeys (auto-added)\nsource = {_FTHR_HYPR_CONF}\n'
         try:
             with open(_HYPR_CONF, 'a') as stream:
                 stream.write(source_line)

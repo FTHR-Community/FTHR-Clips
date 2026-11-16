@@ -456,6 +456,13 @@ def _validate_feature(data: bytes) -> None:
             elif extension in _RASTER_SIGNATURES:
                 if not _read_member(archive, members, name).startswith(_RASTER_SIGNATURES[extension]):
                     raise PluginError(f'Invalid image: {name}.')
+            elif extension in ('.ttf', '.otf', '.wav'):
+                data = _read_member(archive, members, name, 8 * 1024 * 1024)
+                valid = (len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WAVE'
+                         if extension == '.wav' else
+                         len(data) >= 12 and data[:4] in (b'\x00\x01\x00\x00', b'OTTO', b'true'))
+                if not valid:
+                    raise PluginError(f'Invalid font or sound asset: {name}.')
             elif extension in ('.rnnn', '.txt'):
                 # Models and attribution are inert assets, not native libraries.
                 # The feature verifies its model hash before passing it to FFmpeg.

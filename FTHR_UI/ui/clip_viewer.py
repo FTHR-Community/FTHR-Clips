@@ -662,6 +662,7 @@ class _ClipResultReceiver(QObject):
 
     @Slot(object)
     @Slot(int)
+    @Slot(QVideoFrame)
     @Slot(QMediaPlayer.PlaybackState)
     @Slot(QMediaPlayer.MediaStatus)
     @Slot(QMediaPlayer.Error, str)
@@ -4426,7 +4427,7 @@ class ShareWindow(QDialog):
             self._export_sig.emit(False, str(e))
             self.export_error.emit(
                 'FFMPEG NOT FOUND',
-                'ffmpeg is required for export. It normally ships with FTHR Clips; '
+                'ffmpeg is required for export. It normally ships with FTHRClips; '
                 'if you are running from source, install it: '
                 'sudo pacman -S ffmpeg (Arch) or sudo apt install ffmpeg (Debian).',
                 'error',
@@ -4589,16 +4590,13 @@ class ShareWindow(QDialog):
             elapsed_ms=round(result.elapsed_seconds * 1000),
             exit_code=result.returncode,
             stderr_tail=result.stderr_tail,
+            detail=result.detail or None,
             output_exists=output_exists,
             output_size_bytes=(os.path.getsize(out) if output_exists else 0))
         if result.state is ExportState.COMPLETED:
             self._export_sig.emit(True, out)
         elif not self._cancelled:
-            detail = result.detail
-            if result.stderr_tail:
-                detail = next((line for line in reversed(
-                    result.stderr_tail.splitlines()) if line.strip()), detail)
-            self._export_sig.emit(False, detail or 'Export failed')
+            self._export_sig.emit(False, result.failure_message())
 
     def _on_export_plan(self, summary: str):
         if self._cancelled:
@@ -4634,7 +4632,7 @@ class ShareWindow(QDialog):
                 f'font-family: {Fonts.DISPLAY}; letter-spacing: 0px; background: transparent;'))
             self.export_error.emit(
                 'EXPORT FAILED',
-                'FFmpeg returned an error. The output file may be incomplete.',
+                msg,
                 'warning',
             )
 
@@ -5028,7 +5026,7 @@ class ClipViewer(QDialog):
                  upload_enabled: bool = False, metadata_manager=None,
                  linked_import: bool = False, *, embedded: bool = False,
                  autoplay: bool = False, upload_coordinator=None, trash_handler=None,
-                 _interface_sample=None):
+                 preloaded_media=None, native_preview=None, _interface_sample=None):
         super().__init__(parent)
         self._interface_sample = _interface_sample is not None
         if self._interface_sample:
@@ -5038,7 +5036,8 @@ class ClipViewer(QDialog):
                               settings_manager=settings_manager, upload_enabled=upload_enabled,
                               metadata_manager=metadata_manager, linked_import=linked_import,
                               embedded=embedded, autoplay=autoplay,
-                              upload_coordinator=upload_coordinator, trash_handler=trash_handler)
+                              upload_coordinator=upload_coordinator, trash_handler=trash_handler,
+                              preloaded_media=preloaded_media, native_preview=native_preview)
 
     @classmethod
     def interface_sample(cls, poster, *, title='Sample clip.mp4', duration_ms=24000):
@@ -5077,7 +5076,8 @@ class ClipViewer(QDialog):
     def _initialize_clip(self, clip_path, bridge, *, thumb_pixmap=None,
                          settings_manager=None, upload_enabled=False, metadata_manager=None,
                          linked_import=False, embedded=True, autoplay=False,
-                         upload_coordinator=None, trash_handler=None):
+                         upload_coordinator=None, trash_handler=None, preloaded_media=None,
+                         native_preview=None):
         self._trash_handler = trash_handler
         self._trash_completion_token = None
         reusing = hasattr(self, 'player')
@@ -5127,6 +5127,9 @@ class ClipViewer(QDialog):
             getattr(self, '_compatibility_generation', 0) + 1)
         self._compatibility_checked = False
         self._compatible_playback_path = None
+        self._pending_editor_media = None
+        self._preloaded_audio_sources = None
+        self._preloaded_audio_mixer = None
         self.bridge          = bridge
         self.sm              = settings_manager
         self._mm             = metadata_manager
@@ -5328,12 +5331,12 @@ class ClipViewer(QDialog):
 
         if not reusing:
             self._export_done.connect(self._on_export_done)
-            self._setup_ui()
+            self._setup_ui(preloaded_media=preloaded_media, native_preview=native_preview)
             self._apply_styles()
             self._refresh_highlight_markers()
         else:
             self._reset_clip_ui()
-            self._create_media_player()
+            self._create_media_player(preloaded_media)
         self._bind_upload_coordinator()
         self._refresh_quick_crop_btn()
 
@@ -5416,7 +5419,8 @@ class ClipViewer(QDialog):
         if reusing:
             self._restore_editor_state(self._capture_editor_state(), persist=False)
         self._restore_persisted_editor_draft()
-        self._later(0, self._discover_audio_sources_async)
+        if self._pending_editor_media is None:
+            self._later(0, self._discover_audio_sources_async)
         self._proxy_prepare_timer = QTimer(self)
         self._proxy_prepare_timer.setSingleShot(True)
         self._proxy_prepare_timer.setInterval(650)
@@ -5820,22 +5824,29 @@ class ClipViewer(QDialog):
         self.refresh_library_flags()
         self._refresh_highlight_markers()
 
-    def _create_native_video_widget(self):
+    def _create_native_video_widget(self, native_preview=None):
         if self._native_output_enabled and quick_preview_supported():
             try:
-                self._native_video_widget = QuickVideoPreview(self._video_clip_frame)
+                if native_preview is None:
+                    native_preview = QuickVideoPreview(self._video_clip_frame)
+                else:
+                    native_preview.setParent(self._video_clip_frame)
+                    native_preview.initialize_scene()
+                self._native_video_widget = native_preview
                 self._native_video_widget.gpu_failed.connect(self._update_video_renderer)
             except RuntimeError as exc:
                 emit_event('playback', 'gpu_preview_unavailable', detail=str(exc))
                 self._native_video_widget = QVideoWidget(self._video_clip_frame)
         else:
+            if native_preview is not None:
+                native_preview.deleteLater()
             self._native_video_widget = QVideoWidget(self._video_clip_frame)
         self._native_video_widget.setObjectName('nativeVideoWidget')
         self._native_video_widget.setGeometry(0, 0, 1, 1)
         self._native_video_widget.hide()
         self._native_video_widget.installEventFilter(self)
 
-    def _setup_ui(self):
+    def _setup_ui(self, *, preloaded_media=None, native_preview=None):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -5915,7 +5926,7 @@ class ClipViewer(QDialog):
         # Qt Quick keeps decoded video and edited presentation on the GPU.
         # Retain the native widget/software combination for unavailable GPUs.
         if not self._interface_sample:
-            self._create_native_video_widget()
+            self._create_native_video_widget(native_preview)
         # The native sink callback is bound at each source boundary below. Its
         # closure captures that source generation so queued callbacks from an
         # earlier clip cannot mutate this clip's counters or surface state.
@@ -6497,40 +6508,82 @@ class ClipViewer(QDialog):
         self._update_studio_layout()
 
         if not self._interface_sample:
-            self._create_media_player()
+            self._create_media_player(preloaded_media)
 
-    def _create_media_player(self):
-        self.player = QMediaPlayer(self)
+    def _create_media_player(self, preloaded_media=None):
+        adopted = None
+        if preloaded_media is not None:
+            from ui.editor_preloader import PendingPreparedMedia
+
+            if isinstance(preloaded_media, PendingPreparedMedia):
+                self._pending_editor_media = preloaded_media
+                if not preloaded_media.bind(
+                        self.clip_path, self._preview_quality,
+                        lambda inspection: self._later(0, lambda: self._on_pending_media_ready(
+                            preloaded_media, inspection))):
+                    self._pending_editor_media = None
+            else:
+                adopted = preloaded_media.adopt(
+                    self, clip_path=self.clip_path, playback_path=self._playback_path)
+        if adopted is None:
+            self.player = QMediaPlayer(self)
+            self.audio_output = QAudioOutput(self)
+            self.player.setAudioOutput(self.audio_output)
+        else:
+            self.player, self.audio_output, preloader_sink = adopted
+            self._preloaded_audio_sources = preloaded_media.audio_sources
+            self._preloaded_audio_mixer = preloaded_media.take_audio_mixer(self)
+            self._compatibility_checked = True
+            self._compatible_playback_path = self._playback_path
+            self.audio_output.setMuted(False)
         playback_instance_created()
         self._diagnostic_player_counted = True
-        self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(self._master_volume / 100.0)
-        self.player.setAudioOutput(self.audio_output)
-        # One stable output is attached before the source is opened. Effects,
-        # crop and stretch change GPU parameters (or bounded fallback state);
-        # they never replace this player or reload its source.
+        # Let the dialog paint before opening media or connecting a preload's sink.
+        if adopted is None:
+            self._attach_video_output()
+            self._connect_media_player_signals(self.player)
+            if self._pending_editor_media is None:
+                self._later(0, self._prepare_initial_media_source)
+        else:
+            self._later(0, lambda: self._set_media_source(preloader_sink=preloader_sink))
+
+    def _on_pending_media_ready(self, pending, inspection):
+        if self._closing or self._pending_editor_media is not pending:
+            return
+        self._pending_editor_media = None
+        valid = inspection is not None and inspection.matches_files(self.clip_path)
+        if valid:
+            self._preloaded_audio_sources = inspection.audio_sources
+        self._discover_audio_sources_async()
+        if valid and pending.quality == self._preview_quality:
+            self._on_compatibility_source_ready(
+                inspection.playback_path, self._compatibility_cancel,
+                self._compatibility_generation)
+        else:
+            from core.playback_proxy import cached_playback_path, is_compatibility_cache_path
+            self._playback_path = cached_playback_path(self.clip_path, self._preview_quality)
+            self._compatibility_cache_active = is_compatibility_cache_path(
+                self.clip_path, self._playback_path)
+            self._prepare_initial_media_source()
+
+    def _attach_video_output(self, *, preloader_sink=None):
+        # Keep the editor output attached through playback and edit changes.
         self._video_renderer = 'native' if self._native_output_enabled else 'software'
-        if isinstance(self._native_video_widget, QuickVideoPreview):
+        quick_preview = isinstance(self._native_video_widget, QuickVideoPreview)
+        if preloader_sink is not None:
+            # Media Foundation binds decoding to the sink present at open.
+            # Relay the existing QVideoFrame to the editor's rendering sink.
+            editor_sink = (self._native_video_widget.videoSink()
+                           if quick_preview or self._native_output_enabled
+                           else self.video_widget.video_sink)
+            self._connect_clip_result(preloader_sink.videoFrameChanged, editor_sink.setVideoFrame)
+        elif quick_preview:
             self.player.setVideoSink(self._native_video_widget.videoSink())
         else:
             self.player.setVideoOutput(
                 self._native_video_widget if self._native_output_enabled
                 else self.video_widget.video_sink)
-        self._connect_clip_result(self.player.playbackStateChanged, self._on_state_changed)
-        self._connect_clip_result(self.player.mediaStatusChanged, self._on_media_status_changed)
-        self._connect_clip_result(self.player.positionChanged, self._on_player_position_changed)
-        # Surface backend errors instead of letting them propagate up as a
-        # hard crash. This connects QMediaPlayer.errorOccurred where available
-        # (Qt 6.5+); older bindings simply ignore the AttributeError.
-        try:
-            self._connect_clip_result(self.player.errorOccurred, self._on_player_error)
-        except AttributeError:
-            # Older supported Qt builds have no errorOccurred signal.
-            pass
-        # Let the dialog paint its poster and controls before MediaFoundation
-        # starts opening the source. This removes decoder startup from the
-        # perceived click-to-editor latency.
-        self._later(0, self._prepare_initial_media_source)
 
     # Event filter — keep the software video surface sized to the clip frame
 
@@ -7087,7 +7140,7 @@ class ClipViewer(QDialog):
             self.video_widget._enqueue_latest_frame()
         self._refresh_live_preview()
 
-    def _set_media_source(self):
+    def _set_media_source(self, *, preloader_sink=None):
         if self._closing:
             return
         try:
@@ -7123,12 +7176,18 @@ class ClipViewer(QDialog):
                     self, self._renderer_resume_position_ms,
                     source_generation=source_generation)
             self._playback_preparing_at = time.monotonic()
-            emit_event('playback', 'media_requested', state='PREPARING')
+            emit_event('playback', 'media_requested', state='PREPARING',
+                       preloaded=preloader_sink is not None)
             label = getattr(self, '_sdr_preview_lbl', None)
             if label is not None:
                 from core.playback_proxy import is_sdr_preview_path
                 label.setVisible(is_sdr_preview_path(self.clip_path, self._playback_path))
-            self.player.setSource(QUrl.fromLocalFile(self._playback_path))
+            if preloader_sink is None:
+                self.player.setSource(QUrl.fromLocalFile(self._playback_path))
+            else:
+                self._attach_video_output(preloader_sink=preloader_sink)
+                self._connect_media_player_signals(self.player)
+                self._on_media_status_changed(self.player.mediaStatus())
         except Exception as e:
             print(f'[ClipViewer] setSource failed: {e}')
             detail = f'{type(e).__name__}: {e}'
@@ -7140,7 +7199,8 @@ class ClipViewer(QDialog):
     def _prepare_initial_media_source(self, *, require_compatible=False):
         """Prepare the first media source without blocking the editor UI."""
 
-        if self._closing or (self._compatibility_checked and not require_compatible):
+        if (self._closing or getattr(self, '_pending_editor_media', None) is not None
+                or (self._compatibility_checked and not require_compatible)):
             return
         if self._playback_path != self.clip_path and not require_compatible:
             self._compatibility_checked = True
@@ -7270,6 +7330,8 @@ class ClipViewer(QDialog):
             self._cancel_compatibility_prepare()
         self._proxy_checked = False
         self._prepared_playback_path = None
+        if getattr(self, '_pending_editor_media', None) is not None:
+            return
         path = cached_playback_path(self.clip_path, mode)
         if not self._compatibility_checked:
             # The required compatibility worker may still be probing. An
@@ -7526,7 +7588,8 @@ class ClipViewer(QDialog):
                     PlayerLifecycleState.CLOSED,
                 }):
             return
-        if getattr(self, '_compatibility_worker', None) is not None:
+        if (getattr(self, '_compatibility_worker', None) is not None
+                or getattr(self, '_pending_editor_media', None) is not None):
             # Compatibility preparation owns its own cancellable process
             # deadline. The decoder readiness window starts after setSource.
             self._playback_stall_timer.start()
@@ -9233,6 +9296,7 @@ class ClipViewer(QDialog):
         source = self._single_dry_audio_source()
         if source is None or not self._select_container_audio_track(source.audio_index):
             return False
+        self._discard_preloaded_audio_mixer()
         self._deferred_audio_mixer_sources = ()
         self._native_audio_source_id = source.source_id
         self._audio_preparation_ready = True
@@ -9278,6 +9342,13 @@ class ClipViewer(QDialog):
     _audio_sources_discovered = Signal(object, str, object)
 
     def _discover_audio_sources_async(self):
+        if getattr(self, '_pending_editor_media', None) is not None:
+            return
+        sources = self._preloaded_audio_sources
+        self._preloaded_audio_sources = None
+        if sources is not None:
+            self._on_audio_sources_discovered(sources, '', self._prepare_cancel)
+            return
         clip_path = self.clip_path
         signal = self._audio_sources_discovered
         cancelled = self._prepare_cancel
@@ -9359,6 +9430,12 @@ class ClipViewer(QDialog):
             self._update_playback_readiness()
         self._refresh_audio_mix_panel()
 
+    def _discard_preloaded_audio_mixer(self):
+        mixer = getattr(self, '_preloaded_audio_mixer', None)
+        self._preloaded_audio_mixer = None
+        if mixer is not None:
+            mixer.stop_async()
+
     def _prepare_audio_mixer(self, sources):
         if (self._closing or self._audio_mixer is not None
                 or self._player_lifecycle_state in {
@@ -9374,7 +9451,14 @@ class ClipViewer(QDialog):
         self._playback_preparing_at = time.monotonic()
         self._playback_status_lbl.setText('Preparing audio…')
         try:
-            self._audio_mixer = FFmpegPlaybackController(
+            warmed = getattr(self, '_preloaded_audio_mixer', None)
+            if (warmed is not None and (not self._limiter_enabled
+                    or warmed.sources != tuple(source for source in sources if source.available)
+                    or (warmed.preparation_result is not None and not warmed.preparation_result[0]))):
+                self._discard_preloaded_audio_mixer()
+                warmed = None
+            self._preloaded_audio_mixer = None
+            self._audio_mixer = warmed or FFmpegPlaybackController(
                 self.clip_path, sources, self, limiter_enabled=self._limiter_enabled)
             current_mixer = self._audio_mixer
             for signal, callback in (
@@ -9395,6 +9479,10 @@ class ClipViewer(QDialog):
                 self._speed_rate, int(self.player.position()),
                 preserve_pitch=bool(getattr(self, '_preserve_pitch', True)))
             self._audio_mixer.start()
+            # The worker may have finished while its speculative owner had no
+            # editor slots. Replay the published result after wiring signals.
+            if warmed is not None and warmed.preparation_result is not None:
+                self._on_audio_mixer_ready(*warmed.preparation_result)
         except PlaybackError as mixer_error:
             print(f'[ClipViewer] custom audio mixer unavailable: {mixer_error}')
             emit_event(
@@ -10203,7 +10291,7 @@ class ClipViewer(QDialog):
             self._export_done.emit(False, str(e))
             self.export_error.emit(
                 'FFMPEG NOT FOUND',
-                'ffmpeg is required for export. It normally ships with FTHR Clips; '
+                'ffmpeg is required for export. It normally ships with FTHRClips; '
                 'if you are running from source, install it: '
                 'sudo pacman -S ffmpeg (Arch) or sudo apt install ffmpeg (Debian).',
                 'error',
@@ -10263,16 +10351,13 @@ class ClipViewer(QDialog):
             elapsed_ms=round(result.elapsed_seconds * 1000),
             exit_code=result.returncode,
             stderr_tail=result.stderr_tail,
+            detail=result.detail or None,
             output_exists=output_exists,
             output_size_bytes=(os.path.getsize(out) if output_exists else 0))
         if result.state is ExportState.COMPLETED:
             self._export_done.emit(True, out)
         elif not getattr(self, '_cancelled', False):
-            detail = result.detail
-            if result.stderr_tail:
-                detail = next((line for line in reversed(
-                    result.stderr_tail.splitlines()) if line.strip()), detail)
-            self._export_done.emit(False, detail or 'Export failed')
+            self._export_done.emit(False, result.failure_message())
 
     def _on_export_done(self, success: bool, msg: str):
         if getattr(self, '_closing', False):
@@ -10292,7 +10377,7 @@ class ClipViewer(QDialog):
             self.export_btn.setText('Export failed')
             self.export_error.emit(
                 'EXPORT FAILED',
-                'FFmpeg returned an error. The output file may be incomplete.',
+                msg,
                 'warning',
             )
             set_theme_style(self.crop_info_lbl, lambda: (f'color: {Colors.ERROR}; font-size: 8px; '
@@ -10607,6 +10692,7 @@ class ClipViewer(QDialog):
     def _teardown_player(self, *, wait_for_workers=True):
         if self._teardown_complete:
             return
+        self._discard_preloaded_audio_mixer()
         if not getattr(self, '_skip_detail_flush_on_teardown', False):
             if self._flush_clip_details() is False:
                 raise OSError('The clip details could not be saved')
@@ -10622,6 +10708,10 @@ class ClipViewer(QDialog):
         self._set_player_state(PlayerLifecycleState.CLOSING)
         self._closing = True
         self._prepare_cancel.set()
+        pending = getattr(self, '_pending_editor_media', None)
+        self._pending_editor_media = None
+        if pending is not None:
+            pending.cancel()
         if hasattr(self, '_scrub_preview_timer'):
             self._cancel_scrub_preview()
         ClipViewer._cancel_compatibility_prepare(self)

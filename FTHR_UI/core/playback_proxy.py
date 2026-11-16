@@ -17,7 +17,7 @@ import threading
 import time
 
 from core.ffmpeg_tools import get_ffmpeg_exe, get_ffprobe_exe, software_video_args
-from core.hdr_color import hdr_color_from_stream, probe_hdr, sdr_tonemap_filter
+from core.hdr_color import hdr_color_from_stream, inspect_hdr, probe_hdr, sdr_tonemap_filter
 from core.media_process import run_media_process
 from core.media_identity import file_identity
 
@@ -39,6 +39,8 @@ _MP4_EXTENSIONS = {'.mp4', '.m4v', '.mov'}
 _MP4_PCM_TAGS = {'fpcm', 'ipcm'}
 _PROBE_DECISIONS: OrderedDict[Path, bool] = OrderedDict()
 _PROBE_LOCK = threading.Lock()
+_MAX_ORIGINAL_COMPATIBILITY_ENTRIES = 128
+_ORIGINAL_COMPATIBILITY: OrderedDict[tuple[Path, str, bool], None] = OrderedDict()
 
 
 def _remember_probe(target: Path, needed: bool) -> None:
@@ -71,6 +73,17 @@ def _compatibility_cache_path(source: str) -> Path:
     identity = f'{file_identity(source)!r}|presentation-v4'
     return CACHE_DIR / 'compatibility' / (
         hashlib.sha256(identity.encode('utf-8')).hexdigest() + '.mp4')
+
+
+def _remember_original_compatibility(
+        source: str, key: tuple[Path, str, bool], cancelled: threading.Event) -> None:
+    if _compatibility_cache_path(source) != key[0] or cancelled.is_set():
+        return
+    with _PROBE_LOCK:
+        _ORIGINAL_COMPATIBILITY[key] = None
+        _ORIGINAL_COMPATIBILITY.move_to_end(key)
+        while len(_ORIGINAL_COMPATIBILITY) > _MAX_ORIGINAL_COMPATIBILITY_ENTRIES:
+            _ORIGINAL_COMPATIBILITY.popitem(last=False)
 
 
 def is_compatibility_cache_path(source: str, candidate: str) -> bool:
@@ -385,8 +398,12 @@ def prepare_playback_path(source: str, cancelled: threading.Event, mode: str = '
                 pass
 
 
-def _probe_playback_streams(source: str, cancelled: threading.Event,
-                            *, discover: bool = False) -> list[dict]:
+def _probe_playback_streams(source: str, cancelled: threading.Event) -> list[dict]:
+    return _inspect_playback_streams(source, cancelled)[1]
+
+
+def _inspect_playback_streams(source: str, cancelled: threading.Event,
+                               *, discover: bool = False) -> tuple[bool, list[dict]]:
     try:
         # MP4 track headers contain the compatibility timing and codec tags.
         # Other containers may need stream discovery to report their duration.
@@ -409,15 +426,15 @@ def _probe_playback_streams(source: str, cancelled: threading.Event,
                 if (mp4 and not discover and any(
                         s.get('codec_type') == 'video' and 'start_time' not in s
                         for s in streams)):
-                    return _probe_playback_streams(source, cancelled, discover=True)
+                    return _inspect_playback_streams(source, cancelled, discover=True)
                 if not mp4:
                     for stream in streams:
                         stream.setdefault('duration', document.get('format', {}).get('duration'))
-                return streams
+                return not result[2], streams
     except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
         # The existing presentation normalization can still be attempted.
         pass
-    return []
+    return False, []
 
 
 def _compatible_remux_matches(source_streams: list[dict], output_streams: list[dict]) -> bool:
@@ -528,9 +545,14 @@ def prepare_compatibility_path(source: str, cancelled: threading.Event) -> str:
             return cached
         compatibility = _compatibility_cache_path(source)
         source_path = Path(source)
-        source_size = source_path.stat().st_size
         mp4 = source_path.suffix.lower() in _MP4_EXTENSIONS
-        source_streams = _probe_playback_streams(source, cancelled)
+        original_key = (compatibility, sys.platform, mp4)
+        with _PROBE_LOCK:
+            if original_key in _ORIGINAL_COMPATIBILITY:
+                _ORIGINAL_COMPATIBILITY.move_to_end(original_key)
+                return source
+        source_size = source_path.stat().st_size
+        streams_checked, source_streams = _inspect_playback_streams(source, cancelled)
         audio_streams = [s for s in source_streams if s.get('codec_type') == 'audio']
         pcm_audio_indices = [i for i, stream in enumerate(audio_streams)
                              if stream.get('codec_tag_string') in _MP4_PCM_TAGS]
@@ -542,14 +564,20 @@ def prepare_compatibility_path(source: str, cancelled: threading.Event) -> str:
                         if pcm_remux else _MAX_CACHE_BYTES)
         video = next((s for s in source_streams if s.get('codec_type') == 'video'), {})
         color = hdr_color_from_stream(video)
+        hdr_checked = bool(video)
         if color is not None or (video and video.get('color_transfer') in {None, 'unknown'}):
             # Imported files can signal HDR or mastering data in the bitstream.
-            color = probe_hdr(source, cancelled) or color
+            hdr_checked, detected_color = inspect_hdr(source, cancelled)
+            color = detected_color or color
+        streams_validated = streams_checked and hdr_checked and (not mp4 or all(
+            stream.get('codec_tag_string') for stream in audio_streams))
         if cancelled.is_set():
             return source
         if color is None and (sys.platform != 'win32'
                               or (not pcm_remux and source_size >
                                   _MAX_CACHE_BYTES - _MAX_COMPATIBILITY_GROWTH)):
+            if streams_validated and sys.platform != 'win32':
+                _remember_original_compatibility(source, original_key, cancelled)
             return source
         target = (compatibility.with_suffix(_HDR_PREVIEW_SUFFIX)
                   if color is not None else compatibility)
@@ -557,7 +585,8 @@ def prepare_compatibility_path(source: str, cancelled: threading.Event) -> str:
         temporary = target.with_suffix(
             f'.{os.getpid()}-{threading.get_ident()}.partial.mp4')
         from core.mp4_timing import (
-            normalize_mp4_presentation, normalize_mp4_presentation_in_place,
+            Mp4NormalizationResult, normalize_mp4_presentation_in_place,
+            normalize_mp4_presentation_result,
         )
         if color is not None:
             if not _prepare_hdr_sdr_preview(
@@ -587,8 +616,12 @@ def prepare_compatibility_path(source: str, cancelled: threading.Event) -> str:
             if not _compatible_remux_matches(
                     source_streams, _probe_playback_streams(str(temporary), cancelled)):
                 return source
-        elif not normalize_mp4_presentation(source, temporary, cancelled):
-            return source
+        else:
+            normalization = normalize_mp4_presentation_result(source, temporary, cancelled)
+            if normalization is Mp4NormalizationResult.UNCHANGED and streams_validated:
+                _remember_original_compatibility(source, original_key, cancelled)
+            if normalization is not Mp4NormalizationResult.NORMALIZED:
+                return source
         if (cancelled.is_set()
                 or _compatibility_cache_path(source) != compatibility
                 or temporary.stat().st_size <= 0

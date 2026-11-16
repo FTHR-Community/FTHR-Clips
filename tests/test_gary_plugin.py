@@ -161,7 +161,7 @@ def test_failed_update_unloads_old_plugin_and_is_reported(host, tmp_path):
 def test_app_does_not_ship_gary_code_or_assets():
     assert 'gary' not in (ROOT / 'FTHR_UI/main.py').read_text(encoding='utf-8').lower()
     assert not (ROOT / 'FTHR_UI/assets/gary.png').exists()
-    for filename in ('FTHR.spec',):
+    for filename in ('FTHR.spec', 'FTHR_linux.spec'):
         source = (ROOT / filename).read_text(encoding='utf-8')
         assert 'gary.png' not in source and 'gatze.png' not in source
 

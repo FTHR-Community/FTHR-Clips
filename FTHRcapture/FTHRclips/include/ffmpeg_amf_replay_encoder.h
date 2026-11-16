@@ -6,6 +6,7 @@
 
 #include "replay_encoder.h"
 #include <d3d11.h>
+#include <wrl/client.h>
 
 #include <atomic>
 #include <cstdint>
@@ -59,6 +60,24 @@ int InstallAmfSingleTexturePool(AVHWFramesContext* frames, ID3D11Device* device,
 int AcquireAmfInputFrame(AVBufferRef* frames, AVFrame* frame) noexcept;
 const AmfInputPoolDiagnostics* GetAmfInputPoolDiagnostics(
     const AVHWFramesContext* frames) noexcept;
+
+// The video processor is on the capture device. Its reusable input view
+// accepts a same-device BGRA copy when the capture surface cannot be viewed.
+class AmfVideoProcessorInput {
+public:
+    HRESULT Initialize(ID3D11Device* device, ID3D11VideoDevice* video_device,
+        ID3D11VideoProcessorEnumerator* enumerator, UINT width, UINT height) noexcept;
+    HRESULT Prepare(ID3D11DeviceContext* context, ID3D11VideoDevice* video_device,
+        ID3D11VideoProcessorEnumerator* enumerator, ID3D11Texture2D* source,
+        const D3D11_TEXTURE2D_DESC& description, UINT subresource,
+        ID3D11VideoProcessorInputView** view) noexcept;
+    void Reset() noexcept;
+
+private:
+    D3D11_TEXTURE2D_DESC copy_description_{};
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> copy_texture_;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> copy_view_;
+};
 
 // Internal diagnostics only; does not change the exported replay/shared ABI.
 struct AmfTextureEvidence {

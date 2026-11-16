@@ -283,7 +283,7 @@ def submit(source, directory, quality, build_command, duration, validate,
                 status=lambda value: setattr(task, 'status', value),
                 state_callback=_state_changed)
             task.status = result.state.value.title()
-            task.detail = '' if result.succeeded else (result.stderr_tail or result.detail)
+            task.detail = result.failure_message(full_stderr=True)
             if result.state == ExportState.COMPLETED:
                 task.progress = 100
         except Exception as error:
@@ -295,6 +295,7 @@ def submit(source, directory, quality, build_command, duration, validate,
                               else time.monotonic() - started)
             result_returncode = result.returncode if result is not None else None
             result_stderr = result.stderr_tail if result is not None else ''
+            result_detail = result.detail if result is not None else task.detail
             try:
                 try:
                     output_exists = output.is_file()
@@ -313,7 +314,7 @@ def submit(source, directory, quality, build_command, duration, validate,
                     output_size_bytes=output_size,
                     error=(DiagnosticError.EXPORT_PROCESS_FAILED
                            if failure is not None else None),
-                    detail=str(failure) if failure is not None else None)
+                    detail=result_detail or None)
             finally:
                 from core.transactional_output import discard_staged_output
                 try:
@@ -460,8 +461,7 @@ def submit_work(sources, output, quality, work, *, label=None):
                 else:
                     task.result = ExportResult(ExportState.CANCELLED, 'Job cancelled')
             task.status = task.result.state.value.title()
-            task.detail = ('' if task.result.succeeded else
-                           task.result.stderr_tail or task.result.detail)
+            task.detail = task.result.failure_message(full_stderr=True)
             if task.result.succeeded:
                 task.progress = 100
         except Exception as error:

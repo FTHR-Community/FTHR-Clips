@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 import pytest
@@ -557,6 +558,47 @@ def test_quick_finish_survives_editor_close_and_reports_output_identity(
     assert terminal['output_exists'] is False
 
 
+@pytest.mark.parametrize('failed_step', ['validation', 'commit'])
+def test_export_queue_reports_failure_after_successful_encode(
+        isolated_admission, monkeypatch, tmp_path, failed_step):
+    events = []
+    monkeypatch.setattr(queue, 'emit_event',
+                        lambda *args, **kwargs: events.append((args, kwargs)))
+    monkeypatch.setattr(queue, 'encode_command', lambda template, *_args: template)
+    reason = f'Output {failed_step} failed'
+
+    def fail_step(*_args):
+        raise OSError(reason)
+
+    if failed_step == 'commit':
+        monkeypatch.setattr(queue, 'commit_staged_output', fail_step)
+
+    def encode(staged):
+        # The extra argument prevents ExportJob from adding FFmpeg's progress flags.
+        return [
+            sys.executable, '-c',
+            'import sys; from pathlib import Path; '
+            'print("Encoded one frame", file=sys.stderr); '
+            'Path(sys.argv[-1]).write_bytes(b"encoded")',
+            '-progress', staged,
+        ]
+
+    task = queue.submit(
+        tmp_path / 'clip.mp4', tmp_path, 'quality', encode, 1,
+        fail_step if failed_step == 'validation' else None)
+    task.thread.join(5)
+
+    assert task.done
+    assert task.status == 'Failed'
+    assert task.detail == reason
+    assert not Path(task.output).exists()
+    terminal = next(fields for args, fields in events if args == ('export', 'terminal'))
+    assert terminal['state'] == 'FAILED'
+    assert terminal['exit_code'] == 0
+    assert terminal['detail'] == reason
+    assert terminal['stderr_tail'] == 'Encoded one frame'
+
+
 def test_terminal_stat_failure_cannot_strand_queue_task(monkeypatch, tmp_path):
     events = []
     ready = threading.Event()
@@ -740,5 +782,3 @@ def test_share_uses_selected_quality_and_preserves_frame_edits(
     media = probe_media(str(output))
     assert (media.width, media.height) == (stretch_size or (160, 120))
     assert media.duration_s == pytest.approx(1.0)
-
-

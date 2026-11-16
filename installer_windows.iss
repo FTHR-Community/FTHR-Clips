@@ -3,8 +3,9 @@
 ; Build: iscc installer_windows.iss
 ; Prerequisite: redist\vc_redist.x64.exe — https://aka.ms/vs/17/release/vc_redist.x64.exe
 
-#define MyAppName      "FTHR Clips"
-#define MyAppVersion   "2.1.0"
+#define MyAppName      "FTHRClips"
+#define MyAppLegacyName "FTHR Clips"
+#define MyAppVersion   "2.1.2"
 #define MyAppPublisher "FTHR Community"
 #define MyAppExeName   "FTHRClips.exe"
 #define MyAppURL       "https://github.com/fthr/clips"
@@ -34,7 +35,7 @@ AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 AppCopyright=Copyright (c) 2026 FTHR Community
 DefaultDirName={autopf}\FTHRClips
-DefaultGroupName={#MyAppName}
+DefaultGroupName={#MyAppLegacyName}
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
 OutputBaseFilename=FTHRClips-Setup-{#MyAppVersion}-x64
@@ -42,12 +43,12 @@ OutputDir=Output
 
 ; Keep Installer metadata visible and consistent with the frozen executable.
 VersionInfoCompany={#MyAppPublisher}
-VersionInfoDescription=FTHR Clips Windows Setup
+VersionInfoDescription=FTHRClips Windows Setup
 VersionInfoProductName={#MyAppName}
 ; PE ProductVersion is numeric; keep the alpha suffix in the textual field.
-VersionInfoProductVersion=2.1.0.0
+VersionInfoProductVersion=2.1.2.0
 VersionInfoTextVersion={#MyAppVersion}
-VersionInfoVersion=2.1.0.0
+VersionInfoVersion=2.1.2.0
 
 ; Compression — maximum, solid
 Compression=lzma2/max
@@ -91,11 +92,11 @@ CreateUninstallRegKey=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
-english.WelcomeLabel1=Welcome to FTHR Clips Setup
-english.WelcomeLabel2=FTHR Clips is a lightweight game capture tool for Windows.%n%nThis will install or update version {#MyAppVersion} on your computer. An existing matching version is repaired in place.%n%nClose FTHR Clips before continuing so capture can shut down cleanly.
-english.FinishedHeadingLabel=FTHR Clips is installed!
-english.FinishedLabel=FTHR Clips is ready. Choose Finish to complete setup.
-english.SelectDirLabel3=Choose where the FTHR Clips application files should live, then continue.
+english.WelcomeLabel1=Welcome to FTHRClips Setup
+english.WelcomeLabel2=FTHRClips is a lightweight game capture tool for Windows.%n%nThis will install or update version {#MyAppVersion} on your computer. An existing matching version is repaired in place.%n%nClose FTHRClips before continuing so capture can shut down cleanly.
+english.FinishedHeadingLabel=FTHRClips is installed!
+english.FinishedLabel=FTHRClips is ready. Choose Finish to complete setup.
+english.SelectDirLabel3=Choose where the FTHRClips application files should live, then continue.
 english.SelectTasksLabel2=Choose whether Setup should create a desktop shortcut.
 
 [Tasks]
@@ -126,12 +127,12 @@ Source: "tools\uninstall_cleanup.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
-Name: "{group}\{#MyAppName}";           Filename: "{app}\{#MyAppExeName}"; \
-    Comment: "Launch FTHR Clips game capture"
-Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
+Name: "{group}\{#MyAppLegacyName}";           Filename: "{app}\{#MyAppExeName}"; \
+    Comment: "Launch FTHRClips game capture"
+Name: "{group}\Uninstall {#MyAppLegacyName}"; Filename: "{uninstallexe}"
 Name: "{group}\Licences and Third-Party Notices"; Filename: "{app}\THIRD_PARTY_NOTICES.md"
-Name: "{commondesktop}\{#MyAppName}";   Filename: "{app}\{#MyAppExeName}"; \
-    Tasks: desktopicon; Comment: "Launch FTHR Clips game capture"
+Name: "{commondesktop}\{#MyAppLegacyName}";   Filename: "{app}\{#MyAppExeName}"; \
+    Tasks: desktopicon; Comment: "Launch FTHRClips game capture"
 
 [Run]
 ; VC++ Runtime: only run when the installed 2015–2022 x64 runtime is missing
@@ -143,11 +144,11 @@ Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/quiet /norestart"; \
 ; Inno owns the checked-by-default completion option and launches it only
 ; after successful interactive setup when Finish is chosen. A pending restart
 ; suppresses postinstall actions automatically; preserve that native behavior.
-Filename: "{app}\{#MyAppExeName}"; Description: "Open FTHR Clips"; \
+Filename: "{app}\{#MyAppExeName}"; Description: "Open FTHRClips"; \
     WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [Messages]
-ConfirmUninstall=Remove %1 and its settings, logs, caches, and installed FTHR plugins?%n%nFTHR Clips will close first. Clips, recordings, screenshots, and exports will be kept.
+ConfirmUninstall=Remove %1 and its settings, logs, caches, and installed FTHR plugins?%n%nFTHRClips will close first. Clips, recordings, screenshots, and exports will be kept.
 
 [Code]
 const
@@ -434,7 +435,7 @@ begin
   Brand := TNewStaticText.Create(WizardForm);
   Brand.SetBounds(ScaleX(28), ScaleY(30), ScaleX(150), ScaleY(40));
   Brand.AutoSize := False;
-  Brand.Caption := 'FTHR Clips';
+  Brand.Caption := 'FTHRClips';
   ApplyDisplayStyle(Brand, 20, InstallerText);
   Brand.Parent := SidebarPanel;
 
@@ -487,7 +488,7 @@ begin
   TitleLabel := TNewStaticText.Create(WizardForm);
   TitleLabel.SetBounds(ScaleX(20), ScaleY(10), ScaleX(260), ScaleY(28));
   TitleLabel.AutoSize := False;
-  TitleLabel.Caption := 'FTHR Clips Setup';
+  TitleLabel.Caption := 'FTHRClips Setup';
   ApplyTextStyle(TitleLabel, 10, InstallerText, True);
   TitleLabel.Parent := TitleBarPanel;
   CloseButton := TBitmapButton.Create(WizardForm);
@@ -530,7 +531,7 @@ begin
   WizardForm.Font.Size := 10;
   WizardForm.Font.Style := [];
   WizardForm.Font.Color := InstallerText;
-  WizardForm.Caption := 'FTHR Clips Setup';
+  WizardForm.Caption := 'FTHRClips Setup';
 
   WizardForm.MainPanel.Visible := False;
   WizardForm.Bevel.Visible := False;
@@ -576,7 +577,7 @@ var
   Directory: String;
 begin
   Directory := Trim(InstallDirEdit.Text);
-  if BrowseForFolder('Choose where FTHR Clips will be installed',
+  if BrowseForFolder('Choose where FTHRClips will be installed',
       Directory, True) then
     InstallDirEdit.Text := Directory;
 end;
@@ -586,7 +587,7 @@ var
   Directory: String;
 begin
   Directory := Trim(ClipDirEdit.Text);
-  if BrowseForFolder('Choose where FTHR Clips will save clips',
+  if BrowseForFolder('Choose where FTHRClips will save clips',
       Directory, True) then
     ClipDirEdit.Text := Directory;
 end;
@@ -606,7 +607,7 @@ begin
   Title.Width := ConsentPage.SurfaceWidth - ScaleX(72);
   Title.Height := ScaleY(48);
   Title.AutoSize := False;
-  Title.Caption := 'Welcome to FTHR Clips';
+  Title.Caption := 'Welcome to FTHRClips';
   ApplyDisplayStyle(Title, 22, InstallerText);
   Title.Parent := ConsentPage.Surface;
 
@@ -671,7 +672,7 @@ begin
   Title.Width := LocationPage.SurfaceWidth - ScaleX(72);
   Title.Height := ScaleY(44);
   Title.AutoSize := False;
-  Title.Caption := 'Set up FTHR Clips';
+  Title.Caption := 'Set up FTHRClips';
   ApplyDisplayStyle(Title, 20, InstallerText);
   Title.Parent := LocationPage.Surface;
 
@@ -764,8 +765,8 @@ var
   Escaped: String;
 begin
   Escaped := Value;
-  StringChangeEx(Escaped, '\\', '\\\\', True);
-  StringChangeEx(Escaped, '"', '\\"', True);
+  StringChangeEx(Escaped, '\', '\\', True);
+  StringChangeEx(Escaped, '"', '\"', True);
   Result := Escaped;
 end;
 
@@ -797,7 +798,7 @@ begin
   while ValueEnd <= Length(Json) do begin
     if (Json[ValueEnd] = '"') and not Escaped then
       break;
-    if (Json[ValueEnd] = '\\') then
+    if (Json[ValueEnd] = '\') then
       Escaped := not Escaped
     else
       Escaped := False;
@@ -806,8 +807,8 @@ begin
   if ValueEnd > Length(Json) then
     exit;
   Remainder := Copy(Json, ValueStart, ValueEnd - ValueStart);
-  StringChangeEx(Remainder, '\\\\', '\\', True);
-  StringChangeEx(Remainder, '\\"', '"', True);
+  StringChangeEx(Remainder, '\\', '\', True);
+  StringChangeEx(Remainder, '\"', '"', True);
   Result := Remainder;
 end;
 
@@ -834,7 +835,7 @@ begin
       while ValueEnd <= Length(Json) do begin
         if (Json[ValueEnd] = '"') and not Escaped then
           break;
-        if (Json[ValueEnd] = '\\') then
+        if (Json[ValueEnd] = '\') then
           Escaped := not Escaped
         else
           Escaped := False;
@@ -899,22 +900,11 @@ begin
 end;
 
 function SaveSettingsJson(const FileName, Json: String): Boolean;
-var
-  Lines: TStringList;
 begin
-  Result := False;
-  Lines := TStringList.Create;
-  try
-    try
-      Lines.Text := Json;
-      Lines.SaveToFile(FileName);
-      Result := True;
-    except
-      Log('Could not write FTHR settings to ' + FileName);
-    end;
-  finally
-    Lines.Free;
-  end;
+  { SettingsManager reads JSON as Unicode; never use the system ANSI codepage. }
+  Result := SaveStringToFile(FileName, UTF8Encode(Json), False);
+  if not Result then
+    Log('Could not write FTHR settings to ' + FileName);
 end;
 
 function ExistingClipDirectory: String;
@@ -1072,11 +1062,11 @@ begin
   PreviewFinishedPage := CreateCustomPage(PreviewInstallingPage.ID, '', '');
   ApplyPageSurface(PreviewFinishedPage);
   WizardForm.FinishedHeadingLabel.Parent := PreviewFinishedPage.Surface;
-  WizardForm.FinishedHeadingLabel.Caption := 'FTHR Clips is ready';
+  WizardForm.FinishedHeadingLabel.Caption := 'FTHRClips is ready';
   WizardForm.FinishedLabel.Parent := PreviewFinishedPage.Surface;
   WizardForm.FinishedLabel.Caption := 'Visual preview only. Nothing was installed.';
   WizardForm.RunList.Parent := PreviewFinishedPage.Surface;
-  WizardForm.RunList.AddCheckBox('Open FTHR Clips', '', 0, True, True, False, False, nil);
+  WizardForm.RunList.AddCheckBox('Open FTHRClips', '', 0, True, True, False, False, nil);
   WizardForm.RunList.Visible := True;
   PreviewCopy := TNewStaticText.Create(PreviewFinishedPage);
   PreviewCopy.SetBounds(ScaleX(36), ScaleY(302),
@@ -1189,20 +1179,20 @@ begin
   Result := '';
 #ifdef PreviewBuild
   Result := 'This is a visual preview build. Installation is disabled. ' +
-    'Close this window and use the normal installer to install FTHR Clips.';
+    'Close this window and use the normal installer to install FTHRClips.';
   exit;
 #endif
   { File-lock detection misses source builds and other install locations.
     Never replace files or launch a successor while an old UI owns capture. }
   if CheckForMutexes(FTHRMutex) then begin
-    Result := 'FTHR Clips is still running. Use its power button to shut down ' +
+    Result := 'FTHRClips is still running. Use its power button to shut down ' +
       'the app and background capture completely, then retry installation.';
     exit;
   end;
   if (InstalledVersion <> '') and
      (CompareDottedVersion(InstalledVersion, '{#MyAppVersion}') > 0) and
      not IsDowngradeAllowed then begin
-    Result := 'A newer FTHR Clips version (' + InstalledVersion +
+    Result := 'A newer FTHRClips version (' + InstalledVersion +
       ') is already installed. This installer will not downgrade it. ' +
       'Use a matching or newer installer, or explicitly pass /ALLOWDOWNGRADE.';
   end;
@@ -1262,10 +1252,10 @@ begin
   if not LegacyCleanupRequested then
     exit;
   if CheckForMutexes(FTHRMutex) then begin
-    Log('Legacy cleanup skipped: FTHR Clips is still running.');
+      Log('Legacy cleanup skipped: FTHRClips is still running.');
     if not WizardSilent then
       MsgBox('The old FTHR installation is still running, so it was left in place. ' +
-        'Close FTHR Clips and run this installer again to remove it.',
+        'Close FTHRClips and run this installer again to remove it.',
         mbInformation, MB_OK);
     exit;
   end;
@@ -1296,7 +1286,7 @@ begin
     if PreserveAutostart then begin
       RegWriteStringValue(HKCU, RunKey, RunValueName,
         '"' + ExpandConstant('{app}\{#MyAppExeName}') + '" --background');
-      Log('Preserved FTHR Clips autostart with the current install path.');
+      Log('Preserved FTHRClips autostart with the current install path.');
     end;
     RemoveLegacyInstall;
   end;
@@ -1452,8 +1442,8 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then begin
     if not RunUninstallCleanup('Shutdown') or CheckForMutexes(FTHRMutex) then begin
-      SuppressibleMsgBox('FTHR Clips could not finish shutting down. ' +
-        'Wait for recordings or exports to finish, close FTHR Clips using its power button, ' +
+      SuppressibleMsgBox('FTHRClips could not finish shutting down. ' +
+        'Wait for recordings or exports to finish, close FTHRClips using its power button, ' +
         'then run uninstall again. No application files were removed.', mbError, MB_OK, IDOK);
       Abort;
     end;
@@ -1464,6 +1454,6 @@ begin
       Abort;
     end;
     RegDeleteValue(HKCU, RunKey, RunValueName);
-    Log('Removed the FTHR Clips per-user autostart value.');
+    Log('Removed the FTHRClips per-user autostart value.');
   end;
 end;
