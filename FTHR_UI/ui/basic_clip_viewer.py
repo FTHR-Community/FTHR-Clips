@@ -5,9 +5,10 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThreadPool, QUrl, Slot
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from ui.clip_worker import CompatibilitySourceWorker
+from ui.sliders import ClickToSeekSlider
 
 
 class BasicClipViewer(QDialog):
@@ -27,7 +28,7 @@ class BasicClipViewer(QDialog):
         self.audio.setVolume(0.8)
         self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.video)
-        self.seek = QSlider(Qt.Orientation.Horizontal)
+        self.seek = ClickToSeekSlider(Qt.Orientation.Horizontal)
         self.seek.setAccessibleName('Playback position')
         self.seek.setRange(0, 0)
         self.seek.valueChanged.connect(self.player.setPosition)
@@ -42,7 +43,7 @@ class BasicClipViewer(QDialog):
         controls.addWidget(self.play)
         controls.addStretch()
         controls.addWidget(QLabel('Volume'))
-        volume = QSlider(Qt.Orientation.Horizontal)
+        volume = ClickToSeekSlider(Qt.Orientation.Horizontal)
         volume.setAccessibleName('Volume')
         volume.setRange(0, 100)
         volume.setValue(80)

@@ -1,7 +1,7 @@
 {
   "format": 1,
-  "snapshot_date": "2026-11-16",
-  "version": "2.1.2",
+  "snapshot_date": "2026-11-21",
+  "version": "2.1.3",
   "files": [
     {
       "path": ".gitattributes",
@@ -26,7 +26,7 @@
     {
       "path": "BUILDING.md",
       "bytes": 10183,
-      "sha256": "3ad0c6ffdf4a6747c1b943c8f1315cf6404f49a1cc54dfc1f044c6bd666afa11"
+      "sha256": "f22ca2ef84976de5ddc493719d8d2e3e96c13a26fcd18998bdfad04102f2ba31"
     },
     {
       "path": "CONTRIBUTING.md",
@@ -365,8 +365,8 @@
     },
     {
       "path": "FTHR_UI/core/audio_manifest.py",
-      "bytes": 10997,
-      "sha256": "14a5ce2011ad77042477166fac002aeb40d23b8b98d3cd2250c13f045c427a64"
+      "bytes": 12885,
+      "sha256": "8b1158bea72ab2278b2cc5562983ced0cd14a2488c22725d03995c8cabb33263"
     },
     {
       "path": "FTHR_UI/core/audio_mixer.py",
@@ -510,13 +510,13 @@
     },
     {
       "path": "FTHR_UI/core/engine_discovery.py",
-      "bytes": 436,
-      "sha256": "dd05154f4f42b96cff445b6f82d725eccda87d7d353bd43e074487a2ecc58fe0"
+      "bytes": 1797,
+      "sha256": "de21e0ba36c5d9c9d16f51ce2b7a6eb51a6290bef9fe8c8ee5109a2dcea9c357"
     },
     {
       "path": "FTHR_UI/core/engine_startup_diagnostics.py",
-      "bytes": 5555,
-      "sha256": "09054f7a03281bcf209d6ccb1e13787d6ae2a3d2e07e0e9c03f0b526c6271974"
+      "bytes": 5979,
+      "sha256": "3443a70c3edece2e8d16941e2b363ae12dc9af1cfaf29cd0ec42fba4c814aac4"
     },
     {
       "path": "FTHR_UI/core/error_codes.py",
@@ -535,8 +535,8 @@
     },
     {
       "path": "FTHR_UI/core/export_lifecycle.py",
-      "bytes": 21895,
-      "sha256": "c8cd85a00c045b57f7f49dd0c8b625e68ecbeef41bb92c871dbe7f8d6000f8b6"
+      "bytes": 22343,
+      "sha256": "ccfb0a0abb120e48b1f96781e9d60892028cc51ae3a098cfc1a0d73d1cbf41e8"
     },
     {
       "path": "FTHR_UI/core/export_profiles.py",
@@ -545,8 +545,8 @@
     },
     {
       "path": "FTHR_UI/core/export_queue.py",
-      "bytes": 19953,
-      "sha256": "00b4c8745f1c5a9432eb5afc1cf6d45678d669ec54629abfa1d965290d9a43a1"
+      "bytes": 20016,
+      "sha256": "be36880c56d1924ae3f1007fb3a79c8dc8a20cf6cef68189758bd6f6a6000edb"
     },
     {
       "path": "FTHR_UI/core/ffmpeg_playback.py",
@@ -560,8 +560,8 @@
     },
     {
       "path": "FTHR_UI/core/field_diagnostics.py",
-      "bytes": 49739,
-      "sha256": "11c3577eab8d8291495098a89901cdb174f2dbf29d83d5933cbbf0edd93eebfa"
+      "bytes": 50257,
+      "sha256": "711a480f3e15bc60205ac952daad731e617fd48de60ac2a7c95d026b33ad0d18"
     },
     {
       "path": "FTHR_UI/core/file_recovery.py",
@@ -595,8 +595,8 @@
     },
     {
       "path": "FTHR_UI/core/hotkey_manager.py",
-      "bytes": 69382,
-      "sha256": "454be7da19ca9d6ef0b7cec4e9a9df68fecf1610d6f09522483aa9d98b198563"
+      "bytes": 69648,
+      "sha256": "44219d692e45e058c397b037650010aee74d99b683b499c58f54a1667885839a"
     },
     {
       "path": "FTHR_UI/core/instance_activation.py",
@@ -625,8 +625,8 @@
     },
     {
       "path": "FTHR_UI/core/library_index.py",
-      "bytes": 16321,
-      "sha256": "a3cdf424219dea4db313a063b375cf49ab8106ff06d354651ffe0c9733420853"
+      "bytes": 16594,
+      "sha256": "77bd8a666dee65b239444a908a7d06a00c47297ce92d44de5df1165c3e4a597c"
     },
     {
       "path": "FTHR_UI/core/library_ownership.py",
@@ -685,8 +685,8 @@
     },
     {
       "path": "FTHR_UI/core/mp4_timing.py",
-      "bytes": 30794,
-      "sha256": "ab784aff67b7be3fb185c128032957c60a551c70afc201f18d9fe4c9e4064193"
+      "bytes": 30769,
+      "sha256": "91cae96814dc3bf339ce27c5e208edbcdcc5e4829ace949aebea83dde90749f4"
     },
     {
       "path": "FTHR_UI/core/native_audio_capabilities.py",
@@ -720,8 +720,8 @@
     },
     {
       "path": "FTHR_UI/core/plugin_runtime.py",
-      "bytes": 9132,
-      "sha256": "8954b740b4e60d2b61077dc1cc3bfb91266a6b3b0972f63f6c887667e4f9d2c7"
+      "bytes": 10288,
+      "sha256": "75a2e0f8ff83c39568eef19556906cf6cc4c4188239968ecb625b29b7e639f2d"
     },
     {
       "path": "FTHR_UI/core/presets_manager.py",
@@ -752,6 +752,11 @@
       "path": "FTHR_UI/core/save_state.py",
       "bytes": 13920,
       "sha256": "575a133fcab8a42a59dfc8c3279e08bd17ab2e1ef11c8e0bcb7f4189bdfbccbf"
+    },
+    {
+      "path": "FTHR_UI/core/save_trace.py",
+      "bytes": 1577,
+      "sha256": "da65681435bf3a995faaacf0dbc609498dee2f88c90d2c5084377f32d5e63f54"
     },
     {
       "path": "FTHR_UI/core/screenshot_save.py",
@@ -795,8 +800,8 @@
     },
     {
       "path": "FTHR_UI/core/transactional_output.py",
-      "bytes": 1018,
-      "sha256": "f7a5c3e43fe0f05ad8b56807bf0341012c70d94d4e6ae8e9d68371c79896eba6"
+      "bytes": 1156,
+      "sha256": "f154d828c85b694026fd21fd5968384b5cb288458c87eea4770a857093e6c045"
     },
     {
       "path": "FTHR_UI/core/ui_performance.py",
@@ -845,8 +850,8 @@
     },
     {
       "path": "FTHR_UI/core/windows_microphone_devices.py",
-      "bytes": 16291,
-      "sha256": "d655d30e57f61b226017032da6d7fa38632b28906641db487f3fe283f28c07da"
+      "bytes": 17013,
+      "sha256": "144d37f9eafe83744dcec844611c782c91207edb21de335aca4f4148d486a1ac"
     },
     {
       "path": "FTHR_UI/core/windows_monitor.py",
@@ -865,8 +870,8 @@
     },
     {
       "path": "FTHR_UI/main.py",
-      "bytes": 1194275,
-      "sha256": "52b927957b39a3194848321fa58f125b55680e008d210703850ad34d14d4b31c"
+      "bytes": 1165890,
+      "sha256": "c39a1a5840deaa4d8cd23081637cd7cca138c70482a3b86498d01c010cce7b7d"
     },
     {
       "path": "FTHR_UI/ui/__init__.py",
@@ -890,8 +895,8 @@
     },
     {
       "path": "FTHR_UI/ui/basic_clip_viewer.py",
-      "bytes": 4151,
-      "sha256": "e94415e6fe6c9703a8714ddc0f1b2596d5e29194d9aac8576bf793c49264254f"
+      "bytes": 4203,
+      "sha256": "46a9e37420ab028793cd6ce42d91188faeb2a818db48e4af886a5aa34b5fc4ed"
     },
     {
       "path": "FTHR_UI/ui/camera_overlay_editor.py",
@@ -905,13 +910,13 @@
     },
     {
       "path": "FTHR_UI/ui/capture_card.py",
-      "bytes": 25236,
-      "sha256": "a8a57cd55018b668ee4e2cb2535bfc70677ba9864f50187da969a67dec483970"
+      "bytes": 23682,
+      "sha256": "7fd6aee0d759a28f69db58cb5b7ffcd5b573bd385b63b5ad45609072714a1797"
     },
     {
       "path": "FTHR_UI/ui/capture_card_client.py",
-      "bytes": 11042,
-      "sha256": "6b789a5caad5a9bc28ac0998abdcba1ad91351394da179d290f978f919c5350e"
+      "bytes": 10365,
+      "sha256": "d83dc83296762b52d50c003d45e6517fefba01afbf97f591ca5baf2d6d68ac31"
     },
     {
       "path": "FTHR_UI/ui/capture_card_process.py",
@@ -920,13 +925,13 @@
     },
     {
       "path": "FTHR_UI/ui/capture_settings_widget.py",
-      "bytes": 32659,
-      "sha256": "81dbef6e20efcac7a3cfa756ee696364b6bc1c3873bc7d9cc993019c3c18c297"
+      "bytes": 31477,
+      "sha256": "fec11143352231084aa5b104c807f30429e7801b5b0f45eaf7cb67d36ec42ce8"
     },
     {
       "path": "FTHR_UI/ui/clip_cover_dialog.py",
-      "bytes": 35879,
-      "sha256": "c9dcc70a5db774a361624c33a7b87570427d998474471c92d17165ca94ee37a9"
+      "bytes": 35921,
+      "sha256": "9f7ca5bb27e88f86eb307759280c2625c2b600c5891173150410cfc354dc5a08"
     },
     {
       "path": "FTHR_UI/ui/clip_editor_window.py",
@@ -935,8 +940,8 @@
     },
     {
       "path": "FTHR_UI/ui/clip_grid.py",
-      "bytes": 333622,
-      "sha256": "4e3a5b2f5fab4f8267e3d087b9f7679a2a8715fb28155ca87e9d8180b651a86b"
+      "bytes": 324929,
+      "sha256": "967061e0df50e35d8a113fcb2055cc57209ad5f79793822ec251d8e385f6a4a2"
     },
     {
       "path": "FTHR_UI/ui/clip_overlap.py",
@@ -945,8 +950,8 @@
     },
     {
       "path": "FTHR_UI/ui/clip_viewer.py",
-      "bytes": 506411,
-      "sha256": "e9a997bedba162d35ed52124acd139ecb6bc7b9cda687769d58ef431eb4f6dd6"
+      "bytes": 448530,
+      "sha256": "28decfcb90a3d98fba06f66efe53373a3f7e1bc5ca528fbb2a634ab093996441"
     },
     {
       "path": "FTHR_UI/ui/clip_worker.py",
@@ -955,8 +960,8 @@
     },
     {
       "path": "FTHR_UI/ui/customize_page.py",
-      "bytes": 84245,
-      "sha256": "25b2ff0e41d8475f39b61078432c1640650d777819ec0573d517be786ba308c0"
+      "bytes": 75288,
+      "sha256": "00b8e51300fbe33f36a0a5a056be564489a07e06a009921637451a96f8d4d207"
     },
     {
       "path": "FTHR_UI/ui/diagnostic_report.py",
@@ -994,14 +999,24 @@
       "sha256": "a60a7e3e1a96d4cae328501ea12f71da92f97db3dd1e0374d87582ad184c1138"
     },
     {
+      "path": "FTHR_UI/ui/editor_state.py",
+      "bytes": 10549,
+      "sha256": "60f674adef5a76c32836c0c6c58c87bf884f11e42f1b3c2cccdf0f9aaab4a4a9"
+    },
+    {
+      "path": "FTHR_UI/ui/editor_timeline.py",
+      "bytes": 44329,
+      "sha256": "cb8802421b32f37be6440a29581d8c068e5095086ead568033b69d8f5e1e0027"
+    },
+    {
       "path": "FTHR_UI/ui/error_bar.py",
       "bytes": 9007,
       "sha256": "94f7988f799d132146f76a25ea7478060f55482bd18f290bb65a338615843b4c"
     },
     {
       "path": "FTHR_UI/ui/export_jobs.py",
-      "bytes": 8249,
-      "sha256": "93c78ca21e5b4316169f790cb6f1f83f353dc27d48cb3919afb250836009dd9c"
+      "bytes": 8497,
+      "sha256": "4260296e6d85e18b8b8314d56f0d4b94e85429934e1b7b66f0ccf674c8006a5b"
     },
     {
       "path": "FTHR_UI/ui/export_presets_widget.py",
@@ -1025,8 +1040,8 @@
     },
     {
       "path": "FTHR_UI/ui/game_profiles.py",
-      "bytes": 73067,
-      "sha256": "e2c5218d76fac79e63ed709b83c6167e9c275df7d90c838d7cd0fd1cbb99fc8e"
+      "bytes": 72848,
+      "sha256": "e63beb266575e6fe208cc491660105c9d8842bb49d9c8b857a028ec82abd6ecf"
     },
     {
       "path": "FTHR_UI/ui/highlight_markers.py",
@@ -1070,8 +1085,13 @@
     },
     {
       "path": "FTHR_UI/ui/library_storage.py",
-      "bytes": 67366,
-      "sha256": "5d6258a8358907c03a0ac048538b2b20cabaf2e63ed81b7ae172b931c4dbb2ff"
+      "bytes": 67408,
+      "sha256": "97efb4820f2ed82076f0726ce6346a7e0ab6d122ff1ab0d0f187b71b7c83a9b2"
+    },
+    {
+      "path": "FTHR_UI/ui/library_thumbnails.py",
+      "bytes": 16980,
+      "sha256": "ae21ae7d0b0d7b562dbd76693f77d167002389b6d288e2d507e1ca39aa8c65e7"
     },
     {
       "path": "FTHR_UI/ui/library_trash.py",
@@ -1120,8 +1140,8 @@
     },
     {
       "path": "FTHR_UI/ui/replay_storage.py",
-      "bytes": 16951,
-      "sha256": "596a716502a8109c75b71ae2360467609a9dfb97aea3265e5767f6ed93979d90"
+      "bytes": 16993,
+      "sha256": "684ea107f2fb4dcfff8bbba14fd074c8aebc590cd9d53c2695ee5478e3aac254"
     },
     {
       "path": "FTHR_UI/ui/running_app_picker.py",
@@ -1140,13 +1160,18 @@
     },
     {
       "path": "FTHR_UI/ui/settings_layout.py",
-      "bytes": 5595,
-      "sha256": "892dae85485f3a62084445fd10d6e948af137b06961f756537c053581737f795"
+      "bytes": 10632,
+      "sha256": "a2991ecd6bd74b1fb3a5706ab11025212e90dedf1a52037967ab857e41d11ab2"
     },
     {
       "path": "FTHR_UI/ui/settings_search.py",
       "bytes": 11391,
       "sha256": "477ba3bdb958751f1f6f6be254822be86a108c0eef5ab6fbad476833f5eca362"
+    },
+    {
+      "path": "FTHR_UI/ui/sliders.py",
+      "bytes": 4146,
+      "sha256": "60cc2a12e74470d8f53cd7247e36c1662bd9634a6fdebcfb3afc517342d05259"
     },
     {
       "path": "FTHR_UI/ui/sound_playback.py",
@@ -1169,9 +1194,14 @@
       "sha256": "9d65b4e2adbaac6b648243f0c9216170c42551efd6710c6bea0aa705605b788c"
     },
     {
+      "path": "FTHR_UI/ui/toolbar_popups.py",
+      "bytes": 23250,
+      "sha256": "3c538d603fcf8254f65bbab800e721f75d5da9df83108a12365dab958db4c790"
+    },
+    {
       "path": "FTHR_UI/ui/ultra_performance.py",
-      "bytes": 12904,
-      "sha256": "a9a31c55edca2faa74cb401c05fed9b49ac0d6062b4f287926ef25be635ef688"
+      "bytes": 12941,
+      "sha256": "06799ab3b835b49746dfff7001dbe9d3eebc7f76db675ca08871a4041ed07226"
     },
     {
       "path": "FTHR_UI/ui/upload_settings_widget.py",
@@ -1191,7 +1221,7 @@
     {
       "path": "FTHR_UI/version.py",
       "bytes": 1468,
-      "sha256": "5e85fc53cb153b2a11ef07693556b2f975f5c5a7b960e776c2dbf864328aa479"
+      "sha256": "9c98bc8dadf2b0f03f3cd50a44cb6727c10f047d24866d5902c4e8caff95d484"
     },
     {
       "path": "FTHR_Uploader/PRIVACY_POLICY.txt",
@@ -1240,13 +1270,13 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/FTHRclips.vcxproj",
-      "bytes": 12712,
-      "sha256": "474bfcdb02fafea91c91ef1cec6755e9a031a1ac1c32d5ab15bfd10d8ff52756"
+      "bytes": 12769,
+      "sha256": "9f22b1b5f23c21c449fce862d0a90b94160239061451b37929a78a1a1425bb95"
     },
     {
       "path": "FTHRcapture/FTHRclips/FTHRclips.vcxproj.filters",
-      "bytes": 7122,
-      "sha256": "245d03c86608e40dc2b408aa77aae9570c487c920244af6ae314b899a8c6a0f2"
+      "bytes": 7230,
+      "sha256": "83c30bdea42553ec00f3844dc60a3021682fdea7ff5a62c335fc39bfcec411ab"
     },
     {
       "path": "FTHRcapture/FTHRclips/include/async_content_sampler.h",
@@ -1275,13 +1305,13 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/include/audio_format_converter.h",
-      "bytes": 3116,
-      "sha256": "be85bce01d1cf5b0cc126fabb46a80244938b1fd8e0893fc2842a2001094be42"
+      "bytes": 3120,
+      "sha256": "e10b4d52de6e7744f2cc0c4e75ceb4d0a650bf3950419c521ccd1328c4bbc8ac"
     },
     {
       "path": "FTHRcapture/FTHRclips/include/audio_packet_ring.h",
-      "bytes": 3043,
-      "sha256": "b3617b85c9f80fa1a1190416912e7dba964d7a85c4e81b16d7773e25aea759ba"
+      "bytes": 3190,
+      "sha256": "7573351f7f3047627c98bd6676f6cbaf0260030b392ad28af58105b370576544"
     },
     {
       "path": "FTHRcapture/FTHRclips/include/audio_ring_buffer.h",
@@ -1315,8 +1345,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/include/capture_engine.h",
-      "bytes": 25454,
-      "sha256": "d8f829fa92752d8c16f93b2baa834009e031bb0589a69272d4d5a97b10afd13b"
+      "bytes": 25654,
+      "sha256": "7f2820a4f27aa29c7da3ae0b02c03cbd70890ba8f7e5d518619c6d25bce73a7b"
     },
     {
       "path": "FTHRcapture/FTHRclips/include/capture_focus_policy.h",
@@ -1355,8 +1385,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/include/encoded_ring_buffer.h",
-      "bytes": 11375,
-      "sha256": "6e9f03a6e402875a9558c425b03354260936138acd19fb2f12593fc9597b96f7"
+      "bytes": 11619,
+      "sha256": "81e5ec57219f892cebed2e832a9b42d68a785663c4ccf5b0d9bddffaf5ea5fc5"
     },
     {
       "path": "FTHRcapture/FTHRclips/include/encoded_video_config.h",
@@ -1377,6 +1407,11 @@
       "path": "FTHRcapture/FTHRclips/include/ffmpeg_qsv_replay_encoder.h",
       "bytes": 5052,
       "sha256": "e987a202a35919355234f1ae71e89376fc9f13782b982aa34a5aeb2974d9147b"
+    },
+    {
+      "path": "FTHRcapture/FTHRclips/include/frame_pacing_trace.h",
+      "bytes": 2283,
+      "sha256": "95b122e6ac656355bfdf33251a66293dde1336c9c8bf4e5f6a1e52f884ab74b3"
     },
     {
       "path": "FTHRcapture/FTHRclips/include/frame_rate_scheduler.h",
@@ -1435,8 +1470,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/include/save_clip_task.h",
-      "bytes": 5311,
-      "sha256": "98af37897364369a6af436912ec38de49554081931d3e5510236054749a4592c"
+      "bytes": 5391,
+      "sha256": "314c1a02f5f48103ac5c41c0fd4d09061360c489503ea0efe4f6242843dac22d"
     },
     {
       "path": "FTHRcapture/FTHRclips/include/shared_memory.h",
@@ -1475,8 +1510,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/include/window_capture_identity.h",
-      "bytes": 2104,
-      "sha256": "56e41513c0cc01c921fe8e7e95d392c27a9a475c35db17b3f89545b6d7b2393a"
+      "bytes": 2365,
+      "sha256": "54dd486e0298f6b2ef7b94bb137bd136a4346f5aad8a74a6b20adb5e5e5829fd"
     },
     {
       "path": "FTHRcapture/FTHRclips/include/windows_audio_session_registry.h",
@@ -1485,8 +1520,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/include/windows_capture_backend_policy.h",
-      "bytes": 7812,
-      "sha256": "53d1c203b04d735074d288aa7b747f48f292962ecec2262c355853d9e68f99ac"
+      "bytes": 13826,
+      "sha256": "88f3a3c29be1c75a8f0cba5976740a30a9b5282d3e1dca50b403564add838539"
     },
     {
       "path": "FTHRcapture/FTHRclips/include/windows_capture_border_policy.h",
@@ -1500,8 +1535,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/include/windows_microphone_audio_provider.h",
-      "bytes": 6829,
-      "sha256": "98e941e3c06d8ad6c243722688ef30185b37ba7168dd0f8da8593d27f3c9e7c7"
+      "bytes": 6873,
+      "sha256": "e73334994ee276640e8db7231243aad0e9931f65dc2199ab8ac583fb920217b6"
     },
     {
       "path": "FTHRcapture/FTHRclips/include/windows_monitor_resolver.h",
@@ -1530,13 +1565,13 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/src/audio_format_converter.cpp",
-      "bytes": 15012,
-      "sha256": "f43b73f37c46ad7cca8b79e6621177ab0222bd356f8471570f53f418c608d1eb"
+      "bytes": 15013,
+      "sha256": "c5537e980717c3fc19b84933b87a1f513530340f0d27ef9a37d5c45caa814760"
     },
     {
       "path": "FTHRcapture/FTHRclips/src/audio_packet_ring.cpp",
-      "bytes": 5942,
-      "sha256": "426b7a093e4e2baca01d06d96ad323985ce6d98450b47ae1e92c8190b09e83f9"
+      "bytes": 6477,
+      "sha256": "0fd2c2e3dfd2be820a74d2dd54e0912237c2f321d3ca4ce38620ff2dca5602b4"
     },
     {
       "path": "FTHRcapture/FTHRclips/src/audio_ring_buffer.cpp",
@@ -1560,8 +1595,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/src/capture_engine.cpp",
-      "bytes": 470352,
-      "sha256": "f15cc13a915946f3db795e3c069e0db7497bca89f702d350d0b2bf8ceea5f14e"
+      "bytes": 495031,
+      "sha256": "28615861bfa155d472d66fa7722950c445814496160411e07e4019faf9925c52"
     },
     {
       "path": "FTHRcapture/FTHRclips/src/clip_audio_manifest.cpp",
@@ -1580,8 +1615,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/src/encoded_ring_buffer.cpp",
-      "bytes": 30742,
-      "sha256": "4f1913b43da4f3cfc05c930780706ba64430bb5b012d911cf04d77d0a651034b"
+      "bytes": 31709,
+      "sha256": "77206701a71d62ca4085e1c4ae2528aa43a25d1049b6d92b52be47b362d576fd"
     },
     {
       "path": "FTHRcapture/FTHRclips/src/encoded_video_config.cpp",
@@ -1610,8 +1645,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/src/main.cpp",
-      "bytes": 31230,
-      "sha256": "18970448c8d38fb81c142203556926ca76a9a2f6732383ba951835aacb1232c5"
+      "bytes": 31392,
+      "sha256": "11aeacaef224471f7b03ea6c765eb6038f7b38f38b1117f05ee6b88dc1518bf8"
     },
     {
       "path": "FTHRcapture/FTHRclips/src/native_encoder_probe.cpp",
@@ -1645,8 +1680,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/src/save_clip_task.cpp",
-      "bytes": 3718,
-      "sha256": "2ca0d4a4a81ff0f841594a33828b73f28e68a4886cab5c7621c9e73602ad7816"
+      "bytes": 4063,
+      "sha256": "4cd8ec7e3a868e9fcf306b12b6e2ba048e9da65368d46bff5b4fe011a9f48e77"
     },
     {
       "path": "FTHRcapture/FTHRclips/src/shared_memory.cpp",
@@ -1680,8 +1715,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips/src/windows_microphone_audio_provider.cpp",
-      "bytes": 41099,
-      "sha256": "3b303ec086bf323f22f1c06800341b14f7018c6892a99ca6ff58d0f22091712e"
+      "bytes": 41525,
+      "sha256": "32985cba8bceed20e503b82d4e0799785e8bc5676f9d5295e80796646120da5e"
     },
     {
       "path": "FTHRcapture/FTHRclips/src/windows_monitor_resolver.cpp",
@@ -2540,13 +2575,13 @@
     },
     {
       "path": "FTHRcapture/FTHRclips_tests/tests/audio_format_converter_test.cpp",
-      "bytes": 84240,
-      "sha256": "53f32f3b6d4b7eb022205341897238b474ac518cce63a1316d706c2663263913"
+      "bytes": 86118,
+      "sha256": "34703a7b7ea59bd4c962d6372a19282abea6ea22b2981d2f44cc325c2542ba10"
     },
     {
       "path": "FTHRcapture/FTHRclips_tests/tests/audio_source_model_test.cpp",
-      "bytes": 20553,
-      "sha256": "f892da0d210279e2b78b941c753ba09915ef5f019113f265980842422c853936"
+      "bytes": 22919,
+      "sha256": "3215311ad5b0edbc9e9f4f3d2e3ee84cdafaef1b6e029fe544047af9db863a04"
     },
     {
       "path": "FTHRcapture/FTHRclips_tests/tests/bgra_frame_scaler_test.cpp",
@@ -2620,8 +2655,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips_tests/tests/windows_capture_backend_policy_test.cpp",
-      "bytes": 10273,
-      "sha256": "468973424bc716fff50a9710a75e2cf5524bab13a3f4adee9973d382eb9bfd5f"
+      "bytes": 20668,
+      "sha256": "a0a1d7125d0aec0517e1a74836b4604f0b0be485ef40f57ee0323e4045a6444c"
     },
     {
       "path": "FTHRcapture/FTHRclips_tests/tests/windows_capture_border_policy_test.cpp",
@@ -2645,8 +2680,8 @@
     },
     {
       "path": "FTHRcapture/FTHRclips_tests/tests/windows_replay_policy_test.cpp",
-      "bytes": 132895,
-      "sha256": "f1aad0853a485d3cfd69581fce23e46a8cc4a18ff6501bf33932790fd6ce874d"
+      "bytes": 134872,
+      "sha256": "d86b2d1400a317be9c386a2fc2d91822c1c894a74215c45c4cb26ba9ce937a9c"
     },
     {
       "path": "FTHRcapture/FTHRclips_tests/tests/windows_wgc_resize_smoke.cpp",
@@ -2690,8 +2725,8 @@
     },
     {
       "path": "FTHRcapture_common/capture_pipeline_health.h",
-      "bytes": 13888,
-      "sha256": "b32114e86a2fafced175c2bacd8ce2240a5c6e7158da6562cf521fdefb6c2090"
+      "bytes": 14671,
+      "sha256": "3451d8a3429639244bf3b48c97cdffab1a95c9a50dd271800cb8926c81089553"
     },
     {
       "path": "FTHRcapture_common/capture_stage_timing.h",
@@ -2796,12 +2831,12 @@
     {
       "path": "README.md",
       "bytes": 9853,
-      "sha256": "b62641455ff587fbf65d9597bde467b6a1e261eb99c1e8e2722f37946fc0cd5b"
+      "sha256": "48564b342abc4a8abf7dc088e87779ab16ad7f4e36cd91c92b62353690e20578"
     },
     {
       "path": "RELEASE_NOTES.md",
-      "bytes": 13456,
-      "sha256": "00ae41a4c1cc9e52b8d50a9a06e6edb0cca046f5ec9f1d565034c564ba38d616"
+      "bytes": 13894,
+      "sha256": "7d23dc2e71306c48947ab65554b797d36af13c41c914bd581148003f025a3769"
     },
     {
       "path": "SECURITY.md",
@@ -2811,7 +2846,7 @@
     {
       "path": "START_HERE.md",
       "bytes": 718,
-      "sha256": "bcec8c2890d1342769f40026891f18be2a64f0d5bb90be9c55aa0d8a5107f52d"
+      "sha256": "26c890b912a371d6b38f0b34fc3b6e0effd6649477d89da94ec29fd788b3fefc"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
@@ -3825,13 +3860,13 @@
     },
     {
       "path": "installer_windows.iss",
-      "bytes": 53718,
-      "sha256": "1c40a5f8503a96c5614ce631bff35c031d832c9cc4f3b0d9a31114ac7e7db4af"
+      "bytes": 56511,
+      "sha256": "360e373ff264927ac5d785a593fafa0bdf8b067eca6683ff5ce4c7928837f897"
     },
     {
       "path": "launch_windows.bat",
-      "bytes": 3041,
-      "sha256": "7979f135d47acf35c1c04d3c3a38eef2e59edfb2fe272bf4c66bd38d5027ad27"
+      "bytes": 2867,
+      "sha256": "91469107178acdfb5740df9aecf1e4aaee1456bc19495f41dcb713630673080f"
     },
     {
       "path": "licenses/FFmpeg-LICENSE.txt",
@@ -4125,8 +4160,8 @@
     },
     {
       "path": "tests/test_background_ui_pause.py",
-      "bytes": 27630,
-      "sha256": "129885906c67259fc0141d40a75e9aeb99baa9db8d8b538c43d2bc67d46f21eb"
+      "bytes": 27732,
+      "sha256": "8715d84483358107594098fa43092e59d8bbfe03fcba2690e31c802cab505bb7"
     },
     {
       "path": "tests/test_border_free_capture.py",
@@ -4170,8 +4205,8 @@
     },
     {
       "path": "tests/test_capture_admission_integration.py",
-      "bytes": 78556,
-      "sha256": "d6e3bb9976051afa127424ee9f9b781c96dfce8718a50672ee9c18ce2e6340a7"
+      "bytes": 78652,
+      "sha256": "1714cd50bbcadc2fa09e111872bf2c02efe7cf9d5b514a61253058013a5e5ff3"
     },
     {
       "path": "tests/test_capture_admission_revocation.py",
@@ -4255,13 +4290,18 @@
     },
     {
       "path": "tests/test_capture_startup_audio_compatibility.py",
-      "bytes": 1686,
-      "sha256": "0925be56f3a5db8cfd13f4790194005a293748b76faf1b28dea9895192b95bf1"
+      "bytes": 2701,
+      "sha256": "7a805a8130b5229efc3f9212a6ee0f477b186f19a8eebd978237b5bd7f274ce3"
     },
     {
       "path": "tests/test_ci_contract.py",
       "bytes": 5316,
       "sha256": "f5cda264f1f29d1a6ae7903096670b41ea925c9db9d94a084d80547ca9cbc337"
+    },
+    {
+      "path": "tests/test_click_to_seek_slider.py",
+      "bytes": 3877,
+      "sha256": "eed07d9b6c41252dcafd3dd5d0ffece2eebefc8911d84d751ddc64e28df6fa9a"
     },
     {
       "path": "tests/test_clip_details_tag_compat.py",
@@ -4275,8 +4315,8 @@
     },
     {
       "path": "tests/test_clip_editor_timeline.py",
-      "bytes": 20117,
-      "sha256": "abf5958db6842b2bfb8b6f6f7857ad71d11edb42989001481e112a145a70420b"
+      "bytes": 22606,
+      "sha256": "19f675517bd1686c62ce2a5c728508b143285dc6f9a599971de7df17c11df6c4"
     },
     {
       "path": "tests/test_clip_file_operations.py",
@@ -4290,13 +4330,13 @@
     },
     {
       "path": "tests/test_clip_grid_partial.py",
-      "bytes": 15492,
-      "sha256": "74e0f66479c7c5f2add216b560c3a386fd414c7a5aef66fd5a48acd3a3896064"
+      "bytes": 15580,
+      "sha256": "b52a615f6ee49e705bb9b2a5891be4fd761907ac4e155ef0263cee014015a2e4"
     },
     {
       "path": "tests/test_clip_grid_toolbar.py",
-      "bytes": 8163,
-      "sha256": "823832e904999cd908e4f8e5bd4983e3ce47b92bb13ec5f3f8bf01b047fc08c3"
+      "bytes": 9854,
+      "sha256": "b09c14df45b00e283a9158e65eb6b55094345da32a7ac8b719fcf39f44e6e182"
     },
     {
       "path": "tests/test_clip_grouping.py",
@@ -4355,8 +4395,8 @@
     },
     {
       "path": "tests/test_clip_worker_lifetime.py",
-      "bytes": 11647,
-      "sha256": "a174136a89a4fcf2814773ffd8550908fe3eb45d92ccf0d61e7a086a08055070"
+      "bytes": 11683,
+      "sha256": "916ffd22ac6588bacfd008cf368ae0888c6de10d0ecfbb2f137d5492db891403"
     },
     {
       "path": "tests/test_combined_audio_policy.py",
@@ -4486,7 +4526,7 @@
     {
       "path": "tests/test_engine_contract_gate.py",
       "bytes": 8461,
-      "sha256": "b9592fd51d5b47b1c6d7af39d02e558b00d6b21cf461f65ee51ab0686edb15d6"
+      "sha256": "4b5a0847200915e710c8ccfbc9468cca64e1d4a745812687a4d7ed5732f3aeb1"
     },
     {
       "path": "tests/test_engine_error_recovery.py",
@@ -4495,8 +4535,8 @@
     },
     {
       "path": "tests/test_engine_startup_diagnostics.py",
-      "bytes": 4185,
-      "sha256": "659111cf23f0cf9aecb2c4cb786b9d5d31c409c47c7ebfa0e8db3f1f622e7354"
+      "bytes": 4772,
+      "sha256": "99880ecd7b2c7859b81aff6db668c2cedb96297dd8b9b6fcdc3099522ed3c783"
     },
     {
       "path": "tests/test_error_bar.py",
@@ -4525,8 +4565,8 @@
     },
     {
       "path": "tests/test_export_queue.py",
-      "bytes": 32863,
-      "sha256": "47976f52ee89d173d1f8cb4d6d75c67589a9019b73a42c2201d76f53fa3a0d70"
+      "bytes": 32976,
+      "sha256": "945996a43e6a486619d6a070b2b9da3d2c3ab48fb03ad2f12375e6570469f147"
     },
     {
       "path": "tests/test_ffmpeg_playback_origin.py",
@@ -4540,8 +4580,8 @@
     },
     {
       "path": "tests/test_field_diagnostics.py",
-      "bytes": 21517,
-      "sha256": "7143bf8f399a9761edd816874b36d73938855e01979cec0d12443114bcf9a8ab"
+      "bytes": 23056,
+      "sha256": "a29cc1a0494f140b1688c87d2585b3065bb93708c66438e82846e866f1ae3d0d"
     },
     {
       "path": "tests/test_file_recovery.py",
@@ -4715,8 +4755,8 @@
     },
     {
       "path": "tests/test_library_and_settings_regressions.py",
-      "bytes": 12317,
-      "sha256": "8b4a35df2adfc9148fcc5f1c7a18190656fae61af2c79bae5ca3f73b7541b15b"
+      "bytes": 12360,
+      "sha256": "d5be2029ea8131ff6d9d00d8c2e1025ed59c0d2d63c552e63eb85898ab4261e7"
     },
     {
       "path": "tests/test_library_backup.py",
@@ -4775,8 +4815,8 @@
     },
     {
       "path": "tests/test_library_multiselect.py",
-      "bytes": 26801,
-      "sha256": "08ffb54eee5b04c6c75818a3f2239bd5cc4e781e89be5b3056b696eb7fbc4389"
+      "bytes": 27812,
+      "sha256": "157c336d51653ac962a0611de05bf0887e7cc224524d31c6d15591fd58e3e740"
     },
     {
       "path": "tests/test_library_ownership.py",
@@ -4785,8 +4825,8 @@
     },
     {
       "path": "tests/test_library_reliability.py",
-      "bytes": 4137,
-      "sha256": "14db0ca6a87f05e31c822125b315542c2e3ba7ecca14f8a648f3d4d0d2abdc79"
+      "bytes": 4243,
+      "sha256": "b9dd5e5bfacb960b030927e4cc6563cb6e618c31b99c4c00ad1bb8c478ec7ea5"
     },
     {
       "path": "tests/test_library_rename_integration.py",
@@ -4875,13 +4915,13 @@
     },
     {
       "path": "tests/test_microphone_gain_safety.py",
-      "bytes": 3872,
-      "sha256": "cf967a2f613d01b2c123f530383653557e1fdaf73b8bbce58a5274c8153ad649"
+      "bytes": 4809,
+      "sha256": "aa66e0262e204b18764a870cf843278f0598c076986b8fa2d2f9d077a13c1060"
     },
     {
       "path": "tests/test_mp4_timing.py",
-      "bytes": 33461,
-      "sha256": "1d2908a100d773fc3ef21067d70f47cc920d134195ef9fd346c55b3823b571b9"
+      "bytes": 33720,
+      "sha256": "10b70eb7e13347a047bf212c750da16f95811dc3803509a1577a0471bd3ba77f"
     },
     {
       "path": "tests/test_multiband_audio.py",
@@ -4920,8 +4960,8 @@
     },
     {
       "path": "tests/test_playback_inventory_status.py",
-      "bytes": 18236,
-      "sha256": "971ba270b8eff5479be0a12b574324b2fd13deef7a0eaf2c13c48ccc97598e8c"
+      "bytes": 20217,
+      "sha256": "dfbb8a08408ac08efb374ab8a76cc031eeb4d917d4546e3792d9576ba4a86847"
     },
     {
       "path": "tests/test_playback_mix_model.py",
@@ -4940,8 +4980,8 @@
     },
     {
       "path": "tests/test_plugin_export_integration.py",
-      "bytes": 2452,
-      "sha256": "391eabe68e9142cb0e5e4dc3ac54191f20c2986351a8b51deead99153f2e8d99"
+      "bytes": 3007,
+      "sha256": "2c40025f4348256649ccf6caaa90e21135f20fc59b0753c6d5a78cac5fb2344c"
     },
     {
       "path": "tests/test_plugin_manager.py",
@@ -5010,8 +5050,8 @@
     },
     {
       "path": "tests/test_quick_snapshots.py",
-      "bytes": 2123,
-      "sha256": "4f4f1de64954cede29ec35f758ee1d2c9383b89d1f3b1ff57dd038d0b1821475"
+      "bytes": 2141,
+      "sha256": "d06d0c0776c30feaf838bede56a41e27650c3af2139266f440d75c9f34961061"
     },
     {
       "path": "tests/test_quick_video_preview.py",
@@ -5022,6 +5062,11 @@
       "path": "tests/test_recorded_provenance.py",
       "bytes": 4984,
       "sha256": "58dd3b0e28dd75bda15eb5553458fda6011e570ffe60c008808d57cfd0198870"
+    },
+    {
+      "path": "tests/test_recorder_import_workflow.py",
+      "bytes": 6843,
+      "sha256": "b5c954b1b1e8019743e977610b59bb5c1369da69e915a32129b273de257e654d"
     },
     {
       "path": "tests/test_recording_recovery.py",
@@ -5170,8 +5215,8 @@
     },
     {
       "path": "tests/test_stage4_export_lifecycle.py",
-      "bytes": 15553,
-      "sha256": "ce51adfb0e5f46437f6d12c0e14d8cc61258f80d90723bd7786ac2fa1b3d8cef"
+      "bytes": 17747,
+      "sha256": "b9d3a2350816d59acb256ed395fe2c1eb653b3c8229fc9da3d0cbce05852002c"
     },
     {
       "path": "tests/test_stage4_player_lifecycle.py",
@@ -5180,8 +5225,8 @@
     },
     {
       "path": "tests/test_stage7_library_scalability.py",
-      "bytes": 13838,
-      "sha256": "7d2dd2f2585cc20f48d25266bf1e28e4f875186bca1b82bbe35d68a3f1b05b40"
+      "bytes": 14036,
+      "sha256": "accf9b25f20a36a0e88d8f488e56f909a7784c5c6ca7bb81cf721196c686c73b"
     },
     {
       "path": "tests/test_system_audio_backup.py",
@@ -5215,8 +5260,8 @@
     },
     {
       "path": "tests/test_transactional_save_contract.py",
-      "bytes": 1829,
-      "sha256": "0e713e9ca24ea72f94afde12fa9faadeb22b0a4073a28f8c0fbd63a6f1165c46"
+      "bytes": 1824,
+      "sha256": "69b2f453ba22cf9b821ae4375a1e54612d472c9b7480fd51c850dffe7338d41f"
     },
     {
       "path": "tests/test_ui_consistency.py",
@@ -5230,8 +5275,8 @@
     },
     {
       "path": "tests/test_ui_memory.py",
-      "bytes": 20090,
-      "sha256": "f5a3e8455042343d0fc075cc9c903946a049017ea5886c95b738dcc8a86947d7"
+      "bytes": 20122,
+      "sha256": "21432bd027b8de0006ce36cc803c74c0c95590776c5b56e0f8bc612e12be7dc9"
     },
     {
       "path": "tests/test_ui_memory_gpu.py",
@@ -5240,8 +5285,8 @@
     },
     {
       "path": "tests/test_ui_performance_optimizations.py",
-      "bytes": 9370,
-      "sha256": "7a69a633fd53b0feb0517b7171a65e3cce1d509cecd4c6d1e46a6ca3df08a809"
+      "bytes": 9390,
+      "sha256": "f75384c38aba4d97e5f7d95a2dd550610d90be11b8bb1d8f17aa0c5959a14557"
     },
     {
       "path": "tests/test_ui_performance_presets.py",
@@ -5350,13 +5395,13 @@
     },
     {
       "path": "tests/test_windows_installer_contract.py",
-      "bytes": 2380,
-      "sha256": "7aaa4fd87a5184c2c0aa2b642e9207c1ff88b26dba6151e383bfa646330e3acf"
+      "bytes": 3314,
+      "sha256": "aa8ebe62912846ca11a7c9644d577b3ed8184dd9549585b41779f2f05e8a9fcd"
     },
     {
       "path": "tests/test_windows_lifecycle_contract.py",
-      "bytes": 3313,
-      "sha256": "201ce6a80971042af90d09998812774a817c7e76b50a252c10419a0e08db02d7"
+      "bytes": 3170,
+      "sha256": "e0ff9ae828cc08362808b84de32e7ca2082f02c1134f4c5e05d217379bb8f3a9"
     },
     {
       "path": "tests/test_windows_microphone_devices.py",
@@ -5490,13 +5535,13 @@
     },
     {
       "path": "tools/package_source.py",
-      "bytes": 6829,
-      "sha256": "566115657699ea5fbce90e352ca20858e9a378c9a2c42ee9583d2b61673bb4e7"
+      "bytes": 6842,
+      "sha256": "c73bc300cd4140d6b187e64a9ebb0a877a1f3a466c015991712726868c3a028d"
     },
     {
       "path": "tools/profile_clip_grid_scroll.py",
-      "bytes": 6992,
-      "sha256": "ca572414e59a92cb6bbfbd4474aad1532975de229bb9c6d732d8c704750f4102"
+      "bytes": 7210,
+      "sha256": "1dd16d58e21dbbb820eeb5bfd697fd9e713a488118cd83becb3bbc302c3fc236"
     },
     {
       "path": "tools/pyi_rth_windows_startup.py",
@@ -5526,7 +5571,7 @@
     {
       "path": "tools/release_asset_manifest.json",
       "bytes": 120150,
-      "sha256": "db0ba38f4b154fb7f552e2b5d0fcfc367e179767e44822ea8f687b63c5984360"
+      "sha256": "e790d02ab65aa281f86688b3a6f5352f40caef9a3554425243bb59386871c479"
     },
     {
       "path": "tools/render_clip_settings_review.py",
@@ -5575,13 +5620,18 @@
     },
     {
       "path": "tools/run_windows_focus_capture_smoke.py",
-      "bytes": 3219,
-      "sha256": "3ca5ab323cf759c54d18bf18887cf561835272f518f2c605e764322cfc8ce6bd"
+      "bytes": 5603,
+      "sha256": "1f20dde79d8fab6a6b7ae2894a672522e9fae1c86332ab3493357d43c2c3d468"
     },
     {
       "path": "tools/run_windows_fps_performance_smoke.py",
       "bytes": 25153,
       "sha256": "b3ac9e3ab27efac93b87dfd4e68765b7e6dea8107a1c8a814e846bcdce1f5d70"
+    },
+    {
+      "path": "tools/run_windows_protected_monitor_resize_smoke.py",
+      "bytes": 16709,
+      "sha256": "795f2358cf7af7edc07cd1715eb94c535b17e475adf7236c5dec95a53387a19c"
     },
     {
       "path": "tools/run_windows_recording_smoke.py",
@@ -5655,13 +5705,18 @@
     },
     {
       "path": "tools/windows_focus_capture_smoke.cpp",
-      "bytes": 6186,
-      "sha256": "a06e2a42ce6e2ab7090144a2d6bf34c547cb1de7a3b51d8b3484d9b621bd434e"
+      "bytes": 10419,
+      "sha256": "37ee12db8034a536a394c25ae11b6e379e2ce7c68f47fcc6023d3261122dd3e7"
     },
     {
       "path": "tools/windows_fps_performance_smoke.cpp",
       "bytes": 22648,
       "sha256": "29fac8b6f19e5a7cbc2254b6af6d35f5b1b6a0b45bdb794072bd51c4d5664eb8"
+    },
+    {
+      "path": "tools/windows_protected_monitor_resize_smoke.cpp",
+      "bytes": 28901,
+      "sha256": "02e6a02b7beefc5018f44b146064f77b5a9ef7928c1639adcd43e1a37e830bc8"
     },
     {
       "path": "tools/windows_recording_smoke.cpp",

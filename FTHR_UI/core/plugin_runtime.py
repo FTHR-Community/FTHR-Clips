@@ -207,6 +207,31 @@ class PluginRuntime:
         dialog.raise_()
         dialog.activateWindow()
 
+    def clip_actions(self, path):
+        """Return context-menu actions contributed by currently active plugins."""
+        return self._clip_actions(path, 'send_clip', 'clip_action_label')
+
+    def bulk_clip_actions(self, paths):
+        """Return plugin actions for a snapshot of the selected video paths."""
+        paths = tuple(paths)
+        return self._clip_actions(paths, 'send_clips', 'bulk_clip_action_label') if paths else []
+
+    def _clip_actions(self, payload, handler_name, label_name):
+        actions = []
+        for plugin_id, entry in tuple(self.active.items()):
+            handler = getattr(entry[1], handler_name, None)
+            label = getattr(entry[1], label_name, None)
+            if callable(handler) and label:
+                def invoke(pid=plugin_id, active_entry=entry, send=handler):
+                    if self.active.get(pid) is active_entry:
+                        try:
+                            send(payload)
+                        except Exception:
+                            log.exception('Feature plugin %s clip action failed', pid)
+
+                actions.append((label, invoke))
+        return actions
+
     def close(self):
         for plugin_id in list(self.active):
             self._stop(plugin_id)

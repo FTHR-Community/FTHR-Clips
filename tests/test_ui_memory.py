@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMenu, QWidget
 from main import _SettingsPage
 from core.settings_manager import SettingsManager
 from core.screenshot_save import ScreenshotCropSaveWorker
-from ui import clip_viewer, camera_overlay_editor
+from ui import clip_viewer, camera_overlay_editor, editor_timeline
 from ui.clip_viewer import TrimSlider, ClipViewer, TimelineSegment
 from ui.image_memory import ImageLRU, image_bytes
 from ui.screenshot_editor import CropCanvas, ScreenshotEditor
@@ -71,8 +71,8 @@ def test_disable_filmstrip_cancels_inflight_decode_and_rejects_late_cache(
         return None
 
     monkeypatch.setattr(core.media_process, 'run_media_process', runner)
-    monkeypatch.setattr(clip_viewer, 'get_ffmpeg_exe', lambda: 'ffmpeg')
-    clip_viewer._TIMELINE_IMAGE_CACHE.clear()
+    monkeypatch.setattr(editor_timeline, 'get_ffmpeg_exe', lambda: 'ffmpeg')
+    editor_timeline.clear_timeline_image_cache()
     slider.load_thumbnails(str(clip))
     qtbot.waitUntil(started.is_set)
     slider.set_preview_strip_enabled(False)
@@ -81,7 +81,7 @@ def test_disable_filmstrip_cancels_inflight_decode_and_rejects_late_cache(
     slider.load_thumbnails(str(clip))
     assert slider._thumbnail_worker_starts == 1
     assert not slider._thumbnails and not slider._scaled_thumbnails
-    assert clip_viewer._TIMELINE_IMAGE_CACHE.bytes_used == 0
+    assert editor_timeline._TIMELINE_IMAGE_CACHE.bytes_used == 0
     slider.resize(800, 116)
     slider.show()
     seeks = []
@@ -477,7 +477,7 @@ def test_disabling_filmstrip_reaps_a_real_decoder_and_stays_off(
     assert time.monotonic() - started < 3
     assert all(child.poll() is not None for child in children)
     assert not slider._thumbnails and not slider._scaled_thumbnails
-    assert clip_viewer._TIMELINE_IMAGE_CACHE.bytes_used == 0
+    assert editor_timeline._TIMELINE_IMAGE_CACHE.bytes_used == 0
     starts = slider._thumbnail_worker_starts
     child_count = len(children)
     for _ in range(3):

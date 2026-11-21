@@ -947,6 +947,48 @@ void WgcReadbackQueuePreservesTimingAndSourceBoundaries() {
         "an explicit focus or resize pause clears queued pixels even within one generation");
 }
 
+void EncoderOutputDiagnosticsIgnorePausedTimeAndSeeNewPackets() {
+    using namespace std::chrono_literals;
+    using namespace fthr::capture_pipeline_health;
+    const auto start = EncoderOutputProgress::Clock::time_point{};
+    EncoderOutputProgress output(start);
+    Snapshot sample;
+    sample.wgc_backend = true;
+    sample.source_frames = 328;
+    sample.encoder_submissions = 328;
+    sample.encoded_packets = 328;
+    sample.replay_ring_insertions = 328;
+    sample.encoder_idle = true;
+    CheckPolicy(output.Observe(sample.encoded_packets, start),
+        "initial output advances encoder progress");
+
+    output.Rebaseline(start + 40s);
+    const auto resumed = start + 40s + 200ms;
+    CheckPolicy(!output.Observe(sample.encoded_packets, resumed),
+        "resuming with drained counters does not invent an encoded packet");
+    sample.encoded_output_age_ms = output.AgeMs(resumed);
+    CheckPolicy(sample.encoded_output_age_ms == 200
+            && Classify(sample) == Classification::Healthy,
+        "an intentional long pause does not immediately classify as an encoder stall");
+
+    const auto active = start + 42s + 1ms;
+    sample.encoder_idle = false;
+    sample.has_pending_work = true;
+    ++sample.encoder_submissions;
+    sample.encoded_output_age_ms = output.AgeMs(active);
+    CheckPolicy(Classify(sample) == Classification::EncoderOutputStallCandidate,
+        "active pending work without output still qualifies after the stall threshold");
+
+    ++sample.encoded_packets;
+    ++sample.replay_ring_insertions;
+    CheckPolicy(output.Observe(sample.encoded_packets, active),
+        "a new packet advances progress before the current snapshot");
+    sample.encoded_output_age_ms = output.AgeMs(active);
+    CheckPolicy(sample.encoded_output_age_ms == 0
+            && Classify(sample) == Classification::Healthy,
+        "a new packet is not classified using the old packet's age");
+}
+
 void CapturePipelineHealthClassifiesBoundaries() {
     using fthr::capture_pipeline_health::Classification;
     using fthr::capture_pipeline_health::Snapshot;
@@ -2752,6 +2794,7 @@ int RunWindowsReplayPolicyTests() {
     ReplayHealthReportsExactSavePredicates();
     ReplaySaveClassificationCoversEvidenceBoundaries();
     CapturePipelineHealthClassifiesBoundaries();
+    EncoderOutputDiagnosticsIgnorePausedTimeAndSeeNewPackets();
     OutputCadenceIsSeparateFromPipelineLiveness();
     StageTimingReportsBoundedIntervalPercentiles();
     WgcReadbackQueuePreservesTimingAndSourceBoundaries();

@@ -584,12 +584,15 @@ def test_in_place_normalization_replaces_only_after_successful_copy(tmp_path):
 
 
 def test_in_place_normalization_can_commit_through_owned_callback(tmp_path):
-    source = tmp_path / 'owned.mp4'
+    source = tmp_path / ('.game_clip_from_19Nov2026_21-56-15_export_1762a3e0f1ad.partial.'
+                         + 'a' * 32 + '.mp4')
     original = _make_mp4(media_time=1000)
     source.write_bytes(original)
     calls = []
 
     def commit_replace(temp_path, destination):
+        assert temp_path.parent.parent == source.parent
+        assert len(str(temp_path)) < len(str(source))
         calls.append((temp_path, destination))
         os.replace(temp_path, destination)
         return {'committed': True}
@@ -598,6 +601,7 @@ def test_in_place_normalization_can_commit_through_owned_callback(tmp_path):
         source, commit_replace=commit_replace)
     assert calls and calls[0][1] == source
     assert source.read_bytes() != original
+    assert list(tmp_path.iterdir()) == [source]
 
 
 def test_missing_sample_entries_and_malformed_data_references_are_rejected(tmp_path):

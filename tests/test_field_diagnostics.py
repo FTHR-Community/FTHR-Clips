@@ -462,6 +462,37 @@ def test_previous_unclean_session_is_reported_on_next_launch(tmp_path):
     assert summary['previous_session']['session_id'] == first.session_id
 
 
+def test_finished_archive_scrubs_profile_in_current_and_legacy_errors(tmp_path):
+    account = "Ticket André O'Brien"
+    path = rf"D:\Users\{account}\Videos\partial.mp4"
+    error = str(FileNotFoundError(2, 'No such file or directory', path))
+    legacy = json.dumps({'detail': error, 'output': path}) + '\n'
+    first = DiagnosticSession('test', root=tmp_path).start()
+    first.close(clean=False)
+    with first.events_path.open('a', encoding='utf-8') as events:
+        events.write(legacy)
+    first.engine_log_path.write_text(error, encoding='utf-8')
+    ui_log = tmp_path / 'ui.log'
+    ui_log.write_text(legacy, encoding='utf-8')
+    session = DiagnosticSession('test', root=tmp_path).start()
+    try:
+        session.emit('export', 'terminal', detail=error)
+        session.update_summary('failures', {path: error})
+        session.engine_log_path.write_text(error, encoding='utf-8')
+        destination = session.export_zip(tmp_path / 'report.zip', ui_log_path=ui_log)
+    finally:
+        session.close()
+    with zipfile.ZipFile(destination) as archive:
+        for name in archive.namelist():
+            content = archive.read(name).decode()
+            assert 'Ticket' not in content and "Brien" not in content
+            if name.endswith('.jsonl'):
+                assert any('%USERPROFILE%' in str(json.loads(line))
+                           for line in content.splitlines())
+        prior = archive.read('previous-session/events.jsonl').splitlines()
+        assert '%USERPROFILE%' in json.loads(prior[-1])['detail']
+
+
 def test_settings_troubleshooting_action_emits_export_request(
         qtbot, tmp_path, monkeypatch):
     qt_widgets = pytest.importorskip('PySide6.QtWidgets')

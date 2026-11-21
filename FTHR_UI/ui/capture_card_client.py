@@ -12,9 +12,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-# Development launches the helper script with the current Python interpreter.
-# Frozen builds relaunch the packaged executable with ``--card-process`` because
-# no standalone interpreter or source script is available in the package.
+# Packaged builds start the helper through the app executable.
 _FROZEN = getattr(sys, 'frozen', False)
 if _FROZEN:
     _LAUNCH_CMD = [sys.executable, '--card-process']
@@ -47,11 +45,8 @@ class CaptureCardClient:
             env = dict(os.environ)
             from core.theme_manager import ThemeManager
             env['FTHR_CARD_APPEARANCE'] = json.dumps(ThemeManager().runtime_appearance_snapshot())
-            # Popen's encoding controls the parent pipe only. The detached
-            # Python child otherwise decodes redirected stdin with the Windows
-            # locale (e.g. cp1252), corrupting names such as KovaaK’s.
+            # Set the child pipe encoding too, so Windows preserves Unicode clip names.
             env['PYTHONIOENCODING'] = 'utf-8'
-            # platform plugin; setting xcb there makes the card process exit.
             monitor = self._sm.get('notification_monitor', 'auto') if self._sm else 'auto'
             env['FTHR_CARD_SCREEN_NAME'] = monitor
             env['FTHR_CARD_VISUALS_ENABLED'] = (
@@ -129,9 +124,7 @@ class CaptureCardClient:
                     visible = (mode == 'all' or (mode == 'capture' and capture)
                                or (mode == 'detection' and detection))
                     self.set_visuals_enabled(visible)
-        # A broken helper must not permanently disable notifications. Retry
-        # the exact event once on a fresh process; later events can also
-        # relaunch after a previous launch failure.
+        # Retry the event once with a fresh helper.
         for attempt in range(2):
             if self._proc is None or self._proc.poll() is not None:
                 self._proc = None
@@ -255,9 +248,7 @@ class CaptureCardClient:
         try:
             proc.stdin.write('quit\n')
             proc.stdin.flush()
-            # The child joins its blocking stdin reader after app.quit(). EOF
-            # releases that reader immediately; leaving the pipe open forced
-            # every normal shutdown to wait for the timeout.
+            # Closing stdin wakes the child reader so shutdown can finish.
             proc.stdin.close()
         except (BrokenPipeError, OSError, ValueError):
             # A closed pipe cannot accept quit. The bounded wait below handles shutdown.

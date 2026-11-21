@@ -2617,7 +2617,7 @@
     },
     {
       "path": "FTHR_UI/assets/icons/plugins.svg",
-      "sha256": "d87ca02ce4a39dcb9d5acdadba0d1ff81996b8ce386578b5ec93aa64cf839746",
+      "sha256": "3999d192f68b6f10b8614fd8268948c1bf511d45b784ece905e3b528845d724a",
       "media_type": "image/svg+xml",
       "usage": [
         "Plugins navigation icon"

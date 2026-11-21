@@ -60,3 +60,22 @@ def test_windows_installer_lifecycle_source_contract_passes():
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert 'stable existing AppId is retained' in completed.stdout
     assert 'installer never names the user clip root as a deletion target' in completed.stdout
+
+
+def test_drag_hooks_only_attach_to_noninteractive_headers_and_detach_at_shutdown():
+    script = (ROOT / 'installer_windows.iss').read_text(encoding='utf-8')
+    calls = [
+        line.strip() for line in script.splitlines()
+        if line.lstrip().startswith('EnableHeaderDrag(')
+    ]
+    assert calls == [
+        'EnableHeaderDrag(TitleBarPanel, WizardForm.Handle);',
+        'EnableHeaderDrag(TitleLabel, WizardForm.Handle);',
+        'EnableHeaderDrag(UninstallProgressForm.MainPanel, UninstallProgressForm.Handle);',
+        'EnableHeaderDrag(UninstallProgressForm.PageNameLabel, UninstallProgressForm.Handle);',
+        'EnableHeaderDrag(UninstallProgressForm.PageDescriptionLabel, '
+        'UninstallProgressForm.Handle);',
+    ]
+    assert 'CloseButton.OnClick := @CloseSetupClick;' in script
+    for host in ('Setup', 'Uninstall'):
+        assert f'procedure Deinitialize{host};\nbegin\n  DisableHeaderDrag;' in script

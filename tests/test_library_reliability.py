@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QThread
 from PySide6.QtGui import QImage
 
 from ui import clip_grid
+from ui import library_thumbnails
 
 
 def test_ready_clip_opens_before_thumbnail_and_only_once(qtbot, tmp_path):
@@ -31,16 +32,16 @@ def test_expired_failure_retries_and_metadata_survives_decode_failure(
         qtbot, monkeypatch, tmp_path):
     clip = tmp_path / 'clip.mp4'
     clip.touch()
-    monkeypatch.setattr(clip_grid, 'THUMB_CACHE_DIR', str(tmp_path))
-    cache = clip_grid._get_cached_thumb_path(str(clip))
-    failed = Path(clip_grid._get_negative_cache_path(cache))
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path))
+    cache = library_thumbnails._get_cached_thumb_path(str(clip))
+    failed = Path(library_thumbnails._get_negative_cache_path(cache))
     failed.touch()
     os.utime(failed, (1, 1))
     metadata = SimpleNamespace(duration_seconds=12.5, width=1920, height=1080,
                                average_fps=60, video_bitrate_bps=1,
                                total_bitrate_bps=1)
-    monkeypatch.setattr(clip_grid, '_probe_with_owned_process', lambda *_: metadata)
-    monkeypatch.setattr(clip_grid, '_decode_thumbnail_with_owned_process', lambda *_: None)
+    monkeypatch.setattr(library_thumbnails, '_probe_with_owned_process', lambda *_: metadata)
+    monkeypatch.setattr(library_thumbnails, '_decode_thumbnail_with_owned_process', lambda *_: None)
     worker = clip_grid._ThumbnailWorker(str(clip))
     results = []
     worker.signals.finished.connect(lambda *args: results.append(args))
@@ -52,7 +53,7 @@ def test_expired_failure_retries_and_metadata_survives_decode_failure(
 def test_cancelled_real_worker_recovers_on_reopen(qtbot, monkeypatch, tmp_path):
     clip = tmp_path / 'clip.mp4'
     clip.touch()
-    monkeypatch.setattr(clip_grid, 'THUMB_CACHE_DIR', str(tmp_path / 'cache'))
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path / 'cache'))
     entered = threading.Event()
     metadata = SimpleNamespace(duration_seconds=12.5, width=1920, height=1080,
                                average_fps=60, video_bitrate_bps=1,
@@ -66,10 +67,10 @@ def test_cancelled_real_worker_recovers_on_reopen(qtbot, monkeypatch, tmp_path):
             assert cancel.wait(4), 'test did not cancel the first worker'
         return metadata
 
-    monkeypatch.setattr(clip_grid, '_probe_with_owned_process', probe)
+    monkeypatch.setattr(library_thumbnails, '_probe_with_owned_process', probe)
     image = QImage(16, 9, QImage.Format.Format_RGB32)
     image.fill(Qt.GlobalColor.red)
-    monkeypatch.setattr(clip_grid, '_decode_thumbnail_with_owned_process', lambda *_: image)
+    monkeypatch.setattr(library_thumbnails, '_decode_thumbnail_with_owned_process', lambda *_: image)
     delivered_on = []
     original = clip_grid.ClipThumbnail.set_video_thumbnail
 

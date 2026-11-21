@@ -185,22 +185,22 @@ def test_thumbnail_cache_pruning_removes_complete_old_generations(
 
 def test_fingerprint_bound_cache_changes_after_media_mutation(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ui import clip_grid
+    from ui import library_thumbnails
 
     media = tmp_path / "unicode [take] 'one'.mp4"
     media.write_bytes(b"one")
-    first = clip_grid._get_cached_thumb_path(str(media))
-    first_failed = clip_grid._get_negative_cache_path(first)
+    first = library_thumbnails._get_cached_thumb_path(str(media))
+    first_failed = library_thumbnails._get_negative_cache_path(first)
     media.write_bytes(b"a different payload")
-    second = clip_grid._get_cached_thumb_path(str(media))
-    second_failed = clip_grid._get_negative_cache_path(second)
+    second = library_thumbnails._get_cached_thumb_path(str(media))
+    second_failed = library_thumbnails._get_negative_cache_path(second)
 
     assert first != second
     assert first_failed != second_failed
 
 
 def test_corrupt_thumbnail_is_not_a_cache_hit(tmp_path: Path) -> None:
-    from ui.clip_grid import _valid_cached_thumbnail
+    from ui.library_thumbnails import _valid_cached_thumbnail
 
     corrupt = tmp_path / "bad.jpg"
     corrupt.write_bytes(b"not a jpeg")
@@ -247,7 +247,7 @@ def test_large_section_uses_bounded_virtual_canvas(
 
 def test_owned_thumbnail_process_is_cancelled_and_reaped(monkeypatch) -> None:
     from core import media_process
-    from ui.clip_grid import _run_owned_media_process
+    from ui.library_thumbnails import _run_owned_media_process
 
     cancelled = threading.Event()
     command = [sys.executable, "-c", "import time; time.sleep(10)"]
@@ -275,18 +275,18 @@ def test_owned_thumbnail_process_is_cancelled_and_reaped(monkeypatch) -> None:
 def test_cancelled_thumbnail_worker_does_not_publish_failure_generation(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Cancellation is terminal cleanup, not a negative-cache failure."""
-    from ui import clip_grid
+    from ui import library_thumbnails
 
     media = tmp_path / "clip.mp4"
     media.write_bytes(b"fixture")
     cache = tmp_path / "thumb.jpg"
     cancelled = threading.Event()
-    monkeypatch.setattr(clip_grid, "THUMB_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(clip_grid, "_get_cached_thumb_path",
+    monkeypatch.setattr(library_thumbnails, "THUMB_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(library_thumbnails, "_get_cached_thumb_path",
                         lambda _path: str(cache))
-    monkeypatch.setattr(clip_grid, "is_completed_video_path", lambda _path: True)
+    monkeypatch.setattr(library_thumbnails, "is_completed_video_path", lambda _path: True)
     monkeypatch.setattr(
-        clip_grid, "_probe_with_owned_process",
+        library_thumbnails, "_probe_with_owned_process",
         lambda _path, _cancel: SimpleNamespace(
             duration_seconds=12.0, width=1920, height=1080,
             average_fps=60.0, video_bitrate_bps=1, total_bitrate_bps=1),
@@ -296,9 +296,9 @@ def test_cancelled_thumbnail_worker_does_not_publish_failure_generation(
         cancelled.set()
         return None
 
-    monkeypatch.setattr(clip_grid, "_decode_thumbnail_with_owned_process",
+    monkeypatch.setattr(library_thumbnails, "_decode_thumbnail_with_owned_process",
                         cancel_during_decode)
-    worker = clip_grid._ThumbnailWorker(str(media), cancelled)
+    worker = library_thumbnails._ThumbnailWorker(str(media), cancelled)
     finished: list[tuple] = []
     diagnostics: list[tuple] = []
     worker.signals.finished.connect(lambda *args: finished.append(args))
@@ -316,30 +316,30 @@ def test_thumbnail_cache_prune_failure_still_releases_terminal_owner(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Optional cache maintenance cannot suppress diagnostic_finished."""
     from PySide6.QtGui import QImage
-    from ui import clip_grid
+    from ui import library_thumbnails
 
     media = tmp_path / 'clip.mp4'
     media.write_bytes(b'fixture')
     cache = tmp_path / 'thumb.jpg'
-    monkeypatch.setattr(clip_grid, 'THUMB_CACHE_DIR', str(tmp_path))
-    monkeypatch.setattr(clip_grid, '_get_cached_thumb_path',
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path))
+    monkeypatch.setattr(library_thumbnails, '_get_cached_thumb_path',
                         lambda _path: str(cache))
-    monkeypatch.setattr(clip_grid, 'is_completed_video_path', lambda _path: True)
+    monkeypatch.setattr(library_thumbnails, 'is_completed_video_path', lambda _path: True)
     monkeypatch.setattr(
-        clip_grid, '_probe_with_owned_process',
+        library_thumbnails, '_probe_with_owned_process',
         lambda _path, _cancel: SimpleNamespace(
             duration_seconds=12.0, width=1920, height=1080,
             average_fps=60.0, video_bitrate_bps=1, total_bitrate_bps=1),
     )
     image = QImage(4, 4, QImage.Format.Format_RGB32)
     image.fill(0xFFFFFFFF)
-    monkeypatch.setattr(clip_grid, '_decode_thumbnail_with_owned_process',
+    monkeypatch.setattr(library_thumbnails, '_decode_thumbnail_with_owned_process',
                         lambda _path, _cancel: image)
     monkeypatch.setattr(
-        clip_grid, 'maybe_prune_thumbnail_cache',
+        library_thumbnails, 'maybe_prune_thumbnail_cache',
         lambda _path: (_ for _ in ()).throw(RuntimeError('prune failed')))
 
-    worker = clip_grid._ThumbnailWorker(str(media), threading.Event())
+    worker = library_thumbnails._ThumbnailWorker(str(media), threading.Event())
     diagnostics: list[tuple] = []
     worker.signals.diagnostic_finished.connect(
         lambda *args: diagnostics.append(args))

@@ -225,6 +225,43 @@ void EncodedTrackAssemblyPreservesSignedPresentationOrigin() {
         "a clip entirely before a source produces an empty signed-range snapshot");
 }
 
+void PcmSnapshotTrimsItsTailWithoutChangingPacketOriginsOrBacking() {
+    const fthr::AudioSourceId id{"78787878-7878-4787-8787-787878787878"};
+    constexpr size_t bytes_per_frame = 2 * sizeof(float);
+    fthr::EncodedAudioPacketRing pcm(id, 12, {48000, 2, "flt", "pcm_f32le"}, 1);
+    CheckAudio(pcm.Push({std::vector<uint8_t>(8 * bytes_per_frame, 0x23), 0, 8})
+            && pcm.Push({std::vector<uint8_t>(16 * bytes_per_frame), 8, 16})
+            && pcm.Push({std::vector<uint8_t>(16 * bytes_per_frame), 24, 16}),
+        "PCM ring accepts a real packet followed by coalesced silence");
+
+    const auto trimmed = pcm.TakeSnapshot(4, 25);
+    CheckAudio(trimmed.valid() && trimmed.packets.size() == 2
+            && trimmed.first_pts_samples == 0 && trimmed.last_pts_samples == 25,
+        "PCM snapshot retains leading packet timing and ends at the selected sample");
+    CheckAudio(trimmed.packets[0].duration_samples == 8
+            && trimmed.packets[1].pts_samples == 8 && trimmed.packets[1].duration_samples == 17
+            && trimmed.packets[1].byte_size() == 32 * bytes_per_frame,
+        "the final PCM packet describes only the retained prefix of its shared payload");
+
+    const auto wider = pcm.TakeSnapshot(-4, 50);
+    CheckAudio(wider.valid() && wider.first_pts_samples == 0 && wider.last_pts_samples == 40
+            && wider.packets[1].duration_samples == 32
+            && wider.packets[1].storage == trimmed.packets[1].storage,
+        "other snapshots keep the original PCM duration and shared bytes");
+    const auto one_packet = pcm.TakeSnapshot(3, 6);
+    CheckAudio(one_packet.valid() && one_packet.packets.size() == 1
+            && one_packet.first_pts_samples == 0 && one_packet.last_pts_samples == 6
+            && one_packet.packets[0].duration_samples == 6,
+        "one PCM packet can cross both boundaries without changing its source PTS");
+
+    fthr::EncodedAudioPacketRing aac(id, 12, {48000, 2, "fltp", "aac"}, 1);
+    CheckAudio(aac.Push({{0x12, 0x10}, 8, 1024}), "AAC tail fixture is valid");
+    const auto compressed = aac.TakeSnapshot(4, 25);
+    CheckAudio(compressed.valid() && compressed.last_pts_samples == 1032
+            && compressed.packets[0].duration_samples == 1024,
+        "compressed audio keeps its complete final codec packet");
+}
+
 void PairedPublicationProtectsTheManifestContract() {
     std::vector<std::pair<std::filesystem::path, std::filesystem::path>> renames;
     fthr::transactional_save::FileOps operations;
@@ -385,6 +422,7 @@ int RunAudioSourceModelTests() {
     SourceLimitAndSanitizationStaySafe();
     EncodedPacketRingIsBoundedAndSnapshotsOverlap();
     EncodedTrackAssemblyPreservesSignedPresentationOrigin();
+    PcmSnapshotTrimsItsTailWithoutChangingPacketOriginsOrBacking();
     PairedPublicationProtectsTheManifestContract();
     NativeManifestBindsTheTemporaryMediaWithoutPrivatePaths();
     std::cout << "AUDIT-050 audio source model tests: " << audio_source_checks

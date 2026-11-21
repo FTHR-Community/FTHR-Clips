@@ -130,8 +130,11 @@ static int ListMicrophones(bool render = false) {
         std::cout << "{\"endpoint_id\":\"" << EscapeJson(Utf8FromWide(endpoint.endpoint_id))
                   << "\",\"display_name\":\"" << EscapeJson(endpoint.display_name)
                   << "\",\"device_state\":" << endpoint.device_state
-                  << ",\"is_default\":" << (endpoint.is_default ? "true" : "false")
-                  << '}';
+                  << ",\"is_default\":" << (endpoint.is_default ? "true" : "false");
+        if (render)
+            std::cout << ",\"is_default_communications\":"
+                      << (endpoint.is_default_communications ? "true" : "false");
+        std::cout << '}';
     }
     std::cout << "]}" << std::endl;
     return 0;

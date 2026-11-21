@@ -243,11 +243,12 @@ namespace fthr {
 
         // Save workers return false and publish SetEngineError() on failure.
         // Publish CLIP_SAVED only after the transactional write succeeds.
-        bool ProcessSaveClipTask(const SaveClipTask& task); // transactional wrapper
+        struct SaveWorkerTiming;
+        bool ProcessSaveClipTask(const SaveClipTask& task, SaveWorkerTiming* timing);
         void ForwardAudioToRecording(const AudioSourceMetadata& source, const uint8_t* data,
             uint32_t size, int64_t timeline_100ns, int64_t duration_samples);
         bool MuxEncodedClip(const SaveClipTask& task,
-            const std::wstring& output_path);               // Compressed replay: mux only
+            const std::wstring& output_path, SaveWorkerTiming* timing);
         bool EncodeRawClip(const SaveClipTask& task,
             const std::wstring& output_path);               // Legacy raw path: encode + mux
 
@@ -478,6 +479,8 @@ namespace fthr {
         std::atomic<uint64_t> wgc_missed_output_deadlines_{0};
         CaptureStageTiming wgc_acquisition_timings_;
         CaptureStageTiming wgc_readback_timings_;
+        CaptureStageTiming wgc_readback_copy_timings_;
+        CaptureStageTiming wgc_readback_map_timings_;
         CaptureStageTiming wgc_scale_timings_;
         CaptureStageTiming wgc_submit_timings_;
         std::atomic<uint64_t> conversion_submissions_{0};
@@ -496,6 +499,7 @@ namespace fthr {
         std::atomic<int64_t> capture_start_qpc_{0};
         std::atomic<int64_t> generation_start_qpc_{0};
         std::atomic<int64_t> last_source_frame_qpc_{0};
+        std::atomic<WgcCaptureSize> protected_monitor_source_size_{{0, 0}};
         std::atomic<int64_t> last_encoder_submission_qpc_{0};
         std::atomic<int64_t> last_encoded_output_qpc_{0};
         std::atomic<int64_t> last_ring_insertion_qpc_{0};

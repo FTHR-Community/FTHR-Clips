@@ -3,9 +3,12 @@ from __future__ import annotations
 from io import StringIO
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
+
+import pytest
 
 from core.export_lifecycle import ExportJob, ExportResult, ExportState
 from ui.clip_viewer import ClipViewer
@@ -137,6 +140,49 @@ def test_export_job_rejects_zero_byte_output_and_cleans_staged(tmp_path):
     assert result.state is ExportState.FAILED
     assert not staged.exists()
     assert not final.exists()
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows MP4 finalization')
+def test_long_named_export_normalizes_decodes_and_cleans_up(tmp_path, monkeypatch):
+    from core.ffmpeg_tools import FFmpegUnavailable, get_ffmpeg_exe
+    from core.mp4_timing import needs_mp4_presentation_normalization
+    from core.transactional_output import create_staged_output_path
+
+    try:
+        ffmpeg = get_ffmpeg_exe()
+    except FFmpegUnavailable as error:
+        pytest.skip(str(error))
+    final = tmp_path / 'witcher3_clip_from_19Nov2026_21-56-15_export_1762a3e0f1ad.mp4'
+    staged = create_staged_output_path(final)
+    open_path = Path.open
+    copies = []
+
+    def check_legacy_path(path):
+        # Model a nested export folder separately from pytest's temp location
+        # and the host's Windows long-path setting.
+        if 185 + len(str(path.relative_to(tmp_path))) >= 260:
+            raise FileNotFoundError(2, 'No such file or directory', str(path))
+
+    def legacy_open(path, mode='r', *args, **kwargs):
+        if mode == 'xb':
+            check_legacy_path(path)
+            copies.append(path)
+        return open_path(path, mode, *args, **kwargs)
+
+    def legacy_popen(command, **kwargs):
+        check_legacy_path(Path(command[-1]))
+        return subprocess.Popen(command, **kwargs)
+
+    monkeypatch.setattr(Path, 'open', legacy_open)
+    command = [ffmpeg, '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=160x120:r=30',
+               '-t', '1', '-c:v', 'mpeg4', '-bf', '2', str(staged)]
+    result = ExportJob(command, staged, final, popen_factory=legacy_popen).run()
+    assert result.succeeded, result.failure_message(full_stderr=True)
+    assert len(copies) == 1
+    assert not needs_mp4_presentation_normalization(final)
+    subprocess.run([ffmpeg, '-v', 'error', '-xerror', '-i', str(final),
+                    '-f', 'null', '-'], check=True, timeout=15)
+    assert list(tmp_path.iterdir()) == [final]
 
 
 def test_export_job_preserves_bounded_stderr_on_nonzero_exit(tmp_path):
@@ -377,6 +423,10 @@ def test_export_job_rename_failure_is_terminal_and_clean(tmp_path):
 
     assert result.state is ExportState.FAILED
     assert 'rename denied' in result.detail
+    assert 'finish saving' in result.failure_message()
+    assert final.name in result.failure_message()
+    assert 'rename denied' not in result.failure_message()
+    assert 'rename denied' in result.failure_message(full_stderr=True)
     assert not staged.exists()
     assert not final.exists()
 

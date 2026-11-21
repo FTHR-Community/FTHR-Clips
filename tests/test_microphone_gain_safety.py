@@ -58,6 +58,30 @@ def test_existing_microphone_gain_is_loaded_without_rewrite_and_changes_save_onc
 
 
 
+def test_microphone_track_click_saves_gain_once_on_release(qtbot, monkeypatch, tmp_path):
+    from PySide6.QtCore import QPoint, Qt
+
+    import main
+    monkeypatch.setattr(main.sys, 'platform', 'win32')
+    page, settings = _make_page(qtbot, monkeypatch, tmp_path, 100)
+    slider = page.mic_vol_slider
+    slider.resize(401, 30)
+    restarts = []
+    page.audio_capture_changed.connect(restarts.append)
+    position = QPoint(300, slider.height() // 2)
+
+    qtbot.mousePress(slider, Qt.MouseButton.LeftButton, pos=position)
+    assert 145 <= slider.sliderPosition() <= 155
+    assert page.mic_vol_value.text() == f'{slider.sliderPosition()}%'
+    assert settings.get('mic_volume') == 100
+    assert restarts == []
+
+    qtbot.mouseRelease(slider, Qt.MouseButton.LeftButton, pos=position)
+    assert settings.get('mic_volume') == slider.value()
+    assert page.mic_vol_value.text() == f'{slider.value()}%'
+    assert restarts == [True]
+
+
 def test_windows_audio_preferences_restart_capture_and_persist(qtbot, monkeypatch, tmp_path):
     import main
     from core.windows_microphone_devices import WindowsMicrophoneEndpoint

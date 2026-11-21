@@ -29,6 +29,12 @@ namespace fthr {
     class ReplayStorage;
     class ReplayStoragePayload;
 
+    struct EncodedSnapshotLockTiming {
+        int64_t wait_ns = 0;
+        int64_t hold_ns = 0;
+        uint64_t acquisitions = 0;
+    };
+
     constexpr uint32_t kEncodedReplayKeyframePrerollSeconds = 4;
     constexpr uint32_t kEncodedReplaySafetySeconds = 1;
 
@@ -185,7 +191,8 @@ namespace fthr {
         // Copy the requested wall-clock interval with decoder keyframe pre-roll.
         // Called from the save thread, where blocking is permitted.
         EncodedRingSnapshot TakeSnapshotByTime(
-            uint32_t duration_seconds, int64_t target_end_qpc) const;
+            uint32_t duration_seconds, int64_t target_end_qpc,
+            EncodedSnapshotLockTiming* timing = nullptr) const;
 
         bool WaitUntilPublished(
             int64_t target_qpc, std::chrono::milliseconds timeout) const;
@@ -218,7 +225,8 @@ namespace fthr {
         int64_t             qpc_freq_;
 
         EncodedRingSnapshot TakeSnapshotByTimeImpl(
-            uint32_t duration_seconds, int64_t target_end_qpc) const;
+            uint32_t duration_seconds, int64_t target_end_qpc,
+            EncodedSnapshotLockTiming* timing) const;
         std::shared_ptr<ReplayMemoryBudget> memory_budget_;
         ReplayMemoryReservation ring_memory_;
         std::shared_ptr<ReplayStorage> storage_;

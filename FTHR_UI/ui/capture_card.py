@@ -24,7 +24,6 @@ from core.theme_manager import ThemeManager
 from ui.sound_playback import SoundPlayback
 
 
-# Layout constants
 
 _FULL_W, _FULL_H       = 340, 116
 _COMPACT_W, _COMPACT_H = 320, 76
@@ -37,7 +36,6 @@ _SLIDE_IN_DURATION_MS = 450
 _DEFAULT_HOLD_DURATION_MS = 2400
 _SLIDE_OUT_DURATION_MS = 350
 
-# Sound files live in assets/sounds/ alongside the UI source.
 _SND_DIR = Path(__file__).parent.parent / 'assets' / 'sounds'
 _SOUND_FILES = {
     'clip_captured': _SND_DIR / 'clip_captured.wav',
@@ -91,7 +89,6 @@ def _resolve_sound(key: str) -> Path:
     return _SOUND_FILES[key]
 
 
-# Sound helper
 
 def _get_sound_playback() -> SoundPlayback:
     global _SOUND_PLAYBACK
@@ -122,7 +119,6 @@ def _notification_sounds_enabled() -> bool:
         return True
 
 
-# CaptureCard widget
 
 class CaptureCard(QWidget):
     """
@@ -146,7 +142,6 @@ class CaptureCard(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setFixedSize(_FULL_W, _FULL_H)
 
-        # Display state
         self._headline: str = 'CLIP CAPTURED'
         self._stats: list[tuple[str, str]] = []   # (value, label) pairs
         self._detail: str = ''
@@ -169,13 +164,11 @@ class CaptureCard(QWidget):
         self._c_prog_track = QColor('#111111')
         self._c_prog_fill = QColor('#ffffff')
 
-        # Progress drain
         self._prog_timer = QTimer(self)
         self._prog_timer.setInterval(16)
         self._prog_timer.timeout.connect(self._tick_progress)
         self._prog_clock = QElapsedTimer()
 
-        # Shimmer sweep
         self._shim_timer = QTimer(self)
         self._shim_timer.setInterval(16)
         self._shim_timer.timeout.connect(self._tick_shimmer)
@@ -190,22 +183,16 @@ class CaptureCard(QWidget):
         self._progress_delay.setSingleShot(True)
         self._progress_delay.timeout.connect(self._start_progress)
 
-        # The animation group deliberately has no Qt parent. Python reference
-        # ownership disposes the previous group when self._seq is replaced. With
-        # a Qt parent, old animation groups would remain as children and
-        # compete with the new group for control of self.pos during rapid saves.
+        # Python owns the animation group so a retrigger can release it immediately.
         self._seq: QSequentialAnimationGroup | None = None
 
-        # Warm the short cues while the detached card is starting. The first
-        # startup/clip event can then play immediately instead of racing a
-        # decoder initialization on the notification path.
+        # Preload cues so the first notification can play immediately.
         try:
             _get_sound_playback()
         except Exception:
             # Notification audio is optional; a later event retries initialization.
             pass
 
-    # Public API
 
     def show_captured(self, duration_s: float | None = None,
                       fps: int | None = None, resolution: str = '') -> None:
@@ -341,7 +328,6 @@ class CaptureCard(QWidget):
         if self._display_kind == 'background':
             self._stop_display()
 
-    # Internal
 
     def set_visuals_enabled(self, enabled: bool) -> None:
         """Toggle the card window while leaving notification sounds enabled."""
@@ -350,8 +336,7 @@ class CaptureCard(QWidget):
             self._stop_display()
 
     def _stop_display(self) -> None:
-        # Cancel any running animation/timers and destroy the old group so it
-        # doesn't linger as a Qt child competing with the new animation.
+        # Stop the previous sequence before starting another on the same card.
         if self._seq is not None:
             self._seq.stop()
             self._seq = None
@@ -394,13 +379,10 @@ class CaptureCard(QWidget):
                 volume = 100
             _play_sound(_resolve_sound(sound_key), _master_volume(volume))
 
-        # The helper process remains alive as a lightweight sound host when
-        # card visuals are disabled. Keep this after sound dispatch so all
-        # notification cues retain their existing behaviour.
+        # Dispatch sound even when card visuals are disabled.
         if not self._visuals_enabled:
             return
 
-        # Determine positions and scale for this screen.
         # FTHR_CARD_SCREEN_NAME is set by CaptureCardClient based on the user's
         # notification_monitor setting. 'auto' falls back to highest refresh rate.
         screens = QApplication.screens()
@@ -413,9 +395,7 @@ class CaptureCard(QWidget):
             active_screen = max(screens, key=lambda s: s.refreshRate()) if screens else QApplication.primaryScreen()
         screen = active_screen.availableGeometry()
 
-        # Scale the card relative to a 1080p baseline so it doesn't look like a
-        # billboard on a 768p laptop or a postage stamp on 4K. Clamp to [0.65, 1.0]
-        # — never bigger than the design size, never microscopic.
+        # Scale against the 1080p design size.
         self._scale = min(1.0, max(0.65, screen.height() / 1080))
         w = int(self._base_w * self._scale)
         h = int(self._base_h * self._scale)
@@ -425,20 +405,16 @@ class CaptureCard(QWidget):
         on_y   = screen.top()   +     _MARGIN
         off_x  = screen.right() + w + 10  # off-screen right
 
-        # Reset paint state
         self._progress = 1.0
         self._shimmer  = -1.0
 
-        # Place off-screen, then show
         self.move(off_x, on_y)
         self.show()
 
         on_pt  = QPoint(on_x,  on_y)
         off_pt = QPoint(off_x, on_y)
 
-        # Animations have no Qt parent — the group owns them via addAnimation(),
-        # and the group itself has no Qt parent so Python refcount controls its
-        # lifetime. Replacing self._seq destroys everything cleanly.
+        # The animation group takes ownership of its child animations.
         sin = QPropertyAnimation(self, b'pos')
         sin.setDuration(_SLIDE_IN_DURATION_MS)
         sin.setStartValue(off_pt)
@@ -460,8 +436,7 @@ class CaptureCard(QWidget):
         self._seq.finished.connect(self.hide)
         self._seq.start()
 
-        # Start the shimmer during arrival, then drain progress only after the
-        # card has landed. These delays are visual timing constants.
+        # Drain progress after the slide-in finishes.
         self._shimmer_delay.start(150)
         self._progress_delay.start(_SLIDE_IN_DURATION_MS + 30)
 
@@ -491,7 +466,6 @@ class CaptureCard(QWidget):
             self._shim_timer.stop()
         self.update()
 
-    # Painting
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         p = QPainter(self)
@@ -507,14 +481,11 @@ class CaptureCard(QWidget):
         # Background (use base dimensions, not widget size)
         p.fillRect(0, 0, w, h, self._c_bg)
 
-        # Left accent border
         p.fillRect(0, 0, _BORDER, h, self._c_accent)
 
-        # Clip shimmer to card interior
         inner = QRect(_BORDER, 0, w - _BORDER, h)
         p.setClipRect(inner)
 
-        # Shimmer overlay sweep
         if self._shimmer >= 0.0:
             cx = _BORDER + int((w - _BORDER) * (self._shimmer / 3.0 - 0.3))
             grad = QLinearGradient(cx - 70, 0, cx + 70, 0)
@@ -585,11 +556,9 @@ class CaptureCard(QWidget):
             if self._stats:
                 self._draw_stats(p, 54)
 
-        # Progress track ──
         p.setPen(Qt.PenStyle.NoPen)
         p.fillRect(0, h - 2, w, 2, self._c_prog_track)
 
-        # Progress fill ──
         fill_w = int(w * self._progress)
         if fill_w > 0:
             p.fillRect(0, h - 2, fill_w, 2, self._c_prog_fill)

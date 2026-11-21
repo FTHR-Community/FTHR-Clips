@@ -34,6 +34,14 @@ def test_plugin_presets_follow_enabled_state_without_changing_personal_presets(t
     picker = ShareModeDialog()
     qtbot.addWidget(picker)
     assert picker._preset_combo.findData(plugin_id) >= 0
+    from PySide6.QtWidgets import QPushButton
+    buttons = {button.text(): button for button in picker.findChildren(QPushButton)}
+    discord = next(button for label, button in buttons.items() if 'Discord' in label)
+    for quality in ('lossless', 'fast', 'lossless', 'quality'):
+        picker._quality_combo.setCurrentIndex(picker._quality_combo.findData(quality))
+        assert buttons['Share clip'].isEnabled()
+        for control in (discord, picker._preset_combo, buttons['Use']):
+            assert control.isEnabled() == (quality != 'lossless')
     editor = ExportPresetsWidget()
     qtbot.addWidget(editor)
     editor.refresh(plugin_id)

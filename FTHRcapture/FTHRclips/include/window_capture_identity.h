@@ -37,12 +37,16 @@ public:
     }
 
     bool HasProcessWatch() const noexcept { return process_handle_ != nullptr; }
-    bool IsRenderable() const noexcept {
+    const char* RenderabilityFailure() const noexcept {
         RECT client{};
-        return Matches(window_) && !IsIconic(window_) && IsWindowVisible(window_)
-            && GetClientRect(window_, &client) && client.right > client.left
-            && client.bottom > client.top;
+        if (!Matches(window_)) return "window_identity";
+        if (IsIconic(window_)) return "minimized";
+        if (!IsWindowVisible(window_)) return "hidden";
+        if (!GetClientRect(window_, &client)) return "client_rect_unavailable";
+        if (client.right <= client.left || client.bottom <= client.top) return "empty_client";
+        return nullptr;
     }
+    bool IsRenderable() const noexcept { return RenderabilityFailure() == nullptr; }
     void Reset() noexcept {
         if (process_handle_) CloseHandle(process_handle_);
         process_handle_ = nullptr;

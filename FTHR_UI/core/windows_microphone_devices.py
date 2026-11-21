@@ -25,10 +25,23 @@ class WindowsMicrophoneEndpoint:
     display_name: str
     device_state: int
     is_default: bool
+    is_default_communications: bool = False
 
     @property
     def is_active(self) -> bool:
         return bool(self.device_state & DEVICE_STATE_ACTIVE)
+
+
+def playback_endpoint_label(endpoint: WindowsMicrophoneEndpoint) -> str:
+    general = getattr(endpoint, 'is_default', False)
+    communications = getattr(endpoint, 'is_default_communications', False)
+    if general and communications:
+        return f'{endpoint.display_name} (Windows default for playback and communications)'
+    if communications:
+        return f'{endpoint.display_name} (Windows communications default)'
+    if general:
+        return f'{endpoint.display_name} (Windows playback default)'
+    return endpoint.display_name
 
 
 class MicrophoneDiscoveryError(RuntimeError):
@@ -200,8 +213,9 @@ def parse_microphone_inventory(
             if strict:
                 raise ValueError('native microphone inventory has an invalid or duplicate endpoint')
             continue
-        if strict and (type(state) is not int
-                       or ('is_default' in item and type(item['is_default']) is not bool)):
+        if strict and (type(state) is not int or any(
+                type(item.get(flag, False)) is not bool
+                for flag in ('is_default', 'is_default_communications'))):
             raise ValueError('native microphone inventory has invalid endpoint state')
         seen_ids.add(endpoint_id)
         result.append(WindowsMicrophoneEndpoint(
@@ -209,6 +223,7 @@ def parse_microphone_inventory(
             display_name=display_name,
             device_state=state,
             is_default=bool(item.get('is_default', False)),
+            is_default_communications=item.get('is_default_communications') is True,
         ))
     return result
 

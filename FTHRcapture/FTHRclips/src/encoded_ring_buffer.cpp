@@ -18,6 +18,32 @@ namespace fthr {
 
 namespace {
 
+class SnapshotLock {
+public:
+    using Clock = std::chrono::steady_clock;
+    SnapshotLock(std::mutex& mutex, EncodedSnapshotLockTiming* timing)
+        : timing_(timing), started_(timing ? Clock::now() : Clock::time_point{}),
+          lock_(mutex), acquired_(timing ? Clock::now() : Clock::time_point{}) {}
+
+    ~SnapshotLock() {
+        if (timing_) {
+            const auto released = Clock::now();
+            lock_.unlock();
+            timing_->wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                acquired_ - started_).count();
+            timing_->hold_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                released - acquired_).count();
+            ++timing_->acquisitions;
+        }
+    }
+
+private:
+    EncodedSnapshotLockTiming* timing_;
+    Clock::time_point started_;
+    std::unique_lock<std::mutex> lock_;
+    Clock::time_point acquired_;
+};
+
 bool CheckedQpcDelta(
     int64_t qpc_frequency, int64_t time_base_numerator,
     int64_t time_base_denominator, int64_t pts_delta,
@@ -319,9 +345,10 @@ bool EncodedRingBuffer::WaitForVideoConfig(
 }
 
 EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTime(
-    uint32_t duration_seconds, int64_t target_end_qpc) const {
+    uint32_t duration_seconds, int64_t target_end_qpc,
+    EncodedSnapshotLockTiming* timing) const {
     try {
-        return TakeSnapshotByTimeImpl(duration_seconds, target_end_qpc);
+        return TakeSnapshotByTimeImpl(duration_seconds, target_end_qpc, timing);
     } catch (const std::bad_alloc&) {
         EncodedRingSnapshot failed;
         failed.selection_outcome = replay_save::SnapshotOutcome::MemoryBudgetExceeded;
@@ -330,7 +357,8 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTime(
 }
 
 EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTimeImpl(
-    uint32_t duration_seconds, int64_t target_end_qpc) const {
+    uint32_t duration_seconds, int64_t target_end_qpc,
+    EncodedSnapshotLockTiming* timing) const {
     using replay_interval::Sample;
     if (duration_seconds == 0 || qpc_freq_ <= 0
         || static_cast<uint64_t>(duration_seconds)
@@ -353,7 +381,7 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTimeImpl(
         snapshot.capture_generation = current_generation;
         snapshot.generation_continuous = true;
         {
-            std::lock_guard<std::mutex> lock(video_config_mutex_);
+            SnapshotLock lock(video_config_mutex_, timing);
             if (!snapshot.memory.Grow(video_config_.codec_extradata.size()))
                 throw std::bad_alloc();
             snapshot.video_config = video_config_;
@@ -402,7 +430,7 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTimeImpl(
         refs.reserve(current_count);
         for (uint64_t pos = oldest; pos < current_head; ++pos) {
             const size_t slot_idx = static_cast<size_t>(pos % capacity_);
-            std::lock_guard<std::mutex> lock(slot_mutexes_[slot_idx]);
+            SnapshotLock lock(slot_mutexes_[slot_idx], timing);
             const auto state = slot_states_[slot_idx].load(
                 std::memory_order_acquire);
             const auto& packet = slots_[slot_idx];
@@ -467,7 +495,7 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTimeImpl(
         for (size_t i = selection.decode_start; i <= selection.end; ++i) {
             const uint64_t pos = refs[i].position;
             const size_t slot_idx = static_cast<size_t>(pos % capacity_);
-            std::lock_guard<std::mutex> lock(slot_mutexes_[slot_idx]);
+            SnapshotLock lock(slot_mutexes_[slot_idx], timing);
             const auto& source = slots_[slot_idx];
             if (!source.valid || source.absolute_position != pos
                 || source.generation != current_generation) {
@@ -573,7 +601,7 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTimeImpl(
         // pre-roll before presentation_start_pts must never become a visible
         // marker position.
         {
-            std::lock_guard<std::mutex> publication_lock(publication_mutex_);
+            SnapshotLock publication_lock(publication_mutex_, timing);
             if (generation_.load(std::memory_order_acquire)
                     != current_generation) {
                 snapshot.internal_consistency = false;

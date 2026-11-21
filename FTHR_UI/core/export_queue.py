@@ -185,7 +185,7 @@ def run_export(template, staged, output, *, quality, duration, cancel,
                 state_callback=state_callback,
             )
             result = job.run(duration=duration)
-            if result.state != ExportState.FAILED or cancel.is_set():
+            if result.state != ExportState.FAILED or result.finalization_target or cancel.is_set():
                 break
         return result
 
@@ -283,6 +283,7 @@ def submit(source, directory, quality, build_command, duration, validate,
                 status=lambda value: setattr(task, 'status', value),
                 state_callback=_state_changed)
             task.status = result.state.value.title()
+            task.result = result
             task.detail = result.failure_message(full_stderr=True)
             if result.state == ExportState.COMPLETED:
                 task.progress = 100

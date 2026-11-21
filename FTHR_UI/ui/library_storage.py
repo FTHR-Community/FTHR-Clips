@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 from PySide6.QtCore import QObject, QSignalBlocker, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QBoxLayout, QCheckBox, QHBoxLayout, QLabel, QLineEdit,
-    QListView, QListWidget, QPushButton, QSlider, QVBoxLayout, QWidget,
+    QListView, QListWidget, QPushButton, QVBoxLayout, QWidget,
 )
 
 from core.library_storage import (
@@ -26,6 +26,7 @@ from core.library_storage import (
 from core.settings_manager import clips_directory_lexical_from
 from core.library_index import canonical_media_path
 from ui.dialogs import FthrMessageDialog
+from ui.sliders import ClickToSeekSlider
 from ui.style import (
     Colors, Fonts, button_outline_qss, checkbox_qss,
     label_body, lineedit_qss, set_theme_style, slider_qss,
@@ -1000,7 +1001,7 @@ class LibraryStorageController(QObject):
         self.cancel()
 
 
-class _LimitSlider(QSlider):
+class _LimitSlider(ClickToSeekSlider):
     """Select discrete limits while keeping typed values independent of the stops."""
 
     edited = Signal()

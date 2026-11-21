@@ -1,6 +1,6 @@
-# FTHR Clips 2.1.2 — Windows source
+# FTHR Clips 2.1.3 — Windows source
 
-Snapshot: 14 November 2026. See [BUILDING.md](BUILDING.md) for Windows prerequisites, dependency verification, build and test commands.
+Snapshot: 21 November 2026. See [BUILDING.md](BUILDING.md) for Windows prerequisites, dependency verification, build and test commands.
 
 This tree includes the Windows app, native engine, shared code, optional uploader support, assets, tests and licences. Website files, standalone plugins, Linux engine and AppImage packaging are excluded. The app retains its plugin host so separately distributed plugins can be installed.
 

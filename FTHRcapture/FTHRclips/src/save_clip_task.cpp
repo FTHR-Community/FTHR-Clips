@@ -2,6 +2,9 @@
 
 #include "save_clip_task.h"
 #include "audio_timeline.h"
+#ifdef _WIN32
+#include "frame_pacing_trace.h"
+#endif
 
 #include <algorithm>
 #include <iostream>
@@ -49,6 +52,9 @@ bool SaveClipQueue::Push(SaveClipTask&& task) {
     std::wstring log_path = task.output_path;
     uint32_t     log_id   = task.task_id;
     size_t       log_depth = 0;
+#ifdef _WIN32
+    const bool trace_enabled = frame_pacing_trace::Enabled();
+#endif
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -64,6 +70,9 @@ bool SaveClipQueue::Push(SaveClipTask&& task) {
             return false;
         }
 
+#ifdef _WIN32
+        task.trace_enqueued_qpc = frame_pacing_trace::Now(trace_enabled);
+#endif
         queue_.push(std::move(task));
         log_depth = queue_.size();
     }
@@ -98,6 +107,9 @@ bool SaveClipQueue::Pop(SaveClipTask& out_task) {
     
     out_task = std::move(queue_.front());
     queue_.pop();
+#ifdef _WIN32
+    out_task.trace_dequeued_qpc = frame_pacing_trace::Now(out_task.trace_enqueued_qpc != 0);
+#endif
     
     return true;
 }

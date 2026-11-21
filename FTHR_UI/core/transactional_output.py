@@ -10,7 +10,9 @@ from pathlib import Path
 def create_staged_output_path(final_path: str | os.PathLike[str]) -> Path:
     final = Path(final_path)
     token = uuid.uuid4().hex
-    return final.with_name(f'.{final.stem}.partial.{token}{final.suffix}')
+    # Keep FFmpeg's temporary output within the Windows path budget even
+    # when the final filename uses most of it. FFmpeg needs the media suffix.
+    return final.with_name(f'.partial.{token}{final.suffix}')
 
 
 def commit_staged_output(

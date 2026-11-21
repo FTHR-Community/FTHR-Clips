@@ -126,18 +126,20 @@ def _replacement_roots() -> list[tuple[str, str]]:
 
 
 _WINDOWS_USER_ROOT = re.compile(
-    r'(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/]Users[\\/][^\\/\s"\']+')
+    # Older JSONL may encode non-ASCII characters inside the account name.
+    r'(?i)[A-Z]:[\\/]+Users[\\/]+(?:\\+u[0-9a-f]{4}|[^\\/"\r\n<>|:*?])+')
 
 
 def redact_path(value: Any) -> str:
     """Redact the current profile/application/temp roots in arbitrary text."""
     text = redact_secret(value)
+    if '\\' not in text and '/' not in text:
+        return text
     for root, token in _replacement_roots():
-        text = re.sub(re.escape(root), token, text, flags=re.IGNORECASE)
-        alternate = root.replace('\\', '/')
-        if alternate != root:
-            text = re.sub(re.escape(alternate), token, text,
-                          flags=re.IGNORECASE)
+        # Exception reprs and historical JSONL can escape a separator several
+        # times. Match the root without unescaping the surrounding log or JSON.
+        pattern = r'[\\/]+'.join(re.escape(part) for part in re.split(r'[\\/]+', root))
+        text = re.sub(pattern + r"""(?=$|[\\/"'\r\n])""", token, text, flags=re.IGNORECASE)
     return _WINDOWS_USER_ROOT.sub('%USERPROFILE%', text)
 
 
@@ -156,7 +158,7 @@ def _sanitize(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, Mapping):
         items = list(value.items())[:128]
         return {
-            redact_secret(str(key))[:128]: _sanitize(item, depth=depth + 1)
+            redact_path(str(key))[:128]: _sanitize(item, depth=depth + 1)
             for key, item in items
         }
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -188,7 +190,13 @@ def _read_bounded_tail(path: Path, max_bytes: int) -> str:
         with path.open('rb') as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
-            handle.seek(max(0, size - max_bytes))
+            if size > max_bytes:
+                # The cutoff may fall between a profile root and its username.
+                # Export only whole lines so the redactor can see the prefix.
+                handle.seek(size - max_bytes - 1)
+                handle.readline(max_bytes + 1)
+            else:
+                handle.seek(0)
             data = handle.read(max_bytes)
         return bounded_tail(data.decode('utf-8', errors='replace'), max_bytes)
     except OSError as error:

@@ -31,6 +31,7 @@ struct WindowsMicrophoneEndpoint {
     std::string display_name;
     uint32_t device_state = 0;
     bool is_default = false;
+    bool is_default_communications = false;
 };
 
 // Enumerates native eCapture endpoints and their stable IDs.  The caller can

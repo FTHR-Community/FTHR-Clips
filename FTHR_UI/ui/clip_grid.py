@@ -1,7 +1,4 @@
-# Responsive library grid grouped by date.
-#
-# Workers scan files and generate thumbnails; disk caches retain thumbnails
-# and durations. Keep filesystem and decoding work off the Qt thread.
+"""Virtualized library grid with background file discovery and thumbnail loading."""
 
 from ui.style import set_theme_style
 from ui.image_memory import ImageLRU, start_image_cache_maintenance
@@ -34,6 +31,11 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QDesktopServices, QPixmap, QPainter, QColor, QLinearGradient, QPainterPath, QPen
 from PySide6.QtGui import QImage, QImageReader, QIcon, QFontMetrics, QPixmapCache, QDrag
 from ui.library_album_drag import AlbumDragMimeData, AlbumDragSnapshot
+from ui.library_thumbnails import (
+    _ImageThumbnailWorker, _ThumbnailWorker, _get_cached_duration_path,
+    _get_cached_thumb_path, _get_negative_cache_path,
+    get_cached_clip_metadata as get_cached_clip_metadata, read_cached_metadata,
+)
 
 from core.clip_files import (
     IMAGE_SUFFIXES,
@@ -46,8 +48,8 @@ from core.library_index import (
     LibraryRecord, LibraryScanResult, canonical_media_path,
     scan_library, recorded_media_details,
 )
-from core.library_cache import maybe_prune_thumbnail_cache
-from core.media_process import run_media_process as _run_owned_media_process, media_process_snapshot
+from core.save_trace import SAVE_TRACE_ENABLED, mark_save_trace
+from core.media_process import media_process_snapshot
 from core.library_ownership import (
     MediaOwnership, classify_media_path, media_file_identity,
 )
@@ -56,13 +58,11 @@ from core.clip_metadata_types import MutationResult, FileOperationState
 from shiboken6 import isValid
 from core.audio_manifest import manifest_path_for
 from core.theme_manager import ThemeManager
-from core.media_metadata import parse_ffprobe_video_metadata
 from core.library_tags import format_tags_text, normalize_tags, parse_tags_text
 from core.library_searches import SearchCriteria, normalize_search_criteria
 from core.library_covers import (
     MAX_COVER_PNG_BYTES, inspect_png,
 )
-from core.ffmpeg_tools import FFmpegUnavailable, get_ffmpeg_exe, get_ffprobe_exe
 from core.settings_manager import (
     StoragePathError, clips_directory_from, ensure_storage_directory,
 )
@@ -99,7 +99,7 @@ class _DropdownCombo(WheelSafeComboBox):
 
 from ui.style import (
     Colors, Fonts, Sizes,
-    label_display, lineedit_qss,
+    label_body, label_display, lineedit_qss,
     context_menu_qss, combo_qss, button_primary_qss, button_secondary_qss, checkbox_qss,
 )
 from ui.dialogs import FthrInputDialog, FthrMessageDialog
@@ -215,9 +215,6 @@ class _MediaFilterCombo(_DropdownCombo):
         super().keyPressEvent(event)
 
 
-THUMB_CACHE_DIR = os.path.join(os.path.expanduser('~'), '.fthr', 'thumbnails')
-
-# These folders hold processed/shared clips — not shown in the main library grid
 _GRID_EXCLUDED_DIRS = {'Exported', 'Shared'}
 _VIDEO_EXTS = VIDEO_SUFFIXES
 _IMAGE_EXTS = IMAGE_SUFFIXES
@@ -245,7 +242,6 @@ def _show_in_file_manager(file_path: str) -> None:
 
 
 
-# Card geometry
 # Cards flex with the viewport. The thumbnail *surface* remains 16:9, while
 # source pixels fill it with a centered crop, preserving their aspect ratio.
 _CARD_W      = 360  # preferred / cache sizing reference
@@ -257,105 +253,7 @@ _CARD_H      = _THUMB_H + _CARD_BODY_H
 _MAX_MATERIALIZED_CARDS = 96
 _VIRTUAL_OVERSCAN_ROWS = 2
 _MAX_THUMBNAIL_QUEUE = 128
-_NEGATIVE_CACHE_SECONDS = 30.0
 _ALBUM_UNSET = object()
-def _get_cached_thumb_path(file_path: str) -> str:
-    """Return a cache path based on file path + mtime so stale caches auto-invalidate.
-
-    Including mtime in the hash invalidates the cache automatically when a file
-    is overwritten without requiring a separate cache index.
-    """
-    info = os.stat(file_path)
-    # v4 caches preserve source aspect ratio through FFmpeg scaling. The format
-    # here prevents an older, force-stretched 16:9 thumbnail from surviving an
-    # application update.
-    key = f'{canonical_media_path(file_path)}|{info.st_size}|{info.st_mtime_ns}|aspect-v4'.encode(
-        'utf-8', errors='surrogateescape')
-    return os.path.join(THUMB_CACHE_DIR, hashlib.md5(key).hexdigest() + '.jpg')
-
-
-def _get_cached_duration_path(thumb_path: str) -> str:
-    """Sidecar storing authoritative clip metadata for thumbnail/viewer reuse.
-
-    The versioned filename invalidates old OpenCV-derived FPS caches.
-    Format: ``duration width height fps video_bitrate total_bitrate``.
-    """
-    return thumb_path[:-4] + '.meta-v3'
-
-
-def _get_negative_cache_path(thumb_path: str) -> str:
-    """Fingerprint-bound marker for an unchanged media probe failure."""
-    return thumb_path[:-4] + '.failed'
-
-
-def _has_recent_probe_failure(path: str) -> bool:
-    try:
-        age = time.time() - os.path.getmtime(path)
-        return 0 <= age < _NEGATIVE_CACHE_SECONDS
-    except OSError:
-        # A missing/unreadable optional marker must not suppress a fresh probe.
-        return False
-
-
-def _read_cached_duration(dur_path: str) -> int:
-    """Backwards-compatible reader that returns just the duration."""
-    meta = read_cached_metadata(dur_path)
-    return int(meta[0]) if meta else 0
-
-
-def read_cached_metadata(dur_path: str):
-    """Return factual cached metadata, or ``None`` when unavailable."""
-    try:
-        with open(dur_path, 'r') as f:
-            parts = f.read().strip().split()
-        if not parts:
-            return None
-        duration = float(parts[0])
-        width    = int(parts[1]) if len(parts) > 1 else 0
-        height   = int(parts[2]) if len(parts) > 2 else 0
-        fps      = float(parts[3]) if len(parts) > 3 else 0.0
-        video_bitrate = int(parts[4]) if len(parts) > 4 else 0
-        total_bitrate = int(parts[5]) if len(parts) > 5 else 0
-        if (not math.isfinite(duration) or duration <= 0
-                or width <= 0 or height <= 0 or not math.isfinite(fps)
-                or fps < 0 or video_bitrate < 0 or total_bitrate < 0):
-            return None
-        return (duration, width, height, fps,
-                video_bitrate, total_bitrate)
-    except (OSError, ValueError):
-        # A corrupt/missing sidecar is a cache miss and will be probed again.
-        return None
-
-
-def _write_cached_duration(dur_path: str, duration: float,
-                            width: int = 0, height: int = 0, fps: float = 0.0,
-                            video_bitrate: int = 0,
-                            total_bitrate: int = 0):
-    """Persist factual FFprobe metadata so ClipViewer can skip a second probe."""
-    try:
-        temp_path = dur_path + f'.tmp-{os.getpid()}-{threading.get_ident()}'
-        with open(temp_path, 'w') as f:
-            f.write(
-                f'{float(duration):.6f} {int(width)} {int(height)} '
-                f'{float(fps):.6f} {int(video_bitrate)} {int(total_bitrate)}')
-        os.replace(temp_path, dur_path)
-    except OSError:
-        try:
-            os.unlink(temp_path)
-        except (OSError, UnboundLocalError):
-            # A failed optional cache write may leave no temporary file to remove.
-            pass
-
-
-# Public lookup used by ClipViewer to avoid blocking a decoder on first
-# open. Returns (duration_sec, width, height, fps) or None on any miss / error.
-def get_cached_clip_metadata(file_path: str):
-    try:
-        cache_path = _get_cached_thumb_path(file_path)
-    except OSError:
-        # A removed source has no cache identity; callers can show the placeholder.
-        return None
-    return read_cached_metadata(_get_cached_duration_path(cache_path))
 
 
 def _humanize_relative(ts: float) -> str:
@@ -404,297 +302,6 @@ def _game_name_from_path(file_path: str, clips_root: str | None = None) -> str:
 def _clip_title_from_filename(file_path: str) -> str:
     """Display the actual editable filename, without its media extension."""
     return Path(file_path).stem
-
-
-class _ThumbnailSignals(QObject):
-    finished = Signal(str, str, int)  # file_path, cache_path, duration_sec
-    diagnostic_finished = Signal(int, int, bool)  # total_ms, metadata_ms, cache_hit
-
-
-def _valid_cached_thumbnail(path: str) -> bool:
-    """Validate a JPEG header/decode before treating a cache entry as a hit."""
-    try:
-        reader = QImageReader(path)
-        reader.setAutoTransform(True)
-        image = reader.read()
-        return not image.isNull() and image.width() > 0 and image.height() > 0
-    except (OSError, RuntimeError):
-        # A damaged cached JPEG is a miss, never a reason to reject the clip.
-        return False
-
-
-def _probe_with_owned_process(
-        file_path: str, cancel_event: threading.Event):
-    try:
-        probe = get_ffprobe_exe()
-    except FFmpegUnavailable:
-        # Missing FFprobe only disables enrichment; opening uses the original media.
-        return None
-    result = _run_owned_media_process(
-        [probe, '-v', 'error', '-show_entries',
-         'stream=index,codec_type,width,height,avg_frame_rate,'
-         'r_frame_rate,duration,bit_rate:'
-         'format_tags=fthr_frame_rate,fthr_video_bitrate_bps:'
-         'format=duration,size,bit_rate', '-of', 'json', file_path],
-        cancel_event)
-    if result is None or result[0] != 0:
-        return None
-    try:
-        size = Path(file_path).stat().st_size
-    except OSError:
-        size = None
-    return parse_ffprobe_video_metadata(
-        result[1].decode('utf-8', errors='replace'), file_size=size)
-
-
-def _decode_thumbnail_with_owned_process(
-        file_path: str, cancel_event: threading.Event) -> QImage | None:
-    try:
-        ffmpeg = get_ffmpeg_exe()
-    except FFmpegUnavailable:
-        # Missing FFmpeg only disables the thumbnail, not access to the clip.
-        return None
-    result = _run_owned_media_process(
-        [ffmpeg, '-hide_banner', '-loglevel', 'error', '-ss', '0',
-         '-i', file_path, '-frames:v', '1', '-vf',
-         "scale=w='min(640,iw)':h='min(360,ih)':force_original_aspect_ratio=decrease",
-         '-f', 'image2pipe', '-vcodec', 'mjpeg', '-'],
-        cancel_event)
-    if result is None or result[0] != 0 or not result[1]:
-        return None
-    image = QImage.fromData(result[1], 'JPEG')
-    if image.isNull():
-        return None
-    return image
-
-
-class _ThumbnailWorker(QRunnable):
-    """Generate and cache a video thumbnail off the main thread."""
-
-    def __init__(self, file_path: str, cancel_event=None):
-        super().__init__()
-        self.file_path = file_path
-        self.cancel_event = cancel_event or threading.Event()
-        self.signals = _ThumbnailSignals()
-
-    def run(self):
-        started = time.monotonic()
-        metadata_ms = 0
-        cache_hit = False
-        cache_path = ''
-        temp_path = ''
-        try:
-            if not is_completed_video_path(self.file_path):
-                self.signals.finished.emit(self.file_path, '', 0)
-                return
-            if self.cancel_event.is_set():
-                return
-            cache_path = _get_cached_thumb_path(self.file_path)
-            dur_path   = _get_cached_duration_path(cache_path)
-            failed_path = _get_negative_cache_path(cache_path)
-
-            # Cache hit: a valid JPEG AND factual metadata sidecar both exist.
-            # Fingerprinting in _get_cached_thumb_path means mutations select a
-            # new generation; corrupt entries never poison the next run.
-            if (os.path.exists(cache_path) and os.path.exists(dur_path)
-                    and read_cached_metadata(dur_path) is not None
-                    and _valid_cached_thumbnail(cache_path)):
-                cache_hit = True
-                duration = _read_cached_duration(dur_path)
-                self.signals.finished.emit(self.file_path, cache_path, duration)
-                return
-            if os.path.exists(cache_path) and not _valid_cached_thumbnail(cache_path):
-                # Never retain a corrupt generation just because its filename
-                # still matches the current source fingerprint.
-                try:
-                    os.unlink(cache_path)
-                except OSError:
-                    pass
-            if _has_recent_probe_failure(failed_path):
-                # A decoder timeout or temporarily unavailable tool says
-                # nothing permanent about the media. Retry unchanged files
-                # after a short cooldown, including markers from older builds.
-                self.signals.finished.emit(
-                    self.file_path, '', _read_cached_duration(dur_path))
-                return
-            metadata_started = time.monotonic()
-            probed = _probe_with_owned_process(
-                self.file_path, self.cancel_event)
-            metadata_ms = round((time.monotonic() - metadata_started) * 1000)
-            if self.cancel_event.is_set():
-                return
-            duration = (probed.duration_seconds
-                        if probed and probed.duration_seconds is not None else 0.0)
-            width = probed.width if probed and probed.width else 0
-            height = probed.height if probed and probed.height else 0
-            fps = probed.average_fps if probed and probed.average_fps else 0.0
-            video_bitrate = (
-                probed.video_bitrate_bps if probed and probed.video_bitrate_bps else 0)
-            total_bitrate = (
-                probed.total_bitrate_bps if probed and probed.total_bitrate_bps else 0)
-
-            # Metadata is useful even if thumbnail decoding later fails.
-            os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
-            if probed is not None:
-                _write_cached_duration(
-                    dur_path, duration, width, height, fps,
-                    video_bitrate, total_bitrate)
-
-            image = _decode_thumbnail_with_owned_process(
-                self.file_path, self.cancel_event)
-            if image is None:
-                if self.cancel_event.is_set():
-                    return
-                try:
-                    Path(failed_path).parent.mkdir(parents=True, exist_ok=True)
-                    Path(failed_path).touch()
-                except OSError:
-                    pass
-                self.signals.finished.emit(self.file_path, '', int(duration))
-                return
-
-            os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
-            if not os.path.exists(cache_path):
-                # QImage decode/scaling stays on this QRunnable. Only the
-                # thumbnail-sized JPEG reaches the UI and cache.
-                temp_path = cache_path + f'.tmp-{os.getpid()}-{threading.get_ident()}.jpg'
-                if image.save(temp_path, 'JPG', 85):
-                    os.replace(temp_path, cache_path)
-                else:
-                    try:
-                        os.unlink(temp_path)
-                    except OSError:
-                        pass
-            # Persist full metadata so ClipViewer can skip its own cv2.VideoCapture
-            # on subsequent opens — this is what removes the first-launch lag for
-            # clips that already appear on the grid.
-            self.signals.finished.emit(
-                self.file_path, cache_path, int(duration))
-        except Exception as error:
-            # Thumbnail/metadata enrichment must never invalidate a clip that
-            # was already transactionally published by the engine.
-            if self.cancel_event.is_set():
-                return
-            emit_event(
-                'library', 'thumbnail_generation_failed', state='FAILED',
-                detail=f'{type(error).__name__}: {error}')
-            try:
-                if cache_path:
-                    os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
-                    Path(_get_negative_cache_path(cache_path)).touch()
-            except (OSError, UnboundLocalError):
-                pass
-            self.signals.finished.emit(self.file_path, '', 0)
-        finally:
-            try:
-                if temp_path:
-                    try:
-                        os.unlink(temp_path)
-                    except OSError:
-                        pass
-                maybe_prune_thumbnail_cache(THUMB_CACHE_DIR)
-            except Exception as error:
-                # Cache maintenance is optional; it must never prevent the
-                # terminal diagnostic signal that releases the job owner.
-                emit_event(
-                    'library', 'thumbnail_cache_maintenance_failed',
-                    state='FAILED',
-                    detail=f'{type(error).__name__}: {error}')
-            finally:
-                self.signals.diagnostic_finished.emit(
-                    round((time.monotonic() - started) * 1000),
-                    metadata_ms, cache_hit)
-
-
-class _ImageThumbnailSignals(QObject):
-    finished = Signal(str, object)  # file_path, thumbnail-sized QImage
-    diagnostic_finished = Signal(int, int, bool)
-
-
-class _ImageThumbnailWorker(QRunnable):
-    """Decode screenshots with QImageReader away from the Qt GUI thread."""
-
-    def __init__(self, file_path: str, cancel_event=None):
-        super().__init__()
-        self.file_path = file_path
-        self.cancel_event = cancel_event or threading.Event()
-        self.signals = _ImageThumbnailSignals()
-
-    def run(self):
-        started = time.monotonic()
-        cache_hit = False
-        cache_path = ''
-        temp_path = ''
-        try:
-            cache_path = _get_cached_thumb_path(self.file_path)
-            failed_path = _get_negative_cache_path(cache_path)
-            if self.cancel_event.is_set():
-                return
-            if os.path.exists(cache_path) and _valid_cached_thumbnail(cache_path):
-                cache_hit = True
-                reader = QImageReader(cache_path)
-                reader.setAutoTransform(True)
-                image = reader.read()
-                self.signals.finished.emit(self.file_path, image)
-                return
-            if os.path.exists(cache_path):
-                try:
-                    os.unlink(cache_path)
-                except OSError:
-                    pass
-            if _has_recent_probe_failure(failed_path):
-                self.signals.finished.emit(self.file_path, QImage())
-                return
-            reader = QImageReader(self.file_path)
-            reader.setAutoTransform(True)
-            size = reader.size()
-            if size.isValid() and (size.width() > 640 or size.height() > 360):
-                size.scale(QSize(640, 360), Qt.AspectRatioMode.KeepAspectRatio)
-                reader.setScaledSize(size)
-            image = reader.read()
-            if self.cancel_event.is_set():
-                return
-            if image.isNull():
-                raise ValueError('image decoder returned an empty image')
-            Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
-            temp_path = cache_path + f'.tmp-{os.getpid()}-{threading.get_ident()}.jpg'
-            if not image.save(temp_path, 'JPG', 85):
-                raise OSError('thumbnail cache write failed')
-            os.replace(temp_path, cache_path)
-            self.signals.finished.emit(self.file_path, image)
-        except Exception as error:
-            if self.cancel_event.is_set():
-                return
-            emit_event(
-                'library', 'thumbnail_generation_failed', state='FAILED',
-                detail=f'{type(error).__name__}: {error}')
-            try:
-                if cache_path:
-                    Path(_get_negative_cache_path(cache_path)).parent.mkdir(
-                        parents=True, exist_ok=True)
-                    Path(_get_negative_cache_path(cache_path)).touch()
-            except (OSError, UnboundLocalError):
-                pass
-            self.signals.finished.emit(self.file_path, QImage())
-        finally:
-            try:
-                if temp_path:
-                    try:
-                        os.unlink(temp_path)
-                    except OSError:
-                        pass
-                if cache_path:
-                    maybe_prune_thumbnail_cache(THUMB_CACHE_DIR)
-            except Exception as error:
-                # Cache maintenance is optional; it must not strand the
-                # in-flight owner by suppressing the terminal signal.
-                emit_event(
-                    'library', 'thumbnail_cache_maintenance_failed',
-                    state='FAILED',
-                    detail=f'{type(error).__name__}: {error}')
-            finally:
-                self.signals.diagnostic_finished.emit(
-                    round((time.monotonic() - started) * 1000), 0, cache_hit)
 
 
 class _CoverDecodeSignals(QObject):
@@ -824,7 +431,6 @@ class _FileCollectWorker(QRunnable):
             found, pairs, imported, list(self.result.watched_directories))
 
 
-# ClipThumbnail — Medal-style card: thumb on top, info row below
 
 class _RenameLabel(QLabel):
     rename_requested = Signal()
@@ -1090,6 +696,7 @@ class ClipThumbnail(QFrame):
         self._tag_details_provider = None
         self._tag_edit_handler = None
         self._cover_handler = None
+        self._clip_actions_provider = None
         self._batch_locked = False
         self._overlap_paths = ()
         self.setObjectName('clipCard')
@@ -1925,6 +1532,10 @@ class ClipThumbnail(QFrame):
         link_action = menu.addAction(
             'Open SFTP location' if self.upload_link.startswith('sftp://')
             else 'Open uploaded link') if self.upload_link else None
+        clip_actions = {}
+        if self.is_video and self._clip_actions_provider is not None:
+            for label, callback in self._clip_actions_provider(path):
+                clip_actions[menu.addAction(label)] = callback
         favorite_action = menu.addAction('Remove favorite' if self._library_flags and self._library_flags['favorite'] else 'Add favorite')
         favorite_action.setEnabled(self._library_flags is not None)
         add_album_menu = menu.addMenu('Add to album')
@@ -1962,6 +1573,8 @@ class ClipThumbnail(QFrame):
             self._cover_handler(path, album_record, generation, self)
         elif link_action and action == link_action:
             self._open_upload_link()
+        elif action in clip_actions:
+            clip_actions[action]()
         elif (action is not None and action.parent() is add_album_menu
               and album_record is not None):
             album_id = action.data()
@@ -2046,9 +1659,11 @@ class ClipThumbnail(QFrame):
                                  self._thumb_height - self.duration_label.height() - 8)
 
 
-# ClipGrid — filter bar + date sections + grid of cards
 
 class ClipGrid(QWidget):
+    add_import_folder_requested = Signal()
+    manage_import_folders_requested = Signal()
+    import_feedback = Signal(str, str, bool)
     overlap_merge_requested = Signal(object)
     clip_clicked          = Signal(str)
     clip_preload_requested = Signal(str)
@@ -2074,8 +1689,12 @@ class ClipGrid(QWidget):
     album_drag_finished = Signal()
     trash_view_requested = Signal()
 
-    def __init__(self, settings_manager=None, parent=None, *, metadata_manager=None, autostart=True):
+    def __init__(self, settings_manager=None, parent=None, *, metadata_manager=None,
+                 autostart=True, clip_actions_provider=None, bulk_clip_actions_provider=None,
+                 toolbar_layout=None):
         super().__init__(parent)
+        self._clip_actions_provider = clip_actions_provider
+        self._bulk_clip_actions_provider = bulk_clip_actions_provider
         self._selection = LibrarySelection()
         self._album_drag_lease = None
         self._album_drag_revision = 0
@@ -2266,7 +1885,7 @@ class ClipGrid(QWidget):
         self._watcher = QFileSystemWatcher(self)
         self._watcher.directoryChanged.connect(self._on_dir_changed)
 
-        self._setup_ui()
+        self._setup_ui(toolbar_layout)
         self._refresh_album_catalog()
         self._refresh_saved_searches()
 
@@ -3284,7 +2903,7 @@ class ClipGrid(QWidget):
             summary = f"{len(job['successes'])} moved to Trash, {len(job['failures'])} kept"
             if job['cancel']:
                 summary += ' (cancelled)'
-            self.bulk_status_label.setText(summary)
+            self._set_bulk_status(summary)
             self.bulk_trash_finished.emit(dict(successes=tuple(path for path, _ in job['successes']),
                                                failures=tuple(job['failures']), cancelled=job['cancel']))
             if job['failures'] and not self._shutdown_started:
@@ -3301,7 +2920,7 @@ class ClipGrid(QWidget):
                 job['successes'].append((record.path, record.file_identity))
             else:
                 job['failures'].append((record.path, result.error or 'The file was kept'))
-            self.bulk_status_label.setText(f"{len(job['successes'])} moved to Trash, {len(job['failures'])} kept")
+            self._set_bulk_status(f"{len(job['successes'])} moved to Trash, {len(job['failures'])} kept")
             self._bulk_timer.start(0)
         if record.file_identity is None:
             done(MutationResult('', FileOperationState.ROLLED_BACK, record.path, record.path,
@@ -3326,7 +2945,7 @@ class ClipGrid(QWidget):
             records=captured, index=0, changed=[], unchanged=[], failures=[],
             cancel=False)
         action = 'Removing from album' if remove else 'Adding to album'
-        self.bulk_status_label.setText(f'{action}…')
+        self._set_bulk_status(f'{action}…')
         self._update_selection_ui()
         self._bulk_timer.start(0)
 
@@ -3353,7 +2972,7 @@ class ClipGrid(QWidget):
                 f"{len(job['failures'])} failed")
             if job['cancel']:
                 summary += ' (cancelled)'
-            self.bulk_status_label.setText(summary)
+            self._set_bulk_status(summary)
             result = dict(
                 album_id=job['album_id'], remove=job['remove'],
                 changed=tuple(job['changed']),
@@ -3400,7 +3019,7 @@ class ClipGrid(QWidget):
                 job['failures'].append((record.path, str(error)))
             else:
                 (job['changed'] if changed else job['unchanged']).append(record.path)
-        self.bulk_status_label.setText(
+        self._set_bulk_status(
             f"{len(job['changed'])} changed, {len(job['unchanged'])} unchanged, "
             f"{len(job['failures'])} failed")
         if job['index'] < len(job['records']) and not job['cancel']:
@@ -3485,7 +3104,7 @@ class ClipGrid(QWidget):
             kind='tags', operation=operation, tags=normalized,
             records=captured, index=0, changed=[], unchanged=[], failures=[],
             cancel=False)
-        self.bulk_status_label.setText('Updating tags…')
+        self._set_bulk_status('Updating tags…')
         self._update_selection_ui()
         self._bulk_timer.start(0)
 
@@ -3517,7 +3136,7 @@ class ClipGrid(QWidget):
                        f"{len(job['failures'])} failed")
             if job['cancel']:
                 summary += ' (cancelled)'
-            self.bulk_status_label.setText(summary)
+            self._set_bulk_status(summary)
             result = dict(
                 operation=job['operation'], tags=tuple(job['tags']),
                 changed=tuple(job['changed']), unchanged=tuple(job['unchanged']),
@@ -3567,7 +3186,7 @@ class ClipGrid(QWidget):
                 job['failures'].append((record.path, str(error)))
             else:
                 (job['changed'] if changed else job['unchanged']).append(record.path)
-        self.bulk_status_label.setText(
+        self._set_bulk_status(
             f"{len(job['changed'])} changed, {len(job['unchanged'])} unchanged, "
             f"{len(job['failures'])} failed")
         self._bulk_timer.start(0)
@@ -3693,7 +3312,7 @@ class ClipGrid(QWidget):
                 self._bulk_job is not None and self._bulk_job.get('kind') == 'trash'):
             self._mutation_refresh_pending = True
             return
-        if self._background_paused:
+        if self._background_paused and not self._pending_import_roots:
             self._background_refresh_pending = True
             return
         self._begin_scan(pending[0])
@@ -3916,14 +3535,56 @@ class ClipGrid(QWidget):
         self._bulk_export_enabled = bool(enabled)
         self._update_selection_ui()
 
+    def _set_bulk_status(self, text):
+        self.bulk_status_label.setText(text)
+        self.bulk_status_label.setVisible(bool(text))
+
     def _request_bulk_export(self):
         if self._bulk_export_enabled and self._bulk_job is None and self.selected_records:
             self.bulk_export_requested.emit(self.selected_records)
 
-    def keyPressEvent(self, event):
+    def _refresh_bulk_plugin_actions(self):
+        menu = self._bulk_actions_menu
+        for action in self._bulk_plugin_actions:
+            menu.removeAction(action)
+            action.deleteLater()
+        self._bulk_plugin_actions.clear()
+        if (self._bulk_clip_actions_provider is None or self._bulk_job is not None
+                or self._shutdown_started):
+            return
+        records = tuple(record for record in self.selected_records if record.kind == 'video')
+        if not records:
+            return
+        paths = tuple(record.path for record in records)
+        before = self._bulk_plugin_insert_before
+        for label, callback in self._bulk_clip_actions_provider(paths):
+            if not self._bulk_plugin_actions:
+                self._bulk_plugin_actions.append(menu.insertSeparator(before))
+            action = menu.addAction(label)
+            menu.insertAction(before, action)
+            action.triggered.connect(
+                lambda _checked=False, run=callback: self._invoke_bulk_plugin_action(records, run))
+            self._bulk_plugin_actions.append(action)
+
+    def _invoke_bulk_plugin_action(self, records, callback):
+        if (self._shutdown_started or self._bulk_job is not None
+                or records != tuple(item for item in self.selected_records if item.kind == 'video')):
+            return
+        for record in records:
+            path = record.path
+            if (self._record_for_path(path) != record or path in self._mutation_paths
+                    or (self._readiness_checker and not self._readiness_checker(path))):
+                FthrMessageDialog.warning(
+                    self, 'Clip unavailable',
+                    f'{Path(path).name} is unavailable. Update your selection and try again.',
+                    plain_text=True)
+                return
+        callback()
+
+    def _handle_selection_key(self, event):
         focus = QApplication.focusWidget()
         if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
-            return super().keyPressEvent(event)
+            return False
         if event.key() == Qt.Key.Key_A and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             self.select_all_results()
             event.accept()
@@ -3934,6 +3595,11 @@ class ClipGrid(QWidget):
                 self._set_selection_mode(False)
             event.accept()
         else:
+            return False
+        return True
+
+    def keyPressEvent(self, event):
+        if not self._handle_selection_key(event):
             super().keyPressEvent(event)
 
     def _transfer_selection_rename(self, old_path, new_path):
@@ -3964,7 +3630,7 @@ class ClipGrid(QWidget):
             return
         self._bulk_job = dict(records=self.selected_records, index=0, successes=[], failures=[],
                               cancel=False, favorite=favorite)
-        self.bulk_status_label.setText('Updating selected clips…')
+        self._set_bulk_status('Updating selected clips…')
         self._update_selection_ui()
         self._bulk_timer.start(0)
 
@@ -4014,7 +3680,7 @@ class ClipGrid(QWidget):
                         card.refresh_library_flags()
                         card.set_selection_state(True, True, locked=True)
                 self.library_flags_changed.emit(record.path)
-        self.bulk_status_label.setText(
+        self._set_bulk_status(
             f"{len(job['successes'])} updated, {len(job['failures'])} failed")
         if job['index'] < len(job['records']) and not job['cancel']:
             self._bulk_timer.start(0)
@@ -4035,7 +3701,7 @@ class ClipGrid(QWidget):
             self._apply_current_index()
         self._update_selection_ui()
         if job['cancel']:
-            self.bulk_status_label.setText(self.bulk_status_label.text() + ' (cancelled)')
+            self._set_bulk_status(self.bulk_status_label.text() + ' (cancelled)')
         self.bulk_flags_finished.emit(dict(successes=tuple(job['successes']),
                                           failures=tuple(job['failures']), cancelled=job['cancel']))
         if job['failures'] and not self._shutdown_started:
@@ -4823,10 +4489,10 @@ class ClipGrid(QWidget):
         self._resize_timer.start(0)
 
     def eventFilter(self, obj, event):
-        # Resize events fire like a machine gun while you drag a window edge.
-        # Debounce so we only rebuild the grid 200ms after you STOP dragging,
-        # not 60 times a second mid-drag. Your CPU thanks you.
-        if (event.type() == event.Type.Resize
+        if obj is self._library_toolbar and event.type() == QEvent.Type.KeyPress:
+            return self._handle_selection_key(event)
+        # Debounce resize events to avoid rebuilding the grid mid-drag.
+        if (obj is self._viewport_widget and event.type() == event.Type.Resize
                 and not self._background_paused and not self._shutdown_started):
             self._resize_timer.start(200)
         return super().eventFilter(obj, event)
@@ -4930,21 +4596,47 @@ class ClipGrid(QWidget):
         if self._background_refresh_pending:
             self._background_refresh_pending = False
             self._known_files = None
-            self._load_clips()
+            trace_refresh = SAVE_TRACE_ENABLED and bool(self._pending_saved_clips)
+            if trace_refresh:
+                mark_save_trace('ui_library_resume_scan_request_begin')
+            try:
+                self._load_clips()
+            finally:
+                if trace_refresh:
+                    mark_save_trace('ui_library_resume_scan_request_end')
         pending = self._pending_saved_clips
         self._pending_saved_clips = {}
-        for path, ready in pending.items():
-            self.upsert_saved_clip(path, ready=ready)
+        trace_pending = SAVE_TRACE_ENABLED and bool(pending)
+        if trace_pending:
+            mark_save_trace('ui_library_resume_upserts_begin', clip_count=len(pending))
+        try:
+            for path, ready in pending.items():
+                self.upsert_saved_clip(path, ready=ready)
+        finally:
+            if trace_pending:
+                mark_save_trace('ui_library_resume_upserts_end', clip_count=len(pending))
         self._flush_trash_refresh()
 
-    # UI
 
-    def _setup_ui(self):
+    def _setup_ui(self, toolbar_layout):
         self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(24, 18, 24, 24)
+        self.layout.setContentsMargins(24, 0 if toolbar_layout is not None else 18, 24, 24)
         self.layout.setSpacing(0)
 
-        # Filter bar
+        self._library_toolbar = QWidget()
+        self._library_toolbar.setObjectName('libraryToolbar')
+        self._library_toolbar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        header = QVBoxLayout(self._library_toolbar)
+        header.setSpacing(0)
+        if toolbar_layout is not None:
+            header.setContentsMargins(24, 18, 24, 8)
+            toolbar_layout.addWidget(self._library_toolbar)
+            self._library_toolbar.installEventFilter(self)
+        else:
+            header.setContentsMargins(0, 0, 0, 8)
+            self.layout.addWidget(self._library_toolbar)
+        set_theme_style(self._library_toolbar, self._toolbar_qss)
+
         filt = QFrame()
         filt.setObjectName('filterBar')
         filt.setFixedHeight(Sizes.FILTER_H)
@@ -5010,7 +4702,7 @@ class ClipGrid(QWidget):
         self.select_mode_btn.setCheckable(True)
         self.select_mode_btn.toggled.connect(self._set_selection_mode)
         fl.addWidget(self.select_mode_btn)
-        self.layout.addWidget(filt)
+        header.addWidget(filt)
 
         self.search_edit = QLineEdit(filt)
         self.search_edit.setMinimumWidth(120)
@@ -5089,7 +4781,7 @@ class ClipGrid(QWidget):
         set_theme_style(
             self.search_status_label,
             lambda: label_display(Colors.TEXT_DIM, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL))
-        self.layout.addWidget(self.search_status_label)
+        header.addWidget(self.search_status_label)
 
         self.selection_toolbar = QWidget(self)
         selection_layout = QVBoxLayout(self.selection_toolbar)
@@ -5100,6 +4792,7 @@ class ClipGrid(QWidget):
         toolbar.setSpacing(6)
         selection_layout.addLayout(toolbar)
         self.selection_count_label = QLabel('0 selected')
+        self.selection_count_label.setContentsMargins(0, 0, 6, 0)
         toolbar.addWidget(self.selection_count_label)
         self.select_all_btn = QPushButton('Select all results')
         self.select_all_btn.clicked.connect(self.select_all_results)
@@ -5121,8 +4814,10 @@ class ClipGrid(QWidget):
         menu.addSeparator()
         menu.addAction('Add tags…', lambda: self._prompt_bulk_tags('add'))
         menu.addAction('Remove tags…', lambda: self._prompt_bulk_tags('remove'))
-        menu.addSeparator()
+        self._bulk_plugin_insert_before = menu.addSeparator()
         menu.addAction('Move to Trash', self.start_bulk_trash)
+        self._bulk_plugin_actions = []
+        menu.aboutToShow.connect(self._refresh_bulk_plugin_actions)
         self.bulk_actions_btn.setMenu(menu)
         toolbar.addWidget(self.bulk_actions_btn)
         self.bulk_export_btn = QPushButton('Export originals…')
@@ -5135,6 +4830,7 @@ class ClipGrid(QWidget):
         self.bulk_status_label = QLabel('')
         self.bulk_status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.bulk_status_label.setWordWrap(True)
+        self.bulk_status_label.hide()
         selection_layout.addWidget(self.bulk_status_label)
         toolbar.addStretch()
         for button in (self.select_mode_btn, self.select_all_btn, self.clear_selection_btn,
@@ -5144,11 +4840,31 @@ class ClipGrid(QWidget):
         set_theme_style(menu, context_menu_qss)
         for label in (self.selection_count_label, self.bulk_status_label):
             set_theme_style(label, lambda: label_display(Colors.TEXT_DIM, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL))
-        self.layout.addWidget(self.selection_toolbar)
-        self.layout.addSpacing(8)
+        header.addWidget(self.selection_toolbar)
         self._update_selection_ui()
 
-        # Section host (date-grouped grids live here)
+        self._pending_import_roots = set()
+        self._import_baseline = set()
+        self._import_status = QLabel()
+        set_theme_style(self._import_status, lambda: label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY))
+        self._import_status.hide()
+        self._import_actions = QWidget()
+        actions = QHBoxLayout(self._import_actions)
+        actions.setContentsMargins(0, 0, 0, 0)
+        self._add_import_folder = QPushButton('Add folder')
+        set_theme_style(self._add_import_folder, button_primary_qss)
+        self._add_import_folder.clicked.connect(self.add_import_folder_requested.emit)
+        actions.addWidget(self._add_import_folder)
+        self._manage_import_folders = QPushButton('Manage folders')
+        set_theme_style(self._manage_import_folders, button_secondary_qss)
+        self._manage_import_folders.clicked.connect(self.manage_import_folders_requested.emit)
+        actions.addWidget(self._manage_import_folders)
+        actions.addStretch()
+        self._import_actions.hide()
+        self.layout.addWidget(self._import_actions)
+        self._import_status.setWordWrap(True)
+        self.layout.addWidget(self._import_status)
+
         self._sections_host = QWidget()
         self._sections_host.setStyleSheet('background: transparent;')
         self._sections_layout = QVBoxLayout(self._sections_host)
@@ -5156,7 +4872,6 @@ class ClipGrid(QWidget):
         self._sections_layout.setSpacing(20)
         self.layout.addWidget(self._sections_host)
 
-        # Empty state
         self._empty_widget = QWidget()
         self._empty_widget.setStyleSheet('background: transparent;')
         ev_layout = QVBoxLayout(self._empty_widget)
@@ -5195,8 +4910,11 @@ class ClipGrid(QWidget):
         set_theme_style(self, lambda: (self._grid_qss()))
 
     @staticmethod
-    def _grid_qss() -> str:
+    def _toolbar_qss() -> str:
         return f'''
+            QWidget#libraryToolbar {{
+                background: {Colors.BG};
+            }}
             QFrame#filterBar {{
                 background: {Colors.SURFACE_1};
                 border-radius: {Sizes.RADIUS_MD}px;
@@ -5210,6 +4928,11 @@ class ClipGrid(QWidget):
                 letter-spacing: {Fonts.TRACK_LABEL}px;
                 background: transparent;
             }}
+        '''
+
+    @staticmethod
+    def _grid_qss() -> str:
+        return f'''
             QPushButton#viewToggle, QPushButton#viewToggleActive {{
                 background-color: {Colors.SURFACE_2};
                 border: 1px solid {Colors.BORDER};
@@ -5241,7 +4964,6 @@ class ClipGrid(QWidget):
             }}
         '''
 
-    # Filter / sort handlers
 
     @staticmethod
     def _game_group(record: LibraryRecord, clips_root: Path) -> str | None:
@@ -5531,7 +5253,6 @@ class ClipGrid(QWidget):
             return 'IMPORTED CLIPS'
         return 'ALL CLIPS'
 
-    # Filesystem walking
 
     def set_active_output_paths(self, paths) -> None:
         """Hide recorder-owned files until finalization releases their ownership.
@@ -5597,7 +5318,6 @@ class ClipGrid(QWidget):
             if os.path.isdir(path):
                 self._watcher.addPath(path)
 
-    # Build the date-grouped layout
 
     def _load_clips(self):
         if not self._scanning_started:
@@ -5674,7 +5394,12 @@ class ClipGrid(QWidget):
             if result is None or result.stats.cancelled:
                 emit_event('library', 'scan_cancelled', state='CANCELLED',
                            generation=generation, elapsed_ms=elapsed)
+            elif (generation == self._scan_generation and self._background_paused
+                  and not self._shutdown_started):
+                self._finish_import_feedback(result.all_records)
+                self._background_refresh_pending = True
             elif generation == self._scan_generation and not self._shutdown_started:
+                self._finish_import_feedback(result.all_records)
                 self._sync_watched_directories(subdirs)
                 next_records = {record.identity: record
                                 for record in result.all_records}
@@ -5749,7 +5474,7 @@ class ClipGrid(QWidget):
         Keep later batches on the worker to avoid repeated Qt model rebuilds;
         publish the sorted result once the generation completes.
         """
-        if (self._shutdown_started or generation != self._scan_generation
+        if (self._shutdown_started or self._background_paused or generation != self._scan_generation
                 or self._active_scan_worker is None
                 or getattr(self._active_scan_worker, 'generation', None)
                 != generation or self._records):
@@ -5944,6 +5669,7 @@ class ClipGrid(QWidget):
         thumb._tag_details_provider = self.library_details_for
         thumb._tag_edit_handler = self._edit_card_tags
         thumb._cover_handler = self._open_cover_dialog
+        thumb._clip_actions_provider = self._clip_actions_provider
         thumb.set_overlap_paths(self._overlaps.get(file_path, ()))
         self._apply_cover_to_card(thumb)
         record = self._record_for_path(file_path)
@@ -6562,6 +6288,8 @@ class ClipGrid(QWidget):
         """
         if getattr(self, '_scan_suspended', False):
             self._background_refresh_pending = True
+            if SAVE_TRACE_ENABLED:
+                mark_save_trace('ui_library_upsert_deferred', reason='scan_suspended')
             return
         update_started = time.monotonic()
         file_path = os.path.abspath(os.path.normpath(os.fspath(file_path)))
@@ -6576,6 +6304,8 @@ class ClipGrid(QWidget):
                 or self._pending_saved_clips.get(file_path, False))
             if self._background_paused:
                 self._background_refresh_pending = True
+            if SAVE_TRACE_ENABLED:
+                mark_save_trace('ui_library_upsert_deferred', reason='background_paused')
             return
 
         if self._known_files is None:
@@ -6841,10 +6571,46 @@ class ClipGrid(QWidget):
         for card in self._thumb_widgets.values():
             card.refresh_duration_label()
 
+    def track_import_folder(self, folder):
+        if not self._pending_import_roots:
+            self._import_baseline = {record.identity for record in self._records.values()
+                                     if record.imported}
+        self._pending_import_roots.add(canonical_media_path(folder))
+        self.show_import_feedback(folder, 'Indexing recording folder…', False)
+
+    def show_import_feedback(self, folder, message, can_view):
+        self._import_status.setText(f'{Path(folder).name or folder} · {message}')
+        self._import_status.setVisible(self._filter == 'imported')
+        self.import_feedback.emit(folder, message, can_view)
+
+    def _finish_import_feedback(self, records):
+        if not self._pending_import_roots:
+            return
+        for folder in self._sm.get('imported_clip_folders', []):
+            root = canonical_media_path(folder)
+            if root not in self._pending_import_roots:
+                continue
+            videos = [r for r in records if r.imported and r.kind == 'video' and root in r.root_ids]
+            count = sum(r.identity not in self._import_baseline for r in videos)
+            if count:
+                message = f'{count} new imported clip{"s" if count != 1 else ""}.'
+            elif videos:
+                message = 'These clips are already in the library.'
+            elif not os.path.isdir(folder):
+                message = 'Folder unavailable. Locate it in Manage folders.'
+            else:
+                formats = ', '.join(suffix[1:].upper() for suffix in VIDEO_SUFFIXES)
+                message = f'No supported videos found. Supported formats include {formats}.'
+            self.show_import_feedback(folder, message, bool(videos))
+        self._pending_import_roots.clear()
+        self._import_baseline.clear()
+
     def force_refresh(self):
         """Clear the file cache and immediately reload — called when import folders change."""
         if self._background_paused:
             self._background_refresh_pending = True
+            if self._pending_import_roots and not self._mutation_paths:
+                self._begin_scan('import_feedback')
             return
         self._known_files = set()
         self._load_clips()
@@ -6917,6 +6683,8 @@ class ClipGrid(QWidget):
                 w.deleteLater()
 
     def _show_empty(self, show: bool):
+        self._import_actions.setVisible(self._filter == 'imported')
+        self._import_status.setVisible(self._filter == 'imported' and bool(self._import_status.text()))
         if show:
             detail = ''
             if self._search_unavailable_reason:
@@ -6939,8 +6707,9 @@ class ClipGrid(QWidget):
                 detail = f'PRESS {screenshot_key} TO TAKE A SCREENSHOT'
             elif self._filter == 'clips':
                 self._no_clips_lbl.setText('No clips yet')
-            elif self._filter == 'imported':
+            elif self._filter == 'imported' and self._game_filter is None:
                 self._no_clips_lbl.setText('No imported clips')
+                detail = 'Add a folder to see its clips here. Your originals stay in place.'
             elif self._game_filter is not None:
                 self._no_clips_lbl.setText('No clips for this game')
                 detail = self._game_filter

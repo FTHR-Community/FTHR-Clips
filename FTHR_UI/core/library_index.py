@@ -260,7 +260,10 @@ def scan_library(
                 continue
             visited_dirs.add(visit_key)
             stats.directories_visited += 1
-            add_watch(current)
+            # Windows directory notifications hold handles that can prevent a rename.
+            # External folders use the library's periodic refresh on that platform.
+            if os.name != 'nt' or not (imported or _root_is_imported(current_id, imported_roots)):
+                add_watch(current)
             try:
                 entries = os.scandir(current)
             except OSError:

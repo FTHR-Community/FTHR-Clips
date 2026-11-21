@@ -6,10 +6,13 @@ and live-device handles. Container stream titles are the fallback.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from contextlib import nullcontext
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 from uuid import UUID
 
@@ -50,9 +53,9 @@ def manifest_path_for(media_path: str | Path) -> Path:
     return media.with_name(media.name + MANIFEST_SUFFIX)
 
 
-def media_sha256(media_path: str | Path, cancelled=None) -> str:
+def media_sha256(media_path: str | Path, cancelled=None, *, _opened=None) -> str:
     digest = hashlib.sha256()
-    with Path(media_path).open('rb') as media:
+    with (Path(media_path).open('rb') if _opened is None else nullcontext(_opened)) as media:
         while True:
             if cancelled is not None and cancelled.is_set():
                 raise InterruptedError('media validation cancelled')
@@ -137,6 +140,11 @@ def write_manifest_atomic(manifest: dict[str, Any], media_path: str | Path) -> P
     return destination
 
 
+def _file_identity(stat_result: os.stat_result) -> tuple[int, ...]:
+    return (stat_result.st_dev, stat_result.st_ino, stat_result.st_size,
+            stat_result.st_mtime_ns, stat_result.st_ctime_ns)
+
+
 def rebind_manifest_after_media_replace(media_path: str | Path) -> bool:
     """Update the media hash after a rewrite that preserves every audio stream.
 
@@ -147,18 +155,46 @@ def rebind_manifest_after_media_replace(media_path: str | Path) -> bool:
 
     media = Path(media_path)
     sidecar = manifest_path_for(media)
-    if not sidecar.is_file() or not media.is_file():
-        return False
+    temporary = None
     try:
+        sidecar_identity = _file_identity(sidecar.stat())
         manifest = json.loads(sidecar.read_text(encoding='utf-8'))
         validate_manifest(manifest)
         if manifest.get('media_file') != media.name:
             return False
-        manifest['media_sha256'] = media_sha256(media)
-        write_manifest_atomic(manifest, media)
+        with media.open('rb') as source:
+            descriptor_identity = _file_identity(os.fstat(source.fileno()))
+            path_identity = _file_identity(media.stat())
+            # Windows can report different ctime values for stat and fstat.
+            # Establish ownership with the shared file ID, size and mtime,
+            # then check each complete fingerprint against its own baseline.
+            if descriptor_identity[:4] != path_identity[:4]:
+                return False
+            manifest['media_sha256'] = media_sha256(media, _opened=source)
+            validate_manifest(manifest)
+            # Stage and validate the new binding against the same descriptor.
+            # A second pathname hash would re-read the entire clip without
+            # providing a stable owner for the first pass.
+            with tempfile.NamedTemporaryFile(
+                    mode='w', encoding='utf-8', dir=sidecar.parent, delete=False,
+                    prefix=sidecar.name + '.', suffix='.partial') as staged:
+                temporary = Path(staged.name)
+                json.dump(manifest, staged, ensure_ascii=True, sort_keys=True,
+                          separators=(',', ':'))
+            if (descriptor_identity != _file_identity(os.fstat(source.fileno()))
+                    or path_identity != _file_identity(media.stat())
+                    or sidecar_identity != _file_identity(sidecar.stat())):
+                return False
+            temporary.replace(sidecar)
         return True
     except (OSError, json.JSONDecodeError, AudioManifestError):
         return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def read_manifest_for_media(media_path: str | Path, cancelled=None) -> dict[str, Any] | None:

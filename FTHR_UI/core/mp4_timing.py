@@ -771,10 +771,10 @@ def normalize_mp4_presentation_in_place(
     temp_path: Path | None = None
     temp_dir = tempfile.TemporaryDirectory(
         dir=str(source_path.parent),
-        prefix=f'.{source_path.name}.normalize-',
+        prefix='.fthr-',
     )
     try:
-        temp_path = Path(temp_dir.name) / source_path.name
+        temp_path = Path(temp_dir.name) / 'normalized.mp4'
         with source_path.open('rb') as source_file:
             expected_path = _file_identity(source_path.stat())
             expected_fd = _file_identity(os.fstat(source_file.fileno()))

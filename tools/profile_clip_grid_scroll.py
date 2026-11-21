@@ -53,11 +53,11 @@ def main():
         from PySide6.QtTest import QTest
         import main as application
         from ui.app_style import apply_app_style
-        from ui import clip_grid
+        from ui import library_thumbnails
         # Copy warm cache entries into the disposable profile; media is only read.
         cache = profile_home / 'thumbnails'
         shutil.copytree(original_home / '.fthr/thumbnails', cache, dirs_exist_ok=True)
-        clip_grid.THUMB_CACHE_DIR = str(cache)
+        library_thumbnails.THUMB_CACHE_DIR = str(cache)
         app = QApplication.instance() or QApplication([])
         application._load_fonts()
         apply_app_style(app)
@@ -78,7 +78,11 @@ def main():
         window.setWindowTitle('FTHR Clips — scroll profiling (capture disabled)')
         window.resize(1280, 976)
         window.show()
-        QTest.qWait(2500)
+        # Let Python recovery and thumbnail workers run during warm-up.
+        warmup_until = time.monotonic() + 2.5
+        while time.monotonic() < warmup_until:
+            app.processEvents()
+            time.sleep(0.01)
         grid, scroll = window.clip_grid, window.clip_scroll_area
         samples, virtual_times = [], []
         baseline_update = grid._update_virtualized_cards

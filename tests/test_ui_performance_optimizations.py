@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QWidget
 from shiboken6 import isValid
 
 from core import ffmpeg_playback, media_process, playback_proxy
-from ui import clip_viewer
+from ui import editor_timeline
 from ui.clip_viewer import TimelineSegment, TrimSlider
 
 
@@ -129,12 +129,12 @@ def test_cancelled_filmstrip_resumes_completed_samples(qtbot, tmp_path, monkeypa
         return 0, b'', b''
 
     monkeypatch.setattr(media_process, 'run_media_process', run)
-    monkeypatch.setattr(clip_viewer, 'get_ffmpeg_exe', lambda: 'ffmpeg')
+    monkeypatch.setattr(editor_timeline, 'get_ffmpeg_exe', lambda: 'ffmpeg')
     slider.load_thumbnails(str(media), 4)
     qtbot.waitUntil(finished.is_set)
-    key = clip_viewer._timeline_cache_key(str(media), 4, slider.duration_ms)
-    assert clip_viewer._cached_timeline_images(key) is None
-    assert len(clip_viewer._cached_timeline_images(key, allow_partial=True)) == 2
+    key = editor_timeline._timeline_cache_key(str(media), 4, slider.duration_ms)
+    assert editor_timeline._cached_timeline_images(key) is None
+    assert len(editor_timeline._cached_timeline_images(key, allow_partial=True)) == 2
     slider.load_thumbnails(str(media), 4)
     qtbot.waitUntil(lambda: len(slider._thumbnails) == 4)
     assert commands[1][commands[1].index('-ss') + 1] == '5.000000000'

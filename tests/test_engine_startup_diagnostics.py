@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from core.engine_startup_diagnostics import (
     EngineLaunchContext,
     extract_startup_failure,
@@ -83,6 +85,19 @@ def test_winerror_4551_launch_failure_preserves_native_call_and_context():
         'requested_capture_mode': 'desktop',
         'requested_encoder': 'nvenc',
     }
+
+
+@pytest.mark.parametrize(('code', 'symbol'), [
+    (225, 'ERROR_VIRUS_INFECTED'),
+    (226, 'ERROR_VIRUS_DELETED'),
+])
+def test_antivirus_block_identifies_detection_and_preserves_diagnostics(code, symbol):
+    error = OSError('launch blocked')
+    error.winerror = code
+    failure = format_engine_launch_failure(error, EngineLaunchContext('', 'desktop', 'auto', 'h264'))
+    message, diagnostic = failure.detail.split('diagnostic=', 1)
+    assert 'antivirus protection history' in message
+    assert json.loads(diagnostic)['native_failure']['symbolic_error'] == symbol
 
 
 def test_non_win32_launch_error_is_not_mislabeled_as_winerror():

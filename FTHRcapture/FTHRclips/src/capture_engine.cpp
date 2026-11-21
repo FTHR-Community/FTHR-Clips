@@ -35,6 +35,7 @@
 #include "encoded_video_config_ffmpeg.h"
 #include "video_encoder.h"
 #include "save_clip_task.h"
+#include "frame_pacing_trace.h"
 #include "shared_memory.h"
 #include "audio_capture.h"
 #include "audio_ring_buffer.h"
@@ -79,6 +80,104 @@ extern "C" {
 
 namespace fthr {
 
+    namespace {
+
+    struct SaveSelectionTrace {
+        bool enabled;
+        uint32_t task_id;
+        int64_t request_qpc;
+        int64_t replay_target_qpc = 0;
+        int64_t publication_begin_qpc = 0;
+        int64_t publication_end_qpc = 0;
+        int64_t storage_lease_end_qpc = 0;
+        int64_t snapshot_begin_qpc = 0;
+        int64_t snapshot_end_qpc = 0;
+        uint64_t snapshot_packets = 0;
+        uint32_t snapshot_attempts = 0;
+        EncodedSnapshotLockTiming lock_timing;
+        bool publication_reached = false;
+        bool queued = false;
+
+        ~SaveSelectionTrace() {
+            if (!enabled) return;
+            frame_pacing_trace::Emit("native_save_selection", task_id,
+                frame_pacing_trace::Qpc(), [this](std::ostream& line) {
+                    line << ",\"request_qpc\":" << request_qpc
+                         << ",\"replay_target_qpc\":" << replay_target_qpc
+                         << ",\"publication_begin_qpc\":" << publication_begin_qpc
+                         << ",\"publication_end_qpc\":" << publication_end_qpc
+                         << ",\"publication_reached\":" << (publication_reached ? "true" : "false")
+                         << ",\"storage_lease_end_qpc\":" << storage_lease_end_qpc
+                         << ",\"snapshot_begin_qpc\":" << snapshot_begin_qpc
+                         << ",\"snapshot_end_qpc\":" << snapshot_end_qpc
+                         << ",\"snapshot_packets\":" << snapshot_packets
+                         << ",\"snapshot_attempts\":" << snapshot_attempts
+                         << ",\"ring_lock_acquisitions\":" << lock_timing.acquisitions
+                         << ",\"ring_lock_wait_ns\":" << lock_timing.wait_ns
+                         << ",\"ring_lock_hold_ns\":" << lock_timing.hold_ns
+                         << ",\"queued\":" << (queued ? "true" : "false");
+                });
+        }
+    };
+
+    struct SavePacketTiming {
+        uint64_t packets = 0;
+        uint64_t bytes = 0;
+        int64_t allocation_ticks = 0;
+        int64_t read_copy_ticks = 0;
+        int64_t write_ticks = 0;
+
+        void Fields(std::ostream& line, const char* stream) const {
+            line << ",\"" << stream << "\":{\"packets\":" << packets
+                 << ",\"bytes\":" << bytes
+                 << ",\"allocation_ticks\":" << allocation_ticks
+                 << ",\"read_copy_ticks\":" << read_copy_ticks
+                 << ",\"write_ticks\":" << write_ticks << "}";
+        }
+    };
+
+    }  // namespace
+
+    struct CaptureEngine::SaveWorkerTiming {
+        int64_t worker_begin_qpc = 0;
+        int64_t mux_begin_qpc = 0;
+        int64_t mux_end_qpc = 0;
+        int64_t packet_loop_begin_qpc = 0;
+        int64_t packet_loop_end_qpc = 0;
+        int64_t trailer_begin_qpc = 0;
+        int64_t trailer_end_qpc = 0;
+        int64_t close_begin_qpc = 0;
+        int64_t close_end_qpc = 0;
+        int64_t writer_complete_qpc = 0;
+        int64_t transaction_end_qpc = 0;
+        SavePacketTiming video;
+        SavePacketTiming audio;
+
+        void Emit(const SaveClipTask& task, bool committed, int64_t response_qpc) const {
+            frame_pacing_trace::Emit("native_save_worker", task.task_id,
+                frame_pacing_trace::Qpc(), [&](std::ostream& line) {
+                    line << ",\"queue_enqueued_qpc\":" << task.trace_enqueued_qpc
+                         << ",\"queue_dequeued_qpc\":" << task.trace_dequeued_qpc
+                         << ",\"worker_begin_qpc\":" << worker_begin_qpc
+                         << ",\"mux_begin_qpc\":" << mux_begin_qpc
+                         << ",\"mux_end_qpc\":" << mux_end_qpc
+                         << ",\"packet_loop_begin_qpc\":" << packet_loop_begin_qpc
+                         << ",\"packet_loop_end_qpc\":" << packet_loop_end_qpc
+                         << ",\"trailer_begin_qpc\":" << trailer_begin_qpc
+                         << ",\"trailer_end_qpc\":" << trailer_end_qpc
+                         << ",\"close_begin_qpc\":" << close_begin_qpc
+                         << ",\"close_end_qpc\":" << close_end_qpc
+                         << ",\"writer_complete_qpc\":" << writer_complete_qpc
+                         << ",\"transaction_end_qpc\":" << transaction_end_qpc
+                         << ",\"base_commit_qpc\":" << (committed ? transaction_end_qpc : 0)
+                         << ",\"clip_saved_response_qpc\":" << response_qpc
+                         << ",\"committed\":" << (committed ? "true" : "false");
+                    video.Fields(line, "video");
+                    audio.Fields(line, "audio");
+                });
+        }
+    };
+
     // WGCState — WinRT types confined here so the header stays WinRT-free
 
     struct CaptureEngine::WGCState {
@@ -99,6 +198,19 @@ namespace fthr {
         std::unique_ptr<HdrFrameConverter> hdr_canvas;
         std::unique_ptr<HdrFrameConverter> color_converter;
         winrt::com_ptr<ID3D11Texture2D> hdr_staging;
+
+        // Both slots may straddle a mode change. Decide protected geometry
+        // once per tick using the newest available frame.
+        auto NextFrame(bool newest) {
+            auto frame = frame_pool.TryGetNextFrame();
+            if (newest && frame) {
+                if (auto next = frame_pool.TryGetNextFrame()) {
+                    frame.Close();
+                    return next;
+                }
+            }
+            return frame;
+        }
 
         ID3D11Texture2D* CanvasTexture() const {
             return hdr_canvas ? hdr_canvas->Texture() : owned_canvas.Texture();
@@ -875,9 +987,12 @@ namespace fthr {
         dxgi_resampled_presentations_.store(0);
         dxgi_replay_cache_armed_.store(false, std::memory_order_relaxed);
         wgc_repeated_frame_observations_.store(0);
+        protected_monitor_source_size_.store({}, std::memory_order_relaxed);
         wgc_missed_output_deadlines_.store(0);
         wgc_acquisition_timings_.Take();
         wgc_readback_timings_.Take();
+        wgc_readback_copy_timings_.Take();
+        wgc_readback_map_timings_.Take();
         wgc_scale_timings_.Take();
         wgc_submit_timings_.Take();
         conversion_submissions_.store(0);
@@ -2013,7 +2128,7 @@ namespace fthr {
 
     void CaptureEngine::ReplayStallWatchdogThread() {
         using clock = std::chrono::steady_clock;
-        uint64_t previous_packets = 0;
+        const bool trace_enabled = frame_pacing_trace::Enabled();
         uint64_t previous_acquire_attempts = 0;
         uint64_t previous_acquired = 0;
         uint64_t previous_submissions = 0;
@@ -2036,8 +2151,8 @@ namespace fthr {
         uint64_t snapshot_previous_dxgi_held_presentations = 0;
         uint64_t snapshot_previous_wgc_missed_deadlines = 0;
         bool cadence_interval_interrupted = false;
-        auto last_output_progress = clock::now();
-        auto last_stall_progress = last_output_progress;
+        auto last_stall_progress = clock::now();
+        capture_pipeline_health::EncoderOutputProgress output_progress(last_stall_progress);
         auto last_acquire_progress = clock::now();
         auto last_acquired_progress = clock::now();
         auto last_submission_progress = clock::now();
@@ -2055,6 +2170,7 @@ namespace fthr {
                 // as a second, unrelated pipeline stall. A focus-gated game
                 // also intentionally stops submitting while tabbed out.
                 const auto recovering_now = clock::now();
+                output_progress.Rebaseline(recovering_now);
                 last_stall_progress = recovering_now;
                 last_acquire_progress = recovering_now;
                 last_acquired_progress = recovering_now;
@@ -2074,6 +2190,7 @@ namespace fthr {
             const uint64_t ring_insertions = video_ring_insertions_.load(
                 std::memory_order_relaxed);
             const auto now = clock::now();
+            const bool output_advanced = output_progress.Observe(packets, now);
             if (acquire_attempts != previous_acquire_attempts) {
                 previous_acquire_attempts = acquire_attempts;
                 last_acquire_progress = now;
@@ -2104,9 +2221,7 @@ namespace fthr {
                     std::chrono::milliseconds>(now - last_acquired_progress).count();
                 const auto submission_age = std::chrono::duration_cast<
                     std::chrono::milliseconds>(now - last_submission_progress).count();
-                const auto output_age = std::chrono::duration_cast<
-                    std::chrono::milliseconds>(
-                        now - last_output_progress).count();
+                const auto output_age = output_progress.AgeMs(now);
                 const auto ring_age = std::chrono::duration_cast<
                     std::chrono::milliseconds>(
                         now - last_ring_progress).count();
@@ -2303,11 +2418,27 @@ namespace fthr {
                 const auto content_sampling = content_sampler_.Stats();
                 std::ostringstream stage_timings;
                 WriteCaptureStageTiming(stage_timings, "wgc_acquisition", wgc_acquisition_timings_.Take());
-                WriteCaptureStageTiming(stage_timings, "wgc_readback", wgc_readback_timings_.Take());
+                const auto wgc_readback = wgc_readback_timings_.Take();
+                WriteCaptureStageTiming(stage_timings, "wgc_readback", wgc_readback);
                 WriteCaptureStageTiming(stage_timings, "wgc_scale", wgc_scale_timings_.Take());
                 WriteCaptureStageTiming(stage_timings, "wgc_submit", wgc_submit_timings_.Take());
                 WriteCaptureStageTiming(stage_timings, "nvenc_drain",
                     replay_encoder_ ? replay_encoder_->TakeDrainTimings() : CaptureStagePercentiles{});
+                if (trace_enabled) {
+                    const auto staging_copy = wgc_readback_copy_timings_.Take();
+                    const auto staging_map = wgc_readback_map_timings_.Take();
+                    frame_pacing_trace::Emit("native_capture_interval", 0,
+                        frame_pacing_trace::Qpc(), [&](std::ostream& line) {
+                            line << ",\"stages\":{";
+                            WriteCaptureStageTiming(line, "wgc_readback", wgc_readback);
+                            WriteCaptureStageTiming(line, "wgc_copy_submit", staging_copy);
+                            WriteCaptureStageTiming(line, "wgc_map", staging_map);
+                            line << "\"wgc_missed_output_deadlines\":"
+                                 << capture_pipeline_health::SaturatingDifference(
+                                     wgc_missed_deadlines, snapshot_previous_wgc_missed_deadlines)
+                                 << "}";
+                        });
+                }
                 std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\","
                           << "\"event\":\"capture_health_snapshot\","
                           << "\"frames_acquired\":" << acquired << ','
@@ -2677,9 +2808,7 @@ namespace fthr {
                               << std::endl;
                 }
             }
-            if (packets != previous_packets) {
-                previous_packets = packets;
-                last_output_progress = now;
+            if (output_advanced) {
                 last_stall_progress = now;
                 snapshot_emitted = false;
                 continue;
@@ -3064,6 +3193,8 @@ namespace fthr {
         LARGE_INTEGER save_qpc_frequency{};
         QueryPerformanceCounter(&save_qpc);
         QueryPerformanceFrequency(&save_qpc_frequency);
+        SaveSelectionTrace selection_trace{
+            frame_pacing_trace::Enabled(), save_request_id, save_qpc.QuadPart};
 
         if (save_clip_queue_.IsShutdown()
             || save_clip_queue_.GetQueueDepth() >= save_clip_queue_.GetCapacity()) {
@@ -3173,6 +3304,7 @@ namespace fthr {
                     save_qpc.QuadPart, qpc, save_qpc_frequency.QuadPart);
                 return seconds >= 0.0 ? seconds * 1000.0 : -1.0;
             };
+            const auto monitor_source = protected_monitor_source_size_.load(std::memory_order_relaxed);
             std::ostringstream json;
             json << std::setprecision(12)
                  << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
@@ -3227,8 +3359,8 @@ namespace fthr {
                  << configured_target_width_
                  << ",\"configured_target_height\":"
                  << configured_target_height_
-                 << ",\"actual_source_width\":" << width_
-                 << ",\"actual_source_height\":" << height_
+                 << ",\"actual_source_width\":" << (monitor_source.Positive() ? monitor_source.width : width_)
+                 << ",\"actual_source_height\":" << (monitor_source.Positive() ? monitor_source.height : height_)
                  << ",\"actual_encoded_width\":" << target_width_
                  << ",\"actual_encoded_height\":" << target_height_
                  << ",\"capture_generation\":" << runtime.capture_generation
@@ -3442,21 +3574,31 @@ namespace fthr {
                 : save_qpc.QuadPart;
             const auto publish_timeout = std::chrono::milliseconds(
                 std::max<uint32_t>(100, 3000 / std::max<uint32_t>(fps_, 1)));
-            if (!encoded_ring_->WaitUntilPublished(
-                    replay_save_qpc, publish_timeout)) {
+            selection_trace.replay_target_qpc = replay_save_qpc;
+            selection_trace.publication_begin_qpc = frame_pacing_trace::Now(selection_trace.enabled);
+            selection_trace.publication_reached = encoded_ring_->WaitUntilPublished(
+                replay_save_qpc, publish_timeout);
+            selection_trace.publication_end_qpc = frame_pacing_trace::Now(selection_trace.enabled);
+            if (!selection_trace.publication_reached) {
                 std::cerr << "[SaveClip] Encoder publication did not reach the "
                              "save boundary within "
                           << publish_timeout.count() << "ms; using the latest "
                              "published packet" << std::endl;
             }
             auto save_lease = replay_storage_ ? replay_storage_->BeginSave() : nullptr;
+            selection_trace.storage_lease_end_qpc = frame_pacing_trace::Now(selection_trace.enabled);
             if (replay_storage_ && !save_lease) {
                 SetEngineError(shared_memory,
                     L"Another replay clip is being saved. Wait for it to finish before saving again.");
                 return false;
             }
+            selection_trace.snapshot_begin_qpc = frame_pacing_trace::Now(selection_trace.enabled);
             EncodedRingSnapshot snapshot = encoded_ring_->TakeSnapshotByTime(
-                duration_seconds, replay_save_qpc);
+                duration_seconds, replay_save_qpc,
+                selection_trace.enabled ? &selection_trace.lock_timing : nullptr);
+            selection_trace.snapshot_end_qpc = frame_pacing_trace::Now(selection_trace.enabled);
+            selection_trace.snapshot_packets = snapshot.packets.size();
+            selection_trace.snapshot_attempts = snapshot.selection_attempts;
 
             if (snapshot.selection_outcome == replay_save::SnapshotOutcome::MemoryBudgetExceeded) {
                 const auto budget = encoded_ring_->GetMemoryBudget();
@@ -4012,6 +4154,7 @@ namespace fthr {
                       << diagnostic_audio_tracks << ','
                       << "\"elapsed_ms\":" << selection_ms << "}"
                       << std::endl;
+            selection_trace.queued = true;
             std::wcout << L"[SaveClip] Encoded task queued: " << path << std::endl;
             return true;
         }
@@ -4093,6 +4236,7 @@ namespace fthr {
                       << "}" << std::endl;
             return false;
         }
+        selection_trace.queued = true;
         std::wcout << L"[SaveClip] Raw task queued: " << path << std::endl;
         return true;
     } catch (const std::bad_alloc&) {
@@ -4115,7 +4259,11 @@ namespace fthr {
             std::wcout << L"[SaveClipThread] Processing task " << task.task_id
                 << L": " << task.output_path << std::endl;
 
-            const bool ok = ProcessSaveClipTask(task);
+            SaveWorkerTiming timing;
+            const bool trace_enabled = task.trace_dequeued_qpc != 0;
+            timing.worker_begin_qpc = frame_pacing_trace::Now(trace_enabled);
+            const bool ok = ProcessSaveClipTask(task, trace_enabled ? &timing : nullptr);
+            int64_t response_qpc = 0;
 
             // Failures already publish SetEngineError(). Publish success only after
             // ProcessSaveClipTask confirms the file was written.
@@ -4124,7 +4272,9 @@ namespace fthr {
                 // that follows a failed one cannot carry the old error text.
                 SetEngineString(task.shared_memory, L"");
                 task.shared_memory->engine_response = ResponseType::CLIP_SAVED;
+                response_qpc = frame_pacing_trace::Now(trace_enabled);
             }
+            if (trace_enabled) timing.Emit(task, ok, response_qpc);
         }
 
         std::cout << "[SaveClipThread] Exiting." << std::endl;
@@ -4133,7 +4283,8 @@ namespace fthr {
 
     // ProcessSaveClipTask - transactional wrapper around both media writers
 
-    bool CaptureEngine::ProcessSaveClipTask(const SaveClipTask& task) try {
+    bool CaptureEngine::ProcessSaveClipTask(
+        const SaveClipTask& task, SaveWorkerTiming* timing) try {
         if (task.use_encoded_path && (!task.encoded_audio_tracks.empty() || !task.audio_warnings.empty())) {
             std::string transaction_id;
             std::string transaction_error;
@@ -4147,22 +4298,25 @@ namespace fthr {
             const auto result = transactional_save::RunPair(
                 task.output_path,
                 manifest_path,
-                [this, &task, &transaction_id](
+                [this, &task, &transaction_id, timing](
                     const std::filesystem::path& media_temporary_path,
                     const std::filesystem::path& manifest_temporary_path,
                     std::string& writer_error) {
-                    if (!MuxEncodedClip(task, media_temporary_path.wstring())) {
+                    if (!MuxEncodedClip(task, media_temporary_path.wstring(), timing)) {
                         writer_error = "The temporary clip could not be muxed.";
                         return false;
                     }
-                    return WriteClipAudioManifest(
+                    const bool ok = WriteClipAudioManifest(
                         task.output_path,
                         media_temporary_path,
                         manifest_temporary_path,
                         transaction_id,
                         task.encoded_audio_tracks,
                         &writer_error, task.audio_warnings);
+                    if (timing) timing->writer_complete_qpc = frame_pacing_trace::Qpc();
+                    return ok;
                 });
+            if (timing) timing->transaction_end_qpc = frame_pacing_trace::Qpc();
             if (result.cleanup_error) {
                 std::wcerr << L"[SaveClip] Secondary paired cleanup failure for "
                     << result.media_temporary_path.wstring() << L": "
@@ -4190,13 +4344,16 @@ namespace fthr {
 
         const auto result = transactional_save::Run(
             task.output_path,
-            [this, &task](const std::filesystem::path& temporary_path,
+            [this, &task, timing](const std::filesystem::path& temporary_path,
                           std::string&) {
                 const std::wstring output_path = temporary_path.wstring();
-                return task.use_encoded_path
-                    ? MuxEncodedClip(task, output_path)
+                const bool ok = task.use_encoded_path
+                    ? MuxEncodedClip(task, output_path, timing)
                     : EncodeRawClip(task, output_path);
+                if (timing) timing->writer_complete_qpc = frame_pacing_trace::Qpc();
+                return ok;
             });
+        if (timing) timing->transaction_end_qpc = frame_pacing_trace::Qpc();
 
         if (result.cleanup_error) {
             std::wcerr << L"[SaveClip] Secondary cleanup failure for "
@@ -4241,7 +4398,14 @@ namespace fthr {
     // Rescale packet timestamps to the output stream timebase without re-encoding.
 
     bool CaptureEngine::MuxEncodedClip(
-        const SaveClipTask& task, const std::wstring& output_path) {
+        const SaveClipTask& task, const std::wstring& output_path, SaveWorkerTiming* timing) {
+        struct MuxTraceSpan {
+            SaveWorkerTiming* timing;
+            ~MuxTraceSpan() {
+                if (timing) timing->mux_end_qpc = frame_pacing_trace::Qpc();
+            }
+        } mux_trace{timing};
+        if (timing) timing->mux_begin_qpc = frame_pacing_trace::Qpc();
         struct MuxDiagnosticSpan {
             uint32_t task_id;
             std::chrono::steady_clock::time_point started;
@@ -4916,6 +5080,7 @@ namespace fthr {
 
         const auto save_budget = task.replay_save_lease && replay_storage_
             ? replay_storage_->memory_budget() : nullptr;
+        if (timing) timing->packet_loop_begin_qpc = frame_pacing_trace::Qpc();
         const auto write_video = [&](const EncodedRingPacket& pkt) {
             ReplayMemoryReservation packet_memory(save_budget, ReplayMemoryUse::Save);
             if (pkt.byte_size() == 0) return true;
@@ -4925,11 +5090,20 @@ namespace fthr {
             if (!packet_memory.Grow(2 * pkt.byte_size() + AV_INPUT_BUFFER_PADDING_SIZE))
                 return fail_media_write(L"reserving replay RAM for", AVERROR(ENOMEM));
 
+            const auto allocate_started = frame_pacing_trace::Now(timing != nullptr);
             ret = av_new_packet(av_pkt, static_cast<int>(pkt.byte_size()));
+            const auto read_started = frame_pacing_trace::Now(timing != nullptr);
+            if (timing) timing->video.allocation_ticks += read_started - allocate_started;
             if (ret < 0)
                 return fail_media_write(L"allocating a video packet for", ret);
 
-            if (!pkt.ReadInto(av_pkt->data))
+            const bool read = pkt.ReadInto(av_pkt->data);
+            if (timing) {
+                timing->video.read_copy_ticks += frame_pacing_trace::Qpc() - read_started;
+                ++timing->video.packets;
+                timing->video.bytes += pkt.byte_size();
+            }
+            if (!read)
                 return fail_media_write(L"reading video replay data for", AVERROR(EIO));
 
             // Keep decoder pre-roll negative; MP4 presents from the logical
@@ -4966,8 +5140,10 @@ namespace fthr {
             }
 
             last_video_pts = av_pkt->pts;
+            const auto write_started = frame_pacing_trace::Now(timing != nullptr);
             ret = av_write_frame(fmt_ctx, av_pkt);
             av_packet_unref(av_pkt);
+            if (timing) timing->video.write_ticks += frame_pacing_trace::Qpc() - write_started;
             if (ret < 0)
                 return fail_media_write(L"writing video data to", ret);
             video_packet_count++;
@@ -4978,28 +5154,47 @@ namespace fthr {
             ReplayMemoryReservation packet_memory(save_budget, ReplayMemoryUse::Save);
             const auto* persistent = audio.persistent_packets.empty()
                 ? nullptr : audio.persistent_packets[i];
-            const size_t size = persistent ? persistent->byte_size() : audio.packets[i].size();
+            size_t size = persistent ? persistent->byte_size() : audio.packets[i].size();
+            if (persistent && audio.codec == "pcm_f32le") {
+                const uint64_t frame_bytes = static_cast<uint64_t>(audio.channels) * sizeof(float);
+                const int64_t samples = audio.packet_durations[i];
+                if (!frame_bytes || samples <= 0 || static_cast<uint64_t>(samples) > size / frame_bytes)
+                    return fail_media_write(L"preparing a lossless audio packet for", AVERROR(EINVAL));
+                // The snapshot may retain only a prefix of a coalesced PCM
+                // packet. Match the bytes and duration on the muxed sample.
+                size = static_cast<size_t>(static_cast<uint64_t>(samples) * frame_bytes);
+            }
             if (!size || size > static_cast<size_t>(std::numeric_limits<int>::max()))
                 return fail_media_write(L"preparing an audio packet for", AVERROR(EINVAL));
             if (!packet_memory.Grow(size + AV_INPUT_BUFFER_PADDING_SIZE))
                 return fail_media_write(L"reserving replay RAM for", AVERROR(ENOMEM));
 
+            const auto allocate_started = frame_pacing_trace::Now(timing != nullptr);
             ret = av_new_packet(av_pkt, static_cast<int>(size));
+            const auto read_started = frame_pacing_trace::Now(timing != nullptr);
+            if (timing) timing->audio.allocation_ticks += read_started - allocate_started;
             if (ret < 0)
                 return fail_media_write(L"allocating an audio packet for", ret);
 
+            bool read = true;
             if (persistent && persistent->replay_storage) {
-                if (!persistent->replay_storage->ReadInto(av_pkt->data, size))
-                    return fail_media_write(L"reading lossless audio data for", AVERROR(EIO));
+                read = persistent->replay_storage->ReadSlice(0, av_pkt->data, size);
             } else {
                 const auto spooled = persistent && persistent->storage
                     ? persistent->storage->Read() : nullptr;
-                if (persistent && persistent->storage && !spooled)
-                    return fail_media_write(L"reading lossless audio data for", AVERROR(EIO));
-                const auto& data = spooled ? *spooled
-                    : persistent ? persistent->data : audio.packets[i];
-                std::memcpy(av_pkt->data, data.data(), size);
+                read = !(persistent && persistent->storage && !spooled);
+                if (read) {
+                    const auto& data = spooled ? *spooled
+                        : persistent ? persistent->data : audio.packets[i];
+                    std::memcpy(av_pkt->data, data.data(), size);
+                }
             }
+            if (timing) {
+                timing->audio.read_copy_ticks += frame_pacing_trace::Qpc() - read_started;
+                ++timing->audio.packets;
+                timing->audio.bytes += size;
+            }
+            if (!read) return fail_media_write(L"reading lossless audio data for", AVERROR(EIO));
             av_pkt->pts = pts;
             av_pkt->dts = pts;
             av_pkt->duration = audio.packet_durations[i];
@@ -5008,8 +5203,10 @@ namespace fthr {
             av_packet_rescale_ts(av_pkt, AVRational{1, static_cast<int>(audio.sample_rate)},
                                  audio.stream->time_base);
 
+            const auto write_started = frame_pacing_trace::Now(timing != nullptr);
             ret = av_write_frame(fmt_ctx, av_pkt);
             av_packet_unref(av_pkt);
+            if (timing) timing->audio.write_ticks += frame_pacing_trace::Qpc() - write_started;
             if (ret < 0)
                 return fail_media_write(L"writing audio data to", ret);
             return true;
@@ -5054,6 +5251,7 @@ namespace fthr {
                 return false;
             ++audio_packet_count;
         }
+        if (timing) timing->packet_loop_end_qpc = frame_pacing_trace::Qpc();
         if (video_packet_count == 0)
             return fail_media_write(L"writing video data to", -1);
         av_packet_free(&av_pkt);
@@ -5076,7 +5274,9 @@ namespace fthr {
                 "all decodable media currently available." << std::endl;
         std::cout << "========================================\n" << std::endl;
 
+        if (timing) timing->trailer_begin_qpc = frame_pacing_trace::Qpc();
         ret = av_write_trailer(fmt_ctx);
+        if (timing) timing->trailer_end_qpc = frame_pacing_trace::Qpc();
         if (ret < 0)
             return fail_media_write(L"finalizing the container for", ret);
 
@@ -5096,7 +5296,9 @@ namespace fthr {
                 return fail_media_write(L"flushing highlight metadata for", fmt_ctx->pb->error);
         }
 
+        if (timing) timing->close_begin_qpc = frame_pacing_trace::Qpc();
         ret = avio_closep(&fmt_ctx->pb);
+        if (timing) timing->close_end_qpc = frame_pacing_trace::Qpc();
         if (ret < 0) {
             avformat_free_context(fmt_ctx);
             wchar_t message[512];
@@ -6721,7 +6923,8 @@ namespace fthr {
         description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         description.SampleDesc.Count = 1;
         description.Usage = D3D11_USAGE_DEFAULT;
-        description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        // The crop feeds both shader sampling and encoder video-processor input views.
+        description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         const HRESULT result = device_->CreateTexture2D(
             &description, nullptr, &crop_texture_);
         if (FAILED(result)) {
@@ -7180,6 +7383,8 @@ namespace fthr {
             if (sz.Width <= 0 || sz.Height <= 0) throw winrt::hresult_error(E_INVALIDARG);
             width_ = static_cast<uint32_t>(sz.Width);
             height_ = static_cast<uint32_t>(sz.Height);
+            wgc_state_->pool_width = width_;
+            wgc_state_->pool_height = height_;
             current_api = "Direct3D11CaptureFramePool::CreateFreeThreaded";
             wgc_state_->frame_pool =
                 winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
@@ -7376,6 +7581,7 @@ namespace fthr {
     // does not depend on desktop change notifications.
 
     void CaptureEngine::CaptureThreadWGC() {
+        const bool trace_enabled = frame_pacing_trace::Enabled();
         // WinRT calls (TryGetNextFrame, surface access) require the thread to be
         // in a COM apartment. Multi-threaded apartment is correct here — we have
         // no message pump and don't need the STA marshaling overhead.
@@ -7448,9 +7654,84 @@ namespace fthr {
         CaptureFocusPolicy focus_policy;
         WgcMonitorGeometry monitor_geometry(
             static_cast<int32_t>(width_), static_cast<int32_t>(height_));
+        const WgcCaptureSize canvas{static_cast<int32_t>(width_), static_cast<int32_t>(height_)};
+        const bool adapt_monitor = wgc_state_->monitor_item && focus_gated_
+            && !source_hdr_ && !crop_enabled_;
+        WgcProtectedMonitorResize protected_geometry(canvas);
+        int64_t pool_recreated_at = 0;
+        int64_t last_monitor_frame_time = 0;
+        bool focus_was_paused = false;
+        std::optional<std::chrono::steady_clock::time_point> resize_started;
+        const auto log_monitor_event = [&](const char* event, const char* reason,
+                WgcCaptureSize source, bool retained, int64_t elapsed_ms) {
+            std::ostringstream log;
+            log << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\",\"event\":\"" << event
+                << "\",\"reason\":\"" << diagnostics::JsonEscape(reason)
+                << "\",\"source_width\":" << source.width << ",\"source_height\":" << source.height
+                << ",\"pool_width\":" << wgc_state_->pool_width << ",\"pool_height\":" << wgc_state_->pool_height
+                << ",\"canvas_width\":" << width_ << ",\"canvas_height\":" << height_
+                << ",\"encoded_width\":" << target_width_ << ",\"encoded_height\":" << target_height_
+                << ",\"elapsed_ms\":" << elapsed_ms << ",\"capture_generation\":" << capture_generation_.load()
+                << ",\"history_retained\":" << (retained ? "true" : "false") << '}';
+            std::cout << log.str() << std::endl;
+        };
+        const auto fail_monitor_resize = [&](const std::string& reason, WgcCaptureSize observed,
+                                              int64_t elapsed_ms) {
+            SetCaptureFailure("WGC monitor resize: " + reason);
+            capture_health_flags_.store(WgcSizeMismatchHealthFlags(true));
+            ClearReplayForRecovery();
+            log_monitor_event("wgc_monitor_reconfiguration_required", reason.c_str(),
+                              observed, false, elapsed_ms);
+            running_.store(false);
+        };
         LARGE_INTEGER focus_frequency{};
         QueryPerformanceFrequency(&focus_frequency);
         int64_t foreground_since_100ns = 0;
+        int64_t focus_paused_at = 0;
+        auto captured_monitor = reinterpret_cast<HMONITOR>(resolved_monitor_.hmonitor);
+        int64_t next_monitor_lookup = 0;
+        const auto game_on_captured_monitor = [&](int64_t at) {
+            const auto game_monitor = MonitorFromWindow(reinterpret_cast<HWND>(target_hwnd_),
+                                                         MONITOR_DEFAULTTONULL);
+            if (!game_monitor) return false;
+            if (game_monitor == captured_monitor) return true;
+            // HMONITORs can change across a mode set. Verify the stable display
+            // identity and adapter before allowing a replacement handle.
+            if (at >= next_monitor_lookup) {
+                next_monitor_lookup = at + 5'000'000; // 500 ms while on a different display
+                const auto current = monitor_resolver_.Resolve(resolved_monitor_.monitor_device_path);
+                if (current.ok() && current.monitor.adapter_luid == resolved_monitor_.adapter_luid)
+                    captured_monitor = reinterpret_cast<HMONITOR>(current.monitor.hmonitor);
+            }
+            return game_monitor == captured_monitor;
+        };
+        const auto observe_game_focus = [&](int64_t at) {
+            if (!focus_gated_ || !target_hwnd_) return focus_policy.Observe(false);
+            const bool foreground = GetForegroundWindow() == reinterpret_cast<HWND>(target_hwnd_);
+            const char* reason = foreground ? window_source_identity_.RenderabilityFailure()
+                                            : "foreground_changed";
+            if (!reason && !game_on_captured_monitor(at)) reason = "game_off_capture_monitor";
+            const bool paused = reason != nullptr;
+            if (paused != focus_was_paused) {
+                if (paused) focus_paused_at = at;
+                // Audio-enabled focus resumes start a new generation below.
+                const auto source = protected_geometry.AcceptedSource();
+                std::ostringstream log;
+                log << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\",\"event\":\"wgc_game_focus_changed\""
+                    << ",\"paused\":" << (paused ? "true" : "false")
+                    << ",\"foreground_match\":" << (foreground ? "true" : "false")
+                    << ",\"reason\":\"" << (reason ? reason : "foreground_restored")
+                    << "\",\"pause_ms\":" << (at - focus_paused_at) / 10'000
+                    << ",\"source_width\":" << source.width << ",\"source_height\":" << source.height
+                    << ",\"pool_width\":" << wgc_state_->pool_width << ",\"pool_height\":" << wgc_state_->pool_height
+                    << ",\"canvas_width\":" << width_ << ",\"canvas_height\":" << height_
+                    << ",\"capture_generation\":" << capture_generation_.load()
+                    << ",\"history_retained\":" << (paused || replay_pause_clock_ ? "true" : "false") << '}';
+                std::cout << log.str() << std::endl;
+                focus_was_paused = paused;
+            }
+            return focus_policy.Observe(paused);
+        };
         int64_t window_resume_since_100ns = 0;
         bool window_source_was_paused = false;
         bool window_restore_pending = false;
@@ -7649,18 +7930,16 @@ namespace fthr {
             try {
                 current_frame_api = "ID3D11Device::GetDeviceRemovedReason";
                 winrt::check_hresult(device_->GetDeviceRemovedReason());
-                const auto focus = focus_policy.Observe(focus_gated_ && target_hwnd_ != 0
-                    && (GetForegroundWindow() != reinterpret_cast<HWND>(target_hwnd_)
-                        || !window_source_identity_.IsRenderable()));
+                LARGE_INTEGER focus_now{};
+                QueryPerformanceCounter(&focus_now);
+                const auto raw_focus_time = ReplayPauseClock::Scale(
+                    focus_now.QuadPart, 10'000'000, focus_frequency.QuadPart);
+                const auto focus = observe_game_focus(raw_focus_time);
                 if (focus.discard_queued_frames) {
                     content_sampler_.Reset();
                     content_suspicious_streak_.store(0);
                     capture_health_flags_.fetch_and(~CAPTURE_HEALTH_CONTENT_SUSPECT);
                 }
-                LARGE_INTEGER focus_now{};
-                QueryPerformanceCounter(&focus_now);
-                const auto raw_focus_time = ReplayPauseClock::Scale(
-                    focus_now.QuadPart, 10'000'000, focus_frequency.QuadPart);
                 auto window_state = wgc::WindowState::Active;
                 if (!wgc_state_->monitor_item) {
                     const HWND hwnd = reinterpret_cast<HWND>(target_hwnd_);
@@ -7757,7 +8036,9 @@ namespace fthr {
                     latest_texture = nullptr;
                     begin_replay_after_resume();
                     if (focus_gated_) {
-                        std::cout << "[CaptureThread/WGC] Game focus restored; rebuilding replay history."
+                        std::cout << "[CaptureThread/WGC] Game focus restored. "
+                                  << (replay_pause_clock_ ? "Continuing video replay."
+                                                         : "Starting a fresh audio/video replay generation.")
                                   << std::endl;
                     }
                     capture_health_flags_.fetch_and(~CAPTURE_HEALTH_PAUSED);
@@ -7766,13 +8047,23 @@ namespace fthr {
                 }
                 bool new_image = false;
                 std::optional<winrt::Windows::Graphics::SizeInt32> monitor_frame_size;
+                WgcCaptureSize item{}, pool{};
+                std::optional<WgcProtectedMonitorResizeDecision> monitor_decision;
+                if (adapt_monitor && !source_paused) {
+                    current_frame_api = "GraphicsCaptureItem::Size(monitor)";
+                    const auto size = wgc_state_->item.Size();
+                    item = {size.Width, size.Height};
+                    pool = {static_cast<int32_t>(wgc_state_->pool_width),
+                            static_cast<int32_t>(wgc_state_->pool_height)};
+                }
                 uint32_t requested_pool_width = 0;
                 uint32_t requested_pool_height = 0;
                 // Drain both slots at each tick. Notifications can coalesce;
                 // TryGetNextFrame is the sole authority for queued images.
                 const auto acquisition_started = CaptureStageTiming::Clock::now();
-                for (int slot = 0; slot < 2; ++slot) {
-                    auto frame = wgc_state_->frame_pool.TryGetNextFrame();
+                for (int slot = 0; slot < (adapt_monitor ? 1 : 2); ++slot) {
+                    current_frame_api = "Direct3D11CaptureFramePool::TryGetNextFrame";
+                    auto frame = wgc_state_->NextFrame(adapt_monitor);
                     if (!frame) break;
                     wgc::FrameLease frame_lease(frame);
                     if (focus.discard_queued_frames || source_paused) continue;
@@ -7781,12 +8072,21 @@ namespace fthr {
                             < window_resume_since_100ns) continue;
                     if (focus_gated_ && frame.SystemRelativeTime().count()
                             < foreground_since_100ns) continue;
+                    if (adapt_monitor) {
+                        const auto stamp = frame.SystemRelativeTime().count();
+                        if (stamp < pool_recreated_at || stamp <= last_monitor_frame_time) continue;
+                        last_monitor_frame_time = stamp;
+                    }
                     current_frame_api = "Direct3D11CaptureFrame::ContentSize";
                     const auto content_size = frame.ContentSize();
                     if (wgc_state_->monitor_item) {
                         monitor_frame_size = content_size;
-                        if (!monitor_geometry.Matches(content_size.Width, content_size.Height))
+                        if (!adapt_monitor && !monitor_geometry.Matches(content_size.Width, content_size.Height))
                             continue;
+                        if (adapt_monitor && (content_size.Width <= 0 || content_size.Height <= 0)) {
+                            monitor_decision = protected_geometry.Observe(item, pool, {}, {}, true, tick_now);
+                            continue;
+                        }
                     }
                     if (!wgc_state_->monitor_item) {
                         if (content_size.Width <= 0 || content_size.Height <= 0) {
@@ -7857,7 +8157,26 @@ namespace fthr {
                     current_frame_api =
                         "IDirect3DDxgiInterfaceAccess::GetInterface(ID3D11Texture2D)";
                     winrt::check_hresult(interop->GetInterface(IID_PPV_ARGS(tex.put())));
-                    if (wgc_state_->monitor_item) {
+                    if (adapt_monitor) {
+                        D3D11_TEXTURE2D_DESC desc{};
+                        tex->GetDesc(&desc);
+                        const WgcCaptureSize content{content_size.Width, content_size.Height};
+                        monitor_decision = protected_geometry.Observe(item, pool, content,
+                            {static_cast<int32_t>(desc.Width), static_cast<int32_t>(desc.Height)},
+                            true, tick_now);
+                        if (monitor_decision->action != WgcProtectedMonitorResizeAction::Capture) continue;
+                        // The owned canvas is also the verified in-focus cache. On a 1:1
+                        // frame this is a GPU CopyResource; padding is never encoded.
+                        auto& normalizer = wgc_state_->owned_canvas;
+                        std::string error;
+                        if ((!normalizer.Texture() && !normalizer.Initialize(device_, width_, height_, fps_, error))
+                            || !normalizer.Copy(context_, tex.get(), content.width, content.height,
+                                pool.width, pool.height, scaling_mode_ == 1, error)) {
+                            fail_monitor_resize(error, content, 0);
+                            break;
+                        }
+                        latest_texture.copy_from(normalizer.Texture());
+                    } else if (wgc_state_->monitor_item) {
                         if (!ValidateCaptureTexture(tex.get(), "WGC")) {
                             ClearReplayForRecovery();
                             capture_health_flags_.fetch_or(CAPTURE_HEALTH_BACKEND_FAILED);
@@ -7868,7 +8187,8 @@ namespace fthr {
                             D3D11_TEXTURE2D_DESC desc{};
                             tex->GetDesc(&desc);
                             desc.Usage = D3D11_USAGE_DEFAULT;
-                            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                            // Intel's video processor rejects SRV-only monitor textures.
+                            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
                             desc.CPUAccessFlags = 0;
                             desc.MiscFlags = 0;
                             current_frame_api = "ID3D11Device::CreateTexture2D(latest WGC image)";
@@ -7950,13 +8270,74 @@ namespace fthr {
                 if (source_paused) {
                     if (wgc_state_->monitor_item) {
                         monitor_geometry.Reset();
+                        protected_geometry.Reset();
+                        resize_started.reset();
                         capture_health_flags_.fetch_and(~CAPTURE_HEALTH_RECOVERING);
                         if (replay_pause_clock_)
                             replay_pause_clock_->Observe(true, raw_focus_time);
                     }
                     continue;
                 }
-                if (wgc_state_->monitor_item) {
+                if (adapt_monitor) {
+                    if (!monitor_decision) {
+                        monitor_decision = protected_geometry.Observe(item, pool, {}, {}, false, tick_now);
+                    }
+                    const auto& decision = *monitor_decision;
+                    const auto observed = monitor_frame_size
+                        ? WgcCaptureSize{monitor_frame_size->Width, monitor_frame_size->Height} : item;
+                    const auto elapsed_ms = resize_started
+                        ? std::chrono::duration_cast<std::chrono::milliseconds>(tick_now - *resize_started).count() : 0;
+                    if (decision.action == WgcProtectedMonitorResizeAction::Reconfigure) {
+                        fail_monitor_resize(decision.reason, observed, elapsed_ms);
+                        break;
+                    }
+                    if (protected_geometry.Pending() && !resize_started) {
+                        resize_started = tick_now;
+                        log_monitor_event("wgc_monitor_resize_pending", "waiting_for_geometry",
+                                          observed, true, 0);
+                    }
+                    if (decision.recreate_pool.Positive()) {
+                        // No WGC frame or borrowed surface is live here. Preserve
+                        // the independent canvas while growing the source pool.
+                        const auto requested = decision.recreate_pool;
+                        current_frame_api = "Direct3D11CaptureFramePool::Recreate(monitor)";
+                        try {
+                            wgc_state_->frame_pool.Recreate(wgc_state_->winrt_device,
+                                WgcPixelFormat(source_hdr_), 2, {requested.width, requested.height});
+                            wgc_state_->pool_width = requested.width;
+                            wgc_state_->pool_height = requested.height;
+                            wgc_state_->owned_canvas.ResetProcessor();
+                            readback_queue.Reset();
+                            converted_image_valid = false;
+                            LARGE_INTEGER recreated{};
+                            QueryPerformanceCounter(&recreated);
+                            pool_recreated_at = ReplayPauseClock::Scale(recreated.QuadPart, 10'000'000,
+                                                                        focus_frequency.QuadPart);
+                            log_monitor_event("wgc_monitor_pool_recreated", "content_exceeds_pool",
+                                              requested, true, elapsed_ms);
+                        } catch (winrt::hresult_error const& e) {
+                            winrt::check_hresult(device_->GetDeviceRemovedReason());
+                            const auto error = diagnostics::FormatHResultFailure(current_frame_api, e.code().value);
+                            log_monitor_event("wgc_monitor_pool_recreate_failed", error.c_str(),
+                                              requested, true, elapsed_ms);
+                        }
+                    }
+                    if (new_image && (decision.source_changed || (resize_started && !protected_geometry.Pending()))) {
+                        const auto source = protected_geometry.AcceptedSource();
+                        protected_monitor_source_size_.store(source, std::memory_order_relaxed);
+                        readback_queue.Reset();
+                        converted_image_valid = false;
+                        if (replay_encoder_) replay_encoder_->RequestKeyframe();
+                        log_monitor_event("wgc_monitor_resize_accepted",
+                            decision.source_changed ? "source_size_changed" : "fresh_source_restored",
+                            source, true, elapsed_ms);
+                    }
+                    if (!protected_geometry.Pending()) resize_started.reset();
+                    // Only real focus loss compacts a video-only replay. During
+                    // resize, cadence and audio both continue on the active clock.
+                    if (replay_pause_clock_) replay_pause_clock_->Observe(false, raw_focus_time);
+                    if (!new_image && !decision.allow_cached_frame) continue;
+                } else if (wgc_state_->monitor_item) {
                     current_frame_api = "GraphicsCaptureItem::Size(monitor)";
                     const auto item_size = wgc_state_->item.Size();
                     // Either source can lead the display transition. Require
@@ -8027,23 +8408,23 @@ namespace fthr {
                     latest_texture = nullptr;
                     continue;
                 }
-                if (focus_gated_ && (GetForegroundWindow()
-                        != reinterpret_cast<HWND>(target_hwnd_)
-                        || !window_source_identity_.IsRenderable())) {
+                LARGE_INTEGER before_submit{};
+                if (focus_gated_) QueryPerformanceCounter(&before_submit);
+                const auto submit_focus_time = focus_gated_
+                    ? ReplayPauseClock::Scale(before_submit.QuadPart, 10'000'000, focus_frequency.QuadPart) : 0;
+                if (focus_gated_ && observe_game_focus(submit_focus_time).paused) {
                     latest_texture = nullptr;
                     // This loss occurred after the early observation. Feed it
                     // back so a rapid return next tick still performs resume
                     // warmup and rejects images queued while out of focus.
-                    focus_policy.Observe(true);
+                    protected_geometry.Reset();
+                    resize_started.reset();
+                    readback_queue.Reset();
+                    converted_image_valid = false;
                     foreground_since_100ns = 0;
                     capture_health_flags_.fetch_or(CAPTURE_HEALTH_PAUSED);
                     content_sampler_.Reset();
-                    if (replay_pause_clock_) {
-                        LARGE_INTEGER paused_at{};
-                        QueryPerformanceCounter(&paused_at);
-                        replay_pause_clock_->Observe(true, ReplayPauseClock::Scale(
-                            paused_at.QuadPart, 10'000'000, focus_frequency.QuadPart));
-                    }
+                    if (replay_pause_clock_) replay_pause_clock_->Observe(true, submit_focus_time);
                     continue;
                 }
 
@@ -8185,7 +8566,10 @@ namespace fthr {
                         ID3D11Texture2D* slots[] = {staging, alternate_staging.get()};
                         const auto work = readback_queue.Queue(replay_qpc,
                             capture_generation_.load(std::memory_order_acquire));
+                        const auto copy_started = trace_enabled
+                            ? CaptureStageTiming::Clock::now() : CaptureStageTiming::Clock::time_point{};
                         context_->CopyResource(slots[work.write_slot], readback_source);
+                        if (trace_enabled) wgc_readback_copy_timings_.RecordSince(copy_started);
                         // Send this tick's copy before waiting for the previous
                         // one, so the GPU can complete it during cadence wait.
                         context_->Flush();
@@ -8193,11 +8577,17 @@ namespace fthr {
                         staging = slots[work.read->slot];
                         input_qpc = work.read->qpc;
                     } else {
+                        const auto copy_started = trace_enabled
+                            ? CaptureStageTiming::Clock::now() : CaptureStageTiming::Clock::time_point{};
                         context_->CopyResource(staging, readback_source);
+                        if (trace_enabled) wgc_readback_copy_timings_.RecordSince(copy_started);
                     }
 
                     D3D11_MAPPED_SUBRESOURCE mapped{};
+                    const auto map_started = trace_enabled
+                        ? CaptureStageTiming::Clock::now() : CaptureStageTiming::Clock::time_point{};
                     HRESULT hr = context_->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
+                    if (trace_enabled) wgc_readback_map_timings_.RecordSince(map_started);
                     wgc_readback_timings_.RecordSince(readback_started);
                     if (FAILED(hr)) {
                         if (hybrid_bgra_scaler_) {

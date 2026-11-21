@@ -84,11 +84,11 @@ if _STARTUP_POLICY_RESULT is not None:
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QScrollArea, QStackedWidget, QFrame, QComboBox, QGridLayout,
+    QPushButton, QLabel, QScrollArea, QStackedWidget, QFrame, QComboBox,
     QSizePolicy,
-    QCheckBox, QSlider,
+    QCheckBox,
     QToolButton, QButtonGroup, QFileDialog, QLineEdit, QMenu,
-    QSystemTrayIcon, QLayout, QDialog, QStyle, QStyleOptionSlider, QMessageBox,
+    QSystemTrayIcon, QLayout, QDialog, QMessageBox,
 )
 from PySide6.QtCore import (QUrl, QProcess,
     QTimer, Signal, Qt, QPoint, QSize, QRect, QEvent,
@@ -99,6 +99,7 @@ from PySide6.QtGui import QDesktopServices, QImage, QPixmap, QFontDatabase, QCur
 from version import __version__ as APP_VERSION, APP_NAME
 from core import linux_tools
 from core.capture_bridge import CaptureBridge
+from core.save_trace import SAVE_TRACE_ENABLED, mark_save_trace
 from core.capture_highlights import (
     CaptureHighlightAppendError,
     media_identity,
@@ -144,7 +145,7 @@ from core.native_audio_capabilities import (
     native_audio_exclusions_supported, native_audio_backup_control_supported,
     native_audio_policy_arguments,
 )
-from core.engine_discovery import isolated_source_engines
+from core.engine_discovery import find_source_engine
 from core.capture_session import (
     CameraSnapshot,
     CaptureSessionSnapshot,
@@ -211,14 +212,7 @@ from core.capture_admission import (
     evaluate_admission,
     policy_from_raw,
 )
-from core.hotkey_manager import (
-    CONTROLLER_BUTTON_ORDER,
-    HotkeyManager,
-    format_controller_combo,
-    format_keyboard_combo,
-    normalize_controller_combo,
-    normalize_keyboard_combo,
-)
+from core.hotkey_manager import HotkeyManager
 from core.game_detector import (
     ForegroundGameDetector,
     GameWindow,
@@ -284,6 +278,7 @@ from core.windows_microphone_devices import (
     discovery_diagnostic_code,
     discovery_result_event_fields,
     migrate_legacy_microphone_name,
+    playback_endpoint_label,
 )
 from core.combined_audio_policy import (
     build_combined_audio_filter,
@@ -322,7 +317,6 @@ from ui.frameless_window_windows import (
 from ui.frameless_window_linux import install_resize_filter
 from core.window_geometry import (
     is_rect_visible,
-    popup_rect_for_anchor,
     restore_window_geometry,
     save_window_geometry,
 )
@@ -340,13 +334,15 @@ from core.capture_compatibility import (
     apply_capture_policy, border_free_capture_enabled, capture_policy_is_current,
 )
 from ui.camera_overlay_editor import (
-    CameraOverlayEditor, OverlayPlacementEditor, UnifiedOverlayPreview,
+    UnifiedOverlayPreview,
 )
 from ui.keyboard_overlay_preview import KeyboardSourcePreview
 from ui.game_crop_dialog import GameCropDialog
 from ui.capture_settings_widget import (
     _enumerate_capturable_windows,
 )
+from ui.sliders import ClickToSeekSlider
+from ui.toolbar_popups import HotkeyPopup, PopupPanel as _PopupPanel, clip_length_label
 from ui.style import set_theme_style, refresh_theme_styles
 from ui.style import (
     Colors, Fonts, Sizes,
@@ -370,8 +366,6 @@ try:
 except Exception:
     _SD_AVAILABLE = False
 
-
-# Global constants
 
 # The bottom bar is deliberately a failure channel, not a general-purpose
 # status feed. Routine advisories and successful-but-degraded processing are
@@ -665,132 +659,6 @@ class _MicLevelMeter(QWidget):
         p.end()
 
 
-# Popup panel base — shared look for all dropdown panels
-
-class _PopupPanel(QFrame):
-    """Base class for top-bar dropdown panels (capture settings, source, hotkeys)."""
-
-    popup_hidden = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent, Qt.WindowType.Popup)
-        self.setObjectName('popupPanel')
-        self.setMinimumWidth(300)
-        # Do not dispatch to a subclass override before that subclass has
-        # created its child widgets.
-        self._apply_popup_style()
-
-    def _apply_popup_style(self):
-        set_theme_style(self, lambda: (f'''
-            QFrame#popupPanel {{
-                background-color: {Colors.SURFACE_2};
-                border: {Sizes.BORDER_W}px solid {Colors.BORDER_HI};
-                border-radius: {Sizes.RADIUS_MD}px;
-            }}
-            QFrame#popupPanel QLabel {{
-                color: {Colors.TEXT};
-                background-color: transparent;
-            }}
-            QFrame#popupPanel[attached="true"] {{
-                border-top-left-radius: 0px;
-                border-top-right-radius: 0px;
-            }}
-        '''))
-
-    def refresh_theme(self):
-        """Refresh the shared popup shell after a theme change."""
-        self._apply_popup_style()
-
-    def hideEvent(self, event):  # noqa: N802 - Qt API name
-        """Tell the trigger button when Qt closes the popup for any reason.
-
-        Popup windows are also hidden by Qt when the user clicks outside them.
-        That path does not pass through MainWindow's toggle handlers, so the
-        trigger arrow needs the popup's actual visibility transition.
-        """
-        super().hideEvent(event)
-        button = getattr(self, '_attached_button', None)
-        if button is not None:
-            button.setExpanded(False) if hasattr(button, 'setExpanded') else None
-        self.popup_hidden.emit()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        button = getattr(self, '_attached_button', None)
-        if button is None or not self.isVisible():
-            return
-        anchor = button.mapToGlobal(QPoint(0, button.height()))
-        if abs(self.y() - anchor.y()) > 2:
-            return  # A screen-edge fallback may place the panel above its button.
-        left = max(1, anchor.x() - self.x() + 1)
-        right = min(self.width() - 1, anchor.x() - self.x() + button.width() - 1)
-        if right > left:
-            painter = QPainter(self)
-            painter.fillRect(QRect(left, 0, right - left, 1), QColor(Colors.SURFACE_2))
-
-    def show_below(self, button: QWidget):
-        self._attached_button = button
-        self.setProperty('attached', True)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        if hasattr(button, 'setExpanded'):
-            button.setExpanded(True)
-        self.adjustSize()
-        anchor_pos = button.mapToGlobal(QPoint(0, 0))
-        pos = button.mapToGlobal(QPoint(0, button.height()))
-        x = pos.x()
-        y = pos.y()
-        area = None
-        margin = 8
-
-        # Popups are wider than several top-bar buttons. Anchor from the left
-        # while there is room, then right-align to the trigger and clamp to the
-        # usable screen. This keeps the panel visible in maximized/fullscreen
-        # windows and on secondary monitors with non-zero origins.
-        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
-        if screen is not None:
-            area = screen.availableGeometry()
-
-            max_w = max(160, area.width() - margin * 2)
-            max_h = max(120, area.height() - margin * 2)
-            if self.width() > max_w or self.height() > max_h:
-                self.resize(min(self.width(), max_w), min(self.height(), max_h))
-            anchor = QRect(
-                anchor_pos.x(), anchor_pos.y(),
-                button.width(), button.height())
-            placed = popup_rect_for_anchor(
-                anchor, self.width(), self.height(), area, margin=margin)
-            x, y = placed.x(), placed.y()
-            if placed.size() != self.size():
-                self.resize(placed.size())
-
-        self.move(QPoint(x, y))
-
-        self.show()
-        # Apply the anchor again once the native popup exists; some platforms
-        # offset the first show by the host window's frame margins.
-        self.move(QPoint(x, y))
-
-        # Qt may add a one-pixel native popup frame after show(). Clamp the
-        # realized frame as well so the visible border respects the margin.
-        if area is not None:
-            frame = self.frameGeometry()
-            delta_x = 0
-            delta_y = 0
-            if frame.left() < area.left() + margin:
-                delta_x = area.left() + margin - frame.left()
-            elif frame.right() > area.right() - margin:
-                delta_x = area.right() - margin - frame.right()
-            if frame.top() < area.top() + margin:
-                delta_y = area.top() + margin - frame.top()
-            elif frame.bottom() > area.bottom() - margin:
-                delta_y = area.bottom() - margin - frame.bottom()
-            if delta_x or delta_y:
-                self.move(self.pos() + QPoint(delta_x, delta_y))
-
-        self.raise_()
-
-
 class _ToggleSwitch(QCheckBox):
     """Rounded switch with a clickable surface covering the entire control."""
 
@@ -987,7 +855,6 @@ class CaptureSettingsPopup(_PopupPanel):
         clip_fields_layout.setContentsMargins(0, 0, 0, 0)
         clip_fields_layout.setSpacing(12)
 
-        # Clip length
         self.clip_combo = self._make_combo([], -1, self._on_clip_changed)
         self._reload_clip_choices()
         clip_fields_layout.addLayout(_row('Clip length', self.clip_combo))
@@ -1016,21 +883,18 @@ class CaptureSettingsPopup(_PopupPanel):
         self.clip_memory_warning.setVisible(self.cur_clip >= 120)
         clip_fields_layout.addWidget(self.clip_memory_warning)
 
-        # FPS
         fps_idx = self._FPS_VALUES.index(self.cur_fps) \
             if self.cur_fps in self._FPS_VALUES else 1
         self.fps_combo = self._make_combo(
             [str(v) for v in self._FPS_VALUES], fps_idx, self._on_fps_changed)
         clip_fields_layout.addLayout(_row('Framerate', self.fps_combo))
 
-        # Resolution
         res_idx = self._RES_KEYS.index(self.cur_res.lower()) \
             if self.cur_res.lower() in self._RES_KEYS else 4
         self.res_combo = self._make_combo(self._RES_LABELS, res_idx,
                                           self._on_res_changed)
         clip_fields_layout.addLayout(_row('Resolution', self.res_combo))
 
-        # Quality
         qual_idx = self._QUAL_KEYS.index(self.cur_qual) \
             if self.cur_qual in self._QUAL_KEYS else 2
         self.qual_combo = self._make_combo(self._QUAL_LABELS, qual_idx,
@@ -1038,9 +902,7 @@ class CaptureSettingsPopup(_PopupPanel):
         clip_fields_layout.addLayout(_row('Quality', self.qual_combo))
 
         # Keep the editable value and both step buttons inside one control.
-        # This restores the compact original treatment and aligns the control
-        # edge with the selectors above instead of pulling the minus button
-        # into the label gutter.
+        # Align the bitrate stepper with the selectors above.
         bitrate_row = QHBoxLayout()
         bitrate_row.setSpacing(16)
         bitrate_label = QLabel('Custom bitrate')
@@ -1289,13 +1151,7 @@ class CaptureSettingsPopup(_PopupPanel):
         self.custom_lengths_changed.emit()
         self.adjustSize()
 
-    @staticmethod
-    def _clip_length_label(seconds):
-        minutes, remainder = divmod(seconds, 60)
-        if not minutes:
-            return f'{seconds}s'
-        value = f'{seconds / 60:.2f}'.rstrip('0').rstrip('.')
-        return f'{value}m'
+    _clip_length_label = staticmethod(clip_length_label)
 
     def _reload_clip_choices(self):
         values = sorted(set(self._CLIP_VALUES + [self.cur_clip]))
@@ -1545,7 +1401,6 @@ class SourcePopup(_PopupPanel):
         self.mode_combo.activated.connect(self._claim_manual_on_same_choice)
         layout.addWidget(self.mode_combo)
 
-        # Window list row
         win_row = QHBoxLayout()
         win_row.setSpacing(Sizes.SPACE_3)
         self.window_combo = _DropdownCombo()
@@ -2478,415 +2333,6 @@ class GameDetectionPopup(_PopupPanel):
                 else 'Game detection: Auto-Switch')
 
 
-def _record_button_qss(recording: bool = False, muted: bool = False) -> str:
-    border = Colors.ACCENT if recording else Colors.BORDER
-    background = Colors.ACCENT_SOFT if recording else Colors.SURFACE_1
-    color = Colors.ACCENT if recording else (Colors.TEXT_DIM if muted else Colors.TEXT)
-    return f'''
-        QPushButton {{
-            background-color: {background};
-            border: {Sizes.BORDER_W}px solid {border};
-            border-radius: {Sizes.RADIUS_MD}px;
-            color: {color};
-            font-size: {Fonts.SIZE_BODY}px;
-            font-family: {Fonts.BODY};
-            font-weight: 600;
-            padding: 0 8px;
-            min-height: 28px;
-            text-align: left;
-        }}
-        QPushButton:hover {{ border-color: {Colors.ACCENT}; color: {Colors.ACCENT}; }}
-        QPushButton:pressed {{ background-color: {Colors.ACCENT_SOFT}; border-color: {Colors.ACCENT}; }}
-    '''
-
-
-def _clear_button_qss() -> str:
-    return f'''
-        QPushButton {{
-            background-color: transparent;
-            border: {Sizes.BORDER_W}px solid {Colors.BORDER};
-            border-radius: {Sizes.RADIUS_MD}px;
-            color: {Colors.TEXT_DIM};
-            font-size: {Fonts.SIZE_MICRO}px;
-            font-family: {Fonts.DISPLAY};
-            letter-spacing: {Fonts.TRACK_LABEL}px;
-            font-weight: 600;
-            padding: 0 7px;
-            min-height: 28px;
-        }}
-        QPushButton:hover {{ border-color: {Colors.ACCENT}; color: {Colors.ACCENT}; }}
-        QPushButton:disabled {{ border-color: {Colors.HAIRLINE}; color: {Colors.TEXT_GHOST}; }}
-    '''
-
-
-def _hotkey_action_frame_qss() -> str:
-    return '''
-        QFrame#hotkeyActionRow {
-            background-color: transparent;
-            border: none;
-        }
-    '''
-
-
-class _KeyboardBindingButton(QPushButton):
-    binding_changed = Signal()
-
-    def __init__(self, hotkey_manager: HotkeyManager, action: str, parent=None):
-        super().__init__(parent)
-        self.hotkey_manager = hotkey_manager
-        self.action = action
-        self._recording = False
-        self._held_keys = set()
-        self._recorded_order = []
-        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumWidth(100)
-        self.setFixedHeight(30)
-        self.clicked.connect(self._toggle_recording)
-        self.refresh_value()
-
-    def refresh_value(self):
-        if not self._recording:
-            value = self.hotkey_manager.get_hotkey(self.action, device='keyboard')
-            self.setText(format_keyboard_combo(value))
-            set_theme_style(self, lambda value=value: (_record_button_qss(muted=not bool(value))))
-
-    def cancel_recording(self):
-        if self._recording:
-            self._finish_recording(commit=False)
-
-    def _toggle_recording(self):
-        if self._recording:
-            self._finish_recording(commit=False)
-        else:
-            self._recording = True
-            self._held_keys.clear()
-            self._recorded_order.clear()
-            self.hotkey_manager.begin_input_capture()
-            self.setText('Press keys')
-            set_theme_style(self, lambda: (_record_button_qss(recording=True)))
-            self.setFocus(Qt.FocusReason.MouseFocusReason)
-            self.grabKeyboard()
-
-    def _remember_key(self, key_name: str):
-        if key_name:
-            self._held_keys.add(key_name)
-            if key_name not in self._recorded_order:
-                self._recorded_order.append(key_name)
-
-    def keyPressEvent(self, event):
-        if not self._recording:
-            super().keyPressEvent(event)
-            return
-        if event.isAutoRepeat():
-            event.accept()
-            return
-        for modifier in self.hotkey_manager.qt_modifier_names(event):
-            self._remember_key(modifier)
-        self._remember_key(self.hotkey_manager.qt_key_name(event))
-        preview = normalize_keyboard_combo(self._recorded_order)
-        if preview:
-            self.setText(format_keyboard_combo(preview))
-        event.accept()
-
-    def keyReleaseEvent(self, event):
-        if not self._recording:
-            super().keyReleaseEvent(event)
-            return
-        if event.isAutoRepeat():
-            event.accept()
-            return
-        key_name = self.hotkey_manager.qt_key_name(event)
-        if key_name:
-            self._held_keys.discard(key_name)
-        still_down_modifiers = set(self.hotkey_manager.qt_modifier_names(event))
-        for modifier in ('Ctrl', 'Alt', 'Shift', 'Win'):
-            if modifier not in still_down_modifiers:
-                self._held_keys.discard(modifier)
-        if not self._held_keys and self._recorded_order:
-            QTimer.singleShot(70, lambda: self._finish_recording(commit=True))
-        event.accept()
-
-    def focusOutEvent(self, event):
-        self.cancel_recording()
-        super().focusOutEvent(event)
-
-    def _finish_recording(self, commit: bool):
-        if not self._recording:
-            return
-        combo = normalize_keyboard_combo(self._recorded_order)
-        self._recording = False
-        self.releaseKeyboard()
-        self._held_keys.clear()
-        self._recorded_order.clear()
-        if commit and combo and self.hotkey_manager.set_hotkey(
-                self.action, combo, device='keyboard'):
-            self.binding_changed.emit()
-        self.hotkey_manager.end_input_capture()
-        self.refresh_value()
-
-
-class _ControllerBindingButton(QPushButton):
-    binding_changed = Signal()
-
-    def __init__(self, hotkey_manager: HotkeyManager, action: str, parent=None):
-        super().__init__(parent)
-        self.hotkey_manager = hotkey_manager
-        self.action = action
-        self._recording = False
-        self._recorded_order = []
-        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setMinimumWidth(108)
-        self.setFixedHeight(30)
-        self.setEnabled(sys.platform == 'win32')
-        pass
-        self.clicked.connect(self._toggle_recording)
-        self.refresh_value()
-
-    def refresh_value(self):
-        if not self._recording:
-            value = self.hotkey_manager.get_controller_hotkey(self.action)
-            self.setText(format_controller_combo(value))
-            set_theme_style(self, lambda value=value: (_record_button_qss(muted=not bool(value))))
-
-    def cancel_recording(self):
-        if self._recording:
-            self._finish_recording(commit=False)
-
-    def _toggle_recording(self):
-        if self._recording:
-            self._finish_recording(commit=False)
-            return
-        self._recording = True
-        self._recorded_order.clear()
-        self.hotkey_manager.begin_input_capture()
-        self.hotkey_manager.controller_buttons_changed.connect(
-            self._on_controller_buttons_changed)
-        self.setText('Press buttons')
-        set_theme_style(self, lambda: (_record_button_qss(recording=True)))
-        self.setFocus(Qt.FocusReason.MouseFocusReason)
-
-    def _on_controller_buttons_changed(self, buttons):
-        if not self._recording:
-            return
-        pressed = set(buttons or [])
-        if pressed:
-            for button_name in CONTROLLER_BUTTON_ORDER:
-                if button_name in pressed and button_name not in self._recorded_order:
-                    self._recorded_order.append(button_name)
-            for button_name in sorted(pressed):
-                if button_name not in self._recorded_order:
-                    self._recorded_order.append(button_name)
-            preview = normalize_controller_combo(self._recorded_order)
-            if preview:
-                self.setText(format_controller_combo(preview))
-            return
-        if self._recorded_order:
-            QTimer.singleShot(70, lambda: self._finish_recording(commit=True))
-
-    def _finish_recording(self, commit: bool):
-        if not self._recording:
-            return
-        combo = normalize_controller_combo(self._recorded_order)
-        try:
-            self.hotkey_manager.controller_buttons_changed.disconnect(
-                self._on_controller_buttons_changed)
-        except (RuntimeError, TypeError):
-            # The popup can be destroyed before its optional disconnect.
-            pass
-        self._recording = False
-        self._recorded_order.clear()
-        if commit and combo and self.hotkey_manager.set_hotkey(
-                self.action, combo, device='controller'):
-            self.binding_changed.emit()
-        self.hotkey_manager.end_input_capture()
-        self.refresh_value()
-
-
-class HotkeyPopup(_PopupPanel):
-    """Keyboard and controller binding selector ported from the legacy UI."""
-
-    def __init__(self, hotkey_manager: HotkeyManager, parent=None):
-        super().__init__(parent)
-        self.hotkey_manager = hotkey_manager
-        self.setMinimumWidth(340)
-        self._binding_buttons = []
-        self._keyboard_buttons = {}
-        self._keyboard_clear_buttons = {}
-        self._controller_buttons = {}
-        self._controller_clear_buttons = {}
-        self._setup_ui()
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(12)
-
-        label = QLabel('Hotkeys')
-        set_theme_style(label, lambda: (_LABEL_STYLE))
-        layout.addWidget(label)
-        self.device_combo = WheelSafeComboBox()
-        self.device_combo.addItems(['Keyboard', 'Controller'])
-        self.device_combo.setAccessibleName('Shortcut device')
-        set_theme_style(self.device_combo, combo_qss)
-        self.device_combo.currentIndexChanged.connect(self._set_binding_device)
-        layout.addWidget(self.device_combo)
-        self.actions_scroll = QScrollArea()
-        self.actions_scroll.setWidgetResizable(True)
-        self.actions_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.actions_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        set_theme_style(self.actions_scroll, lambda: (
-            'QScrollArea { background: transparent; border: none; }'
-            'QScrollArea > QWidget > QWidget { background: transparent; }'))
-        self.actions_widget = QWidget()
-        self.actions_layout = QVBoxLayout(self.actions_widget)
-        self.actions_layout.setContentsMargins(0, 0, 0, 0)
-        self.actions_layout.setSpacing(6)
-        self.actions_scroll.setWidget(self.actions_widget)
-        layout.addWidget(self.actions_scroll)
-        self.reload_actions()
-
-    def reload_actions(self):
-        for button in self._binding_buttons:
-            button.cancel_recording()
-        while self.actions_layout.count():
-            item = self.actions_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._binding_buttons.clear()
-        self._keyboard_buttons.clear()
-        self._keyboard_clear_buttons.clear()
-        self._controller_buttons.clear()
-        self._controller_clear_buttons.clear()
-        actions = [
-            ('CAPTURE CLIP', 'save_clip'),
-            ('HIGHLIGHT', 'mark_highlight'),
-            ('SCREENSHOT', 'save_screenshot'),
-            ('CONFIRM GAME', 'confirm_game_detection'),
-            ('DISMISS GAME', 'dismiss_game_detection'),
-            ('START RECORDING', 'start_recording'),
-            ('STOP RECORDING', 'stop_recording'),
-        ]
-        from core.hotkey_manager import custom_clip_seconds
-        custom_actions = sorted(
-            (custom_clip_seconds(action), action)
-            for action in self.hotkey_manager.hotkeys
-            if custom_clip_seconds(action) is not None)
-        actions[1:1] = [(f'CLIP {CaptureSettingsPopup._clip_length_label(seconds)}', action)
-                        for seconds, action in custom_actions]
-        for label_text, action_key in actions:
-            self.actions_layout.addWidget(self._create_action_row(label_text, action_key))
-        self.actions_scroll.setFixedHeight(min(360, len(actions) * 36 - 6))
-        self._set_binding_device(self.device_combo.currentIndex())
-        self.adjustSize()
-
-    def _create_action_row(self, label_text: str, action_key: str) -> QFrame:
-        frame = QFrame()
-        frame.setObjectName('hotkeyActionRow')
-        set_theme_style(frame, lambda: (_hotkey_action_frame_qss()))
-        grid = QGridLayout(frame)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(6)
-        grid.setColumnStretch(1, 1)
-
-        action_label = QLabel(label_text.capitalize())
-        set_theme_style(action_label, lambda: (label_uppercase(Colors.TEXT, Fonts.SIZE_LABEL, Fonts.TRACK_LABEL)))
-        action_label.setFixedWidth(106)
-        grid.addWidget(action_label, 0, 0)
-
-        keyboard_btn = _KeyboardBindingButton(self.hotkey_manager, action_key)
-        controller_btn = _ControllerBindingButton(self.hotkey_manager, action_key)
-        keyboard_clear = QPushButton('Clear')
-        keyboard_clear.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        keyboard_clear.setFixedSize(46, 30)
-        set_theme_style(keyboard_clear, lambda: (_clear_button_qss()))
-        keyboard_clear.setAccessibleName(f'Clear keyboard shortcut for {label_text.lower()}')
-        keyboard_clear.clicked.connect(
-            lambda _checked=False, action=action_key: self._clear_keyboard_bind(action))
-        keyboard_btn.binding_changed.connect(
-            lambda action=action_key: self._sync_keyboard_clear(action))
-        clear_btn = QPushButton('Clear')
-        clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        clear_btn.setFixedSize(46, 30)
-        set_theme_style(clear_btn, lambda: (_clear_button_qss()))
-        clear_btn.setAccessibleName(f'Clear controller shortcut for {label_text.lower()}')
-        clear_btn.clicked.connect(
-            lambda _checked=False, action=action_key: self._clear_controller_bind(action))
-        controller_btn.binding_changed.connect(
-            lambda action=action_key: self._sync_controller_clear(action))
-
-        self._binding_buttons.extend([keyboard_btn, controller_btn])
-        self._keyboard_buttons[action_key] = keyboard_btn
-        self._keyboard_clear_buttons[action_key] = keyboard_clear
-        self._controller_buttons[action_key] = controller_btn
-        self._controller_clear_buttons[action_key] = clear_btn
-        grid.addWidget(keyboard_btn, 0, 1)
-        grid.addWidget(keyboard_clear, 0, 2)
-        grid.addWidget(controller_btn, 0, 1)
-        grid.addWidget(clear_btn, 0, 2)
-        self._sync_keyboard_clear(action_key)
-        self._sync_controller_clear(action_key)
-        return frame
-
-    def _set_binding_device(self, index):
-        for button in self._binding_buttons:
-            button.cancel_recording()
-        controller = index == 1
-        for button in (*self._keyboard_buttons.values(), *self._keyboard_clear_buttons.values()):
-            button.setVisible(not controller)
-        for button in (*self._controller_buttons.values(), *self._controller_clear_buttons.values()):
-            button.setVisible(controller)
-
-    def _clear_controller_bind(self, action_key: str):
-        self._controller_buttons[action_key].cancel_recording()
-        self.hotkey_manager.set_hotkey(action_key, '', device='controller')
-        self._controller_buttons[action_key].refresh_value()
-        self._sync_controller_clear(action_key)
-
-    def _clear_keyboard_bind(self, action_key: str):
-        self._keyboard_buttons[action_key].cancel_recording()
-        self.hotkey_manager.set_hotkey(action_key, '', device='keyboard')
-        self._keyboard_buttons[action_key].refresh_value()
-        self._sync_keyboard_clear(action_key)
-
-    def _sync_keyboard_clear(self, action_key: str):
-        self._keyboard_clear_buttons[action_key].setEnabled(
-            bool(self.hotkey_manager.get_hotkey(action_key, device='keyboard')))
-
-    def _sync_controller_clear(self, action_key: str):
-        clear_btn = self._controller_clear_buttons[action_key]
-        clear_btn.setEnabled(
-            sys.platform == 'win32'
-            and bool(self.hotkey_manager.get_controller_hotkey(action_key)))
-
-    def refresh_theme(self):
-        super().refresh_theme()
-        for button in self._binding_buttons:
-            button.refresh_value()
-        for action_key, button in self._keyboard_clear_buttons.items():
-            set_theme_style(button, lambda: (_clear_button_qss()))
-            self._sync_keyboard_clear(action_key)
-        for action_key, button in self._controller_clear_buttons.items():
-            set_theme_style(button, lambda: (_clear_button_qss()))
-            self._sync_controller_clear(action_key)
-        for frame in self.findChildren(QFrame):
-            if frame.objectName() == 'hotkeyActionRow':
-                set_theme_style(frame, lambda: (_hotkey_action_frame_qss()))
-        for label in self.findChildren(QLabel):
-            if label.text() in {'HOTKEYS', 'KEYBOARD', 'CONTROLLER'}:
-                set_theme_style(label, lambda label=label: (_LABEL_STYLE if label.text() == 'HOTKEYS'
-                    else label_uppercase(
-                        Colors.TEXT_DIM, Fonts.SIZE_MICRO,
-                        Fonts.TRACK_LABEL)))
-
-    def hideEvent(self, event):
-        for button in self._binding_buttons:
-            button.cancel_recording()
-        super().hideEvent(event)
-
-
 # TopBarButton — a styled button for the top bar dropdowns
 
 class TopBarButton(ThemedDropdownButton):
@@ -3352,36 +2798,13 @@ class MainWindow(QMainWindow):
             self._pump_admission_transition)
 
         if getattr(sys, 'frozen', False):
-            possible_paths = [Path(sys._MEIPASS) / 'engine' / 'FTHRClips.exe']
+            bundled_engine = Path(sys._MEIPASS) / 'engine' / 'FTHRClips.exe'
+            self.engine_path = bundled_engine if bundled_engine.is_file() else None
         else:
-            project_root   = Path(__file__).parent.parent / 'FTHRcapture'
-            possible_paths = [
-                *isolated_source_engines(project_root.parent),
-                # Direct project builds are useful while the running
-                # solution-level engine is locked. Prefer the freshly
-                # compiled source-checkout artifact; frozen releases still
-                # use only their bundled _MEIPASS engine above.
-                project_root / 'FTHRclips' / 'x64' / 'HDRRelease' / 'FTHRclips.exe',
-                project_root / 'FTHRclips' / 'x64' / 'CFRReleasePause' / 'FTHRclips.exe',
-                project_root / 'FTHRclips' / 'x64' / 'CFRReleaseFinal' / 'FTHRclips.exe',
-                project_root / 'FTHRclips' / 'x64' / 'CFRRelease' / 'FTHRclips.exe',
-                project_root / 'FTHRclips' / 'x64' / 'Release' / 'FTHRclips.exe',
-                project_root / 'FTHRclips' / 'x64' / 'Debug'   / 'FTHRclips.exe',
-                project_root / 'x64' / 'Release' / 'FTHRClips.exe',
-                project_root / 'x64' / 'Debug'   / 'FTHRClips.exe',
-                project_root / 'Release'          / 'FTHRClips.exe',
-                project_root / 'Debug'            / 'FTHRClips.exe',
-            ]
-        self.engine_path = None
-        existing_engines = [p for p in possible_paths if p.is_file()]
-        if existing_engines:
-            try:
-                self.engine_path = max(
-                    existing_engines, key=lambda path: path.stat().st_mtime)
-            except OSError:
-                self.engine_path = existing_engines[0]
+            self.engine_path = find_source_engine(Path(__file__).parent.parent)
+        if self.engine_path:
             print(f"Engine found: {self.engine_path.resolve()}")
-        if not self.engine_path:
+        else:
             print("Engine not found.")
 
         # A hard kill can leave the engine's same-directory transaction file.
@@ -3446,7 +2869,6 @@ class MainWindow(QMainWindow):
         self.is_capturing    = True
         self.capture_card    = CaptureCardClient(self.settings_manager)
         self._encoder_type   = 'DETECTING'
-        # Window drag state
         self._drag_pos: QPoint | None = None
 
         self.setWindowTitle(f'{APP_NAME} {APP_VERSION}')
@@ -3561,6 +2983,14 @@ class MainWindow(QMainWindow):
             # Background startup or teardown may temporarily expose no native
             # handle; the first later show retries the normal setup path.
             pass
+
+    def _clip_plugin_actions(self, path):
+        runtime = getattr(self, '_plugin_runtime', None)
+        return runtime.clip_actions(path) if runtime is not None else ()
+
+    def _bulk_clip_plugin_actions(self, paths):
+        runtime = getattr(self, '_plugin_runtime', None)
+        return runtime.bulk_clip_actions(paths) if runtime is not None else ()
 
     def _ensure_plugin_runtime(self):
         runtime = getattr(self, '_plugin_runtime', None)
@@ -3882,7 +3312,6 @@ class MainWindow(QMainWindow):
         self.restore_main_window()
         return self._open_album_folder(None)
 
-    # UI layout
 
     def _setup_ui(self):
         central = QWidget()
@@ -3998,7 +3427,6 @@ class MainWindow(QMainWindow):
                 self.hotkey_popup):
             popup.popup_hidden.connect(self._sync_topbar_dropdown_arrows)
 
-        # NVENC / HW status label (hidden by default)
         self.hw_label = QLabel()
         self.hw_label.setObjectName('hwLabel')
         self.hw_label.setVisible(False)
@@ -4140,11 +3568,9 @@ class MainWindow(QMainWindow):
         top_bar.mouseDoubleClickEvent = self._bar_double_click
         self._top_bar = top_bar
 
-        # Main content stack --
         self.main_stack = QStackedWidget()
         self.main_stack.setObjectName('mainStack')
 
-        # Page 0: clip grid
         body_page = QWidget()
         body_page.setObjectName('body')
         body_layout = QVBoxLayout(body_page)
@@ -4157,7 +3583,10 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.clip_grid = ClipGrid(settings_manager=self.settings_manager,
-                                  metadata_manager=self.clip_metadata_manager, autostart=False)
+                                  metadata_manager=self.clip_metadata_manager, autostart=False,
+                                  clip_actions_provider=self._clip_plugin_actions,
+                                  bulk_clip_actions_provider=self._bulk_clip_plugin_actions,
+                                  toolbar_layout=body_layout)
         self.clip_grid.set_readiness_checker(self._clip_readiness.can_access)
         self.clip_grid.clip_opened.connect(self._on_clip_opened)
         from ui.editor_preload_policy import EditorPreloadPolicy
@@ -4178,7 +3607,6 @@ class MainWindow(QMainWindow):
         self.library_storage_controller.set_scan_suspended(self._ultra_performance)
         self.library_backup_controller = LibraryBackupController(self)
 
-        # Page 1: full-screen settings
         self._settings_page_widget = _SettingsPage(
             self.settings_manager,
             keyboard_capture=self._keyboard_overlay_capture,
@@ -4210,9 +3638,11 @@ class MainWindow(QMainWindow):
             lambda path: (self.clip_grid.set_clips_directory(path, prepared=True),
                           self.library_storage_controller.root_changed(path),
                           self.library_backup_controller.root_changed(path)))
+        self._settings_page_widget.connect_import_grid(self.clip_grid)
+        self.clip_grid.manage_import_folders_requested.connect(self._open_import_settings)
+        self._settings_page_widget.view_imported_requested.connect(self._open_imported_clips)
         self._settings_page_widget.imported_folders_changed.connect(
-            lambda: (self.clip_grid.force_refresh(),
-                     self.library_backup_controller.root_changed()))
+            lambda: self.library_backup_controller.root_changed())
         self._settings_page_widget.notification_monitor_changed.connect(
             self.capture_card.restart)
         self._settings_page_widget.error_notifications_changed.connect(
@@ -4675,7 +4105,6 @@ class MainWindow(QMainWindow):
                 self._bar_double_click(event)
         return super().eventFilter(obj, event)
 
-    # Helpers --
 
     def _vsep(self):
         sep = QFrame()
@@ -4780,6 +4209,16 @@ class MainWindow(QMainWindow):
         self._update_notice = notice
         notice.setModal(False)
         notice.show()
+
+    def _open_import_settings(self):
+        if self._set_main_page(1):
+            from ui.settings_search import search_settings
+            self._settings_page_widget._open_setting_result(search_settings('Import clips')[0])
+
+    def _open_imported_clips(self):
+        if self._open_album_folder(None):
+            from core.library_searches import SearchCriteria
+            self.clip_grid.set_search_criteria(SearchCriteria(kind='imported'))
 
     def _open_settings_category(self, index: int):
         if not self._set_main_page(1):
@@ -6155,8 +5594,14 @@ class MainWindow(QMainWindow):
 
     def _warn_no_engine(self, process_generation: int | None = None):
         if getattr(sys, 'frozen', False):
-            detail = ('FTHRcapture binary is missing from the installation.'
-                      ' Re-download the latest release.')
+            detail = 'The capture engine is missing from the installation. '
+            if sys.platform == 'win32':
+                detail += ('Check Windows Security → Protection history or your antivirus history '
+                           'for FTHRclips.exe. If it was quarantined, leave it quarantined '
+                           'and send the detection name and app version to FTHR support. '
+                           'If there is no detection, reinstall from the official release.')
+            else:
+                detail += 'Reinstall from the official release.'
         else:
             detail = ('FTHRcapture binary not found. Build it:'
                       ' msbuild FTHRcapture/FTHRcapture.sln -p:Configuration=Release -p:Platform=x64')
@@ -7962,6 +7407,7 @@ class MainWindow(QMainWindow):
 
 
     def _on_hotkey_save_clip(self):
+        mark_save_trace('ui_save_hotkey_slot')
         session = getattr(self, '_accepted_capture_session', None)
         config = getattr(session, 'request', None)
         if config is not None:
@@ -14647,7 +14093,9 @@ class MainWindow(QMainWindow):
                 self._show_save_busy_feedback()
                 return
 
+            mark_save_trace('ui_save_command_begin')
             if not owner_bridge.save_clip(str(output_path), duration_seconds):
+                mark_save_trace('ui_save_command_rejected')
                 emit_event(
                     'clip_save', 'command_rejected', state='FAILED',
                     error=DiagnosticError.CLIP_SAVE_FAILED,
@@ -14668,6 +14116,7 @@ class MainWindow(QMainWindow):
                 )
                 return
 
+            mark_save_trace('ui_save_command_written')
             # Acknowledge the command while native save and finalization run.
             submit = self._save_state.submit(
                 str(output_path), duration_seconds, time.monotonic(),
@@ -14685,6 +14134,8 @@ class MainWindow(QMainWindow):
                     reason='save_operation_already_in_flight')
                 return
 
+            if SAVE_TRACE_ENABLED:
+                mark_save_trace('ui_save_submitted', save_id=submit.operation.op_id)
             self._clip_diagnostic_started_by_path[
                 os.path.normcase(os.path.abspath(str(output_path)))] = (
                     self._save_diagnostic_started_at)
@@ -14777,6 +14228,7 @@ class MainWindow(QMainWindow):
         op = outcome.operation
 
         if outcome.kind is OutcomeKind.ACCEPTED:
+            mark_save_trace('ui_save_ack', save_id=op.op_id)
             # Engine has the job. Still not saved — no grid, no upload.
             self._set_status('SAVING', status_idle_qss())
             emit_event(
@@ -14786,6 +14238,7 @@ class MainWindow(QMainWindow):
             return
 
         if outcome.kind is OutcomeKind.TIMEOUT_NOTICE:
+            mark_save_trace('ui_save_timeout', save_id=op.op_id)
             # Not a verdict: the engine is slow, not proven broken. Warn, keep
             # watching, and do not emit a failure the late result would then
             # contradict.
@@ -14797,6 +14250,7 @@ class MainWindow(QMainWindow):
             return
 
         if outcome.kind is OutcomeKind.FAILED:
+            mark_save_trace('ui_save_failed', save_id=op.op_id)
             emit_event(
                 'clip_save', 'save_failed', state='FAILED',
                 error=DiagnosticError.CLIP_SAVE_FAILED,
@@ -14831,6 +14285,7 @@ class MainWindow(QMainWindow):
             return
 
         if outcome.kind is OutcomeKind.COMPLETED:
+            mark_save_trace('ui_base_commit_received', save_id=op.op_id, late=outcome.late)
             emit_event(
                 'clip_save', 'mux_completed', state='WRITTEN',
                 operation_id=op.op_id,
@@ -14965,10 +14420,13 @@ class MainWindow(QMainWindow):
             return
         inflight.add(key)
         path = Path(clip_path)
+        trace_save_id = reports[key].get('operation_id') if SAVE_TRACE_ENABLED else None
 
         def _probe_and_report():
             actual = None
             reason = None
+            if trace_save_id is not None:
+                mark_save_trace('ui_duration_probe_begin', save_id=trace_save_id)
             try:
                 actual = probe_video_presentation_duration(path)
             except Exception as error:
@@ -14978,6 +14436,8 @@ class MainWindow(QMainWindow):
             finally:
                 # Release the bounded slot even when probing raises.
                 slots.release()
+                if trace_save_id is not None:
+                    mark_save_trace('ui_duration_probe_end', save_id=trace_save_id)
             if actual is None and reason is None:
                 reason = 'duration_unavailable'
             _complete_result(actual, reason)
@@ -15153,6 +14613,9 @@ class MainWindow(QMainWindow):
         # rebuilding every existing card here made save latency scale with the
         # entire library and did the same expensive work again at publication.
         if hasattr(self, 'clip_grid'):
+            if SAVE_TRACE_ENABLED:
+                mark_save_trace('ui_library_upsert_begin', save_id=op.op_id,
+                                phase='engine_committed')
             try:
                 self.clip_grid.upsert_saved_clip(
                     str(output_path),
@@ -15167,6 +14630,10 @@ class MainWindow(QMainWindow):
                     phase='engine_committed',
                     detail=f'{type(error).__name__}: {error}')
                 print(f'[Save] Incremental library insertion failed: {error}')
+            finally:
+                if SAVE_TRACE_ENABLED:
+                    mark_save_trace('ui_library_upsert_end', save_id=op.op_id,
+                                    phase='engine_committed')
 
         if has_async_mux:
             self._set_status('SAVING', status_idle_qss())
@@ -15663,6 +15130,9 @@ class MainWindow(QMainWindow):
             'clip_save', 'metadata_validation_completed',
             elapsed_ms=metadata_elapsed_ms, warning_count=len(warnings))
         print(f'Clip ready: {os.path.basename(clip_path)}')
+        trace_save_id = report.get('operation_id') if SAVE_TRACE_ENABLED and report else None
+        if trace_save_id is not None:
+            mark_save_trace('ui_final_clip_ready', save_id=trace_save_id)
         ui_notification_started = time.monotonic()
         self.clip_saved.emit(clip_path)
         ui_notification_ms = round(
@@ -15670,6 +15140,9 @@ class MainWindow(QMainWindow):
         library_started = time.monotonic()
         library_update_error = None
         if hasattr(self, 'clip_grid'):
+            if trace_save_id is not None:
+                mark_save_trace('ui_library_upsert_begin', save_id=trace_save_id,
+                                phase='final_publication')
             try:
                 self.clip_grid.upsert_saved_clip(
                     clip_path,
@@ -15681,6 +15154,10 @@ class MainWindow(QMainWindow):
                     error=DiagnosticError.LIBRARY_SCAN_FAILED,
                     phase='final_publication', detail=library_update_error)
                 print(f'[Save] Incremental library finalization failed: {error}')
+            finally:
+                if trace_save_id is not None:
+                    mark_save_trace('ui_library_upsert_end', save_id=trace_save_id,
+                                    phase='final_publication')
         library_update_ms = round(
             (time.monotonic() - library_started) * 1000)
         # Capture was acknowledged at admission. Publish the library result
@@ -15741,7 +15218,6 @@ class MainWindow(QMainWindow):
                 self.push_error('CLIP SAVE FAILED', str(error), level='error')
             print(f'[UI] Could not open clips folder: {error}')
 
-    # Upload finished callback --
 
     def _on_upload_finished(self, path: str, success: bool, msg: str):
         if success:
@@ -15963,6 +15439,10 @@ class MainWindow(QMainWindow):
             worker_args[3] = _CfrReadyGate()
 
         def _run_and_publish():
+            trace_save_id = (capture_job.get('operation_id')
+                             if SAVE_TRACE_ENABLED and capture_job is not None else None)
+            if trace_save_id:
+                mark_save_trace('ui_finalization_worker_begin', save_id=trace_save_id)
             source_timeline_rejected = False
             source_timeline_validated = False
             _FINALIZATION_CONTEXT.capture_job = capture_job
@@ -16073,6 +15553,8 @@ class MainWindow(QMainWindow):
                         already_normalized=already_normalized,
                         capture_job=capture_job)
                 finally:
+                    if trace_save_id:
+                        mark_save_trace('ui_finalization_worker_end', save_id=trace_save_id)
                     if getattr(_FINALIZATION_CONTEXT, 'capture_job', None) is capture_job:
                         _FINALIZATION_CONTEXT.capture_job = None
                     current = threading.current_thread()
@@ -19365,7 +18847,6 @@ class SlidingStackedWidget(QWidget):
     def count(self):
         return len(self._pages)
 
-    # Sizing
 
     def sizeHint(self):
         s = QSize(0, 0)
@@ -19387,64 +18868,6 @@ class SlidingStackedWidget(QWidget):
 
 # Full-screen settings page (embedded in main content stack)
 
-class _SettingsSlider(QSlider):
-    """Audio slider with absolute click-to-set and a forgiving hit area."""
-
-    _HIT_HEIGHT = Sizes.SLIDER_H
-
-    def __init__(self, orientation: Qt.Orientation, parent=None):
-        super().__init__(orientation, parent)
-        self.setMinimumHeight(self._HIT_HEIGHT)
-        self._dragging_from_anywhere = False
-
-    def _value_from_position(self, position: QPoint) -> int:
-        option = QStyleOptionSlider()
-        self.initStyleOption(option)
-        groove = self.style().subControlRect(
-            QStyle.ComplexControl.CC_Slider, option,
-            QStyle.SubControl.SC_SliderGroove, self)
-        handle = self.style().subControlRect(
-            QStyle.ComplexControl.CC_Slider, option,
-            QStyle.SubControl.SC_SliderHandle, self)
-        span = max(1, groove.width() - handle.width())
-        slider_position = position.x() - groove.x() - handle.width() / 2
-        slider_position = max(0.0, min(float(span), slider_position))
-        return QStyle.sliderValueFromPosition(
-            self.minimum(), self.maximum(), int(round(slider_position)), span,
-            option.upsideDown)
-
-    def mousePressEvent(self, event):
-        if (event.button() == Qt.MouseButton.LeftButton
-                and self.isEnabled()):
-            self._dragging_from_anywhere = True
-            self.setSliderDown(True)
-            self.setSliderPosition(self._value_from_position(
-                event.position().toPoint()))
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if (self._dragging_from_anywhere
-                and event.buttons() & Qt.MouseButton.LeftButton):
-            self.setSliderPosition(self._value_from_position(
-                event.position().toPoint()))
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if (self._dragging_from_anywhere
-                and event.button() == Qt.MouseButton.LeftButton):
-            self.setSliderPosition(self._value_from_position(
-                event.position().toPoint()))
-            self._dragging_from_anywhere = False
-            self.setSliderDown(False)
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-
 class _SettingsPage(QWidget):
     close_requested           = Signal()
     camera_unavailable        = Signal(str)
@@ -19456,6 +18879,9 @@ class _SettingsPage(QWidget):
     _profile_playback_inventory_ready = Signal(object, bool, int)
     clips_directory_changed  = Signal(str)
     imported_folders_changed  = Signal()
+    import_folder_linked = Signal(str)
+    import_folder_duplicate = Signal(str)
+    view_imported_requested = Signal()
     _playback_inventory_ready = Signal(list, bool)
     notification_monitor_changed = Signal()
     error_notifications_changed = Signal(bool)
@@ -19800,6 +19226,7 @@ class _SettingsPage(QWidget):
         self._keyboard_capture = keyboard_capture
         self._storage_controller = storage_controller
         self._backup_controller = backup_controller
+        self._import_feedback_by_root = {}
         self._update_controller = update_controller
         self._keyboard_windows: list[dict] = []
         self._background_ui_paused = False
@@ -19930,7 +19357,6 @@ class _SettingsPage(QWidget):
         category_scroll.setFixedHeight(category_strip.sizeHint().height() + 16)
         main_layout.addWidget(tab_bar)
 
-        # Thin separator line
         divider = QFrame()
         divider.setObjectName('settingsDivider')
         divider.setFrameShape(QFrame.Shape.HLine)
@@ -19991,7 +19417,6 @@ class _SettingsPage(QWidget):
 
         main_layout.addWidget(content, stretch=1)
 
-        # Select first tab
         self._tab_buttons[0].setChecked(True)
         QTimer.singleShot(0, self._fit_category_bar)
 
@@ -20118,6 +19543,8 @@ class _SettingsPage(QWidget):
             return
         idx = self._pending_category_index
         self._ensure_category(idx)
+        if idx == 1:
+            self._refresh_import_folders_list()
         if idx in self._clip_subcategories:
             section = self._clip_embedded_sections[idx]
             section.expand()
@@ -20429,12 +19856,34 @@ class _SettingsPage(QWidget):
         rl.setSpacing(8)
 
         display_path = path
-        if not os.path.isdir(path):
-            display_path += '  —  MISSING (remove link or reconnect drive)'
+        missing = not os.path.isdir(path)
+        if missing:
+            display_path += '  —  Missing'
         path_lbl = QLabel(display_path)
         set_theme_style(path_lbl, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
         path_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        rl.addWidget(path_lbl, 1)
+        info = QVBoxLayout()
+        info.addWidget(path_lbl)
+        rl.addLayout(info, 1)
+        feedback = self._import_feedback_by_root.get(canonical_media_path(path))
+        if feedback and not missing:
+            message, can_view = feedback
+            label = QLabel(message)
+            label.setWordWrap(True)
+            set_theme_style(label, lambda: label_body(Colors.TEXT_MUTED, Fonts.SIZE_BODY))
+            info.addWidget(label)
+            if can_view:
+                view = QPushButton('View clips')
+                view.setToolTip('Open the Imported clips library')
+                set_theme_style(view, button_outline_qss)
+                view.clicked.connect(self.view_imported_requested.emit)
+                rl.addWidget(view)
+
+        if missing:
+            locate = QPushButton('Locate folder')
+            set_theme_style(locate, button_outline_qss)
+            locate.clicked.connect(lambda: self._choose_import_folder(self, replace=path))
+            rl.addWidget(locate)
 
         remove_btn = IconButton('close.png', label='Close')
         remove_btn.setFixedSize(22, 22)
@@ -20453,26 +19902,55 @@ class _SettingsPage(QWidget):
             return
         folders = remove_import_root(
             self.sm.get('imported_clip_folders', []), path)
-        self.sm.set('imported_clip_folders', folders)
-        self.sm.save_settings()
+        if not _persist_setting_changes(self.sm, {'imported_clip_folders': folders}):
+            self._report_storage_change_failure('Could not unlink the folder. It is still in your library.')
+            return
+        self._import_feedback_by_root.pop(canonical_media_path(path), None)
         self._refresh_import_folders_list()
         self.imported_folders_changed.emit()
 
+    def connect_import_grid(self, grid):
+        grid.add_import_folder_requested.connect(lambda: self._choose_import_folder(grid))
+        self.import_folder_linked.connect(grid.track_import_folder)
+        self.import_folder_duplicate.connect(
+            lambda folder: grid.show_import_feedback(folder, 'Already linked.', True))
+        grid.import_feedback.connect(self._show_import_feedback)
+        self.imported_folders_changed.connect(grid.force_refresh)
+
+    def _show_import_feedback(self, folder, message, can_view):
+        self._import_feedback_by_root[canonical_media_path(folder)] = (message, can_view)
+        if '_import_folders_layout' in self.__dict__:
+            self._refresh_import_folders_list()
+
     def _on_import_folder_add(self):
+        self._choose_import_folder(self)
+
+    def _choose_import_folder(self, parent, *, replace=None):
         folder = QFileDialog.getExistingDirectory(
-            self, 'Select Clips Folder',
-            str(Path.home() / 'Videos'),
-            QFileDialog.Option.ShowDirsOnly,
-        )
-        if not folder or self.sm is None:
+            parent, 'Locate folder' if replace else 'Choose folder',
+            str(Path.home() / 'Videos'), QFileDialog.Option.ShowDirsOnly)
+        if folder:
+            self._link_import_folder(folder, replace=replace)
+
+    def _link_import_folder(self, folder, *, replace=None):
+        if self.sm is None:
             return
-        folders = add_import_root(
-            self.sm.get('imported_clip_folders', []), folder)
-        self.sm.set('imported_clip_folders', folders)
-        self.sm.save_settings()
-        self._refresh_import_folders_list()
-        self._scan_pending = [(n, p) for n, p in self._scan_pending if p != folder]
-        self._rebuild_scan_results()
+        previous = self.sm.get('imported_clip_folders', [])
+        roots = remove_import_root(previous, replace) if replace else previous
+        roots = add_import_root(roots, folder)
+        if not replace and len(roots) == len(previous):
+            self.import_folder_duplicate.emit(folder)
+            return
+        if not _persist_setting_changes(self.sm, {'imported_clip_folders': roots}):
+            self._report_storage_change_failure('Could not save the import folder link.')
+            return
+        if replace:
+            self._import_feedback_by_root.pop(canonical_media_path(replace), None)
+        if '_import_folders_layout' in self.__dict__:
+            self._scan_pending = [(n, p) for n, p in self._scan_pending
+                                  if Path(p) != Path(folder)]
+            self._rebuild_scan_results()
+        self.import_folder_linked.emit(folder)
         self.imported_folders_changed.emit()
 
     def _on_clips_folder_browse(self):
@@ -20660,21 +20138,18 @@ class _SettingsPage(QWidget):
             for path in (
                 self.sm.get('imported_clip_folders', []) if self.sm else [])
         }
-        found = [
-            (name, str(path))
-            for name, path in _known
-            if (path.exists()
-                and os.path.normcase(os.path.realpath(path)) not in existing)
-        ]
+        detected = [(name, str(path)) for name, path in _known if path.is_dir()]
+        found = [(name, path) for name, path in detected
+                 if os.path.normcase(os.path.realpath(path)) not in existing]
 
-        # Clear scan results area for fresh output
         while self._scan_results_layout.count():
             item = self._scan_results_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
         if not found:
-            lbl = QLabel('No clip folders from other software were found on your system.')
+            lbl = QLabel('All detected recording folders are already linked.' if detected else
+                         'No recording folders found in the usual locations.')
             lbl.setWordWrap(True)
             set_theme_style(lbl, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_BODY)))
             self._scan_results_layout.addWidget(lbl)
@@ -20743,15 +20218,7 @@ class _SettingsPage(QWidget):
         return row
 
     def _scan_add(self, software_name: str, path: str):
-        if self.sm is not None:
-            folders = add_import_root(
-                self.sm.get('imported_clip_folders', []), path)
-            self.sm.set('imported_clip_folders', folders)
-            self.sm.save_settings()
-            self._refresh_import_folders_list()
-        self._scan_pending = [(n, p) for n, p in self._scan_pending if p != path]
-        self._rebuild_scan_results()
-        self.imported_folders_changed.emit()
+        self._link_import_folder(path)
 
     def _scan_dismiss(self, software_name: str, path: str):
         self._scan_pending = [(n, p) for n, p in self._scan_pending if p != path]
@@ -21019,19 +20486,21 @@ class _SettingsPage(QWidget):
         layout.addWidget(self.replay_low_fps_save_error)
 
         import_section, layout = folded_settings_section('Import clips')
+        import_section._header.toggled.connect(
+            lambda expanded: self._refresh_import_folders_list() if expanded else None)
         # Import Clips --
         layout.addSpacing(6)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        add_btn = QPushButton('Add folder')
+        add_btn = QPushButton('Choose folder')
         set_theme_style(add_btn, button_outline_qss)
         add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         add_btn.clicked.connect(self._on_import_folder_add)
         btn_row.addWidget(add_btn)
 
-        self._scan_btn = QPushButton('Scan for clips')
+        self._scan_btn = QPushButton('Find recording folders')
         set_theme_style(self._scan_btn, button_secondary_qss)
         self._scan_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._scan_btn.clicked.connect(self._on_import_folder_scan)
@@ -21093,7 +20562,7 @@ class _SettingsPage(QWidget):
         root_layout.addWidget(timeline_section)
         root_layout.addWidget(editor_section)
         root_layout.addWidget(import_section)
-        from ui.customize_page import _AccordionSection
+        from ui.settings_layout import AccordionSection as _AccordionSection
         self._clip_embedded_sections = {}
         for index, title in ((7, 'Game profiles'), (8, 'Allowed games')):
             section = _AccordionSection(title)
@@ -21162,13 +20631,13 @@ class _SettingsPage(QWidget):
         self.sm.set(key, bool(enabled))
         self.sm.save_settings()
         if key == 'timeline_preview_strip_enabled':
-            from ui.clip_viewer import ClipViewer, _TIMELINE_IMAGE_CACHE, _TIMELINE_CACHE_LOCK
+            from ui.clip_viewer import ClipViewer
+            from ui.editor_timeline import clear_timeline_image_cache
             for viewer in QApplication.instance().allWidgets():
                 if isinstance(viewer, ClipViewer) and viewer.sm is self.sm:
                     viewer.set_timeline_preview_enabled(enabled)
             if not enabled:
-                with _TIMELINE_CACHE_LOCK:
-                    _TIMELINE_IMAGE_CACHE.clear()
+                clear_timeline_image_cache()
         self._sync_ui_performance_controls()
 
     def _make_audio_page(self):
@@ -21184,7 +20653,6 @@ class _SettingsPage(QWidget):
         root_layout.setSpacing(12)
         left, left_layout = folded_settings_section('Microphone')
 
-        # Device row
         dev_row = QHBoxLayout()
         dev_row.setSpacing(8)
         dev_lbl = QLabel('Input device')
@@ -21219,13 +20687,12 @@ class _SettingsPage(QWidget):
             'Play your microphone equally through both speakers. Useful if your microphone only records on one side.'))
         left_layout.addSpacing(12)
 
-        # Volume row
         vol_row = QHBoxLayout()
         vol_row.setSpacing(8)
         self.mic_gain_label = QLabel('Volume')
         self.mic_gain_label.setFixedWidth(100)
         vol_row.addWidget(self.mic_gain_label)
-        self.mic_vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.mic_vol_slider = ClickToSeekSlider(Qt.Orientation.Horizontal)
         self.mic_vol_slider.setRange(0, 200)
         self.mic_vol_slider.setValue(100)
         self.mic_vol_slider.setTracking(False)
@@ -21239,6 +20706,7 @@ class _SettingsPage(QWidget):
         self.mic_vol_value = QLabel('100%')
         self.mic_vol_value.setFixedWidth(42)
         self.mic_vol_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.mic_vol_slider.sliderMoved.connect(lambda v: self.mic_vol_value.setText(f'{v}%'))
         self.mic_vol_slider.valueChanged.connect(self._on_mic_volume_changed)
         vol_row.addWidget(self.mic_vol_value)
         left_layout.addLayout(vol_row)
@@ -21258,7 +20726,6 @@ class _SettingsPage(QWidget):
         self._update_mic_gain_warning(self.mic_vol_slider.value())
         left_layout.addSpacing(8)
 
-        # Live level meter row
         meter_row = QHBoxLayout()
         meter_row.setSpacing(8)
         meter_lbl = QLabel('Live level')
@@ -21269,7 +20736,6 @@ class _SettingsPage(QWidget):
         left_layout.addLayout(meter_row)
         left_layout.addSpacing(10)
 
-        # Loopback checkbox
         self.mic_loopback_check = QCheckBox(
             'Listen to microphone')
         self.mic_loopback_check.setToolTip(
@@ -21291,9 +20757,6 @@ class _SettingsPage(QWidget):
             left_layout.addWidget(warn)
 
 
-        # Right: Notification placement and playback levels. Custom sound
-        # files remain under Customize, but the everyday loudness controls
-        # belong here beside the rest of the audio settings.
         right, right_layout = folded_settings_section('Notifications')
         self.sound_sliders = {}
         self.sound_value_labels = {}
@@ -21348,7 +20811,7 @@ class _SettingsPage(QWidget):
             sound_label.setFixedWidth(150)
             sound_row.addWidget(sound_label)
 
-            slider = _SettingsSlider(Qt.Orientation.Horizontal)
+            slider = ClickToSeekSlider(Qt.Orientation.Horizontal)
             slider.setRange(0, 100)
             slider.setSingleStep(1)
             slider.setPageStep(10)
@@ -21432,6 +20895,7 @@ class _SettingsPage(QWidget):
         self.playback_label = playback_label
         playback_row.addWidget(playback_label)
         self.playback_combo = QComboBox()
+        playback_label.setBuddy(self.playback_combo)
         self.playback_combo.setMinimumWidth(0)
         self.playback_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         set_theme_style(self.playback_combo, combo_qss)
@@ -21688,6 +21152,20 @@ class _SettingsPage(QWidget):
                                    'If app capture is unavailable, the device mix is used.',
             AUDIO_SOURCE_DEVICES: devices_hint,
         }[mode]
+        playback_defaults = {
+            endpoint.endpoint_id for endpoint in self._playback_endpoints
+            if getattr(endpoint, 'is_default', False)
+            or getattr(endpoint, 'is_default_communications', False)
+        }
+        show_split_hint = (
+            playback_ready and len(playback_defaults) > 1
+            and not playback_defaults.issubset(track['id'] for track in tracks))
+        if playback_ready and len(playback_defaults) > 1:
+            if visible:
+                hint += (' Windows uses a separate communications output. Choose '
+                         'Several devices as separate tracks to record both outputs.')
+            elif mode == AUDIO_SOURCE_DEVICES and show_split_hint:
+                hint += ' Add the Windows playback and communications outputs to capture both.'
         if not self.sm.get('audio_capture_enabled', True):
             hint = 'Audio capture is off. Your source selection is saved.'
         self.audio_source_hint.setText(hint)
@@ -21708,7 +21186,7 @@ class _SettingsPage(QWidget):
         self.audio_source_hint.setVisible(
             not self.sm.get('audio_capture_enabled', True)
             or mode in (AUDIO_SOURCE_COMBINED, AUDIO_SOURCE_DEVICE)
-            or (mode == AUDIO_SOURCE_DEVICES and not tracks))
+            or (mode == AUDIO_SOURCE_DEVICES and (not tracks or show_split_hint)))
 
     def _on_keep_system_audio_backup_toggled(self, enabled: bool):
         previous = self.sm.get('keep_system_audio_backup', True) is not False
@@ -21803,7 +21281,7 @@ class _SettingsPage(QWidget):
         for endpoint in self._playback_endpoints if ready else []:
             if endpoint.endpoint_id not in used:
                 self.extra_device_combo.addItem(
-                    endpoint.display_name, endpoint.endpoint_id)
+                    playback_endpoint_label(endpoint), endpoint.endpoint_id)
         full = len(tracks) >= MAX_AUDIO_DEVICE_TRACKS
         self.extra_device_combo.setEnabled(ready and not full)
         self.extra_device_name.setEnabled(ready and not full)
@@ -21839,7 +21317,9 @@ class _SettingsPage(QWidget):
             self.sm.get('audio_device_tracks', []))
         if len(tracks) >= MAX_AUDIO_DEVICE_TRACKS:
             return
-        device_name = self.extra_device_combo.currentText()
+        device_name = next(
+            endpoint.display_name for endpoint in self._playback_endpoints
+            if endpoint.endpoint_id == endpoint_id)
         tracks.append({'id': str(endpoint_id),
                        'name': self.extra_device_name.text() or device_name})
         normalized_tracks = normalize_audio_device_tracks(tracks)
@@ -22769,8 +22249,7 @@ class _SettingsPage(QWidget):
             self._playback_endpoints = list(endpoints or [])
             self._profile_playback_devices = [{
                 'endpoint_id': str(getattr(endpoint, 'endpoint_id', '')),
-                'display_name': str(getattr(
-                    endpoint, 'display_name', getattr(endpoint, 'endpoint_id', ''))),
+                'display_name': playback_endpoint_label(endpoint),
                 'is_default': bool(getattr(endpoint, 'is_default', False)),
                 'available': bool(getattr(endpoint, 'is_active', True)),
             } for endpoint in self._playback_endpoints
@@ -22845,7 +22324,8 @@ class _SettingsPage(QWidget):
             self.playback_combo.clear()
             self.playback_combo.addItem('Windows default', '')
             for endpoint in self._playback_endpoints if ready else []:
-                self.playback_combo.addItem(endpoint.display_name, endpoint.endpoint_id)
+                self.playback_combo.addItem(
+                    playback_endpoint_label(endpoint), endpoint.endpoint_id)
             index = self.playback_combo.findData(saved)
             if saved and index < 0:
                 name = self.sm.get('playback_device_name', 'Selected device')
@@ -22863,7 +22343,9 @@ class _SettingsPage(QWidget):
              else 'Playback device ready.') if ready else
             'Device availability not confirmed. Refresh to check playback devices.')
         self.playback_combo.setToolTip(
-            'If this device disconnects, capture switches to the Windows default.')
+            'Choose the output used by the apps you want to capture. Capture switches '
+            'to the Windows default if this device disconnects. For apps that use '
+            'different outputs, choose Several devices as separate tracks.')
         self.playback_hint.setVisible(
             self._audio_source_mode() in (AUDIO_SOURCE_COMBINED, AUDIO_SOURCE_DEVICE)
             and (not ready or bool(saved and self.playback_combo.findData(saved) < 0)
@@ -23232,13 +22714,11 @@ class _SettingsPage(QWidget):
 
     def _on_mic_device_changed(self, _idx: int):
         idx = self._selected_mic_index()
-        # Restart meter on the new device
         self.mic_level_meter.stop()
         if (self.isVisible() and self.stack.currentIndex() == 2
                 and not getattr(self, '_background_ui_paused', False)):
             self.mic_level_meter.set_gain(self.mic_vol_slider.value() / 100.0)
             self.mic_level_meter.start(idx)
-        # Restart loopback if currently on
         if self.mic_loopback_check.isChecked():
             self._stop_loopback()
             self._start_loopback(idx)
@@ -23365,7 +22845,7 @@ class _SettingsPage(QWidget):
         if idx == 3 and '_keyboard_preview_timer' in self.__dict__:
             self._keyboard_preview_timer.start()
 
-    def _make_visuals_page_unified_legacy(self):
+    def _make_visuals_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
@@ -23383,7 +22863,7 @@ class _SettingsPage(QWidget):
         options.setMinimumWidth(360)
         set_theme_style(options,
             lambda: ('QFrame#overlayOptionsPanel { background: transparent; border: none; }'))
-        from ui.customize_page import _AccordionSection
+        from ui.settings_layout import AccordionSection as _AccordionSection
         from ui.style import lineedit_qss
         from ui.settings_layout import SettingHelp
         sections_layout = QVBoxLayout(options)
@@ -23435,7 +22915,6 @@ class _SettingsPage(QWidget):
         options_layout.addLayout(cam_dev_row)
         options_layout.addSpacing(18)
 
-        # Image options
         options_layout = option_section('Images')
         image_layers = self._stored_image_layers()
         image_enabled = bool(
@@ -23514,7 +22993,7 @@ class _SettingsPage(QWidget):
             lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
         opacity_label.setFixedWidth(64)
         image_controls.addWidget(opacity_label)
-        self.image_overlay_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.image_overlay_opacity = ClickToSeekSlider(Qt.Orientation.Horizontal)
         self.image_overlay_opacity.setRange(10, 100)
         self.image_overlay_opacity.setValue(100)
         set_theme_style(self.image_overlay_opacity, slider_qss)
@@ -23530,11 +23009,7 @@ class _SettingsPage(QWidget):
         options_layout.addLayout(image_controls)
         options_layout.addSpacing(20)
 
-        # Third-party keyboard options. The source is a separate top-level
-        # Windows window (Noboard/NohBoard/Keyviz/etc.), just like an OBS
-        # window-capture source. The capture worker stays independent of the
-        # native replay engine so the eyedropper and intensity slider never
-        # trigger an engine restart.
+        # Keyboard overlays use a separate capture worker so edits can be applied live.
         options_layout = option_section('Keyboard')
         keyboard_config = third_party_keyboard_settings(self.sm)
         self.keyboard_overlay_check = QCheckBox(
@@ -23610,7 +23085,7 @@ class _SettingsPage(QWidget):
             lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
         keyboard_intensity_label.setFixedWidth(64)
         keyboard_intensity_row.addWidget(keyboard_intensity_label)
-        self.keyboard_intensity = _SettingsSlider(Qt.Orientation.Horizontal)
+        self.keyboard_intensity = ClickToSeekSlider(Qt.Orientation.Horizontal)
         self.keyboard_intensity.setRange(0, 100)
         self.keyboard_intensity.setValue(keyboard_config['intensity'])
         set_theme_style(self.keyboard_intensity, slider_qss)
@@ -23663,7 +23138,6 @@ class _SettingsPage(QWidget):
         background_layout.addLayout(source_buttons)
         sections_layout.addStretch()
 
-        # Composite preview
         preview_panel = QFrame()
         preview_panel.setObjectName('overlayPreviewPanel')
         set_theme_style(preview_panel,
@@ -23750,185 +23224,6 @@ class _SettingsPage(QWidget):
         wl.addWidget(scroll)
         return wrapper
 
-    def _make_visuals_page(self):
-        return self._make_visuals_page_unified_legacy()
-
-    def _make_visuals_page_legacy(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_8)
-        layout.setSpacing(0)
-        preview_background = self._load_overlay_preview_background()
-
-        # Camera Overlay --
-        layout.addWidget(_flat_section_header('Camera Overlay'))
-        layout.addSpacing(12)
-
-        self.camera_check = QCheckBox('Enable camera overlay')
-        set_theme_style(self.camera_check, checkbox_qss)
-        self.camera_check.setChecked(self.sm.get('camera_enabled', False))
-        self.camera_check.toggled.connect(self._on_camera_toggled)
-        layout.addWidget(self.camera_check)
-        layout.addSpacing(8)
-
-        cam_dev_row = QHBoxLayout()
-        cam_dev_row.setSpacing(8)
-        _dev_lbl = QLabel('Device')
-        set_theme_style(_dev_lbl,
-            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
-        _dev_lbl.setFixedWidth(80)
-        cam_dev_row.addWidget(_dev_lbl)
-        self.camera_device_combo = _DropdownCombo()
-        set_theme_style(self.camera_device_combo, combo_qss)
-        self._populate_camera_devices()
-        self.camera_device_combo.currentIndexChanged.connect(self._on_camera_device_changed)
-        cam_dev_row.addWidget(self.camera_device_combo, 1)
-        refresh = IconButton('refresh.png', label='Refresh')
-        refresh.setObjectName('micRefreshBtn')
-        refresh.setFixedSize(26, 26)
-        refresh.setToolTip('Re-scan video devices')
-        refresh.clicked.connect(self._populate_camera_devices)
-        cam_dev_row.addWidget(refresh)
-        layout.addLayout(cam_dev_row)
-        layout.addSpacing(6)
-
-        self.camera_overlay_editor = CameraOverlayEditor()
-        self.camera_overlay_editor.setObjectName('cameraOverlayEditor')
-        self.camera_overlay_editor.set_rect(
-            self.sm.get('camera_overlay_rect', DEFAULT_OVERLAY_RECT))
-        self.camera_overlay_editor.set_enabled(
-            bool(self.sm.get('camera_enabled', False)))
-        self.camera_overlay_editor.set_background(preview_background)
-        self.camera_overlay_editor.rect_changed.connect(
-            self._on_camera_overlay_rect_changed)
-        layout.addWidget(self.camera_overlay_editor)
-        layout.addSpacing(6)
-        self._camera_preview_timer = QTimer(self)
-        self._camera_preview_timer.setInterval(100)
-        self._camera_preview_timer.timeout.connect(self._update_camera_preview)
-
-        # Image Overlay --
-        layout.addSpacing(28)
-        layout.addWidget(_flat_section_header('Image Overlay'))
-        layout.addSpacing(12)
-
-        image_path = str(self.sm.get('image_overlay_path', '') or '')
-        image_enabled = bool(self.sm.get('image_overlay_enabled', False))
-        self.image_overlay_check = QCheckBox('Enable image overlay')
-        set_theme_style(self.image_overlay_check, checkbox_qss)
-        self.image_overlay_check.setChecked(image_enabled)
-        self.image_overlay_check.toggled.connect(self._on_image_overlay_toggled)
-        layout.addWidget(self.image_overlay_check)
-        layout.addSpacing(8)
-
-        image_row = QHBoxLayout()
-        image_row.setSpacing(8)
-        image_label = QLabel('Image')
-        set_theme_style(image_label,
-            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
-        image_label.setFixedWidth(80)
-        image_row.addWidget(image_label)
-        self.image_overlay_path = QLineEdit(image_path)
-        self.image_overlay_path.setReadOnly(True)
-        self.image_overlay_path.setPlaceholderText('No image selected')
-        set_theme_style(self.image_overlay_path, combo_qss)
-        image_row.addWidget(self.image_overlay_path, 1)
-        choose_image = QPushButton('Choose image')
-        set_theme_style(choose_image, button_outline_qss)
-        choose_image.clicked.connect(self._choose_image_overlay)
-        image_row.addWidget(choose_image)
-        clear_image = QPushButton('Clear')
-        set_theme_style(clear_image, button_secondary_qss)
-        clear_image.clicked.connect(self._clear_image_overlay)
-        image_row.addWidget(clear_image)
-        layout.addLayout(image_row)
-        layout.addSpacing(8)
-
-        image_controls = QHBoxLayout()
-        image_controls.setSpacing(8)
-        fit_label = QLabel('Placement')
-        set_theme_style(fit_label,
-            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
-        fit_label.setFixedWidth(80)
-        image_controls.addWidget(fit_label)
-        self.image_overlay_fit = _DropdownCombo()
-        set_theme_style(self.image_overlay_fit, combo_qss)
-        self.image_overlay_fit.addItem('Fit inside frame', 'fit')
-        self.image_overlay_fit.addItem('Fill frame', 'fill')
-        fit_index = self.image_overlay_fit.findData(
-            self.sm.get('image_overlay_fit', 'fit'))
-        self.image_overlay_fit.setCurrentIndex(max(0, fit_index))
-        self.image_overlay_fit.currentIndexChanged.connect(
-            self._on_image_overlay_fit_changed)
-        image_controls.addWidget(self.image_overlay_fit, 1)
-        opacity_label = QLabel('Opacity')
-        set_theme_style(opacity_label,
-            lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
-        opacity_label.setFixedWidth(72)
-        image_controls.addWidget(opacity_label)
-        self.image_overlay_opacity = QSlider(Qt.Orientation.Horizontal)
-        self.image_overlay_opacity.setRange(10, 100)
-        self.image_overlay_opacity.setValue(
-            int(self.sm.get('image_overlay_opacity', 100)))
-        set_theme_style(self.image_overlay_opacity, slider_qss)
-        self.image_overlay_opacity.valueChanged.connect(
-            self._on_image_overlay_opacity_changed)
-        image_controls.addWidget(self.image_overlay_opacity, 1)
-        self.image_overlay_opacity_value = QLabel(
-            f"{self.image_overlay_opacity.value()}%")
-        self.image_overlay_opacity_value.setFixedWidth(38)
-        set_theme_style(self.image_overlay_opacity_value,
-            lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
-        image_controls.addWidget(self.image_overlay_opacity_value)
-        layout.addLayout(image_controls)
-        layout.addSpacing(6)
-
-        self.image_overlay_editor = OverlayPlacementEditor(
-            'IMAGE', DEFAULT_IMAGE_OVERLAY_RECT)
-        self.image_overlay_editor.set_background(preview_background)
-        self.image_overlay_editor.set_rect(self.sm.get(
-            'image_overlay_rect', DEFAULT_IMAGE_OVERLAY_RECT))
-        image_pixmap = QPixmap(image_path) if image_path else QPixmap()
-        self.image_overlay_editor.set_overlay_pixmap(image_pixmap)
-        self.image_overlay_editor.set_empty_text('CHOOSE AN IMAGE TO PREVIEW')
-        self.image_overlay_editor.set_enabled(image_enabled)
-        self.image_overlay_editor.rect_changed.connect(
-            self._on_image_overlay_rect_changed)
-        layout.addWidget(self.image_overlay_editor)
-        layout.addSpacing(6)
-        image_hint = QLabel('Transparent PNG and WebP files keep their alpha.')
-        image_hint.setWordWrap(True)
-        set_theme_style(image_hint, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
-        layout.addWidget(image_hint)
-
-        # Keyboard visualization is intentionally shelved while mouse input
-        # remains available in the unified editor.
-        layout.addSpacing(28)
-        layout.addWidget(_flat_section_header('Input Overlays'))
-        layout.addSpacing(10)
-        coming_soon = QLabel(
-            'Keyboard overlay coming soon.')
-        coming_soon.setWordWrap(True)
-        set_theme_style(coming_soon, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
-        layout.addWidget(coming_soon)
-
-        layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        set_theme_style(scroll, scrollbar_qss)
-        scroll.setWidget(page)
-
-        wrapper = QWidget()
-        wrapper.setStyleSheet('background: transparent;')
-        wl = QVBoxLayout(wrapper)
-        wl.setContentsMargins(0, 0, 0, 0)
-        wl.setSpacing(0)
-        wl.addWidget(scroll)
-        return wrapper
-
     def _on_theme_applied(self):
         """Re-apply the full app stylesheet using current theme colors."""
         global _COMBO_STYLE, _LABEL_STYLE
@@ -23951,7 +23246,6 @@ class _SettingsPage(QWidget):
         app = QApplication.instance()
         if app is not None:
             apply_app_style(app)
-        # Re-apply styles for this settings page
         self._apply_styles()
         QTimer.singleShot(0, self._fit_category_bar)
         self._set_settings_content_surface()
@@ -23969,7 +23263,6 @@ class _SettingsPage(QWidget):
         if 'keyboard_color_swatch' in self.__dict__:
             self._sync_keyboard_color_swatch(
                 third_party_keyboard_settings(self.sm)['color'])
-        # Signal the main window to rebuild its stylesheet
         top = self.window()
         if hasattr(top, '_apply_theme'):
             top._apply_theme()
@@ -24159,7 +23452,8 @@ class _SettingsPage(QWidget):
         self._apply_ui_performance_runtime()
 
     def _apply_ui_performance_runtime(self):
-        from ui.clip_viewer import ClipViewer, _TIMELINE_IMAGE_CACHE, _TIMELINE_CACHE_LOCK
+        from ui.clip_viewer import ClipViewer
+        from ui.editor_timeline import clear_timeline_image_cache
         preload = getattr(self.window(), '_editor_preload', None)
         if preload is not None:
             preload.refresh()
@@ -24171,8 +23465,7 @@ class _SettingsPage(QWidget):
                 widget.set_timeline_preview_enabled(timeline)
                 widget._refresh_live_preview(immediate=True)
         if not timeline:
-            with _TIMELINE_CACHE_LOCK:
-                _TIMELINE_IMAGE_CACHE.clear()
+            clear_timeline_image_cache()
         grid = getattr(self.window(), 'clip_grid', None)
         if grid is not None:
             grid.apply_thumbnail_preference()

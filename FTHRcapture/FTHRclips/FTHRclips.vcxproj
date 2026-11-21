@@ -58,6 +58,7 @@
     <ClInclude Include="include\packet_buffer_pool.h" />
     <ClInclude Include="include\replay_encoder.h" />
     <ClInclude Include="include\save_clip_task.h" />
+    <ClInclude Include="include\frame_pacing_trace.h" />
     <ClInclude Include="include\shared_memory.h" />
     <ClInclude Include="include\video_encoder.h" />
     <ClInclude Include="include\windows_dxgi_recovery.h" />

@@ -14,7 +14,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QDoubleSpinBox, QFileDialog, QLabel, QPushButton, QSlider,
+    QApplication, QDoubleSpinBox, QFileDialog, QLabel, QPushButton,
     QVBoxLayout, QWidget,
 )
 
@@ -26,6 +26,7 @@ from core.library_covers import (
 )
 from core.media_process import run_media_process
 from ui.dialogs import FthrDialog, FthrMessageDialog
+from ui.sliders import ClickToSeekSlider
 from ui.style import (
     Colors, Fonts, button_outline_qss, button_primary_qss,
     button_secondary_qss, label_body, set_theme_style,
@@ -443,7 +444,7 @@ class ClipCoverDialog(FthrDialog):
         self._frame_controls = QWidget(self)
         frame_layout = QVBoxLayout(self._frame_controls)
         frame_layout.setContentsMargins(0, 0, 0, 0)
-        self.frame_slider = QSlider(Qt.Orientation.Horizontal)
+        self.frame_slider = ClickToSeekSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setRange(0, 0)
         self.frame_slider.valueChanged.connect(self._frame_slider_changed)
         frame_layout.addWidget(self.frame_slider)

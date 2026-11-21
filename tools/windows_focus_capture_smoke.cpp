@@ -1,141 +1,254 @@
-// A separate test window process named valorant.exe selects the real
-// anti-cheat route. The capture host keeps its own normal driver profile.
+﻿// The source process is named valorant.exe to exercise protected WGC routing.
 #include "capture_engine.h"
+
 #include <winrt/base.h>
+#include <mmsystem.h>
+
+#include <array>
 #include <chrono>
+#include <cmath>
+#include <cstddef>
 #include <filesystem>
 #include <iostream>
+#include <string_view>
 #include <thread>
+
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "winmm.lib")
 
-static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
-    if (message == WM_APP + 1) {
-        // Let the foreground test process hand focus to the other test window.
-        // A background process cannot reliably call SetForegroundWindow itself.
-        return SetForegroundWindow(reinterpret_cast<HWND>(w));
-    }
-    if (message == WM_PAINT) {
-        PAINTSTRUCT ps{};
-        HDC dc = BeginPaint(hwnd, &ps);
+namespace {
+using namespace std::chrono_literals;
+using Clock = std::chrono::steady_clock;
+constexpr wchar_t kWindowClass[] = L"FthrFocusSmoke";
+constexpr UINT kFocus = WM_APP + 1;
+constexpr UINT kScene = WM_APP + 2;
+enum Scene : LONG_PTR { Before = 1, After, OffFocus };
+
+struct Tone {
+    uint32_t riff = 0x46464952;
+    uint32_t riff_size = 36 + 2 * 4800;
+    uint32_t wave = 0x45564157;
+    uint32_t fmt = 0x20746d66;
+    uint32_t fmt_size = 16;
+    uint16_t format = 1;
+    uint16_t channels = 1;
+    uint32_t sample_rate = 48000;
+    uint32_t byte_rate = 96000;
+    uint16_t block_align = 2;
+    uint16_t bits = 16;
+    uint32_t data = 0x61746164;
+    uint32_t data_size = 2 * 4800;
+    std::array<int16_t, 4800> samples{};
+};
+static_assert(offsetof(Tone, samples) == 44);
+
+std::wstring SourceTitle(DWORD pid) {
+    return L"FTHR synthetic focus source " + std::to_wstring(pid);
+}
+
+void Fill(HDC dc, const RECT& bounds, COLORREF color) {
+    const auto brush = CreateSolidBrush(color);
+    FillRect(dc, &bounds, brush);
+    DeleteObject(brush);
+}
+
+LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case kFocus:
+        return SetForegroundWindow(reinterpret_cast<HWND>(wparam));
+    case kScene:
+        SetWindowLongPtrW(window, GWLP_USERDATA, static_cast<LONG_PTR>(wparam));
+        InvalidateRect(window, nullptr, FALSE);
+        UpdateWindow(window);
+        return TRUE;
+    case WM_TIMER:
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        const HDC dc = BeginPaint(window, &paint);
         RECT bounds{};
-        GetClientRect(hwnd, &bounds);
-        const auto shade = static_cast<BYTE>(GetTickCount64() / 20 % 180 + 40);
-        HBRUSH brush = CreateSolidBrush(RGB(20, shade, 110));
-        FillRect(dc, &bounds, brush);
-        DeleteObject(brush);
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-    return DefWindowProcW(hwnd, message, w, l);
-}
-
-static void Pump(HWND animated, int milliseconds) {
-    const auto end = std::chrono::steady_clock::now()
-        + std::chrono::milliseconds(milliseconds);
-    while (std::chrono::steady_clock::now() < end) {
-        MSG msg{};
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        GetClientRect(window, &bounds);
+        const auto scene = GetWindowLongPtrW(window, GWLP_USERDATA);
+        const auto color = scene == Before ? RGB(203, 26, 26)
+            : scene == After ? RGB(26, 205, 26) : RGB(255, 0, 255);
+        Fill(dc, bounds, color);
+        if (scene != OffFocus) {
+            const int x = bounds.right / 8
+                + static_cast<int>(GetTickCount64() / 15 % 64) * bounds.right / 96;
+            Fill(dc, RECT{x, bounds.bottom / 3, x + bounds.right / 10,
+                         bounds.bottom / 2}, RGB(246, 246, 246));
         }
-        InvalidateRect(animated, nullptr, FALSE);
-        UpdateWindow(animated);
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
-    }
-}
-
-int wmain(int argc, wchar_t** argv) {
-    if (argc != 3 && argc != 2) return 2;
-    winrt::init_apartment(winrt::apartment_type::multi_threaded);
-    HWND previous_foreground = GetForegroundWindow();
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = WindowProc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = L"FthrFocusSmoke";
-    RegisterClassW(&wc);
-    if (argc == 2 && std::wstring(argv[1]) == L"--source") {
-        HWND source = CreateWindowW(wc.lpszClassName, L"FTHR capture recovery test",
-            WS_OVERLAPPEDWINDOW, 60, 60, 420, 240, nullptr, nullptr, wc.hInstance, nullptr);
-        if (!source) return 3;
-        ShowWindow(source, SW_SHOW);
-        while (IsWindow(source)) Pump(source, 30);
+        EndPaint(window, &paint);
         return 0;
     }
-    if (argc != 3) return 2;
-    HWND source = nullptr;
-    for (int tick = 0; !source && tick < 100; ++tick) {
-        source = FindWindowW(wc.lpszClassName, L"FTHR capture recovery test");
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
-    HWND other = CreateWindowW(wc.lpszClassName, L"FTHR background transition test",
-        WS_OVERLAPPEDWINDOW, 510, 60, 420, 240, nullptr, nullptr, wc.hInstance, nullptr);
-    if (!source || !other) return 3;
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+HWND CreateSceneWindow(const wchar_t* title, Scene scene, const RECT& monitor) {
+    const HWND window = CreateWindowExW(WS_EX_TOPMOST, kWindowClass, title, WS_POPUP,
+        monitor.left, monitor.top, monitor.right - monitor.left, monitor.bottom - monitor.top,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (window) SetWindowLongPtrW(window, GWLP_USERDATA, scene);
+    return window;
+}
+
+bool Pump(HWND foreground, std::chrono::milliseconds duration) {
+    RECT bounds{};
+    if (!GetWindowRect(foreground, &bounds)) return false;
+    const POINT center{(bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2};
+    const auto end = Clock::now() + duration;
+    while (Clock::now() < end) {
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            DispatchMessageW(&message);
+        }
+        if (GetForegroundWindow() != foreground || WindowFromPoint(center) != foreground) {
+            std::cerr << "FOCUS_ERROR stage=unexpected_foreground expected=" << foreground
+                      << " actual=" << GetForegroundWindow()
+                      << " visible_at_center=" << WindowFromPoint(center) << std::endl;
+            return false;
+        }
+        std::this_thread::sleep_for(15ms);
+    }
+    return true;
+}
+
+bool Request(HWND window, UINT message, WPARAM value) {
+    DWORD_PTR result = 0;
+    return SendMessageTimeoutW(window, message, value, 0, SMTO_ABORTIFHUNG, 1500, &result)
+        && result;
+}
+
+int RunSource(const RECT& monitor, bool audio) {
+    const auto title = SourceTitle(GetCurrentProcessId());
+    const HWND source = CreateSceneWindow(title.c_str(), Before, monitor);
+    if (!source) return 3;
     ShowWindow(source, SW_SHOW);
-    ShowWindow(other, SW_SHOWNOACTIVATE);
     SetForegroundWindow(source);
-    Pump(source, 300);
+    SetTimer(source, 1, 15, nullptr);
+    Tone tone;
+    if (audio) {
+        for (size_t index = 0; index < tone.samples.size(); ++index) {
+            tone.samples[index] = static_cast<int16_t>(1500 * std::sin(
+                6.28318530718 * 440 * index / tone.sample_rate));
+        }
+        if (!PlaySoundW(reinterpret_cast<LPCWSTR>(&tone), nullptr,
+                        SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT)) return 3;
+    }
+    while (IsWindow(source)) {
+        MSG message{};
+        if (GetMessageW(&message, nullptr, 0, 0) <= 0) break;
+        DispatchMessageW(&message);
+    }
+    if (audio) PlaySoundW(nullptr, nullptr, 0);
+    return 0;
+}
+
+int RunCapture(const wchar_t* monitor_path, const RECT& monitor, HWND source,
+               const std::filesystem::path& output, bool audio) {
+    const HWND other = CreateSceneWindow(L"FTHR synthetic off-focus marker", OffFocus, monitor);
+    if (!other) return 3;
+    // Show the decoy behind the source. Moving the decoy to the foreground
+    // raises it above the source in the topmost band.
+    if (!SetWindowPos(other, source, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+        || !Pump(source, 250ms)) return 3;
+
+    fthr::SharedMemoryLayout response{};
     fthr::CaptureConfig config;
     config.capture_mode = fthr::CaptureConfig::CaptureModeEnum::WINDOW;
     config.target_hwnd = reinterpret_cast<uintptr_t>(source);
-    config.monitor_device_path = argv[1];
-    config.encoder_preference = fthr::EncoderPreference::Nvidia;
+    config.monitor_device_path = monitor_path;
+    config.encoder_preference = fthr::EncoderPreference::Auto;
+    config.capture_cursor = false;
     config.buffer_seconds = 32;
-    config.audio_enabled = true;
+    config.audio_enabled = audio;
+    config.microphone_endpoint_id = L"FTHR synthetic smoke microphone disabled";
+    config.allow_replay_gaps = false;
     fthr::CaptureEngine engine;
-    int result = 0;
-    if (!engine.Initialize(config)) result = 4;
-    if (!result) Pump(source, 3000);
-    for (int cycle = 1; !result && cycle <= 3; ++cycle) {
-        const auto generation = engine.GetCaptureGeneration();
-        SendMessageW(source, WM_APP + 1, reinterpret_cast<WPARAM>(other), 0);
-        Pump(source, 250); // Allow the last in-flight foreground frame to finish.
-        const auto paused_frames = engine.GetFrameCount();
-        Pump(source, 4000);  // Longer than the native watchdog's stall limit.
-        auto flags = engine.GetCaptureHealthFlags();
-        if (GetForegroundWindow() != other
-            || !(flags & fthr::CAPTURE_HEALTH_PAUSED)
-            || engine.GetFrameCount() != paused_frames
-            || engine.GetCaptureGeneration() != generation
-            || (flags & fthr::CAPTURE_HEALTH_BACKEND_FAILED)) {
-            std::cerr << "FOCUS pause failed flags=" << flags
-                      << " expected_foreground=" << other
-                      << " actual_foreground=" << GetForegroundWindow()
-                      << " frames_before=" << paused_frames
-                      << " frames_after=" << engine.GetFrameCount()
-                      << " generation_before=" << generation
-                      << " generation_after=" << engine.GetCaptureGeneration() << std::endl;
-            result = 5;
-            break;
-        }
-        const auto background_frames = engine.GetFrameCount();
-        SendMessageW(other, WM_APP + 1, reinterpret_cast<WPARAM>(source), 0);
-        Pump(source, 1200);
-        if (GetForegroundWindow() != source || engine.GetFrameCount() <= background_frames
-            || engine.GetCaptureGeneration() != generation) {
-            std::cerr << "FOCUS replay-preserving resume failed" << std::endl;
-            result = 6;
-            break;
-        }
-        const auto clip = std::filesystem::path(argv[2])
-            / (L"focus-" + std::to_wstring(cycle) + L".mp4");
-        fthr::SharedMemoryLayout response{};
-        if (!engine.SaveClip(clip.c_str(), 30, &response)) {
-            std::wcerr << L"FOCUS save rejected: " << response.engine_string << std::endl;
-            result = 7;
-            break;
-        }
-        for (int tick = 0; tick < 100 && response.engine_response == fthr::ResponseType::NONE; ++tick)
-            Pump(source, 50);
-        if (response.engine_response != fthr::ResponseType::CLIP_SAVED) {
-            result = 8;
-            break;
-        }
-        std::cout << "FOCUS cycle=" << cycle << " saved=true generation="
-                  << engine.GetCaptureGeneration() << std::endl;
+    if (!engine.Initialize(config) || engine.GetStartupCaptureBackend() != "WGC_MONITOR") return 4;
+    const auto original_generation = engine.GetCaptureGeneration();
+    if (!Pump(source, 4000ms) || !Request(source, kFocus, reinterpret_cast<WPARAM>(other))
+        || !Pump(other, 250ms)) return 5;
+
+    const auto paused_frames = engine.GetFrameCount();
+    if (!Request(source, kScene, After) || !Pump(other, 4000ms)) return 5;
+    const auto flags = engine.GetCaptureHealthFlags();
+    if (!(flags & fthr::CAPTURE_HEALTH_PAUSED) || (flags & fthr::CAPTURE_HEALTH_BACKEND_FAILED)
+        || engine.GetFrameCount() != paused_frames
+        || engine.GetCaptureGeneration() != original_generation) {
+        std::cerr << "FOCUS_ERROR stage=pause flags=" << flags << std::endl;
+        return 5;
     }
+
+    const auto expected_generation = original_generation + (audio ? 1 : 0);
+    if (!Request(other, kFocus, reinterpret_cast<WPARAM>(source)) || !Pump(source, 3500ms)
+        || engine.GetFrameCount() <= paused_frames
+        || engine.GetCaptureGeneration() != expected_generation
+        || (engine.GetCaptureHealthFlags() & fthr::CAPTURE_HEALTH_BACKEND_FAILED)) {
+        std::cerr << "FOCUS_ERROR stage=resume expected_generation=" << expected_generation
+                  << " actual_generation=" << engine.GetCaptureGeneration() << std::endl;
+        return 6;
+    }
+
+    const auto clip = output / (audio ? L"focus-audio.mp4" : L"focus-video.mp4");
+    if (!engine.SaveClip(clip.c_str(), 30, &response)) {
+        std::wcerr << L"FOCUS_ERROR stage=save_rejected detail=" << response.engine_string << std::endl;
+        return 7;
+    }
+    for (int tick = 0; tick < 100 && response.engine_response == fthr::ResponseType::NONE; ++tick) {
+        if (!Pump(source, 50ms)) return 8;
+    }
+    if (response.engine_response != fthr::ResponseType::CLIP_SAVED) return 8;
+    std::cout << "FOCUS saved=true audio=" << audio << " generation_before=" << original_generation
+              << " generation_after=" << engine.GetCaptureGeneration() << std::endl;
     engine.Shutdown();
     DestroyWindow(other);
-    PostMessageW(source, WM_CLOSE, 0, 0);
-    if (IsWindow(previous_foreground)) SetForegroundWindow(previous_foreground);
-    return result;
+    return 0;
+}
+
+} // namespace
+
+int wmain(int argc, wchar_t** argv) {
+    const bool is_source = argc == 4 && std::wstring_view(argv[1]) == L"--source";
+    if (!is_source && argc != 5) return 2;
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    WNDCLASSW window_class{};
+    window_class.lpfnWndProc = WindowProc;
+    window_class.hInstance = GetModuleHandleW(nullptr);
+    window_class.lpszClassName = kWindowClass;
+    if (!RegisterClassW(&window_class)) return 2;
+
+    const auto monitor_path = argv[is_source ? 2 : 1];
+    fthr::monitor::WindowsMonitorTopologySource topology;
+    const auto selection = fthr::monitor::MonitorResolver(topology).Resolve(monitor_path);
+    if (!selection.ok()) return 2;
+    MONITORINFO info{sizeof(info)};
+    if (!GetMonitorInfoW(reinterpret_cast<HMONITOR>(selection.monitor.hmonitor), &info)) return 2;
+    const bool audio = std::wstring_view(argv[argc - 1]) == L"audio";
+    if (is_source) return RunSource(info.rcMonitor, audio);
+
+    const DWORD pid = wcstoul(argv[3], nullptr, 10);
+    const auto title = SourceTitle(pid);
+    const auto deadline = Clock::now() + 10s;
+    HWND source = nullptr;
+    while (Clock::now() < deadline) {
+        source = FindWindowW(kWindowClass, title.c_str());
+        DWORD owner = 0;
+        RECT bounds{};
+        if (source && GetWindowThreadProcessId(source, &owner) && owner == pid
+            && GetForegroundWindow() == source && GetWindowRect(source, &bounds)
+            && EqualRect(&bounds, &info.rcMonitor)) {
+            const int result = RunCapture(monitor_path, info.rcMonitor, source, argv[2], audio);
+            PostMessageW(source, WM_CLOSE, 0, 0);
+            return result;
+        }
+        std::this_thread::sleep_for(25ms);
+    }
+    std::cerr << "FOCUS_ERROR stage=fullscreen_source source=" << source
+              << " foreground=" << GetForegroundWindow() << std::endl;
+    return 3;
 }

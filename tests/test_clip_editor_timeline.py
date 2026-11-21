@@ -15,7 +15,6 @@ from core.ffmpeg_tools import (
 )
 from ui.clip_viewer import (
     ClipViewer,
-    ClickableSlider,
     EditorSnapshot,
     LiveVideoPreview,
     StretchDialog,
@@ -25,22 +24,40 @@ from ui.clip_viewer import (
     _editor_snapshot_to_draft,
     _video_filter_chain,
 )
+from ui.sliders import ClickToSeekSlider
 
 
-def test_editor_slider_uses_a_larger_hit_area_and_absolute_clicks(qtbot):
-    slider = ClickableSlider(Qt.Orientation.Horizontal)
-    qtbot.addWidget(slider)
-    slider.setRange(0, 100)
-    slider.resize(200, slider.minimumHeight())
-    slider.show()
+def test_editor_effect_slider_clicks_and_drags_as_one_edit(qtbot):
+    events = []
+    viewer = SimpleNamespace(
+        _effect_sliders={},
+        _effect_value_labels={},
+        _begin_effect_adjustment=lambda: events.append('start'),
+        _finish_effect_adjustment=lambda: events.append('finish'),
+        _on_effect_changed=lambda key, value: events.append((key, value)),
+    )
+    row = ClipViewer._build_effect_control(viewer, 'brightness', 'Brightness', 0, 100)
+    qtbot.addWidget(row)
+    row.resize(200, row.sizeHint().height())
+    row.show()
+    slider = viewer._effect_sliders['brightness']
+    assert isinstance(slider, ClickToSeekSlider)
+    assert slider.minimumHeight() == 26
 
     QTest.mouseClick(slider, Qt.MouseButton.LeftButton, pos=QPoint(150, 2))
     assert 70 <= slider.value() <= 85
+    assert events == ['start', ('brightness', slider.value()), 'finish']
 
-    QTest.mouseClick(
-        slider, Qt.MouseButton.LeftButton,
-        pos=QPoint(50, slider.height() - 2))
+    events.clear()
+    bottom = slider.height() - 2
+    QTest.mousePress(slider, Qt.MouseButton.LeftButton, pos=QPoint(50, bottom))
     assert 15 <= slider.value() <= 30
+    QTest.mouseMove(slider, QPoint(100, bottom))
+    assert 40 <= slider.value() <= 60
+    QTest.mouseRelease(slider, Qt.MouseButton.LeftButton, pos=QPoint(170, bottom))
+    assert 80 <= slider.value() <= 95
+    assert events[0] == 'start'
+    assert events[-2:] == [('brightness', slider.value()), 'finish']
 
 
 def test_timeline_click_jumps_playhead_instead_of_moving_nearest_trim_handle(qtbot):
@@ -57,6 +74,44 @@ def test_timeline_click_jumps_playhead_instead_of_moving_nearest_trim_handle(qtb
     assert 0.55 < seen[-1] < 0.65
     assert timeline.start_pct == 0.0
     assert timeline.end_pct == 1.0
+
+
+def test_timeline_drag_seeks_through_final_pointer_position(qtbot):
+    timeline = TrimSlider(10_000)
+    qtbot.addWidget(timeline)
+    timeline.resize(800, 116)
+    timeline.show()
+    positions = []
+    scrub_finished = []
+    timeline.seek_requested.connect(positions.append)
+    timeline.playhead_scrub_finished.connect(lambda: scrub_finished.append(len(positions)))
+
+    QTest.mousePress(timeline, Qt.MouseButton.LeftButton, pos=QPoint(300, 56))
+    QTest.mouseMove(timeline, QPoint(450, 56))
+    QTest.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=QPoint(550, 56))
+
+    assert positions == pytest.approx([(x - 14) / (800 - 28) for x in (300, 450, 550)])
+    assert scrub_finished == [3]
+    assert (timeline.start_pct, timeline.end_pct) == (0.0, 1.0)
+
+
+def test_timeline_trim_handle_drag_updates_range_without_seeking(qtbot):
+    timeline = TrimSlider(10_000)
+    qtbot.addWidget(timeline)
+    timeline.resize(800, 116)
+    timeline.show()
+    events = []
+    timeline.range_edit_started.connect(lambda: events.append('start'))
+    timeline.range_changed.connect(lambda start, end: events.append((start, end)))
+    timeline.range_edit_finished.connect(lambda: events.append('finish'))
+    timeline.seek_requested.connect(lambda _: events.append('seek'))
+
+    QTest.mousePress(timeline, Qt.MouseButton.LeftButton, pos=QPoint(14, 56))
+    QTest.mouseMove(timeline, QPoint(200, 56))
+    QTest.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=QPoint(200, 56))
+
+    assert timeline.start_pct == pytest.approx((200 - 14) / (800 - 28))
+    assert events == ['start', (timeline.start_pct, 1.0), 'finish']
 
 
 def test_repeated_scrub_requests_restart_the_seek_debounce():

@@ -29,8 +29,8 @@ extern "C" {
 namespace fthr {
 namespace {
 
-constexpr uint32_t kMaxSupportedChannels = 8;
-constexpr uint32_t kMaxSupportedSampleRate = 192000;
+constexpr uint32_t kMaxSupportedChannels = 16;
+constexpr uint32_t kMaxSupportedSampleRate = 384000;
 
 struct ParsedWaveFormat {
     uint32_t sample_rate = 0;

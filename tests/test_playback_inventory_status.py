@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QPushButton
 
 import main
-from core.capture_settings import encode_audio_device_tracks
+from core.capture_settings import encode_audio_device_tracks, resolve_audio_plan
 from core.settings_manager import SettingsManager
 
 
@@ -143,6 +143,45 @@ def test_successful_empty_scan_is_ready_empty_and_explicitly_has_no_mix_fallback
     assert 'system mix' in hint and 'fallback' in hint
     assert ('no' in hint or 'not' in hint or "won't" in hint)
     assert 'manual recording' in hint
+
+
+def test_split_windows_playback_roles_can_be_saved_together(
+        playback_page, qtbot, monkeypatch):
+    page = playback_page
+    payload = json.dumps({'schema_version': 1, 'microphones': [
+        {'endpoint_id': 'game-id', 'display_name': 'Game output',
+         'device_state': 1, 'is_default': True, 'is_default_communications': False},
+        {'endpoint_id': 'chat-id', 'display_name': 'Chat output',
+         'device_state': 1, 'is_default': False, 'is_default_communications': True},
+    ]})
+    _start_production_scan(
+        page, qtbot, monkeypatch, lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=payload, stderr=''))
+
+    page.audio_source_combo.setCurrentIndex(page.audio_source_combo.findData('combined'))
+    assert 'Several devices as separate tracks' in page.audio_source_hint.text()
+    page.audio_source_combo.setCurrentIndex(page.audio_source_combo.findData('devices'))
+
+    for endpoint_id, role in [('game-id', 'Windows playback default'),
+                              ('chat-id', 'Windows communications default')]:
+        assert 'capture both' in page.audio_source_hint.text()
+        index = page.extra_device_combo.findData(endpoint_id)
+        assert index >= 0
+        assert role in page.extra_device_combo.itemText(index)
+        page.extra_device_combo.setCurrentIndex(index)
+        page._on_add_extra_audio_device()
+
+    assert page.sm.get('audio_device_tracks') == [
+        {'id': 'game-id', 'name': 'Game output'},
+        {'id': 'chat-id', 'name': 'Chat output'},
+    ]
+    separate, applications, tracks = resolve_audio_plan(
+        page.sm.get('audio_source_mode'), page.sm.get('audio_capture_mode'),
+        page.sm.get('audio_device_tracks'), page.sm.get('per_app_audio_tracks'),
+    )
+    assert separate and not applications
+    assert encode_audio_device_tracks(tracks) == 'Game output;game-id|Chat output;chat-id'
+    assert 'capture both' not in page.audio_source_hint.text()
 
 
 def test_ready_missing_all_saved_tracks_preserves_ids_and_requested_config(

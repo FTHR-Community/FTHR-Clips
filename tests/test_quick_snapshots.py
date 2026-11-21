@@ -8,11 +8,11 @@ def test_real_playback_survives_rapid_switches_on_reused_gpu_surface(qtbot, monk
     import subprocess
     from core.ffmpeg_tools import get_ffmpeg_exe
     from ui.clip_editor_window import ClipEditorWindow
-    from ui import clip_grid
+    from ui import library_thumbnails
     from PySide6.QtMultimedia import QMediaPlayer
     if not quick_preview_supported():
         pytest.skip('Native hardware playback test')
-    monkeypatch.setattr(clip_grid, 'THUMB_CACHE_DIR', str(tmp_path / 'thumbnails'))
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path / 'thumbnails'))
     clips = [tmp_path / 'red.mp4', tmp_path / 'blue.mp4']
     for clip, color in zip(clips, ('red', 'blue'), strict=True):
         subprocess.run([

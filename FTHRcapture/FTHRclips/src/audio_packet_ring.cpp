@@ -100,6 +100,16 @@ EncodedAudioSnapshot EncodedAudioPacketRing::TakeSnapshot(
     }
     result.codec_extradata = codec_extradata_;
     result.packets.assign(first, last);
+    if (format_.codec == "pcm_f32le") {
+        // Coalesced silence may span many video frames. Cap the snapshot's
+        // packet durations at the selected end while leaving the backing
+        // data available to other saves and keeping each packet's source PTS.
+        for (auto& packet : result.packets) {
+            const int64_t packet_end = packet.pts_samples + packet.duration_samples;
+            if (packet_end > end_pts_samples)
+                packet.duration_samples -= packet_end - end_pts_samples;
+        }
+    }
     if (!result.packets.empty()) {
         result.first_pts_samples = result.packets.front().pts_samples;
         const auto& last = result.packets.back();

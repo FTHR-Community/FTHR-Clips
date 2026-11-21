@@ -10,6 +10,7 @@ ENGINE_SOURCE = (ROOT / 'FTHRcapture' / 'FTHRclips' / 'src' / 'main.cpp').read_t
     encoding='utf-8')
 ENGINE_HEADER = (ROOT / 'FTHRcapture' / 'FTHRclips' / 'include' / 'shared_memory.h').read_text(
     encoding='utf-8')
+LAUNCHER = (ROOT / 'launch_windows.bat').read_text(encoding='utf-8')
 
 
 def test_background_mode_defers_heavy_main_ui_but_starts_core_services():
@@ -51,21 +52,10 @@ def test_native_engine_has_a_graceful_shutdown_command_without_layout_change():
     assert 'engine.Shutdown();' in ENGINE_SOURCE
 
 
-def test_source_mode_prefers_the_fresh_direct_project_engine():
-    cfr_release = (
-        "project_root / 'FTHRclips' / 'x64' / 'CFRRelease' / 'FTHRclips.exe'"
-    )
-    direct_release = (
-        "project_root / 'FTHRclips' / 'x64' / 'Release' / 'FTHRclips.exe'"
-    )
-    compatibility_release = (
-        "project_root / 'x64' / 'Release' / 'FTHRClips.exe'"
-    )
-
-    assert cfr_release in MAIN_SOURCE
-    assert direct_release in MAIN_SOURCE
-    assert compatibility_release in MAIN_SOURCE
-    assert MAIN_SOURCE.index(cfr_release) < MAIN_SOURCE.index(direct_release)
-    assert MAIN_SOURCE.index(direct_release) < MAIN_SOURCE.index(compatibility_release)
-    assert 'self.engine_path = max(' in MAIN_SOURCE
+def test_source_engine_discovery_is_shared_and_frozen_uses_its_bundle():
+    assert 'from core.engine_discovery import find_source_engine' in MAIN_SOURCE
+    assert 'self.engine_path = find_source_engine(Path(__file__).parent.parent)' in MAIN_SOURCE
+    assert "bundled_engine = Path(sys._MEIPASS) / 'engine' / 'FTHRClips.exe'" in MAIN_SOURCE
+    assert 'self.engine_path = bundled_engine if bundled_engine.is_file() else None' in MAIN_SOURCE
     assert 'print(f"Engine found: {self.engine_path.resolve()}")' in MAIN_SOURCE
+    assert 'FTHR_UI\\core\\engine_discovery.py' in LAUNCHER

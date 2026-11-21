@@ -6,13 +6,14 @@ import sys
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QLineEdit
-from PySide6.QtWidgets import QCheckBox, QPushButton, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QPushButton, QVBoxLayout, QWidget
 
 from core.capture_settings import audio_plan_from_settings, compute_buffer_seconds
 from core.replay_storage import (
     MIB, MIN_BUDGET_MIB, REPLAY_STORAGE_KEY,
     ReplayStorageSettings, estimate_replay_disk_bytes, inspect_replay_folder,
 )
+from ui.sliders import ClickToSeekSlider
 from ui.style import (
     Colors, Fonts, Sizes, button_outline_qss, combo_qss,
     checkbox_qss, label_body, label_uppercase, lineedit_qss, set_theme_style, slider_qss,
@@ -33,7 +34,7 @@ def _space_text(size):
     return f'{size / _MB:,.0f} MB'
 
 
-class _BudgetSlider(QSlider):
+class _BudgetSlider(ClickToSeekSlider):
     def __init__(self, stops_mb, saved_mib, readout, hint):
         super().__init__(Qt.Orientation.Horizontal)
         self._stops = tuple((mb * _MB + MIB - 1) // MIB for mb in stops_mb)

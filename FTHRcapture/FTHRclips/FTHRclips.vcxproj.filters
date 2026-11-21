@@ -33,6 +33,9 @@
     <ClInclude Include="include\save_clip_task.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\frame_pacing_trace.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\hardware_encoder.h">
       <Filter>Header Files</Filter>
     </ClInclude>

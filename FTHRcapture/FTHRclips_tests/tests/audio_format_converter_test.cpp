@@ -220,6 +220,41 @@ void ConvertsPacked24AndEightChannelMasks() {
         "malformed padded PCM block alignment is rejected");
 }
 
+void HighRateEndpointsKeepDurationAndLevel() {
+    for (const DWORD rate : {352800u, 384000u}) {
+        const auto format = Extensible(WAVE_FORMAT_PCM, 24, 3, 1, rate, SPEAKER_FRONT_CENTER);
+        fthr::AudioFormatConverter converter;
+        CheckConverter(converter.Initialize(&format.Format), "high-rate PCM endpoint initializes");
+        const DWORD frames = rate / 100;
+        std::vector<uint8_t> input(frames * 3, 0);
+        for (DWORD i = 0; i < frames; ++i) input[i * 3 + 2] = 0x40;
+        std::vector<float> output;
+        CheckConverter(converter.Convert(input.data(), frames, &output) && converter.Flush(&output),
+            "high-rate endpoint converts and drains");
+        CheckConverter(output.size() == 480 * 2
+            && std::fabs(output[480] - 0.5f) < 0.001f
+            && std::fabs(output[481] - 0.5f) < 0.001f,
+            "10 ms of high-rate mono PCM produces 10 ms of level-matched stereo");
+    }
+}
+
+void WideEndpointsRetainEveryInputChannel() {
+    for (DWORD mask : {0u, 0xffffu}) {
+        const auto format = Extensible(WAVE_FORMAT_IEEE_FLOAT, 32, 64, 16, 48000, mask);
+        fthr::AudioFormatConverter converter;
+        CheckConverter(converter.Initialize(&format.Format), "16-channel endpoint initializes");
+        std::array<float, 16 * 16> input{};
+        for (size_t i = 0; i < 16; ++i) input[i * 16 + i] = 1.0f;
+        std::vector<float> output;
+        CheckConverter(converter.Convert(reinterpret_cast<const uint8_t*>(input.data()), 16, &output)
+            && output.size() == 32, "16-channel input downmixes to stereo");
+        for (size_t i = 0; i < 16; ++i) {
+            CheckConverter(output[i * 2] + output[i * 2 + 1] > 0.0f,
+                "each channel of the wide endpoint reaches the listening mix");
+        }
+    }
+}
+
 void ResamplingIsPersistentAndFlushesDelay() {
     WAVEFORMATEX input_format{};
     input_format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
@@ -1714,6 +1749,8 @@ void BodycamProductionPolicySignalQualityIsImproved() {
 int RunAudioFormatConverterTests() {
     ConvertsIntegerAndFloatFormatsToCanonicalStereo();
     ConvertsPacked24AndEightChannelMasks();
+    HighRateEndpointsKeepDurationAndLevel();
+    WideEndpointsRetainEveryInputChannel();
     ResamplingIsPersistentAndFlushesDelay();
     SilentNativePacketsKeepTheirCanonicalDuration();
     EncoderReportsSubmissionAndFlushResults();

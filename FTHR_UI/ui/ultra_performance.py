@@ -16,7 +16,7 @@ from core.capture_settings import (
 )
 from core.windows_microphone_devices import (
     MicrophoneDiscoveryCancelled, MicrophoneDiscoveryError, discover_microphones,
-    parse_microphone_inventory,
+    parse_microphone_inventory, playback_endpoint_label,
 )
 from ui.dialogs import FthrDialog
 from ui.style import (
@@ -228,7 +228,7 @@ class UltraAudioDialog(FthrDialog):
                     capture_output=True, encoding='utf-8', text=True, timeout=5,
                     creationflags=subprocess.CREATE_NO_WINDOW)
                 playback = [
-                    (endpoint.endpoint_id, endpoint.display_name)
+                    (endpoint.endpoint_id, playback_endpoint_label(endpoint))
                     for endpoint in parse_microphone_inventory(completed.stdout, strict=True)
                     if endpoint.is_active]
         except MicrophoneDiscoveryCancelled:

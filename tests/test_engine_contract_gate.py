@@ -204,7 +204,7 @@ def test_windows_clears_the_message_before_announcing_success():
     channel is emptied first so a success cannot carry a previous failure's
     message (sequence A)."""
     src = _engine_source('FTHRcapture/FTHRclips/src/capture_engine.cpp')
-    start = src.index('const bool ok = ProcessSaveClipTask(task)')
+    start = src.index('const bool ok = ProcessSaveClipTask(task,')
     body = src[start:start + 1200]
     publish = body.index('ResponseType::CLIP_SAVED')
     clear = body.index('SetEngineString(task.shared_memory, L"")')
@@ -215,7 +215,7 @@ def test_windows_success_is_conditional_on_the_outcome():
     """AUDIT-021 regression. CLIP_SAVED must be guarded by the save's result;
     an unconditional publish reports every failure as a success."""
     src = _engine_source('FTHRcapture/FTHRclips/src/capture_engine.cpp')
-    start = src.index('const bool ok = ProcessSaveClipTask(task)')
+    start = src.index('const bool ok = ProcessSaveClipTask(task,')
     body = src[start:start + 1200]
     guard = body.index('if (ok && task.shared_memory)')
     publish = body.index('ResponseType::CLIP_SAVED')

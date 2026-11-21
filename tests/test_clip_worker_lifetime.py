@@ -146,15 +146,15 @@ def test_metadata_worker_queues_probe_result_and_deletes_signals(
             total_bitrate_bps=456,
         ),
     )
-    from ui import clip_grid
-    monkeypatch.setattr(clip_grid, "_get_cached_thumb_path", lambda path: "thumb.jpg")
+    from ui import library_thumbnails
+    monkeypatch.setattr(library_thumbnails, "_get_cached_thumb_path", lambda path: "thumb.jpg")
     monkeypatch.setattr(
-        clip_grid, "_get_cached_duration_path",
+        library_thumbnails, "_get_cached_duration_path",
         lambda path: str(tmp_path / "duration.meta"),
     )
     writes = []
     monkeypatch.setattr(
-        clip_grid, "_write_cached_duration",
+        library_thumbnails, "_write_cached_duration",
         lambda *args: writes.append(args),
     )
 

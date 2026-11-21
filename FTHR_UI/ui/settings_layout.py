@@ -1,7 +1,143 @@
 """Compact settings sections that stack when their controls need more space."""
 from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (QBoxLayout, QWidget, QVBoxLayout, QHBoxLayout,
-                               QLabel, QToolButton, QCheckBox, QFrame, QSizePolicy)
+                               QLabel, QPushButton, QToolButton, QCheckBox, QFrame, QSizePolicy)
+
+from ui.style import Colors, Fonts, Sizes, ThemedDropdownArrow, label_body, set_theme_style
+
+
+class AccordionSection(QFrame):
+    """Collapsible section with an immediate, stable expand/collapse."""
+
+    def __init__(self, title: str, number: str = '', parent=None):
+        super().__init__(parent)
+        self.setObjectName('accordionSection')
+        self._title = title
+        self._expanded = False
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._header = QPushButton()
+        self._header.setObjectName('accordionHeader')
+        self._header.setCheckable(True)
+        self._header.setAccessibleName(title)
+        self._header.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._header.setFixedHeight(Sizes.CAPTURE_CONTROL_H)
+        self._header.clicked.connect(self.toggle)
+
+        h_layout = QHBoxLayout(self._header)
+        h_layout.setContentsMargins(16, 0, 16, 0)
+        h_layout.setSpacing(12)
+
+        if number:
+            num_lbl = QLabel(number)
+            h_layout.addWidget(num_lbl)
+
+        title_lbl = QLabel(title)
+        h_layout.addWidget(title_lbl)
+        h_layout.addStretch()
+
+        self._indicator = ThemedDropdownArrow()
+        h_layout.addWidget(self._indicator)
+
+        layout.addWidget(self._header)
+
+        self._body = QWidget()
+        self._body.setObjectName('accordionBody')
+        self._body.setVisible(False)
+        self._body_layout = QVBoxLayout(self._body)
+        self._body_layout.setContentsMargins(Sizes.SPACE_5, Sizes.SPACE_5, Sizes.SPACE_5, Sizes.SPACE_5)
+        self._body_layout.setSpacing(8)
+        layout.addWidget(self._body)
+        self.refresh_theme()
+
+    def add_content(self, widget: QWidget):
+        # Scope the surface style to direct content wrappers.
+        widget.setObjectName('accordionContent')
+        self._body_layout.addWidget(widget)
+
+    def add_layout(self, layout):
+        self._body_layout.addLayout(layout)
+
+    def clear_content(self):
+        """Remove the current body widgets so theme styles can be rebuilt."""
+        while self._body_layout.count():
+            item = self._body_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+            elif item.layout() is not None:
+                child_layout = item.layout()
+                while child_layout.count():
+                    child_item = child_layout.takeAt(0)
+                    child_widget = child_item.widget()
+                    if child_widget is not None:
+                        child_widget.deleteLater()
+
+    def refresh_theme(self):
+        """Refresh the section shell and header after a theme change."""
+        set_theme_style(self, lambda: (f'''
+            QFrame#accordionSection {{
+                background-color: {Colors.SURFACE_3};
+                border: 1px solid {Colors.BORDER};
+                border-radius: {Sizes.RADIUS_CARD}px;
+            }}
+            QPushButton#accordionHeader {{
+                background-color: {Colors.SURFACE_3};
+                border: none;
+                border-radius: {Sizes.RADIUS_CARD}px;
+                text-align: left;
+            }}
+            QPushButton#accordionHeader:hover {{
+                background-color: {Colors.CARD_BG_HI};
+            }}
+            QPushButton#accordionHeader:focus {{
+                border: 1px solid {Colors.ACCENT};
+            }}
+            QWidget#accordionBody,
+            QWidget#accordionBody > QWidget#accordionContent {{
+                background-color: transparent;
+            }}
+            QWidget#accordionBody QFrame#iconRow,
+            QWidget#accordionBody QFrame#iconTintRow,
+            QWidget#accordionBody QFrame#soundRow {{
+                background-color: transparent;
+                border: none;
+            }}
+        '''))
+        for label in self._header.findChildren(QLabel):
+            if label.text() == self._title:
+                set_theme_style(label, lambda: (f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY_L}px;'
+                    f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
+                    f' letter-spacing: {Fonts.TRACK_LABEL}px;'
+                    f' background: transparent;'))
+            else:
+                set_theme_style(label, lambda: (f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY_L}px;'
+                    f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
+                    f' background: transparent;'))
+        self._indicator.refresh_theme()
+
+    def toggle(self):
+        self._expanded = not self._expanded
+        self._header.setChecked(self._expanded)
+        self._indicator.setExpanded(self._expanded)
+        self._body.setVisible(self._expanded)
+
+    def expand(self):
+        if not self._expanded:
+            self.toggle()
+
+    def collapse(self):
+        if self._expanded:
+            self.toggle()
+
+    @property
+    def expanded(self) -> bool:
+        return self._expanded
 
 
 def settings_section():
@@ -16,8 +152,7 @@ def settings_section():
 
 def folded_settings_section(title, *, expanded=False):
     """Use the same immediate disclosure as Customize and Visuals."""
-    from ui.customize_page import _AccordionSection
-    section = _AccordionSection(title)
+    section = AccordionSection(title)
     content, layout = settings_section()
     layout.setSpacing(12)
     section.add_content(content)
@@ -53,7 +188,6 @@ class SettingHelp(QWidget):
     def __init__(self, control, description, parent=None):
         super().__init__(parent)
         from ui.icons import load_icon
-        from ui.style import Colors, Fonts, label_body, set_theme_style
         self.setObjectName('settingHelp')
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

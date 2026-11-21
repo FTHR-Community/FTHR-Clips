@@ -1,4 +1,11 @@
-# FTHR Clips 2.1.2
+# FTHR Clips 2.1.3
+
+## 21 November 2026 — Windows update
+
+- Drag the setup and uninstall windows by their headers.
+- Capture audio from Windows endpoints with up to 16 channels and sample rates up to 384 kHz. Audio settings now identify separate playback and communications defaults.
+- Export clips with long filenames using shorter temporary paths.
+- Click or drag sliders throughout the desktop app. Microphone gain applies when you release the slider.
 
 ## 16 November 2026 — FFmpeg maintenance and export diagnostics
 

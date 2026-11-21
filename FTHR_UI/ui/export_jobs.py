@@ -56,8 +56,12 @@ class _ExportJobRow(QWidget):
 
     def update_task(self, task):
         label = next((label for label, value in QUALITY_OPTIONS if value == task.quality), task.quality)
-        self.status.setText(f'{label} · {task.status}')
-        self.status.setToolTip(task.detail or task.output)
+        if getattr(task.result, 'finalization_target', None) is not None:
+            self.status.setText(f'Couldn’t finish saving {Path(task.output).name}')
+            self.status.setToolTip(task.result.failure_message())
+        else:
+            self.status.setText(f'{label} · {task.status}')
+            self.status.setToolTip(task.detail or task.output)
         percent = max(0, min(100, round(task.progress)))
         self.percent.setText(f'{percent}%')
         self.progress.setValue(percent)

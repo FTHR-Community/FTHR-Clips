@@ -27,7 +27,7 @@ def test_windows_success_is_after_transaction_completion() -> None:
     transaction = source.index('const auto result = transactional_save::Run(')
     assert source.index('if (result.success) return true;', transaction) > transaction
 
-    worker = source.index('const bool ok = ProcessSaveClipTask(task)')
+    worker = source.index('const bool ok = ProcessSaveClipTask(')
     success_guard = source.index('if (ok && task.shared_memory)', worker)
     response = source.index('ResponseType::CLIP_SAVED', success_guard)
 

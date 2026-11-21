@@ -1,5 +1,7 @@
 """Regression for default audio options rejected by legacy native parsers."""
-from core.engine_discovery import isolated_source_engines
+import os
+
+from core.engine_discovery import find_source_engine, isolated_source_engines
 from core.native_audio_capabilities import native_audio_policy_arguments
 
 
@@ -32,3 +34,25 @@ def test_source_discovery_includes_isolated_engine_but_not_packaged_or_test_bina
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b'fixture')
     assert isolated_source_engines(tmp_path) == [selected]
+
+
+def test_source_discovery_prefers_newest_native_output(tmp_path):
+    capture_root = tmp_path / 'FTHRcapture'
+    stale_direct = capture_root / 'FTHRclips/x64/CFRReleaseFinal/FTHRclips.exe'
+    solution = capture_root / 'x64/Release/FTHRClips.exe'
+    isolated = tmp_path / 'build/current/engine/FTHRclips.exe'
+    portable = tmp_path / 'dist/FTHRClips/_internal/engine/FTHRclips.exe'
+    assert find_source_engine(tmp_path) is None
+    for position, path in enumerate([stale_direct, isolated, solution, portable]):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'fixture')
+        timestamp = 1_700_000_000 + position * 10
+        os.utime(path, (timestamp, timestamp))
+    assert find_source_engine(tmp_path) == solution
+
+    newest_time = 1_700_000_050
+    os.utime(isolated, (newest_time, newest_time))
+    assert find_source_engine(tmp_path) == isolated
+
+    os.utime(solution, (newest_time, newest_time))
+    assert find_source_engine(tmp_path) == isolated

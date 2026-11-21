@@ -20,8 +20,7 @@ if sys.platform == 'win32':
     import ctypes.wintypes as wintypes
 
 
-# Window enumeration — Windows only.
-# capture via wlr-screencopy; per-window targeting is not available.
+# Capture targets come from Win32 or the Linux window inventory.
 
 def _get_exe_info(exe_path: str, size: int = 16, *,
                   include_icon: bool = True) -> 'tuple[str | None, QIcon | None]':
@@ -163,8 +162,7 @@ def _enumerate_capturable_windows(*, include_icons: bool = True):
 
     user32.EnumWindows(WNDENUMPROC(_callback), 0)
 
-    # Enrich each entry with display_name + icon, caching per exe path so we
-    # only call SHGetFileInfo once when the same app has multiple windows.
+    # Cache shell metadata per executable; several windows can share it.
     exe_cache: dict = {}   # exe_path → (display_name, icon)
     for entry in results:
         exe = _get_hwnd_exe_path(entry['hwnd'])
@@ -181,14 +179,11 @@ def _enumerate_capturable_windows(*, include_icons: bool = True):
         entry['display_name'] = name or entry['title']
         entry['icon']         = icon
 
-    # Sort: detected games first, then alphabetically by display name
     results.sort(key=lambda x: (not x['is_game'], x['display_name'].lower()))
     return results
 
 
-# Shared combobox style (kept for capture-source picker). These are functions,
-# rather than import-time constants, so theme edits can refresh this legacy
-# compact widget along with the newer top-bar popup.
+# Resolve theme colors when the widget refreshes.
 def _combo_style() -> str:
     return combo_qss(background=Colors.SURFACE_2, compact=True)
 
@@ -201,7 +196,6 @@ def _label_style() -> str:
     letter-spacing: 0px;
 '''
 
-# SettingBlock — expandable tile replacing the label+combobox pattern
 
 class SettingBlock(QWidget):
     """
@@ -234,7 +228,6 @@ class SettingBlock(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # header (always visible)
         self._header = QFrame()
         self._header.setObjectName('settingHeader')
         self._header.setFixedHeight(52)
@@ -265,7 +258,6 @@ class SettingBlock(QWidget):
         h_layout.addWidget(self._value_widget)
         outer.addWidget(self._header)
 
-        # options panel (hidden by default)
         self._options_frame = QFrame()
         self._options_frame.setObjectName('settingOptions')
         set_theme_style(self._options_frame, lambda: (f'QFrame#settingOptions {{ background-color: {Colors.SURFACE_1};'
@@ -411,12 +403,10 @@ class CaptureSettingsWidget(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(8)
 
-        # Row 1: four expandable setting blocks
         settings_row = QHBoxLayout()
         settings_row.setSpacing(8)
         settings_row.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # Clip Length block
         _clip_labels = ['5s', '10s', '15s', '30s', '45s', '1m', '2m', '3m', '5m', '10m', '15m']
         _clip_values = [5, 10, 15, 30, 45, 60, 120, 180, 300, 600, 900]
         _clip_cur = _clip_labels[_clip_values.index(self.current_clip_length)] \
@@ -426,7 +416,6 @@ class CaptureSettingsWidget(QWidget):
         self.clip_block.opened.connect(self._on_block_opened)
         settings_row.addWidget(self.clip_block)
 
-        # Framerate block
         _fps_labels = ['30', '60', '120', '144', '165', '240', '360']
         _fps_values = [30, 60, 120, 144, 165, 240, 360]
         _fps_cur = str(self.current_framerate) \
@@ -436,7 +425,6 @@ class CaptureSettingsWidget(QWidget):
         self.fps_block.opened.connect(self._on_block_opened)
         settings_row.addWidget(self.fps_block)
 
-        # Resolution block
         _res_labels = ['480p', '720p', '1080p', '1440p', 'Source']
         _res_map    = {'480p': '480p', '720p': '720p', '1080p': '1080p',
                        '1440p': '1440p', 'source': 'Source'}
@@ -446,7 +434,6 @@ class CaptureSettingsWidget(QWidget):
         self.res_block.opened.connect(self._on_block_opened)
         settings_row.addWidget(self.res_block)
 
-        # Quality block
         _quality_labels = ['Low', 'Medium', 'High']
         _quality_map = {'low': 'Low', 'medium': 'Medium', 'high': 'High'}
         _quality_cur = _quality_map.get(self.current_bitrate_level, 'High')
@@ -463,7 +450,6 @@ class CaptureSettingsWidget(QWidget):
 
         main_layout.addLayout(settings_row)
 
-        # Capture source row: Desktop | Window/Game picker
         source_row = QHBoxLayout()
         source_row.setSpacing(12)
 
@@ -478,7 +464,6 @@ class CaptureSettingsWidget(QWidget):
         self.capture_mode_combo.currentIndexChanged.connect(self._on_capture_mode_changed)
         source_row.addWidget(self.capture_mode_combo)
 
-        # Window list — visible only in Window mode
         self.window_combo = WheelSafeComboBox()
         self.window_combo.setStyleSheet(_combo_style())
         self.window_combo.setMinimumWidth(260)
@@ -512,11 +497,8 @@ class CaptureSettingsWidget(QWidget):
         source_row.addStretch()
         main_layout.addLayout(source_row)
 
-        # Show / hide window picker based on current mode
         self._update_window_picker_visibility()
 
-        # If we start in window mode, populate the list immediately so the user
-        # doesn't have to click REFRESH before seeing anything.
         if self.current_capture_mode == 'window':
             self._refresh_window_list()
 
@@ -531,7 +513,6 @@ class CaptureSettingsWidget(QWidget):
         hw_status_layout.setContentsMargins(0, 0, 0, 0)
         hw_status_layout.setSpacing(12)
 
-        # Warning icon + message
         warning_label = QLabel('Warning')
         set_theme_style(warning_label, lambda: (f'color: {Colors.TEXT}; font-size: 14px;'))
         hw_status_layout.addWidget(warning_label)
@@ -547,7 +528,6 @@ class CaptureSettingsWidget(QWidget):
 
         hw_status_layout.addStretch()
 
-        # Retry button
         self.retry_button = QPushButton('Retry')
         set_theme_style(self.retry_button, lambda: (f'''
             QPushButton {{
@@ -591,14 +571,12 @@ class CaptureSettingsWidget(QWidget):
         combo.currentIndexChanged.connect(callback)
         return combo
 
-    # Block management
 
     def _on_block_opened(self, opened_block):
         for block in self._setting_blocks:
             if block is not opened_block:
                 block.collapse()
 
-    # Signal handlers (block-based)
 
     def _on_clip_block_changed(self, label: str):
         label_to_sec = {'5s': 5, '10s': 10, '15s': 15, '30s': 30, '45s': 45,
@@ -665,7 +643,6 @@ class CaptureSettingsWidget(QWidget):
         self.window_combo.blockSignals(True)
         self.window_combo.clear()
 
-        # Try to re-select the previously chosen HWND
         select_idx = -1
         for i, w in enumerate(self._window_list):
             label = ('★ ' if w['is_game'] else '') + w['display_name']
@@ -779,11 +756,9 @@ class CaptureSettingsWidget(QWidget):
         self.hw_status_message.setText('Hardware encoding initialized successfully')
         self.hw_status_bar.setVisible(True)
 
-        # Hide after 3 seconds
         from PySide6.QtCore import QTimer
         QTimer.singleShot(3000, self.hide_hardware_encoding_error)
 
-    # Getters
 
     def get_clip_length(self):    return self.current_clip_length
     def get_framerate(self):      return self.current_framerate

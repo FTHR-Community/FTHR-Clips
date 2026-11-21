@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 from core import linux_runtime, linux_tools
+from core.save_trace import mark_save_trace
 
 
 _FTHR_HYPR_CONF = Path.home() / '.config' / 'hypr' / 'fthr-hotkeys.conf'
@@ -1000,6 +1001,8 @@ class HotkeyManager(QObject):
             hotkey_id = int(native_message.wParam)
             action = self._windows_hotkey_actions.get(hotkey_id)
             if action:
+                if action == 'save_clip':
+                    mark_save_trace('ui_windows_hotkey_received')
                 key = self._windows_hotkey_combos.get(action, '?')
                 print(f'[Hotkey] Received native Windows hotkey {key} -> {action}')
                 self._emit_action(action, source='keyboard')
@@ -1048,6 +1051,8 @@ class HotkeyManager(QObject):
         }
         signal = signals.get(action)
         if signal:
+            if action == 'save_clip':
+                mark_save_trace('ui_save_hotkey_dispatched', source=source)
             print(f'[Hotkey] Dispatching {source} action={action}')
             signal.emit()
 

@@ -18,6 +18,8 @@ namespace fthr {
 struct EncodedAudioPacket {
     std::vector<uint8_t> data;
     int64_t pts_samples = 0;
+    // A PCM snapshot can shorten the duration while sharing its backing
+    // payload. The consumer reads only the retained prefix in that case.
     int64_t duration_samples = 1024;
     std::shared_ptr<AudioSpoolPayload> storage;
     std::shared_ptr<ReplayStoragePayload> replay_storage;

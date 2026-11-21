@@ -8,6 +8,7 @@ from PySide6.QtGui import QImage, QMouseEvent
 from PySide6.QtWidgets import QScrollArea
 
 from ui import clip_grid
+from ui import library_thumbnails
 
 
 def _settings(path):
@@ -18,7 +19,7 @@ def _settings(path):
 
 def test_thumbnail_queue_drains_without_a_new_scan_or_capture(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr(clip_grid, '_MAX_THUMBNAIL_QUEUE', 2)
-    monkeypatch.setattr(clip_grid, 'THUMB_CACHE_DIR', str(tmp_path / 'cache'))
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path / 'cache'))
     image = QImage(16, 9, QImage.Format.Format_RGB32)
     image.fill(Qt.GlobalColor.red)
     for i in range(8):

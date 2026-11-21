@@ -10,6 +10,7 @@
 // cadence and encoder continue.  WGC_SOURCE_STALE_CANDIDATE is diagnostic
 // evidence only; it must never trigger automatic recovery by itself.
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 
@@ -17,6 +18,34 @@ namespace fthr::capture_pipeline_health {
 
 inline constexpr int64_t kEncoderOutputStallThresholdMs = 2000;
 inline constexpr int64_t kWgcSourceStaleThresholdMs = 5000;
+
+class EncoderOutputProgress {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    explicit EncoderOutputProgress(Clock::time_point start) noexcept
+        : last_progress_(start) {}
+
+    void Rebaseline(Clock::time_point now) noexcept {
+        last_progress_ = now;
+    }
+
+    bool Observe(uint64_t packets, Clock::time_point now) noexcept {
+        if (packets == previous_packets_) return false;
+        previous_packets_ = packets;
+        last_progress_ = now;
+        return true;
+    }
+
+    int64_t AgeMs(Clock::time_point now) const noexcept {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_progress_).count();
+    }
+
+private:
+    uint64_t previous_packets_ = 0;
+    Clock::time_point last_progress_;
+};
 
 enum class Classification {
     Healthy,

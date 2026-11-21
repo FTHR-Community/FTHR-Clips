@@ -48,6 +48,10 @@ class EngineLaunchContext:
 def _windows_symbolic_error_name(error: int) -> str | None:
     # Confirmed by the pinned Windows SDK winerror.h. This maps the constant;
     # it does not infer which API failed. The call site is captured separately.
+    if error == 225:
+        return 'ERROR_VIRUS_INFECTED'
+    if error == 226:
+        return 'ERROR_VIRUS_DELETED'
     if error == 4551:
         return 'ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION'
     return None
@@ -120,12 +124,16 @@ def format_engine_launch_failure(
             'requested_encoder': context.requested_encoder,
         },
     }
+    detail = 'The operating system could not start the capture engine executable.'
+    if native_fields['win32_error_decimal'] in (225, 226):
+        detail = ('Windows reported an antivirus detection when starting the capture engine. '
+                  'Check your antivirus protection history and send the detection name '
+                  'and app version to FTHR support.')
     return EngineStartupFailure(
         code='ENGINE_PROCESS_LAUNCH_FAILED',
         title='CAPTURE ENGINE LAUNCH FAILED',
         detail=(
-            'The operating system could not start the capture engine executable. '
-            'diagnostic='
+            detail + ' diagnostic='
             + json.dumps(diagnostic, ensure_ascii=False, separators=(',', ':'))
         ),
     )

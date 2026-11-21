@@ -203,17 +203,21 @@ bool EnumerateWindowsMicrophoneEndpoints(
         if (SUCCEEDED(apartment)) CoUninitialize();
         return false;
     }
-    ComPtr<IMMDevice> default_device;
-    std::wstring default_id;
-    if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(render ? eRender : eCapture, eConsole, &default_device))) {
+    const auto flow = render ? eRender : eCapture;
+    const auto default_endpoint_id = [&](ERole role) {
+        ComPtr<IMMDevice> device;
+        if (FAILED(enumerator->GetDefaultAudioEndpoint(flow, role, &device)))
+            return std::wstring{};
         LPWSTR value = nullptr;
-        if (SUCCEEDED(default_device->GetId(&value)) && value) {
-            default_id = value;
-            CoTaskMemFree(value);
-        }
-    }
+        std::wstring id;
+        if (SUCCEEDED(device->GetId(&value)) && value) id = value;
+        CoTaskMemFree(value);
+        return id;
+    };
+    const auto default_id = default_endpoint_id(eConsole);
+    const auto communications_id = render ? default_endpoint_id(eCommunications) : std::wstring{};
     ComPtr<IMMDeviceCollection> collection;
-    hr = enumerator->EnumAudioEndpoints(render ? eRender : eCapture, DEVICE_STATEMASK_ALL, &collection);
+    hr = enumerator->EnumAudioEndpoints(flow, DEVICE_STATEMASK_ALL, &collection);
     if (FAILED(hr)) {
         if (error) *error = "microphone enumeration could not list endpoints " + HrText(hr);
         if (SUCCEEDED(apartment)) CoUninitialize();
@@ -234,12 +238,15 @@ bool EnumerateWindowsMicrophoneEndpoints(
         endpoint.display_name = FriendlyName(device.Get());
         endpoint.device_state = state;
         endpoint.is_default = endpoint.endpoint_id == default_id;
+        endpoint.is_default_communications = endpoint.endpoint_id == communications_id;
         CoTaskMemFree(endpoint_id);
         if (!endpoint.endpoint_id.empty() && !endpoint.display_name.empty())
             endpoints->push_back(std::move(endpoint));
     }
     std::sort(endpoints->begin(), endpoints->end(), [](const auto& left, const auto& right) {
         if (left.is_default != right.is_default) return left.is_default;
+        if (left.is_default_communications != right.is_default_communications)
+            return left.is_default_communications;
         return left.display_name < right.display_name;
     });
     if (SUCCEEDED(apartment)) CoUninitialize();

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QTimer
+from ui import library_thumbnails
 
 
 class _PauseTarget:
@@ -370,7 +371,7 @@ def test_thumbnail_cancel_resume_re_enriches_card_and_allows_open(
             self.file_path = file_path
             self.cancel_event = cancel_event
             self.cancel_event = cancel_event
-            self.signals = clip_grid_module._ThumbnailSignals()
+            self.signals = library_thumbnails._ThumbnailSignals()
             self.setAutoDelete(False)
             self.workers.append(self)
 
@@ -503,24 +504,25 @@ def test_thumbnail_worker_emits_terminal_diagnostic_for_every_exit_path(
     from PySide6.QtGui import QImage
     from ui import clip_grid
 
+
     media = tmp_path / f'{terminal_state}.mp4'
     media.write_bytes(b'fixture')
     cache = tmp_path / f'{terminal_state}.jpg'
-    monkeypatch.setattr(clip_grid, 'THUMB_CACHE_DIR', str(tmp_path))
-    monkeypatch.setattr(clip_grid, '_get_cached_thumb_path',
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path))
+    monkeypatch.setattr(library_thumbnails, '_get_cached_thumb_path',
                         lambda _path: str(cache))
-    monkeypatch.setattr(clip_grid, 'is_completed_video_path', lambda _path: True)
+    monkeypatch.setattr(library_thumbnails, 'is_completed_video_path', lambda _path: True)
 
     cancel_event = threading.Event()
     if terminal_state == 'cancel':
         cancel_event.set()
     elif terminal_state == 'exception':
         monkeypatch.setattr(
-            clip_grid, '_probe_with_owned_process',
+            library_thumbnails, '_probe_with_owned_process',
             lambda *_args: (_ for _ in ()).throw(RuntimeError('probe failed')))
     else:
         monkeypatch.setattr(
-            clip_grid, '_probe_with_owned_process',
+            library_thumbnails, '_probe_with_owned_process',
             lambda _path, _cancel: SimpleNamespace(
                 duration_seconds=12.0, width=1920, height=1080,
                 average_fps=60.0, video_bitrate_bps=1, total_bitrate_bps=1))
@@ -528,11 +530,11 @@ def test_thumbnail_worker_emits_terminal_diagnostic_for_every_exit_path(
         image = QImage(4, 4, QImage.Format.Format_RGB32)
         image.fill(0xFFFFFFFF)
         monkeypatch.setattr(
-            clip_grid, '_decode_thumbnail_with_owned_process',
+            library_thumbnails, '_decode_thumbnail_with_owned_process',
             lambda _path, _cancel: image)
     elif terminal_state == 'failure':
         monkeypatch.setattr(
-            clip_grid, '_decode_thumbnail_with_owned_process',
+            library_thumbnails, '_decode_thumbnail_with_owned_process',
             lambda _path, _cancel: None)
 
     worker = clip_grid._ThumbnailWorker(str(media), cancel_event)
@@ -628,7 +630,7 @@ def test_repeated_pause_resume_does_not_strand_thumbnail_ownership(
         def __init__(self, file_path, cancel_event):
             super().__init__()
             self.cancel_event = cancel_event
-            self.signals = clip_grid_module._ThumbnailSignals()
+            self.signals = library_thumbnails._ThumbnailSignals()
             self.setAutoDelete(False)
             self.workers.append(self)
 

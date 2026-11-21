@@ -6,7 +6,7 @@ import os
 import pytest
 from PySide6.QtCore import Qt, QPoint, QRect
 from PySide6.QtGui import QColor, QFontDatabase, QPixmap
-from PySide6.QtWidgets import QScrollArea, QMenu
+from PySide6.QtWidgets import QApplication, QFrame, QScrollArea, QMenu, QVBoxLayout, QWidget
 from ui import clip_grid
 
 
@@ -18,21 +18,27 @@ def toolbar_grid(qapp, qtbot, tmp_path, monkeypatch):
         'clips_directory': str(tmp_path), 'imported_clip_folders': [],
     }.get(key, default))
     monkeypatch.setattr(clip_grid.ClipGrid, '_start_thumbnail_worker', lambda *_: None)
-    grid = clip_grid.ClipGrid(settings, autostart=False)
+    page = QWidget()
+    layout = QVBoxLayout(page)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+    grid = clip_grid.ClipGrid(settings, autostart=False, toolbar_layout=layout)
     area = QScrollArea()
+    area.setFrameShape(QFrame.Shape.NoFrame)
     area.setWidgetResizable(True)
     area.setWidget(grid)
-    qtbot.addWidget(area)
+    layout.addWidget(area, 1)
+    qtbot.addWidget(page)
     paths = []
-    for index in range(9):
+    for index in range(30):
         path = tmp_path / 'Arena' / f'Match {index + 1}.mp4'
         path.parent.mkdir(exist_ok=True)
         path.write_bytes(b'synthetic')
         paths.append(str(path))
     grid._replace_records(grid._records_from_paths(set(paths)))
     grid._apply_current_index()
-    area.resize(1100, 720)
-    area.show()
+    page.resize(1100, 720)
+    page.show()
     qtbot.waitUntil(lambda: bool(grid._thumb_widgets))
     for card in grid._thumb_widgets.values():
         image = QPixmap(480, 270)
@@ -41,7 +47,7 @@ def toolbar_grid(qapp, qtbot, tmp_path, monkeypatch):
         card.set_source_duration(42)
         card.metadata_label.setText('1920 × 1080 · 60 fps')
         card._render_thumbnail()
-    yield SimpleNamespace(grid=grid, area=area, paths=paths)
+    yield SimpleNamespace(grid=grid, area=area, page=page, paths=paths)
     grid.shutdown()
 
 
@@ -49,32 +55,33 @@ def test_render_toolbar(toolbar_grid, qtbot):
     state = toolbar_grid
     prefix = os.environ.get('FTHR_TOOLBAR_SCREENSHOTS')
     for width in (800, 1100, 1500):
-        state.area.resize(width, 720)
+        state.page.resize(width, 720)
         qtbot.wait(300)
         if prefix:
-            assert state.area.grab().save(f'{prefix}-{width}.png')
+            assert state.page.grab().save(f'{prefix}-{width}.png')
     first = next(iter(state.grid._thumb_widgets))
     state.grid._select_card(first, Qt.KeyboardModifier.NoModifier, checkbox=True)
     qtbot.wait(30)
     if prefix:
         card = state.grid._thumb_widgets[first]
         assert card.grab().save(f'{prefix}-selected.png')
-        state.area.resize(800, 720)
+        state.page.resize(800, 720)
         qtbot.wait(250)
-        assert state.area.grab().save(f'{prefix}-selecting-800.png')
+        assert state.page.grab().save(f'{prefix}-selecting-800.png')
 
 
 @pytest.mark.parametrize('width', [800, 1100, 1500])
 def test_single_row_fits_and_done_exits(toolbar_grid, qtbot, width):
     grid, area = toolbar_grid.grid, toolbar_grid.area
-    area.resize(width, 720)
+    toolbar_grid.page.resize(width, 720)
     qtbot.wait(100)
     grid._set_selection_mode(True)
     assert grid.select_mode_btn.text() == 'Done selecting'
     controls = (grid._all_count_label, grid.search_edit, grid.reset_search_btn,
                 grid.filter_combo, grid.sort_combo, grid.select_mode_btn)
-    rects = [QRect(w.mapTo(grid, QPoint()), w.size()) for w in controls]
-    assert all(grid.rect().contains(rect) for rect in rects)
+    header = grid._library_toolbar
+    rects = [QRect(w.mapTo(header, QPoint()), w.size()) for w in controls]
+    assert all(header.rect().contains(rect) for rect in rects)
     assert all(not left.intersects(right) for i, left in enumerate(rects) for right in rects[i + 1:])
     assert len({rect.center().y() for rect in rects}) <= 2
     assert grid.search_edit.width() >= 120
@@ -89,6 +96,34 @@ def test_single_row_fits_and_done_exits(toolbar_grid, qtbot, width):
     assert not grid._selection_mode and not grid.selected_records
     assert grid.selection_toolbar.isHidden()
     assert all(card.selection_checkbox.isHidden() for card in grid._thumb_widgets.values())
+
+
+def test_search_and_selection_actions_stay_visible_at_bottom(toolbar_grid, qtbot):
+    state = toolbar_grid
+    grid, area, page = state.grid, state.area, state.page
+    grid.select_all_results()
+    QApplication.processEvents()
+    qtbot.waitUntil(lambda: area.verticalScrollBar().maximum() > 0)
+    controls = (grid.search_edit, grid.selection_count_label, grid.bulk_actions_btn)
+    positions = [control.mapTo(page, QPoint()) for control in controls]
+    bar = area.verticalScrollBar()
+    bar.setValue(bar.maximum())
+    viewport = area.viewport()
+    qtbot.waitUntil(lambda: grid.y() < 0 and any(
+        card.isVisible() and viewport.rect().intersects(
+            QRect(card.mapTo(viewport, QPoint()), card.size()))
+        for card in grid._thumb_widgets.values()))
+    assert all(control.isVisible() for control in controls)
+    assert [control.mapTo(page, QPoint()) for control in controls] == positions
+    assert positions[-1].y() + controls[-1].height() <= area.y()
+    assert grid.selection_count_label.text() == '30 selected'
+    prefix = os.environ.get('FTHR_TOOLBAR_SCREENSHOTS')
+    if prefix:
+        assert page.grab().save(f'{prefix}-scrolled.png')
+    grid.clear_selection_btn.setFocus()
+    qtbot.keyClick(grid.clear_selection_btn, Qt.Key.Key_Escape)
+    assert not grid.selection_toolbar.isVisible()
+    assert grid.search_edit.isVisible()
 
 
 def test_selected_outline_paints_all_edges_and_recycle_clears(toolbar_grid):
@@ -177,7 +212,7 @@ def test_render_filter_menu(toolbar_grid, qtbot, monkeypatch):
             qtbot.wait(30)
             if prefix:
                 assert tags.grab().save(f'{prefix}-tags-menu.png')
-                assert toolbar_grid.area.grab().save(f'{prefix}-active-tags.png')
+                assert toolbar_grid.page.grab().save(f'{prefix}-active-tags.png')
             tags.hide()
             self.hide()
             return None

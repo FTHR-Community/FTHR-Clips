@@ -65,6 +65,30 @@ def _visible_card(state, *, image=False):
     return next(card for card in cards if card.isVisible())
 
 
+@pytest.mark.parametrize('selection_library', [40], indirect=True)
+def test_bulk_plugin_receives_selected_videos_including_scrolled_out_rows(
+        selection_library, qtbot):
+    grid = selection_library.grid
+    selection_library.scroll.resize(800, 280)
+    qtbot.waitUntil(lambda: len(grid._thumb_widgets) < len(grid._records))
+    sent = []
+    grid._bulk_clip_actions_provider = lambda paths: [('Send to Phone…', lambda: sent.append(paths))]
+
+    grid.select_all_results()
+    menu = grid.bulk_actions_btn.menu()
+    menu.aboutToShow.emit()
+    action = next(action for action in menu.actions() if action.text() == 'Send to Phone…')
+    action.trigger()
+    assert sent == [tuple(record.path for record in grid.selected_records if record.kind == 'video')]
+    assert len(sent[0]) == len(grid.selected_records) - 1
+
+    grid.clear_selection()
+    action.trigger()
+    assert len(sent) == 1
+    menu.aboutToShow.emit()
+    assert 'Send to Phone…' not in [action.text() for action in menu.actions()]
+
+
 @pytest.mark.parametrize('target_name', ['_thumb_frame', 'thumb_label'])
 @pytest.mark.parametrize('exit_action', ['done', 'escape'])
 def test_real_thumbnail_clicks_require_explicit_selection_mode(

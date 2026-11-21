@@ -19,6 +19,7 @@ import time
 from typing import Callable, Sequence
 
 from core.mp4_timing import normalize_mp4_presentation_in_place
+from core.field_diagnostics import redact_path
 
 
 class ExportState(str, Enum):
@@ -68,6 +69,7 @@ class ExportResult:
     returncode: int | None = None
     stderr_tail: str = ''
     elapsed_seconds: float = 0.0
+    finalization_target: Path | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -77,6 +79,9 @@ class ExportResult:
         if self.succeeded:
             return ''
         detail = self.detail or 'Export failed'
+        if self.finalization_target is not None:
+            message = f'Couldn’t finish saving the export to {redact_path(str(self.finalization_target))}.'
+            return f'{message}\n{redact_path(detail)}' if full_stderr else message
         if self.state is not ExportState.FAILED or not self.returncode:
             return detail
 
@@ -482,13 +487,14 @@ class ExportJob:
                 return ExportResult(
                     ExportState.CANCELLED, 'Export cancelled', None,
                     self._stderr_tail(), max(0.0, self._clock() - started))
+            target = self.final_path if self.state is ExportState.FINALIZING else None
             if self.state not in _TERMINAL:
                 self._transition(ExportState.FAILED)
             self._discard_staged()
             self._discard_new_final()
             return ExportResult(
                 ExportState.FAILED, str(error), returncode, self._stderr_tail(),
-                max(0.0, self._clock() - started))
+                max(0.0, self._clock() - started), finalization_target=target)
         finally:
             # Every return path, including cancellation and timeout, must
             # terminate the child before closing its pipes. Closing a live

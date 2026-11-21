@@ -590,7 +590,8 @@ def test_export_queue_reports_failure_after_successful_encode(
 
     assert task.done
     assert task.status == 'Failed'
-    assert task.detail == reason
+    assert task.detail.splitlines() == [task.result.failure_message(), reason]
+    assert Path(task.output).name in task.result.failure_message()
     assert not Path(task.output).exists()
     terminal = next(fields for args, fields in events if args == ('export', 'terminal'))
     assert terminal['state'] == 'FAILED'

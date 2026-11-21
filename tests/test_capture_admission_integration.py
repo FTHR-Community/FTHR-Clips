@@ -1048,6 +1048,7 @@ def test_real_settings_page_keeps_allowed_games_lazy_until_explicit_navigation(
         layout.addWidget(scroll)
         return wrapper
     monkeypatch.setattr(main._SettingsPage, '_make_clip_page', clip_shell)
+    monkeypatch.setattr(main._SettingsPage, '_refresh_import_folders_list', lambda _self: None)
     monkeypatch.setattr(main._SettingsPage, '_load_audio_settings',
                         lambda _self: None)
     monkeypatch.setattr(main._SettingsPage, '_sync_encoder_controls',

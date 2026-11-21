@@ -111,6 +111,8 @@ namespace fthr {
 
         SharedMemoryLayout* shared_memory = nullptr;
         uint32_t            task_id = 0;
+        int64_t trace_enqueued_qpc = 0;
+        int64_t trace_dequeued_qpc = 0;
     };
 
 

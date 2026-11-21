@@ -20,13 +20,12 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QFrame, QColorDialog, QFileDialog, QSizePolicy, QGridLayout,
-    QSlider,
+    QFrame, QColorDialog, QFileDialog, QGridLayout,
 )
 from ui.style import (
     Colors, Fonts, Sizes, label_uppercase, label_body,
     button_outline_qss, button_secondary_qss,
-    combo_qss, slider_qss, ThemedDropdownArrow, WheelSafeComboBox,
+    combo_qss, slider_qss, WheelSafeComboBox,
 )
 from core.theme_manager import (
     ThemeManager, DEFAULT_COLORS, CUSTOMIZABLE_ICONS,
@@ -35,6 +34,8 @@ from core.theme_manager import (
     CUSTOMIZABLE_COLOR_GROUPS, BUILTIN_FONT_FAMILIES,
 )
 from ui.sound_playback import SoundPlayback
+from ui.settings_layout import AccordionSection as _AccordionSection
+from ui.sliders import ClickToSeekSlider
 
 
 def _default_icon_path(filename: str) -> Path:
@@ -219,7 +220,6 @@ def _inject_custom_titlebar(dlg, title: str):
 
     old_layout.insertWidget(0, title_bar)
 
-    # Allow dragging the dialog by the title bar
     title_bar._drag_pos = None
 
     def _press(e):
@@ -255,7 +255,6 @@ def _fthr_message_box(parent, title: str, message: str,
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)
 
-    # Title bar
     title_bar = QFrame()
     title_bar.setFixedHeight(36)
     set_theme_style(title_bar, lambda: (f'QFrame {{ background: {Colors.SURFACE_2};'
@@ -281,7 +280,6 @@ def _fthr_message_box(parent, title: str, message: str,
     tb_layout.addWidget(close_btn)
     layout.addWidget(title_bar)
 
-    # Body
     body = QFrame()
     set_theme_style(body, lambda: (f'QFrame {{ background: {Colors.SURFACE_1}; }}'))
     bl = QVBoxLayout(body)
@@ -293,7 +291,6 @@ def _fthr_message_box(parent, title: str, message: str,
         f' font-family: {Fonts.BODY}; background: transparent;'))
     bl.addWidget(msg_lbl)
 
-    # Buttons
     btn_row = QHBoxLayout()
     btn_row.addStretch()
     ok_btn = QPushButton('OK')
@@ -323,7 +320,6 @@ def _fthr_message_box(parent, title: str, message: str,
     bl.addLayout(btn_row)
     layout.addWidget(body)
 
-    # Draggable title bar
     title_bar._drag_pos = None
 
     def _press(e):
@@ -344,157 +340,6 @@ def _fthr_message_box(parent, title: str, message: str,
     from PySide6.QtWidgets import QDialog as _D
     return dlg.exec() == _D.DialogCode.Accepted
 
-
-# Accordion Section — collapsible container matching fthrclips.com style
-
-class _AccordionSection(QFrame):
-    """Collapsible section with an immediate, stable expand/collapse."""
-
-    def __init__(self, title: str, number: str = '', parent=None):
-        super().__init__(parent)
-        self.setObjectName('accordionSection')
-        self._title = title
-        self._expanded = False
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # Header (clickable trigger)
-        self._header = QPushButton()
-        self._header.setObjectName('accordionHeader')
-        self._header.setCheckable(True)
-        self._header.setAccessibleName(title)
-        self._header.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._header.setFixedHeight(Sizes.CAPTURE_CONTROL_H)
-        self._header.clicked.connect(self.toggle)
-
-        h_layout = QHBoxLayout(self._header)
-        h_layout.setContentsMargins(16, 0, 16, 0)
-        h_layout.setSpacing(12)
-
-        if number:
-            num_lbl = QLabel(number)
-            set_theme_style(num_lbl, lambda: (f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY_L}px;'
-                f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
-                f' background: transparent;'))
-            h_layout.addWidget(num_lbl)
-
-        title_lbl = QLabel(title)
-        set_theme_style(title_lbl, lambda: (f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY_L}px;'
-            f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
-            f' letter-spacing: {Fonts.TRACK_LABEL}px;'
-            f' background: transparent;'))
-        h_layout.addWidget(title_lbl)
-        h_layout.addStretch()
-
-        self._indicator = ThemedDropdownArrow()
-        h_layout.addWidget(self._indicator)
-
-        layout.addWidget(self._header)
-
-        # Body
-        self._body = QWidget()
-        self._body.setObjectName('accordionBody')
-        self._body.setVisible(False)
-        self._body_layout = QVBoxLayout(self._body)
-        # Give controls a full spacing step around every edge.  The wrappers
-        # inside the body used to paint the global pure-black canvas and made
-        # right-aligned actions appear to touch the section border.
-        self._body_layout.setContentsMargins(Sizes.SPACE_5, Sizes.SPACE_5, Sizes.SPACE_5, Sizes.SPACE_5)
-        self._body_layout.setSpacing(8)
-        layout.addWidget(self._body)
-        self.refresh_theme()
-
-    def add_content(self, widget: QWidget):
-        # The application-wide QWidget rule paints the page canvas black.
-        # Name each direct content wrapper so the accordion can explicitly
-        # keep its expanded content on the raised gray surface instead.
-        widget.setObjectName('accordionContent')
-        self._body_layout.addWidget(widget)
-
-    def add_layout(self, layout):
-        self._body_layout.addLayout(layout)
-
-    def clear_content(self):
-        """Remove the current body widgets so theme styles can be rebuilt."""
-        while self._body_layout.count():
-            item = self._body_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-            elif item.layout() is not None:
-                child_layout = item.layout()
-                while child_layout.count():
-                    child_item = child_layout.takeAt(0)
-                    child_widget = child_item.widget()
-                    if child_widget is not None:
-                        child_widget.deleteLater()
-
-    def refresh_theme(self):
-        """Refresh the section shell and header after a theme change."""
-        set_theme_style(self, lambda: (f'''
-            QFrame#accordionSection {{
-                background-color: {Colors.SURFACE_3};
-                border: 1px solid {Colors.BORDER};
-                border-radius: {Sizes.RADIUS_CARD}px;
-            }}
-            QPushButton#accordionHeader {{
-                background-color: {Colors.SURFACE_3};
-                border: none;
-                border-radius: {Sizes.RADIUS_CARD}px;
-                text-align: left;
-            }}
-            QPushButton#accordionHeader:hover {{
-                background-color: {Colors.CARD_BG_HI};
-            }}
-            QPushButton#accordionHeader:focus {{
-                border: 1px solid {Colors.ACCENT};
-            }}
-            QWidget#accordionBody,
-            QWidget#accordionBody > QWidget#accordionContent {{
-                background-color: transparent;
-            }}
-            QWidget#accordionBody QFrame#iconRow,
-            QWidget#accordionBody QFrame#iconTintRow,
-            QWidget#accordionBody QFrame#soundRow {{
-                background-color: transparent;
-                border: none;
-            }}
-        '''))
-        for label in self._header.findChildren(QLabel):
-            if label.text() == self._title:
-                set_theme_style(label, lambda: (f'color: {Colors.TEXT}; font-size: {Fonts.SIZE_BODY_L}px;'
-                    f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
-                    f' letter-spacing: {Fonts.TRACK_LABEL}px;'
-                    f' background: transparent;'))
-            else:
-                set_theme_style(label, lambda: (f'color: {Colors.ACCENT}; font-size: {Fonts.SIZE_BODY_L}px;'
-                    f' font-family: {Fonts.DISPLAY}; font-weight: 600;'
-                    f' background: transparent;'))
-        self._indicator.refresh_theme()
-
-    def toggle(self):
-        self._expanded = not self._expanded
-        self._header.setChecked(self._expanded)
-        self._indicator.setExpanded(self._expanded)
-        self._body.setVisible(self._expanded)
-
-    def expand(self):
-        if not self._expanded:
-            self.toggle()
-
-    def collapse(self):
-        if self._expanded:
-            self.toggle()
-
-    @property
-    def expanded(self) -> bool:
-        return self._expanded
-
-
-# Color Swatch — clickable color picker tile
 
 class _ColorSwatch(QWidget):
     """Small clickable color tile that opens a QColorDialog on click."""
@@ -521,13 +366,11 @@ class _ColorSwatch(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Swatch rectangle
         swatch_rect = QRect(0, 0, self.width(), 30)
         p.setBrush(QBrush(QColor(self._color)))
         p.setPen(QPen(QColor(Colors.BORDER_HI), 1))
         p.drawRoundedRect(swatch_rect.adjusted(1, 1, -1, -1), Sizes.RADIUS_MD, Sizes.RADIUS_MD)
 
-        # Label text below
         p.setPen(QPen(QColor(Colors.TEXT_DIM)))
         p.setFont(QFont(Fonts.BODY_FAMILY, 7))
         text_rect = QRect(0, 33, self.width(), 16)
@@ -554,7 +397,6 @@ class _ColorSwatch(QWidget):
                 self.color_changed.emit(self.token, self._color)
 
 
-# Color Preview Mockup — miniature app UI that reflects current theme colors
 
 class _ColorPreviewMockup(QFrame):
     """Miniature mockup of the app UI to preview color changes."""
@@ -574,7 +416,6 @@ class _ColorPreviewMockup(QFrame):
         refresh_theme_styles(self)
 
     def _rebuild(self):
-        # Clear existing children
         old = self.layout()
         if old:
             while old.count():
@@ -588,7 +429,6 @@ class _ColorPreviewMockup(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Mini top bar
         top_bar = QFrame()
         top_bar.setFixedHeight(26)
         set_theme_style(top_bar, lambda: (f'background-color: {c["SHELL_BG"]};'
@@ -610,9 +450,7 @@ class _ColorPreviewMockup(QFrame):
         tb_layout.addWidget(status)
         layout.addWidget(top_bar)
 
-        # The secondary shell surface is used by the app's status strips and
-        # settings chrome. Keep it visible in the preview so it is obvious
-        # that changing the token affects more than the main canvas.
+        # Show the shell surface separately from the canvas.
         status_bar = QFrame()
         status_bar.setFixedHeight(20)
         set_theme_style(status_bar, lambda: (f'background-color: {c["SHELL_BG_2"]};'
@@ -630,7 +468,6 @@ class _ColorPreviewMockup(QFrame):
         sb_layout.addWidget(sb_hint)
         layout.addWidget(status_bar)
 
-        # Content area with cards
         content = QFrame()
         set_theme_style(content, lambda: (f'background-color: {c["BG"]};'
                              f' border-bottom-left-radius: {Sizes.RADIUS_CARD}px;'
@@ -639,7 +476,6 @@ class _ColorPreviewMockup(QFrame):
         cl.setContentsMargins(10, 8, 10, 8)
         cl.setSpacing(Sizes.SPACE_3)
 
-        # Mini clip cards
         cards_row = QHBoxLayout()
         cards_row.setSpacing(Sizes.SPACE_3)
         for i in range(3):
@@ -661,7 +497,6 @@ class _ColorPreviewMockup(QFrame):
         cards_row.addStretch()
         cl.addLayout(cards_row)
 
-        # Mini button row
         btn_row = QHBoxLayout()
         btn_row.setSpacing(Sizes.SPACE_3)
         primary_btn = QLabel('Save clip')
@@ -678,7 +513,6 @@ class _ColorPreviewMockup(QFrame):
         btn_row.addStretch()
         cl.addLayout(btn_row)
 
-        # Mini text samples
         text_row = QVBoxLayout()
         text_row.setSpacing(2)
         t1 = QLabel('Primary text sample')
@@ -695,7 +529,6 @@ class _ColorPreviewMockup(QFrame):
         text_row.addWidget(t4)
         cl.addLayout(text_row)
 
-        # Error / delete samples
         state_row = QHBoxLayout()
         state_row.setSpacing(8)
         err = QLabel('Error')
@@ -727,7 +560,6 @@ class _ColorPreviewMockup(QFrame):
         self.update_colors({**self._colors, token: hex_value})
 
 
-# Icon Crop Dialog — crop imported image to match original icon dimensions
 
 class _IconCropWidget(QWidget):
     """Crop area selector with explicit resizing via corner handles."""
@@ -739,7 +571,6 @@ class _IconCropWidget(QWidget):
         self._source = pixmap
         self._target_size = target_size
 
-        # Start crop at 60 % of the smaller dimension, centered
         src_w, src_h = pixmap.width(), pixmap.height()
         init_size = max(target_size, int(min(src_w, src_h) * 0.6))
         init_size = min(init_size, min(src_w, src_h))
@@ -770,7 +601,6 @@ class _IconCropWidget(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
 
-    # painting
 
     def paintEvent(self, event: QPaintEvent):
         p = QPainter(self)
@@ -790,7 +620,6 @@ class _IconCropWidget(QWidget):
         self._offset_y = (dh - scaled.height()) // 2
         p.drawPixmap(self._offset_x, self._offset_y, scaled)
 
-        # Dim overlay outside crop
         overlay = QColor(Colors.BG)
         overlay.setAlpha(140)
         p.setBrush(QBrush(overlay))
@@ -801,13 +630,11 @@ class _IconCropWidget(QWidget):
         p.drawRect(0, cr.top(), cr.left(), cr.height())
         p.drawRect(cr.right(), cr.top(), dw - cr.right(), cr.height())
 
-        # Crop border
         accent = QColor(Colors.ACCENT)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(accent, 2))
         p.drawRect(cr)
 
-        # Corner handles
         r = self._HANDLE_R
         p.setBrush(QBrush(accent))
         p.setPen(Qt.PenStyle.NoPen)
@@ -842,7 +669,6 @@ class _IconCropWidget(QWidget):
                 return i
         return -1
 
-    # interaction
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() != Qt.MouseButton.LeftButton:
@@ -884,7 +710,6 @@ class _IconCropWidget(QWidget):
     def wheelEvent(self, event):
         event.ignore()
 
-    # resize helpers
 
     def _handle_resize(self, pos: QPoint):
         dx = int((pos.x() - self._drag_start.x()) / self._display_scale)
@@ -918,23 +743,11 @@ class _IconCropWidget(QWidget):
             nx = old.x()
             ny = old.y()
 
-        # Clamp to image bounds
         nx = max(0, min(nx, self._source.width() - new_size))
         ny = max(0, min(ny, self._source.height() - new_size))
         self._crop_rect = QRect(nx, ny, new_size, new_size)
         self.update()
 
-    def _resize_crop_centered(self, new_size: int):
-        cx = self._crop_rect.x() + self._crop_rect.width() // 2
-        cy = self._crop_rect.y() + self._crop_rect.height() // 2
-        nx = cx - new_size // 2
-        ny = cy - new_size // 2
-        nx = max(0, min(nx, self._source.width() - new_size))
-        ny = max(0, min(ny, self._source.height() - new_size))
-        self._crop_rect = QRect(nx, ny, new_size, new_size)
-
-
-# Icon Row — single icon customization entry
 
 class _IconRow(QFrame):
     """Row for customizing one icon: shows reference + current + import button."""
@@ -953,13 +766,11 @@ class _IconRow(QFrame):
         layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(12)
 
-        # Label
         name_lbl = QLabel(label)
         name_lbl.setFixedWidth(120)
         set_theme_style(name_lbl, lambda: (label_body(Colors.TEXT, Fonts.SIZE_BODY)))
         layout.addWidget(name_lbl)
 
-        # Original icon reference
         ref_lbl = QLabel('Default:')
         set_theme_style(ref_lbl, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_LABEL)))
         layout.addWidget(ref_lbl)
@@ -969,7 +780,6 @@ class _IconRow(QFrame):
         self._load_reference_icon()
         layout.addWidget(self._ref_icon)
 
-        # Current custom icon
         cur_lbl = QLabel('Current:')
         set_theme_style(cur_lbl, lambda: (label_body(Colors.TEXT_MUTED, Fonts.SIZE_LABEL)))
         layout.addWidget(cur_lbl)
@@ -981,7 +791,6 @@ class _IconRow(QFrame):
 
         layout.addStretch()
 
-        # Import button
         import_btn = QPushButton('Import')
         set_theme_style(import_btn, lambda: (f'QPushButton {{ background: {Colors.SURFACE_3};'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT};'
@@ -993,7 +802,6 @@ class _IconRow(QFrame):
         import_btn.clicked.connect(self._on_import)
         layout.addWidget(import_btn)
 
-        # Reset button
         reset_btn = QPushButton('Reset')
         set_theme_style(reset_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT_DIM};'
@@ -1038,7 +846,6 @@ class _IconRow(QFrame):
         source = Path(file_path)
         file_size_kb = source.stat().st_size / 1024
 
-        # Get original icon dimensions for crop target
         ref_path = _default_icon_path(self._filename)
         ref_pix = QPixmap(str(ref_path)) if ref_path.exists() else QPixmap(32, 32)
         target_size = max(ref_pix.width(), ref_pix.height(), 32)
@@ -1047,7 +854,6 @@ class _IconRow(QFrame):
         if source_pix.isNull():
             return
 
-        # Performance warning for large files
         if file_size_kb > 100:
             if not _fthr_message_box(
                 self, 'Large Icon File',
@@ -1063,7 +869,6 @@ class _IconRow(QFrame):
         if final is None:
             return
 
-        # Save to temp file then copy via theme manager
         temp_path = self._theme.icons_dir / f'_temp_{self._filename}'
         if not final.save(str(temp_path), 'PNG'):
             print(f'[Theme] Failed to write temp icon for {self._filename}')
@@ -1091,12 +896,10 @@ class _IconRow(QFrame):
         dl = QVBoxLayout(dlg)
         dl.setSpacing(12)
 
-        # Side by side: crop widget + reference
         row = QHBoxLayout()
         crop_widget = _IconCropWidget(source_pix, target_size)
         row.addWidget(crop_widget, stretch=3)
 
-        # Reference column
         ref_col = QVBoxLayout()
         ref_col.setSpacing(8)
         ref_title = QLabel('Reference')
@@ -1136,7 +939,6 @@ class _IconRow(QFrame):
         self.icon_changed.emit(self._filename)
 
 
-# Icon Tint Row — per-icon color control for recolorable default icons
 
 
 def _tint_pixmap(pixmap: QPixmap, color: QColor) -> QPixmap:
@@ -1170,14 +972,12 @@ class _IconTintRow(QFrame):
         layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(12)
 
-        # Tinted icon preview
         self._preview = QLabel()
         self._preview.setFixedSize(32, 32)
         set_theme_style(self._preview, lambda: (f'background: {Colors.SURFACE_2}; border: 1px solid {Colors.BORDER};'))
         self._refresh_preview()
         layout.addWidget(self._preview)
 
-        # Label
         name_lbl = QLabel(label)
         name_lbl.setFixedWidth(120)
         set_theme_style(name_lbl, lambda: (label_body(Colors.TEXT, Fonts.SIZE_BODY)))
@@ -1185,7 +985,6 @@ class _IconTintRow(QFrame):
 
         layout.addStretch()
 
-        # Color swatch (clickable)
         self._swatch = QLabel()
         self._swatch.setFixedSize(32, 20)
         self._swatch.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -1194,7 +993,6 @@ class _IconTintRow(QFrame):
         self._swatch.mousePressEvent = self._on_swatch_click
         layout.addWidget(self._swatch)
 
-        # Reset button
         reset_btn = QPushButton('Reset')
         set_theme_style(reset_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT_DIM};'
@@ -1252,7 +1050,6 @@ class _IconTintRow(QFrame):
         self._refresh_preview()
 
 
-# Sound Row — single sound customization entry with preview
 
 class _SoundRow(QFrame):
     """Row for customizing one sound: shows current + import + preview buttons."""
@@ -1283,13 +1080,11 @@ class _SoundRow(QFrame):
         layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(12)
 
-        # Label
         name_lbl = QLabel(label)
         name_lbl.setFixedWidth(150)
         set_theme_style(name_lbl, lambda: (label_body(Colors.TEXT, Fonts.SIZE_BODY)))
         layout.addWidget(name_lbl)
 
-        # Current file indicator
         self._file_lbl = QLabel()
         self._file_lbl.setFixedWidth(150)
         set_theme_style(self._file_lbl, lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_LABEL)))
@@ -1301,7 +1096,7 @@ class _SoundRow(QFrame):
         volume_label = QLabel('Volume')
         set_theme_style(volume_label, lambda: (label_uppercase(Colors.TEXT_MUTED, Fonts.SIZE_MICRO, 1)))
         layout.addWidget(volume_label)
-        self._volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self._volume_slider = ClickToSeekSlider(Qt.Orientation.Horizontal)
         self._volume_slider.setRange(0, 100)
         self._volume_slider.setTracking(False)
         self._volume_slider.setFixedWidth(Sizes.SLIDER_COMPACT_W)
@@ -1321,7 +1116,6 @@ class _SoundRow(QFrame):
 
         layout.addStretch()
 
-        # Preview button
         preview_btn = IconButton('play.png', label='Preview sound', text='preview')
         set_theme_style(preview_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.ACCENT};'
@@ -1332,7 +1126,6 @@ class _SoundRow(QFrame):
         preview_btn.clicked.connect(self._on_preview)
         layout.addWidget(preview_btn)
 
-        # Import button
         import_btn = QPushButton('Import')
         set_theme_style(import_btn, lambda: (f'QPushButton {{ background: {Colors.SURFACE_3};'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT};'
@@ -1344,7 +1137,6 @@ class _SoundRow(QFrame):
         import_btn.clicked.connect(self._on_import)
         layout.addWidget(import_btn)
 
-        # Reset button
         reset_btn = QPushButton('Reset')
         set_theme_style(reset_btn, lambda: (f'QPushButton {{ background: transparent;'
             f' border: 1px solid {Colors.BORDER}; color: {Colors.TEXT_DIM};'
@@ -1371,7 +1163,6 @@ class _SoundRow(QFrame):
             self._file_lbl.setText('(default)')
 
     def _on_preview(self):
-        # Find the sound file to play
         custom = self._theme.get_custom_sound_path(self._key)
         if custom and custom.exists():
             sound_path = custom
@@ -1433,7 +1224,6 @@ class _SoundRow(QFrame):
         self.sound_changed.emit(self._key)
 
 
-# CustomizePage — full settings tab assembling all sections
 
 class CustomizePage(QWidget):
     """Complete Customize settings tab with accordion sections."""
@@ -1480,7 +1270,6 @@ class CustomizePage(QWidget):
         self._layout.setSpacing(12)
         self._layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # Format info bar
         info_bar = QLabel(
             'Themes include typography, colors, icons, capture-card styling, and sounds  —  '
             f'Fonts: {", ".join(SUPPORTED_FONT_FORMATS)}  |  '
@@ -1494,37 +1283,30 @@ class CustomizePage(QWidget):
         self._info_bar = info_bar
         self._layout.addWidget(info_bar)
 
-        # Section 1: Typography
         self._typography_section = _AccordionSection('Typography', '01')
         self._build_typography_section()
         self._layout.addWidget(self._typography_section)
 
-        # Section 2: Colors
         self._colors_section = _AccordionSection('Colors', '02')
         self._build_colors_section()
         self._layout.addWidget(self._colors_section)
 
-        # Section 3: Icon Colors
         self._icon_colors_section = _AccordionSection('Icon Colors', '03')
         self._build_icon_colors_section()
         self._layout.addWidget(self._icon_colors_section)
 
-        # Section 4: Icons
         self._icons_section = _AccordionSection('Icons', '04')
         self._build_icons_section()
         self._layout.addWidget(self._icons_section)
 
-        # Section 5: Capture Card
         self._capture_card_section = _AccordionSection('Capture Card', '05')
         self._build_capture_card_section()
         self._layout.addWidget(self._capture_card_section)
 
-        # Section 6: Sounds
         self._sounds_section = _AccordionSection('Sounds & Volumes', '06')
         self._build_sounds_section()
         self._layout.addWidget(self._sounds_section)
 
-        # Fixed action row above every customization section.
         action_bar = QHBoxLayout()
         action_bar.setContentsMargins(0, 0, Sizes.SPACE_4, Sizes.SPACE_4)
         action_bar.setSpacing(Sizes.ROW_GAP)
@@ -1565,7 +1347,6 @@ class CustomizePage(QWidget):
         scroll.setWidget(container)
         outer.addWidget(scroll, 1)
 
-    # Typography section
 
     def _build_typography_section(self):
         wrapper = QWidget()
@@ -1705,7 +1486,6 @@ class CustomizePage(QWidget):
             f'color: {Colors.TEXT}; padding: 10px; '
             f'font-family: "{display}", "{body}"; font-size: {Fonts.SIZE_BODY_L}px;'))
 
-    # Colors section
 
     def _build_colors_section(self):
         wrapper = QWidget()
@@ -1713,17 +1493,14 @@ class CustomizePage(QWidget):
         wl.setContentsMargins(0, 0, 0, 0)
         wl.setSpacing(12)
 
-        # Preview mockup at top
         self._preview = _ColorPreviewMockup()
         wl.addWidget(self._preview)
         wl.addSpacing(8)
 
-        # Group colors by category — label + description on the left, swatches right
         for group_name, tokens in CUSTOMIZABLE_COLOR_GROUPS:
             row = QHBoxLayout()
             row.setSpacing(16)
 
-            # Category label on the left
             cat_col = QVBoxLayout()
             cat_col.setSpacing(2)
             cat_lbl = QLabel(group_name)
@@ -1737,7 +1514,6 @@ class CustomizePage(QWidget):
             cat_col.addStretch()
             row.addLayout(cat_col)
 
-            # Swatches grid on the right
             grid = QGridLayout()
             grid.setSpacing(8)
             max_cols = 6
@@ -1752,7 +1528,6 @@ class CustomizePage(QWidget):
 
             wl.addLayout(row)
 
-        # Reset all colors button
         reset_row = QHBoxLayout()
         reset_row.addStretch()
         reset_btn = QPushButton('Reset all colors')
@@ -1796,7 +1571,6 @@ class CustomizePage(QWidget):
         self._preview.update_colors(DEFAULT_COLORS)
         self._theme_refresh_timer.start()
 
-    # Icons section
 
     def _build_icons_section(self):
         wrapper = QWidget()
@@ -1814,7 +1588,6 @@ class CustomizePage(QWidget):
     def _on_icon_changed(self, filename: str):
         self._theme_refresh_timer.start()
 
-    # Icon Colors section
 
     def _build_icon_colors_section(self):
         wrapper = QWidget()
@@ -1822,7 +1595,6 @@ class CustomizePage(QWidget):
         wl.setContentsMargins(0, 0, 0, 0)
         wl.setSpacing(4)
 
-        # Global tint row
         global_row = QHBoxLayout()
         global_row.setSpacing(12)
         g_label = QLabel('Global tint')
@@ -1855,7 +1627,6 @@ class CustomizePage(QWidget):
         wl.addLayout(global_row)
         wl.addSpacing(4)
 
-        # Per-icon tint rows
         self._tint_rows: list[_IconTintRow] = []
         for filename, label in CUSTOMIZABLE_ICONS.items():
             row = _IconTintRow(filename, label, self._theme)
@@ -1902,7 +1673,6 @@ class CustomizePage(QWidget):
     def _on_tint_changed(self, filename: str):
         self._theme_refresh_timer.start()
 
-    # Capture Card section
 
     def _build_capture_card_section(self):
         wrapper = QWidget()
@@ -1929,7 +1699,6 @@ class CustomizePage(QWidget):
             self._cc_swatches.append(swatch)
         wl.addLayout(grid)
 
-        # Reset row
         reset_row = QHBoxLayout()
         reset_row.addStretch()
         reset_btn = QPushButton('Reset capture card')
@@ -1964,7 +1733,6 @@ class CustomizePage(QWidget):
                 DEFAULT_CAPTURE_CARD_COLORS.get(swatch.token, '#ffffff'))
         self._theme_refresh_timer.start()
 
-    # Sounds section
 
     def _build_sounds_section(self):
         wrapper = QWidget()
@@ -1988,7 +1756,6 @@ class CustomizePage(QWidget):
     def _on_sound_changed(self, key: str):
         pass  # Sounds apply immediately (next time the event fires)
 
-    # Export / Import
 
     def _on_export(self):
         dest, _ = _customize_save_file(

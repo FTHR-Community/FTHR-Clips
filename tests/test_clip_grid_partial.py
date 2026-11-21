@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'FTHR_UI'))
 pytest.importorskip('PySide6.QtCore')
 
 from ui import clip_grid
+from ui import library_thumbnails
 
 
 @pytest.fixture(autouse=True)
@@ -381,7 +382,7 @@ def test_thumbnail_worker_rejects_partial_before_decoder(
         decoder_called = True
         raise AssertionError('partial file reached thumbnail decoder')
 
-    monkeypatch.setattr(clip_grid, '_decode_thumbnail_with_owned_process', unexpected_decoder)
+    monkeypatch.setattr(library_thumbnails, '_decode_thumbnail_with_owned_process', unexpected_decoder)
     received: list[tuple[str, str, int]] = []
     worker = clip_grid._ThumbnailWorker(str(partial))
     worker.signals.finished.connect(
@@ -398,11 +399,11 @@ def test_thumbnail_failure_does_not_invalidate_the_saved_clip(
     saved = tmp_path / 'saved.mp4'
     saved.write_bytes(b'valid-core-clip')
     monkeypatch.setattr(
-        clip_grid, '_decode_thumbnail_with_owned_process',
+        library_thumbnails, '_decode_thumbnail_with_owned_process',
         lambda *_args: (_ for _ in ()).throw(
             RuntimeError('injected thumbnail decoder failure')))
-    monkeypatch.setattr(clip_grid, '_probe_with_owned_process', lambda *_: None)
-    monkeypatch.setattr(clip_grid, 'THUMB_CACHE_DIR', str(tmp_path / 'cache'))
+    monkeypatch.setattr(library_thumbnails, '_probe_with_owned_process', lambda *_: None)
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path / 'cache'))
     received: list[tuple[str, str, int]] = []
     worker = clip_grid._ThumbnailWorker(str(saved))
     worker.signals.finished.connect(
@@ -420,10 +421,10 @@ def test_metadata_enrichment_failure_does_not_invalidate_the_saved_clip(
     saved.write_bytes(b'valid-core-clip')
 
     monkeypatch.setattr(
-        clip_grid, '_probe_with_owned_process',
+        library_thumbnails, '_probe_with_owned_process',
         lambda *_args: (_ for _ in ()).throw(
             RuntimeError('injected metadata probe failure')))
-    monkeypatch.setattr(clip_grid, 'THUMB_CACHE_DIR', str(tmp_path / 'cache'))
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path / 'cache'))
 
     received: list[tuple[str, str, int]] = []
     worker = clip_grid._ThumbnailWorker(str(saved))

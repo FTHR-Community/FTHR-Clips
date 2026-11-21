@@ -36,7 +36,7 @@ public:
 
     // Accepts PCM/IEEE_FLOAT WAVEFORMATEX, including WAVEFORMATEXTENSIBLE.
     // Supported input samples are float32, signed 16-bit, packed signed
-    // 24-bit and signed 32-bit, with 1..8 channels and rates up to 192 kHz.
+    // 24-bit and signed 32-bit, with up to 16 channels and rates up to 384 kHz.
     bool Initialize(const WAVEFORMATEX* format);
 
     // Converts input_frames of interleaved native PCM. output is appended to;

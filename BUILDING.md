@@ -190,7 +190,7 @@ python tools/build_windows_installer.py
 
 It verifies the Microsoft VC++ redistributable, the bundle licence manifest,
 and the Windows lifecycle contract before invoking Inno Setup. Output:
-`Output\FTHRClips-Setup-2.1.2-x64.exe` for the current version.
+`Output\FTHRClips-Setup-2.1.3-x64.exe` for the current version.
 
 The frameless, app-style setup starts with a required Privacy Policy checkbox
 linking to `https://policies.fthrclips.com`, then presents the application and

@@ -5,7 +5,7 @@
 
 #define MyAppName      "FTHRClips"
 #define MyAppLegacyName "FTHR Clips"
-#define MyAppVersion   "2.1.2"
+#define MyAppVersion   "2.1.3"
 #define MyAppPublisher "FTHR Community"
 #define MyAppExeName   "FTHRClips.exe"
 #define MyAppURL       "https://github.com/fthr/clips"
@@ -46,9 +46,9 @@ VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=FTHRClips Windows Setup
 VersionInfoProductName={#MyAppName}
 ; PE ProductVersion is numeric; keep the alpha suffix in the textual field.
-VersionInfoProductVersion=2.1.2.0
+VersionInfoProductVersion=2.1.3.0
 VersionInfoTextVersion={#MyAppVersion}
-VersionInfoVersion=2.1.2.0
+VersionInfoVersion=2.1.3.0
 
 ; Compression — maximum, solid
 Compression=lzma2/max
@@ -159,6 +159,11 @@ const
   LegacyInstallDir = '{localappdata}\Programs\FTHR Clips';
   LegacyProgramsDir = '{userprograms}\FTHR Clips';
   FTHRMutex = 'Local\FTHR_Clips_SingleInstance_v1';
+  WM_NCDESTROY = $0082;
+  WM_SYSCOMMAND = $0112;
+  WM_LBUTTONDOWN = $0201;
+  SC_MOVE = $F010;
+  HTCAPTION = 2;
 
 var
   InstalledVersion: String;
@@ -200,13 +205,73 @@ var
   ProgressFill: TPanel;
   InstallingTitle: TNewStaticText;
   InstallingCopy: TNewStaticText;
+  HeaderDragCallback: LongWord;
+  HeaderDragControls: array of HWND;
 
 function AddFontResourceEx(FileName: String; Flags: Cardinal; Reserved: Integer): Integer;
   external 'AddFontResourceExW@gdi32.dll stdcall';
 
-function SendMessage(hWnd: HWND; Msg: LongWord; wParam: Longint;
-  lParam: Longint): Longint;
+{ Inno Setup 6 uses a 32-bit process, including in 64-bit install mode. }
+function SetWindowSubclass(Window: HWND; Callback: LongWord;
+  SubclassId, FormHandle: LongWord): BOOL;
+  external 'SetWindowSubclass@comctl32.dll stdcall';
+
+function RemoveWindowSubclass(Window: HWND; Callback: LongWord;
+  SubclassId: LongWord): BOOL;
+  external 'RemoveWindowSubclass@comctl32.dll stdcall';
+
+function DefSubclassProc(Window: HWND; Msg, WParam: LongWord;
+  LParam: Longint): Longint;
+  external 'DefSubclassProc@comctl32.dll stdcall';
+
+function SendMessage(Window: HWND; Msg, WParam: LongWord;
+  LParam: Longint): Longint;
   external 'SendMessageW@user32.dll stdcall';
+
+function GetMessagePos: LongWord;
+  external 'GetMessagePos@user32.dll stdcall';
+
+function ReleaseCapture: BOOL;
+  external 'ReleaseCapture@user32.dll stdcall';
+
+function HeaderDragWindowProc(Window: HWND; Msg, WParam: LongWord;
+  LParam: Longint; SubclassId, FormHandle: LongWord): Longint;
+begin
+  if Msg = WM_LBUTTONDOWN then begin
+    { Enter the native move loop while the left button is still down. }
+    ReleaseCapture;
+    Result := SendMessage(HWND(FormHandle), WM_SYSCOMMAND, SC_MOVE or HTCAPTION,
+      Longint(GetMessagePos));
+    Exit;
+  end;
+  if Msg = WM_NCDESTROY then
+    RemoveWindowSubclass(Window, HeaderDragCallback, SubclassId);
+  Result := DefSubclassProc(Window, Msg, WParam, LParam);
+end;
+
+procedure EnableHeaderDrag(Header: TWinControl; FormHandle: HWND);
+var
+  Index: Integer;
+begin
+  if HeaderDragCallback = 0 then
+    HeaderDragCallback := CreateCallback(@HeaderDragWindowProc);
+  if SetWindowSubclass(Header.Handle, HeaderDragCallback, 0, FormHandle) then begin
+    Index := GetArrayLength(HeaderDragControls);
+    SetArrayLength(HeaderDragControls, Index + 1);
+    HeaderDragControls[Index] := Header.Handle;
+  end else
+    Log('Could not enable window dragging on a header control.');
+end;
+
+procedure DisableHeaderDrag;
+var
+  Index: Integer;
+begin
+  { Inno can destroy its script engine before releasing the form handles. }
+  for Index := 0 to GetArrayLength(HeaderDragControls) - 1 do
+    RemoveWindowSubclass(HeaderDragControls[Index], HeaderDragCallback, 0);
+  SetArrayLength(HeaderDragControls, 0);
+end;
 
 procedure LoadInstallerAssets;
 begin
@@ -503,6 +568,8 @@ begin
   CloseButton.PngImage.LoadFromFile(ExpandConstant('{tmp}\close-current.png'));
   CloseButton.OnClick := @CloseSetupClick;
   CloseButton.Parent := TitleBarPanel;
+  EnableHeaderDrag(TitleBarPanel, WizardForm.Handle);
+  EnableHeaderDrag(TitleLabel, WizardForm.Handle);
 end;
 
 procedure ApplyPageSurface(Page: TWizardPage);
@@ -1245,6 +1312,11 @@ begin
   CreateNavigation;
 end;
 
+procedure DeinitializeSetup;
+begin
+  DisableHeaderDrag;
+end;
+
 procedure RemoveLegacyInstall;
 var
   LegacyDir, ProgramsDir: String;
@@ -1420,6 +1492,18 @@ end;
 function InitializeUninstall: Boolean;
 begin
   Result := True;
+end;
+
+procedure InitializeUninstallProgressForm;
+begin
+  EnableHeaderDrag(UninstallProgressForm.MainPanel, UninstallProgressForm.Handle);
+  EnableHeaderDrag(UninstallProgressForm.PageNameLabel, UninstallProgressForm.Handle);
+  EnableHeaderDrag(UninstallProgressForm.PageDescriptionLabel, UninstallProgressForm.Handle);
+end;
+
+procedure DeinitializeUninstall;
+begin
+  DisableHeaderDrag;
 end;
 
 function RunUninstallCleanup(const Phase: String): Boolean;

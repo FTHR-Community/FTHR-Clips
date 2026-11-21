@@ -66,7 +66,6 @@ from ui.style import (
     combo_qss,
     context_menu_qss,
     label_body,
-    label_uppercase,
     set_theme_style,
 )
 
@@ -1244,11 +1243,6 @@ class GameProfilesWidget(QWidget):
         self._show_section(self._section_tabs.currentIndex())
         self._refresh_inherited_labels()
         self._loading = False
-
-    def _make_section_label(self, text: str) -> QLabel:
-        label = QLabel(text)
-        set_theme_style(label, lambda: label_uppercase(Colors.TEXT_DIM, Fonts.SIZE_LABEL))
-        return label
 
     def _binding_row(self, label: str, binding: _Binding) -> QWidget:
         title = QLabel(label)
