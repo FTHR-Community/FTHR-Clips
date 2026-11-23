@@ -1189,8 +1189,10 @@ class CameraRecorder:
 
     def _iter_segment_frames(self, end_time: float, duration_sec: float, *,
                              expected_generation: int | None = None,
-                             expected_device_index: int | None = None):
+                             expected_device_index: int | None = None,
+                             output_fps: float | None = None):
         start_time = end_time - duration_sec
+        tolerance = max(0.25, 2.0 / output_fps) if output_fps else 0.0
         with self._lock:
             if (expected_generation is not None
                     and int(expected_generation) != self._generation):
@@ -1200,8 +1202,29 @@ class CameraRecorder:
                 return
             if not self._running:
                 return
-            bufs = [buf for ts, buf in self._chunks if start_time <= ts <= end_time]
-        for buf in bufs:
+            frames = [(ts, buf) for ts, buf in self._chunks
+                      if start_time - tolerance <= ts <= end_time]
+        if output_fps:
+            # Resample at clip-relative times so sparse camera frames do not
+            # move forward on the video timeline. Missing retained history
+            # leaves the clip without a camera overlay.
+            if (not frames or frames[0][0] > start_time + tolerance
+                    or frames[-1][0] < end_time - tolerance):
+                return
+            frame = None
+            cursor = 0
+            for index in range(max(1, round(duration_sec * output_fps))):
+                wanted = start_time + index / output_fps
+                while cursor < len(frames) and (
+                        frames[cursor][0] <= wanted or frame is None):
+                    decoded = _cv2.imdecode(frames[cursor][1], _cv2.IMREAD_COLOR)
+                    cursor += 1
+                    if decoded is not None:
+                        frame = decoded
+                if frame is not None:
+                    yield frame
+            return
+        for _stamp, buf in frames:
             frame = _cv2.imdecode(buf, _cv2.IMREAD_COLOR)
             if frame is not None:
                 yield frame
@@ -1219,13 +1242,15 @@ class CameraRecorder:
     def write_segment(self, path: str, end_time: float, duration_sec: float,
                       fps: float = DEFAULT_FPS, *,
                       expected_generation: int | None = None,
-                      expected_device_index: int | None = None) -> bool:
+                      expected_device_index: int | None = None,
+                      align_to_clock: bool = False) -> bool:
         if not _AVAILABLE:
             return False
         frames = self._iter_segment_frames(
             end_time, duration_sec,
             expected_generation=expected_generation,
             expected_device_index=expected_device_index,
+            output_fps=fps if align_to_clock else None,
         )
         frame = next(frames, None)
         if frame is None:

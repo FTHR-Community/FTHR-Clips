@@ -29,6 +29,8 @@ class EditorSnapshot:
     removed_audio_sources: tuple[str, ...] = ()
     limiter_enabled: bool = True
     stretch_size: tuple[int, int] | None = None
+    audio_segments: tuple[tuple[float, float, bool], ...] = ((0.0, 1.0, False),)
+    source_audio_segments: tuple[tuple[str, tuple[tuple[float, float, bool], ...]], ...] = ()
 
 
 _EDITOR_EFFECT_LIMITS = {
@@ -82,6 +84,10 @@ def _editor_snapshot_to_draft(state: EditorSnapshot) -> dict:
         'trim_start': state.trim_start,
         'trim_end': state.trim_end,
         'segments': [list(segment) for segment in state.segments],
+        'audio_segments': [list(segment) for segment in state.audio_segments],
+        'source_audio_segments': {
+            source_id: [list(segment) for segment in segments]
+            for source_id, segments in state.source_audio_segments},
         'selected_segment': state.selected_segment,
         'crop_rect': list(state.crop_rect) if state.crop_rect else None,
         'stretch_ratio': state.stretch_ratio,
@@ -101,6 +107,37 @@ def _editor_snapshot_to_draft(state: EditorSnapshot) -> dict:
         'removed_audio_sources': list(state.removed_audio_sources),
         'limiter_enabled': state.limiter_enabled,
     }
+
+
+def _parse_segments(raw_segments):
+    if not isinstance(raw_segments, list) or not 1 <= len(raw_segments) <= 500:
+        return None
+    segments = []
+    previous_end = 0.0
+    try:
+        for index, raw in enumerate(raw_segments):
+            if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+                return None
+            start, end = float(raw[0]), float(raw[1])
+            deleted = bool(raw[2])
+            if (not math.isfinite(start) or not math.isfinite(end)
+                    or start < 0.0 or end > 1.0 or end <= start
+                    or (index == 0 and abs(start) > 0.0001)
+                    or (index > 0 and abs(start - previous_end) > 0.0001)):
+                return None
+            # Preserve compatibility with drafts that have rounding at joins.
+            if end <= previous_end:
+                return None
+            segments.append((previous_end, end, deleted))
+            previous_end = end
+    except (TypeError, ValueError):
+        # Invalid persisted coordinates must never reach timeline paint logic.
+        return None
+    if abs(previous_end - 1.0) > 0.0001:
+        return None
+    start, _, deleted = segments[-1]
+    segments[-1] = (start, 1.0, deleted)
+    return tuple(segments)
 
 
 def _editor_snapshot_from_draft(payload: dict) -> EditorSnapshot | None:
@@ -126,31 +163,21 @@ def _editor_snapshot_from_draft(payload: dict) -> EditorSnapshot | None:
     raw_size = payload.get('stretch_size')
     if raw_size is not None and not _valid_stretch_size(raw_size):
         return None
-
-    raw_segments = payload.get('segments')
-    if not isinstance(raw_segments, list) or not 1 <= len(raw_segments) <= 500:
+    segments = _parse_segments(payload.get('segments'))
+    audio_segments = _parse_segments(payload.get('audio_segments', [[0.0, 1.0, False]]))
+    if not segments or not any(not segment[2] for segment in segments) or not audio_segments:
         return None
-    segments = []
-    previous_end = 0.0
-    try:
-        for index, raw in enumerate(raw_segments):
-            if not isinstance(raw, (list, tuple)) or len(raw) != 3:
-                return None
-            start, end = float(raw[0]), float(raw[1])
-            deleted = bool(raw[2])
-            if (not math.isfinite(start) or not math.isfinite(end)
-                    or start < 0.0 or end > 1.0 or end <= start
-                    or (index == 0 and abs(start) > 0.0001)
-                    or (index > 0 and abs(start - previous_end) > 0.0001)):
-                return None
-            segments.append((start, end, deleted))
-            previous_end = end
-    except (TypeError, ValueError):
-        # Invalid persisted coordinates must never reach timeline paint logic.
+    raw_source_segments = payload.get('source_audio_segments', {})
+    if not isinstance(raw_source_segments, dict) or len(raw_source_segments) > 64:
         return None
-    if abs(previous_end - 1.0) > 0.0001 or not any(
-            not segment[2] for segment in segments):
-        return None
+    source_audio_segments = []
+    for source_id, data in raw_source_segments.items():
+        if not isinstance(source_id, str) or not source_id:
+            return None
+        lane = _parse_segments(data)
+        if not lane:
+            return None
+        source_audio_segments.append((source_id, lane))
 
     try:
         selected = int(payload.get('selected_segment', 0))
@@ -236,7 +263,7 @@ def _editor_snapshot_from_draft(payload: dict) -> EditorSnapshot | None:
     return EditorSnapshot(
         trim_start=trim_start,
         trim_end=trim_end,
-        segments=tuple(segments),
+        segments=segments,
         selected_segment=selected,
         crop_rect=crop_rect,
         stretch_ratio=stretch_ratio,
@@ -250,4 +277,6 @@ def _editor_snapshot_from_draft(payload: dict) -> EditorSnapshot | None:
         removed_audio_sources=tuple(removed),
         limiter_enabled=limiter,
         stretch_size=tuple(raw_size) if raw_size is not None else None,
+        audio_segments=audio_segments,
+        source_audio_segments=tuple(sorted(source_audio_segments)),
     )

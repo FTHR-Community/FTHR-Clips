@@ -67,12 +67,15 @@
 #include <filesystem>
 #include <limits>
 #include <new>
+#include <type_traits>
+#include <utility>
 
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/dict.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/mem.h>
 #include <libavutil/opt.h>
 #include <libavutil/imgutils.h>
 }
@@ -231,6 +234,140 @@ namespace fthr {
             if (SUCCEEDED(hr)) return true;
             error = diagnostics::FormatHResultFailure("scRGB canvas copy", hr);
             return false;
+        }
+    };
+
+    struct CaptureEngine::MinecraftJavaState {
+        // Shared with FTHRGameSource. The producer publishes only complete
+        // frames, and either process may drop a frame while the slot is busy.
+        struct Header {
+            volatile LONG state;
+            volatile LONG error;
+            volatile LONG stop;
+            LONG reserved;
+        };
+        static_assert(sizeof(Header) == 16);
+        static constexpr LONG kEmpty = 0;
+        static constexpr LONG kReady = 2;
+        static constexpr LONG kReading = 3;
+
+        winrt::handle mapping;
+        winrt::handle frame_event;
+        winrt::handle process;
+        Header* header = nullptr;
+        winrt::com_ptr<ID3D11Texture2D> upload;
+
+        ~MinecraftJavaState() {
+            if (process && WaitForSingleObject(process.get(), 0) == WAIT_TIMEOUT) {
+                InterlockedExchange(&header->stop, 1);
+                if (WaitForSingleObject(process.get(), 750) == WAIT_TIMEOUT) {
+                    TerminateProcess(process.get(), ERROR_CANCELLED);
+                    WaitForSingleObject(process.get(), 250);
+                }
+            }
+            if (header) UnmapViewOfFile(header);
+        }
+
+        bool Start(HWND hwnd, uint32_t width, uint32_t height, uint32_t fps,
+                   bool cursor, std::string& error) {
+            const auto fail = [&error](const char* operation) {
+                error = std::string(operation) + " failed (Windows error "
+                    + std::to_string(GetLastError()) + ").";
+                return false;
+            };
+            std::wstring exe_path(32768, L'\0');
+            const DWORD length = GetModuleFileNameW(nullptr, exe_path.data(),
+                                                     static_cast<DWORD>(exe_path.size()));
+            if (!length || length == exe_path.size()) return fail("GetModuleFileNameW");
+            exe_path.resize(length);
+            const auto helper_path = std::filesystem::path(exe_path).parent_path()
+                / L"game-source" / L"FTHRGameSource.exe";
+            if (GetFileAttributesW(helper_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                error = "The Minecraft Java Game Capture component is missing. "
+                        "Repair or reinstall the FTHR Clips package.";
+                return false;
+            }
+
+            const auto bytes = sizeof(Header) + static_cast<uint64_t>(width) * height * 4;
+            SECURITY_ATTRIBUTES inherited{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+            mapping.attach(CreateFileMappingW(INVALID_HANDLE_VALUE, &inherited,
+                PAGE_READWRITE, static_cast<DWORD>(bytes >> 32),
+                static_cast<DWORD>(bytes), nullptr));
+            if (!mapping) return fail("CreateFileMappingW");
+            frame_event.attach(CreateEventW(&inherited, FALSE, FALSE, nullptr));
+            if (!frame_event) return fail("CreateEventW");
+            winrt::handle parent;
+            parent.attach(OpenProcess(SYNCHRONIZE, TRUE, GetCurrentProcessId()));
+            if (!parent) return fail("OpenProcess");
+            header = static_cast<Header*>(MapViewOfFile(mapping.get(), FILE_MAP_WRITE, 0, 0, 0));
+            if (!header) return fail("MapViewOfFile");
+
+            SIZE_T list_bytes = 0;
+            InitializeProcThreadAttributeList(nullptr, 1, 0, &list_bytes);
+            if (!list_bytes) return fail("InitializeProcThreadAttributeList sizing");
+            std::vector<uintptr_t> list_storage((list_bytes + sizeof(uintptr_t) - 1)
+                / sizeof(uintptr_t));
+            auto* list = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(list_storage.data());
+            if (!InitializeProcThreadAttributeList(list, 1, 0, &list_bytes)) {
+                return fail("InitializeProcThreadAttributeList");
+            }
+            const std::unique_ptr<std::remove_pointer_t<PPROC_THREAD_ATTRIBUTE_LIST>,
+                decltype(&DeleteProcThreadAttributeList)> attributes(
+                    list, &DeleteProcThreadAttributeList);
+            HANDLE handles[] = {mapping.get(), frame_event.get(), parent.get()};
+            if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                           handles, sizeof(handles), nullptr, nullptr)) {
+                return fail("UpdateProcThreadAttribute");
+            }
+
+            std::wostringstream command;
+            command << L'"' << helper_path.native() << L"\" "
+                    << reinterpret_cast<uintptr_t>(hwnd) << L' '
+                    << reinterpret_cast<uintptr_t>(mapping.get()) << L' '
+                    << reinterpret_cast<uintptr_t>(frame_event.get()) << L' '
+                    << reinterpret_cast<uintptr_t>(parent.get()) << L' '
+                    << width << L' ' << height << L' ' << fps << L' ' << (cursor ? 1 : 0);
+            auto arguments = command.str();
+            STARTUPINFOEXW startup{};
+            startup.StartupInfo.cb = sizeof(startup);
+            startup.lpAttributeList = list;
+            PROCESS_INFORMATION child{};
+            if (!CreateProcessW(helper_path.c_str(), arguments.data(), nullptr, nullptr,
+                    TRUE, EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, nullptr,
+                    helper_path.parent_path().c_str(), &startup.StartupInfo, &child)) {
+                return fail("CreateProcessW for Minecraft Java Game Capture");
+            }
+            process.attach(child.hProcess);
+            CloseHandle(child.hThread);
+            return true;
+        }
+
+        bool Ready() const {
+            return InterlockedCompareExchange(&header->state, kReady, kReady) == kReady;
+        }
+
+        const uint8_t* TakeFrame() const {
+            if (InterlockedCompareExchange(&header->state, kReading, kReady) != kReady) {
+                return nullptr;
+            }
+            return reinterpret_cast<const uint8_t*>(header + 1);
+        }
+
+        void ReleaseFrame() const {
+            InterlockedExchange(&header->state, kEmpty);
+        }
+
+        std::string Failure() const {
+            DWORD exit_code = 0;
+            if (WaitForSingleObject(process.get(), 0) == WAIT_OBJECT_0
+                && GetExitCodeProcess(process.get(), &exit_code)) {
+                return "The Minecraft Java Game Capture component exited (code "
+                    + std::to_string(exit_code) + ").";
+            }
+            if (InterlockedCompareExchange(&header->error, 0, 0) != 0) {
+                return "The Minecraft Java Game Capture component reported a source failure.";
+            }
+            return {};
         }
     };
 
@@ -522,31 +659,55 @@ namespace fthr {
     }  // namespace
 
 
-    // Use executable basenames to select monitor capture for known protected games.
-    // Query with PROCESS_QUERY_LIMITED_INFORMATION; module enumeration may be
-    // blocked. Keep matching case-insensitive and add only confirmed titles.
-    static bool IsAntiCheatProtected(HWND hwnd) {
-        if (!hwnd) return false;
-
+    static std::wstring QueryWindowExecutableName(HWND hwnd) {
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
-        if (!pid) return false;
+        if (!pid) return {};
 
-        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (!h) return false;
+        winrt::handle process;
+        process.attach(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+        if (!process) return {};
+        std::wstring path(32768, L'\0');
+        DWORD length = static_cast<DWORD>(path.size());
+        if (!QueryFullProcessImageNameW(process.get(), 0, path.data(), &length)) return {};
+        path.resize(length);
 
-        wchar_t path[MAX_PATH] = {};
-        DWORD len = MAX_PATH;
-        BOOL ok = QueryFullProcessImageNameW(h, 0, path, &len);
-        CloseHandle(h);
-        if (!ok) return false;
-
-        // Extract basename and lowercase it.
-        const wchar_t* slash = wcsrchr(path, L'\\');
-        std::wstring exe = slash ? slash + 1 : path;
+        auto exe = path.substr(path.find_last_of(L'\\') + 1);
         std::transform(exe.begin(), exe.end(), exe.begin(),
                        [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+        return exe;
+    }
 
+    static bool IsMinecraftJavaWindow(HWND hwnd, const std::wstring& executable) {
+        if (!hwnd || GetAncestor(hwnd, GA_ROOT) != hwnd
+            || (executable != L"javaw.exe" && executable != L"java.exe")) return false;
+        wchar_t class_name[64]{};
+        if (!GetClassNameW(hwnd, class_name, ARRAYSIZE(class_name))
+            || (_wcsicmp(class_name, L"GLFW30") != 0
+                && _wcsicmp(class_name, L"LWJGL") != 0
+                && _wcsicmp(class_name, L"SDL_app") != 0)) return false;
+        wchar_t title[128]{};
+        if (!GetWindowTextW(hwnd, title, ARRAYSIZE(title))) return false;
+        constexpr wchar_t name[] = L"Minecraft";
+        constexpr auto length = ARRAYSIZE(name) - 1;
+        return _wcsnicmp(title, name, length) == 0
+            && (title[length] == L'\0' || title[length] == L'*'
+                || iswspace(title[length]));
+    }
+
+    static std::pair<uint32_t, uint32_t> MinecraftJavaClientSize(HWND hwnd) {
+        RECT client{};
+        if (!GetClientRect(hwnd, &client)) return {};
+        const auto width = client.right - client.left;
+        const auto height = client.bottom - client.top;
+        if (width < 4 || height < 2 || width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION
+            || height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) return {};
+        // libobs aligns output width to four pixels and height to two pixels.
+        return {static_cast<uint32_t>(width) & ~3u, static_cast<uint32_t>(height) & ~1u};
+    }
+
+    // Use executable basenames to select monitor capture for known protected games.
+    static bool IsAntiCheatProtected(const std::wstring& exe) {
         // Known kernel-AC titles. All are matched lowercase.
         static const wchar_t* kProtected[] = {
             L"valorant.exe",                       // Vanguard
@@ -1053,17 +1214,21 @@ namespace fthr {
         };
         const bool window_mode = config.capture_mode
             == CaptureConfig::CaptureModeEnum::WINDOW;
-        const bool protected_window = window_mode && target_hwnd_ != 0
-            && IsAntiCheatProtected(reinterpret_cast<HWND>(target_hwnd_));
-        const auto capture_plan = PlanWindowsCaptureStartup(
-            window_mode, target_hwnd_ != 0, protected_window,
-            config.capture_backend_preference, config.capture_cursor);
-        focus_gated_ = capture_plan.focus_gated;
+        const HWND selected_window = reinterpret_cast<HWND>(target_hwnd_);
         if (window_mode && target_hwnd_ != 0
-            && !window_source_identity_.Bind(reinterpret_cast<HWND>(target_hwnd_))) {
+            && !window_source_identity_.Bind(selected_window)) {
             return FailStartup(ReplayStartupError::CaptureTargetUnavailable,
                 "The selected window closed or changed owner before capture started.");
         }
+        const auto selected_executable = window_mode && selected_window
+            ? QueryWindowExecutableName(selected_window) : std::wstring{};
+        const bool protected_window = IsAntiCheatProtected(selected_executable);
+        const bool minecraft_java_window = window_mode && IsMinecraftJavaWindow(
+            selected_window, selected_executable);
+        const auto capture_plan = PlanWindowsCaptureStartup(
+            window_mode, target_hwnd_ != 0, protected_window,
+            config.capture_backend_preference, config.capture_cursor, minecraft_java_window);
+        focus_gated_ = capture_plan.focus_gated;
         replay_pause_clock_ = ShouldUseCompactReplayPauseClock(
                 focus_gated_, config.audio_enabled,
                 config.separate_audio_enabled)
@@ -1137,6 +1302,9 @@ namespace fthr {
                           << "\"detail\":\"Use a 16-bit scRGB surface on the same HDR display\"}"
                           << std::endl;
                 return InitializeWGC();
+            case WindowsCaptureBackend::MinecraftJavaGame:
+                wgc_active_ = false;
+                return InitializeMinecraftJavaCapture();
             case WindowsCaptureBackend::None:
                 return false;
             }
@@ -1173,6 +1341,9 @@ namespace fthr {
                         + WindowsCaptureBackendName(capture_plan.fallback)
                         + " failure: " + fallback_failure);
                 }
+            } else if (capture_plan.primary == WindowsCaptureBackend::MinecraftJavaGame) {
+                return FailStartup(ReplayStartupError::CaptureTargetUnavailable,
+                    "Minecraft Java Game Capture could not start. " + primary_failure);
             } else if (window_mode) {
                 const char* target_kind = protected_window
                     ? "protected Window capture requires focus-gated WGC monitor capture"
@@ -1487,7 +1658,7 @@ namespace fthr {
                           << diagnostics::JsonEscape(fallback_reason) << "\"}" << std::endl;
             }
         }
-        if (!replay_hdr_ && replay_encoder_cpu_input_) {
+        if (!replay_hdr_ && replay_encoder_cpu_input_ && !minecraft_java_state_) {
             if (!source_hdr_ && selection.backend == ReplayEncoderBackend::NativeNvenc
                 && (scale_geometry.destination.width < scale_geometry.source_width
                     || scale_geometry.destination.height < scale_geometry.source_height)) {
@@ -1995,8 +2166,9 @@ namespace fthr {
         }
         capture_health_flags_.store(CAPTURE_HEALTH_ACTIVE);
 
-        // Select capture loop: WGC image sampling or DXGI acquisition.
-        if (wgc_active_) {
+        if (minecraft_java_state_) {
+            capture_thread_ = new std::thread(&CaptureEngine::CaptureThreadMinecraftJava, this);
+        } else if (wgc_active_) {
             capture_thread_ = new std::thread(&CaptureEngine::CaptureThreadWGC, this);
         } else {
             capture_thread_ = new std::thread(&CaptureEngine::CaptureThread, this);
@@ -2017,7 +2189,7 @@ namespace fthr {
     void CaptureEngine::Shutdown() {
         const bool has_resources = capture_thread_ || stall_watchdog_thread_
             || save_clip_thread_
-            || device_ || context_ || wgc_state_
+            || device_ || context_ || wgc_state_ || minecraft_java_state_
             || replay_encoder_ || audio_active_ || nvenc_device_
             || nvenc_context_ || record_writer_ || application_audio_source_manager_
             || !device_audio_tracks_.empty();
@@ -2106,6 +2278,7 @@ namespace fthr {
         if (wgc_active_) {
             ShutdownWGC();
         }
+        minecraft_java_state_.reset();
 
         ShutdownD3D11();
 
@@ -2346,14 +2519,15 @@ namespace fthr {
                 };
                 const bool api_completion_recent = qpc_is_recent(
                     last_dxgi_completed_qpc);
-                const bool acquire_loop_recent = !wgc_active_
+                const bool dxgi_backend = !wgc_active_ && !minecraft_java_state_;
+                const bool acquire_loop_recent = dxgi_backend
                     && api_completion_recent;
-                const bool wait_timeout_current = !wgc_active_
+                const bool wait_timeout_current = dxgi_backend
                     && api_completion_recent
                     && last_capture_hresult == DXGI_ERROR_WAIT_TIMEOUT;
-                const bool pointer_only_recent = !wgc_active_
+                const bool pointer_only_recent = dxgi_backend
                     && qpc_is_recent(last_dxgi_pointer_only_qpc);
-                const bool idle_evidence = !wgc_active_
+                const bool idle_evidence = dxgi_backend
                     && dxgi::IsDxgiAliveButDesktopStatic(
                         packets > 0, acquire_loop_recent, encoder_idle,
                         wait_timeout_current, pointer_only_recent);
@@ -2366,7 +2540,7 @@ namespace fthr {
                 pipeline.expected_fps = static_cast<double>(fps_);
                 pipeline.observation_interval_ms = observation_interval_ms;
                 pipeline.source_frames = acquired;
-                pipeline.raw_source_frame_delta = wgc_active_
+                pipeline.raw_source_frame_delta = !dxgi_backend
                     ? capture_pipeline_health::SaturatingDifference(
                         acquired, snapshot_previous_acquired)
                     : interval_image_acquire_successes;
@@ -2906,7 +3080,9 @@ namespace fthr {
                 encoder_has_pending_work);
             const char* diagnostic_code = dxgi::PipelineStallCode(
                 stall_boundary);
-            EmitRecentDxgiEvidence("replay_stall_detected");
+            if (!wgc_active_ && !minecraft_java_state_) {
+                EmitRecentDxgiEvidence("replay_stall_detected");
+            }
             std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\","
                       << "\"event\":\"pipeline_stall_detected\","
                       << "\"state\":\"FAILED\",\"error_code\":\""
@@ -3174,10 +3350,18 @@ namespace fthr {
     // x264 path:   Snapshot raw ring indices -> queue raw task (unchanged)
 
     bool CaptureEngine::SaveClip(const wchar_t* path, uint32_t duration_seconds,
-        SharedMemoryLayout* shared_memory) try {
+        SharedMemoryLayout* shared_memory, uint64_t end_monotonic_ns) try {
 
         // Ring capacity includes decoder pre-roll; it must not become visible
         // history beyond the matching audio retention after RAM adaptation.
+        const bool anchored = end_monotonic_ns != 0;
+        if (anchored && (!nvenc_active_ || duration_seconds == 0
+                         || duration_seconds > buffer_seconds_)) {
+            SetEngineError(shared_memory,
+                L"The replay buffer cannot retain the requested clip length plus "
+                L"additional seconds. Choose a shorter clip or increase replay capacity.");
+            return false;
+        }
         if (replay_duration_adapted_ && duration_seconds > buffer_seconds_) {
             std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
                       << "\"event\":\"duration_limited_to_replay\",\"requested_seconds\":" << duration_seconds
@@ -3193,6 +3377,17 @@ namespace fthr {
         LARGE_INTEGER save_qpc_frequency{};
         QueryPerformanceCounter(&save_qpc);
         QueryPerformanceFrequency(&save_qpc_frequency);
+        if (anchored) {
+            const auto frequency = save_qpc_frequency.QuadPart;
+            const auto now_ns = ReplayPauseClock::Scale(
+                save_qpc.QuadPart, 1'000'000'000, frequency);
+            if (now_ns <= 0 || end_monotonic_ns > static_cast<uint64_t>(now_ns)) {
+                SetEngineError(shared_memory, L"The requested clip time is invalid.");
+                return false;
+            }
+            save_qpc.QuadPart = ReplayPauseClock::Scale(
+                static_cast<int64_t>(end_monotonic_ns), frequency, 1'000'000'000);
+        }
         SaveSelectionTrace selection_trace{
             frame_pacing_trace::Enabled(), save_request_id, save_qpc.QuadPart};
 
@@ -3217,7 +3412,7 @@ namespace fthr {
         }
 
         const uint32_t health = capture_health_flags_.load();
-        if ((health & CAPTURE_HEALTH_PAUSED) && !replay_pause_clock_) {
+        if ((health & CAPTURE_HEALTH_PAUSED) && (anchored || !replay_pause_clock_)) {
             std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"clip_save\","
                       << "\"event\":\"save_rejected\",\"state\":\"FAILED\","
                       << "\"save_request_id\":" << save_request_id
@@ -3572,6 +3767,17 @@ namespace fthr {
             const auto replay_save_qpc = replay_pause_clock_
                 ? replay_pause_clock_->MapQpc(save_qpc.QuadPart, save_qpc_frequency.QuadPart)
                 : save_qpc.QuadPart;
+            if (anchored && replay_pause_clock_) {
+                const int64_t duration_qpc = duration_seconds * save_qpc_frequency.QuadPart;
+                const auto replay_start_qpc = replay_pause_clock_->MapQpc(
+                    save_qpc.QuadPart - duration_qpc, save_qpc_frequency.QuadPart);
+                if (std::abs(replay_save_qpc - replay_start_qpc - duration_qpc) > 2) {
+                    SetEngineError(shared_memory,
+                        L"Capture paused during the requested clip. "
+                        L"Wait for the replay buffer to refill and try again.");
+                    return false;
+                }
+            }
             const auto publish_timeout = std::chrono::milliseconds(
                 std::max<uint32_t>(100, 3000 / std::max<uint32_t>(fps_, 1)));
             selection_trace.replay_target_qpc = replay_save_qpc;
@@ -3580,6 +3786,11 @@ namespace fthr {
                 replay_save_qpc, publish_timeout);
             selection_trace.publication_end_qpc = frame_pacing_trace::Now(selection_trace.enabled);
             if (!selection_trace.publication_reached) {
+                if (anchored) {
+                    SetEngineError(shared_memory,
+                        L"Capture did not reach the requested end of the additional seconds.");
+                    return false;
+                }
                 std::cerr << "[SaveClip] Encoder publication did not reach the "
                              "save boundary within "
                           << publish_timeout.count() << "ms; using the latest "
@@ -3595,7 +3806,7 @@ namespace fthr {
             selection_trace.snapshot_begin_qpc = frame_pacing_trace::Now(selection_trace.enabled);
             EncodedRingSnapshot snapshot = encoded_ring_->TakeSnapshotByTime(
                 duration_seconds, replay_save_qpc,
-                selection_trace.enabled ? &selection_trace.lock_timing : nullptr);
+                selection_trace.enabled ? &selection_trace.lock_timing : nullptr, anchored);
             selection_trace.snapshot_end_qpc = frame_pacing_trace::Now(selection_trace.enabled);
             selection_trace.snapshot_packets = snapshot.packets.size();
             selection_trace.snapshot_attempts = snapshot.selection_attempts;
@@ -3642,6 +3853,20 @@ namespace fthr {
                 encoded_replay_health::MakeInput(
                     snapshot, duration_seconds, static_cast<double>(fps_),
                     save_qpc_frequency.QuadPart, replay_save_qpc);
+            if (anchored) {
+                const double target_end_s = static_cast<double>(replay_save_qpc)
+                    / save_qpc_frequency.QuadPart;
+                const double boundary_tolerance_s = std::max(0.25, 2.0 / fps_);
+                if (!snapshot.full_history
+                    || snapshot.presentation_start_qpc_s
+                        > target_end_s - duration_seconds + boundary_tolerance_s
+                    || snapshot.presentation_end_qpc_s < target_end_s - boundary_tolerance_s) {
+                    SetEngineError(shared_memory,
+                        L"The full requested time range is no longer available. "
+                        L"Wait for the replay buffer to fill or choose a shorter clip.");
+                    return false;
+                }
+            }
             const auto replay_health_report = replay_health::Evaluate(
                 replay_health_input, allow_replay_gaps_, allow_low_fps_clips_);
             if (!replay_health_report.accepted) {
@@ -5080,28 +5305,62 @@ namespace fthr {
 
         const auto save_budget = task.replay_save_lease && replay_storage_
             ? replay_storage_->memory_budget() : nullptr;
+        ReplayMemoryReservation packet_memory(save_budget, ReplayMemoryUse::Save);
+        std::unique_ptr<uint8_t, decltype(&av_free)> packet_bytes(nullptr, &av_free);
+        const auto release_packet_bytes = [&] {
+            packet_bytes.reset();
+            packet_memory.Shrink(packet_memory.bytes());
+        };
+        const auto prepare_packet = [&](size_t size, size_t scratch_size,
+                                        ReplayMemoryReservation& scratch,
+                                        SavePacketTiming* packet_timing) {
+            const size_t padded_size = size + AV_INPUT_BUFFER_PADDING_SIZE;
+            if (padded_size > packet_memory.bytes()) release_packet_bytes();
+
+            // Keep charging video conversion scratch. If a large preceding
+            // packet ties up the save budget, release its buffer and retry.
+            if (scratch_size && !scratch.Grow(scratch_size)) {
+                if (padded_size >= packet_memory.bytes())
+                    return fail_media_write(L"reserving replay RAM for", AVERROR(ENOMEM));
+                release_packet_bytes();
+                if (!scratch.Grow(scratch_size))
+                    return fail_media_write(L"reserving replay RAM for", AVERROR(ENOMEM));
+            }
+
+            if (!packet_bytes) {
+                if (!packet_memory.Grow(padded_size))
+                    return fail_media_write(L"reserving replay RAM for", AVERROR(ENOMEM));
+                const auto started = frame_pacing_trace::Now(packet_timing != nullptr);
+                packet_bytes.reset(static_cast<uint8_t*>(av_malloc(padded_size)));
+                if (packet_timing)
+                    packet_timing->allocation_ticks += frame_pacing_trace::Qpc() - started;
+                if (!packet_bytes)
+                    return fail_media_write(L"allocating a packet for", AVERROR(ENOMEM));
+            }
+
+            // av_write_frame borrows the packet. FFmpeg copies an unrefcounted
+            // payload if it retains a reference. Keep the required padding
+            // zero even when the next packet uses less of this buffer.
+            av_pkt->data = packet_bytes.get();
+            av_pkt->size = static_cast<int>(size);
+            std::memset(av_pkt->data + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+            return true;
+        };
         if (timing) timing->packet_loop_begin_qpc = frame_pacing_trace::Qpc();
         const auto write_video = [&](const EncodedRingPacket& pkt) {
-            ReplayMemoryReservation packet_memory(save_budget, ReplayMemoryUse::Save);
-            if (pkt.byte_size() == 0) return true;
-            if (pkt.byte_size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+            const size_t size = pkt.byte_size();
+            if (size == 0) return true;
+            if (size > static_cast<size_t>(std::numeric_limits<int>::max()) - AV_INPUT_BUFFER_PADDING_SIZE)
                 return fail_media_write(L"preparing a video packet for", AVERROR(EINVAL));
-            // Account one packet and muxer format conversion scratch.
-            if (!packet_memory.Grow(2 * pkt.byte_size() + AV_INPUT_BUFFER_PADDING_SIZE))
-                return fail_media_write(L"reserving replay RAM for", AVERROR(ENOMEM));
-
-            const auto allocate_started = frame_pacing_trace::Now(timing != nullptr);
-            ret = av_new_packet(av_pkt, static_cast<int>(pkt.byte_size()));
+            ReplayMemoryReservation scratch(save_budget, ReplayMemoryUse::Save);
+            if (!prepare_packet(size, size, scratch, timing ? &timing->video : nullptr))
+                return false;
             const auto read_started = frame_pacing_trace::Now(timing != nullptr);
-            if (timing) timing->video.allocation_ticks += read_started - allocate_started;
-            if (ret < 0)
-                return fail_media_write(L"allocating a video packet for", ret);
-
             const bool read = pkt.ReadInto(av_pkt->data);
             if (timing) {
                 timing->video.read_copy_ticks += frame_pacing_trace::Qpc() - read_started;
                 ++timing->video.packets;
-                timing->video.bytes += pkt.byte_size();
+                timing->video.bytes += size;
             }
             if (!read)
                 return fail_media_write(L"reading video replay data for", AVERROR(EIO));
@@ -5151,7 +5410,6 @@ namespace fthr {
         };
 
         const auto write_audio = [&](const MuxAudioTrack& audio, size_t i, int64_t pts) {
-            ReplayMemoryReservation packet_memory(save_budget, ReplayMemoryUse::Save);
             const auto* persistent = audio.persistent_packets.empty()
                 ? nullptr : audio.persistent_packets[i];
             size_t size = persistent ? persistent->byte_size() : audio.packets[i].size();
@@ -5164,17 +5422,12 @@ namespace fthr {
                 // packet. Match the bytes and duration on the muxed sample.
                 size = static_cast<size_t>(static_cast<uint64_t>(samples) * frame_bytes);
             }
-            if (!size || size > static_cast<size_t>(std::numeric_limits<int>::max()))
+            if (!size || size > static_cast<size_t>(std::numeric_limits<int>::max()) - AV_INPUT_BUFFER_PADDING_SIZE)
                 return fail_media_write(L"preparing an audio packet for", AVERROR(EINVAL));
-            if (!packet_memory.Grow(size + AV_INPUT_BUFFER_PADDING_SIZE))
-                return fail_media_write(L"reserving replay RAM for", AVERROR(ENOMEM));
-
-            const auto allocate_started = frame_pacing_trace::Now(timing != nullptr);
-            ret = av_new_packet(av_pkt, static_cast<int>(size));
+            ReplayMemoryReservation no_scratch;
+            if (!prepare_packet(size, 0, no_scratch, timing ? &timing->audio : nullptr))
+                return false;
             const auto read_started = frame_pacing_trace::Now(timing != nullptr);
-            if (timing) timing->audio.allocation_ticks += read_started - allocate_started;
-            if (ret < 0)
-                return fail_media_write(L"allocating an audio packet for", ret);
 
             bool read = true;
             if (persistent && persistent->replay_storage) {
@@ -5255,6 +5508,7 @@ namespace fthr {
         if (video_packet_count == 0)
             return fail_media_write(L"writing video data to", -1);
         av_packet_free(&av_pkt);
+        release_packet_bytes();
 
         const double actual_duration_s = (last_video_pts >= 0)
             ? (static_cast<double>(last_video_pts) / 90000.0)
@@ -8731,6 +8985,289 @@ namespace fthr {
     }
 
 
+    bool CaptureEngine::InitializeMinecraftJavaCapture() {
+        startup_capture_backend_ = WindowsCaptureBackendName(
+            WindowsCaptureBackend::MinecraftJavaGame);
+        const HWND hwnd = reinterpret_cast<HWND>(target_hwnd_);
+        if (!window_source_identity_.HasProcessWatch() || !window_source_identity_.IsRenderable()) {
+            SetCaptureFailure("The selected Minecraft Java window is unavailable. "
+                              "Restore the game window and try again.");
+            return false;
+        }
+        const auto [width, height] = MinecraftJavaClientSize(hwnd);
+        if (!width || !height) {
+            SetCaptureFailure("The selected Minecraft Java window has unsupported dimensions.");
+            return false;
+        }
+        width_ = width;
+        height_ = height;
+        if (!InitializeWindowCaptureDevice(hwnd, false)) return false;
+
+        auto state = std::make_unique<MinecraftJavaState>();
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = width_;
+        description.Height = height_;
+        description.MipLevels = 1;
+        description.ArraySize = 1;
+        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        const HRESULT texture_result = device_->CreateTexture2D(&description, nullptr,
+            state->upload.put());
+        if (FAILED(texture_result)) {
+            SetCaptureFailure(diagnostics::FormatHResultFailure(
+                "CreateTexture2D for Minecraft Java Game Capture", texture_result));
+            return false;
+        }
+        std::string error;
+        if (!state->Start(hwnd, width_, height_, fps_, capture_cursor_, error)) {
+            SetCaptureFailure(std::move(error));
+            return false;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+        do {
+            if (!window_source_identity_.IsRenderable()) {
+                SetCaptureFailure("The selected Minecraft Java window closed or stopped rendering.");
+                return false;
+            }
+            error = state->Failure();
+            if (!error.empty()) {
+                SetCaptureFailure(std::move(error));
+                return false;
+            }
+            if (state->Ready()) {
+                minecraft_java_state_ = std::move(state);
+                return true;
+            }
+            if (WaitForSingleObject(state->frame_event.get(), 50) == WAIT_FAILED) {
+                SetCaptureFailure("Could not wait for the first Minecraft Java Game Capture frame.");
+                return false;
+            }
+        } while (std::chrono::steady_clock::now() < deadline);
+        SetCaptureFailure("Minecraft Java did not provide a Game Capture frame in time. "
+            "Bring the game to the foreground and check that it uses the same graphics adapter.");
+        return false;
+    }
+
+    void CaptureEngine::CaptureThreadMinecraftJava() {
+        auto& state = *minecraft_java_state_;
+        const HWND hwnd = reinterpret_cast<HWND>(target_hwnd_);
+        const uint32_t stride = width_ * 4;
+        const auto fail = [this](std::string message, bool reconfigure = false) {
+            SetCaptureFailure(std::move(message));
+            capture_health_flags_.store(CAPTURE_HEALTH_BACKEND_FAILED
+                | (reconfigure ? CAPTURE_HEALTH_RECONFIGURE_REQUIRED : 0u));
+            ClearReplayForRecovery();
+            running_.store(false);
+            std::cout << "FTHR_DIAGNOSTIC_EVENT {\"subsystem\":\"capture\","
+                      << "\"event\":\"runtime_failed\",\"state\":\"FAILED\","
+                      << "\"error_code\":\"CAPTURE_TARGET_UNAVAILABLE\","
+                      << "\"backend\":\"OBS_GAME_CAPTURE\",\"reconfigure_required\":"
+                      << (reconfigure ? "true" : "false") << ",\"detail\":\""
+                      << diagnostics::JsonEscape(last_capture_failure_detail_) << "\"}"
+                      << std::endl;
+        };
+
+        // The readiness frame arrived before the encoder and audio were ready.
+        if (state.TakeFrame()) state.ReleaseFrame();
+        bool paused = false;
+        const auto canvas_size = std::make_pair(width_, height_);
+        std::pair<uint32_t, uint32_t> pending_size{};
+        auto stable_since = std::chrono::steady_clock::now();
+        while (running_.load(std::memory_order_acquire)) {
+            capture_loop_iterations_.fetch_add(1, std::memory_order_relaxed);
+            if (auto error = state.Failure(); !error.empty()) {
+                fail(std::move(error));
+                break;
+            }
+            if (!window_source_identity_.Matches(hwnd)) {
+                fail("The selected Minecraft Java window closed or changed owner.");
+                break;
+            }
+
+            const auto size = MinecraftJavaClientSize(hwnd);
+            const bool renderable = size.first && size.second
+                && !IsIconic(hwnd) && IsWindowVisible(hwnd);
+            if (renderable && size != canvas_size) {
+                const auto now = std::chrono::steady_clock::now();
+                if (size != pending_size) {
+                    pending_size = size;
+                    stable_since = now;
+                } else if (now - stable_since >= std::chrono::milliseconds(400)) {
+                    fail("Minecraft Java resized from " + std::to_string(width_) + 'x'
+                        + std::to_string(height_) + " to " + std::to_string(size.first)
+                        + 'x' + std::to_string(size.second) + ".", true);
+                    break;
+                }
+            } else {
+                pending_size = {};
+            }
+
+            capture_acquire_attempts_.fetch_add(1, std::memory_order_relaxed);
+            const auto* frame = state.TakeFrame();
+            if (!renderable && !paused) {
+                paused = true;
+                capture_health_flags_.fetch_or(CAPTURE_HEALTH_PAUSED);
+                ClearReplayForRecovery();
+            }
+            if (!frame) {
+                const DWORD result = WaitForSingleObject(state.frame_event.get(), 50);
+                if (result == WAIT_FAILED) {
+                    fail("Could not wait for Minecraft Java Game Capture frames.");
+                    break;
+                }
+                if (result == WAIT_TIMEOUT) {
+                    capture_timeouts_.fetch_add(1, std::memory_order_relaxed);
+                }
+                continue;
+            }
+
+            if (!renderable || paused) {
+                state.ReleaseFrame();
+                if (renderable) {
+                    paused = false;
+                    replay_encoder_->RequestKeyframe();
+                    capture_health_flags_.fetch_and(~CAPTURE_HEALTH_PAUSED);
+                }
+                continue;
+            }
+
+            LARGE_INTEGER now{};
+            QueryPerformanceCounter(&now);
+            capture_acquire_successes_.fetch_add(1, std::memory_order_relaxed);
+            source_textures_received_.fetch_add(1, std::memory_order_relaxed);
+            last_source_frame_qpc_.store(now.QuadPart, std::memory_order_release);
+            const uint64_t frame_number = frames_captured_.load(std::memory_order_relaxed) + 1;
+            bool encoded = false;
+            if (replay_encoder_cpu_input_) {
+                SampleContentBGRA(frame, stride, width_, height_, frame_number);
+                last_encoder_submission_qpc_.store(now.QuadPart, std::memory_order_release);
+                encoded = replay_encoder_->EncodeFrameCPU(
+                    CropMappedData(frame, stride), stride, now.QuadPart);
+                state.ReleaseFrame();
+                capture_frames_released_.fetch_add(1, std::memory_order_relaxed);
+                if (!encoded || replay_config_publish_failed_.load()) {
+                    FailReplayEncoder("Minecraft Java BGRA frame submission");
+                    break;
+                }
+            } else {
+                context_->UpdateSubresource(state.upload.get(), 0, nullptr, frame, stride, 0);
+                state.ReleaseFrame();
+                capture_frames_released_.fetch_add(1, std::memory_order_relaxed);
+                encoded = EncodeGpuReplayTexture(PrepareEncodeTexture(state.upload.get()),
+                    now.QuadPart, frame_number);
+                if (!encoded) break;
+            }
+            frames_captured_.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (!(capture_health_flags_.load() & CAPTURE_HEALTH_BACKEND_FAILED)) {
+            capture_health_flags_.store(CAPTURE_HEALTH_NONE);
+        }
+    }
+
+    bool CaptureEngine::InitializeWindowCaptureDevice(HWND hwnd, bool observe_display_hdr) {
+        // A window can move between GPUs on hybrid systems. Resolve the
+        // monitor Windows currently assigns to this HWND and bind the capture
+        // D3D11 device to that monitor's adapter LUID. Never use adapter 0 or
+        // the primary display as an implicit fallback.
+        const HMONITOR window_monitor = MonitorFromWindow(
+            hwnd, MONITOR_DEFAULTTONULL);
+        if (!window_monitor) {
+            SetCaptureFailure("api_call=MonitorFromWindow result=null");
+            return false;
+        }
+        const auto topology = monitor_topology_source_.QueryActiveTopology();
+        const auto window_monitor_it = std::find_if(
+            topology.monitors.begin(), topology.monitors.end(),
+            [window_monitor](const monitor::MonitorTopologyEntry& entry) {
+                return entry.hmonitor == reinterpret_cast<uintptr_t>(window_monitor);
+            });
+        if (!topology.ok() || window_monitor_it == topology.monitors.end()) {
+            SetCaptureFailure(
+                "api_call=WindowsMonitorTopologySource::QueryActiveTopology "
+                "reason=window_monitor_not_resolved");
+            return false;
+        }
+        resolved_monitor_ = *window_monitor_it;
+        // The HWND's monitor is authoritative for this capture generation.
+        // Persist its identity before starting the source so every later
+        // backend resolves the same physical display instead of the originally
+        // configured or primary monitor.
+        monitor_device_path_ = monitor::NormalizeMonitorDevicePath(
+            resolved_monitor_.monitor_device_path);
+
+        // Create one D3D11 device and keep replay encoding on that exact adapter.
+        // Do not enumerate another vendor merely because it exists elsewhere in
+        // the machine; cross-adapter window capture is not alpha-qualified.
+        D3D_FEATURE_LEVEL feature_level{};
+        IDXGIFactory1* window_factory = nullptr;
+        HRESULT hr = CreateDXGIFactory1(
+            __uuidof(IDXGIFactory1),
+            reinterpret_cast<void**>(&window_factory));
+        IDXGIAdapter1* window_adapter = nullptr;
+        if (SUCCEEDED(hr) && window_factory) {
+            for (UINT index = 0; ; ++index) {
+                IDXGIAdapter1* candidate = nullptr;
+                const HRESULT enumerated = window_factory->EnumAdapters1(index, &candidate);
+                if (enumerated == DXGI_ERROR_NOT_FOUND) break;
+                if (FAILED(enumerated) || !candidate) {
+                    hr = enumerated;
+                    if (candidate) candidate->Release();
+                    break;
+                }
+                DXGI_ADAPTER_DESC1 description{};
+                const HRESULT described = candidate->GetDesc1(&description);
+                if (SUCCEEDED(described)
+                    && !(description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+                    && description.AdapterLuid.LowPart
+                        == static_cast<LONG>(resolved_monitor_.adapter_luid.low_part)
+                    && description.AdapterLuid.HighPart
+                        == resolved_monitor_.adapter_luid.high_part) {
+                    window_adapter = candidate;
+                    break;
+                }
+                candidate->Release();
+            }
+        }
+        if (!window_adapter) {
+            if (window_factory) window_factory->Release();
+            const std::string failure = diagnostics::FormatHResultFailure(
+                "IDXGIFactory1::EnumAdapters1(window monitor adapter)",
+                FAILED(hr) ? hr : DXGI_ERROR_NOT_FOUND);
+            SetCaptureFailure(failure + " reason=window_monitor_adapter_not_found");
+            return false;
+        }
+        source_hdr_ = observe_display_hdr
+            && QueryHdrDisplay(resolved_monitor_, window_adapter).value_or(false);
+        sdr_reference_white_ = source_hdr_ ? QuerySdrReferenceWhite(resolved_monitor_) : 1.0f;
+        hr = D3D11CreateDevice(
+            window_adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
+            nullptr, 0, D3D11_SDK_VERSION,
+            &device_, &feature_level, &context_);
+        window_adapter->Release();
+        window_factory->Release();
+        if (FAILED(hr)) {
+            const std::string failure = diagnostics::FormatHResultFailure(
+                "D3D11CreateDevice(window capture)", hr);
+            SetCaptureFailure(failure);
+            std::cerr << '[' << startup_capture_backend_ << "] " << failure << std::endl;
+            return false;
+        }
+        capture_adapter_vendor_ = QueryD3D11DeviceVendor(device_);
+        nvidia_device_ = capture_adapter_vendor_ == EncoderVendor::Nvidia;
+        std::string capture_luid_diagnostic;
+        capture_device_adapter_luid_available_ = QueryD3D11DeviceAdapterLuid(
+            device_, capture_device_adapter_luid_, capture_luid_diagnostic);
+        if (!capture_device_adapter_luid_available_) {
+            std::cerr << '[' << startup_capture_backend_ << "] Could not resolve capture device adapter LUID: "
+                      << capture_luid_diagnostic << std::endl;
+        }
+
+        return true;
+    }
+
     // Create WGC capture for target_hwnd_ using the window content dimensions.
     // The engine must restart if resizing changes the encoder input dimensions.
 
@@ -8777,101 +9314,7 @@ namespace fthr {
             return false;
         }
 
-        // A window can move between GPUs on hybrid systems. Resolve the
-        // monitor Windows currently assigns to this HWND and bind the WGC
-        // D3D11 device to that monitor's adapter LUID. Never use adapter 0 or
-        // the primary display as an implicit fallback.
-        const HMONITOR window_monitor = MonitorFromWindow(
-            hwnd, MONITOR_DEFAULTTONULL);
-        if (!window_monitor) {
-            SetCaptureFailure("api_call=MonitorFromWindow result=null");
-            return false;
-        }
-        const auto topology = monitor_topology_source_.QueryActiveTopology();
-        const auto window_monitor_it = std::find_if(
-            topology.monitors.begin(), topology.monitors.end(),
-            [window_monitor](const monitor::MonitorTopologyEntry& entry) {
-                return entry.hmonitor == reinterpret_cast<uintptr_t>(window_monitor);
-            });
-        if (!topology.ok() || window_monitor_it == topology.monitors.end()) {
-            SetCaptureFailure(
-                "api_call=WindowsMonitorTopologySource::QueryActiveTopology "
-                "reason=window_monitor_not_resolved");
-            return false;
-        }
-        resolved_monitor_ = *window_monitor_it;
-        // The HWND's monitor is authoritative for this capture generation.
-        // Persist its identity before WGC/DXGI fallback setup so every later
-        // backend resolves the same physical display instead of the originally
-        // configured or primary monitor.
-        monitor_device_path_ = monitor::NormalizeMonitorDevicePath(
-            resolved_monitor_.monitor_device_path);
-
-        // Create one WGC device and keep replay encoding on that exact adapter.
-        // Do not enumerate another vendor merely because it exists elsewhere in
-        // the machine; cross-adapter window capture is not alpha-qualified.
-        D3D_FEATURE_LEVEL feature_level{};
-        IDXGIFactory1* window_factory = nullptr;
-        HRESULT hr = CreateDXGIFactory1(
-            __uuidof(IDXGIFactory1),
-            reinterpret_cast<void**>(&window_factory));
-        IDXGIAdapter1* window_adapter = nullptr;
-        if (SUCCEEDED(hr) && window_factory) {
-            for (UINT index = 0; ; ++index) {
-                IDXGIAdapter1* candidate = nullptr;
-                const HRESULT enumerated = window_factory->EnumAdapters1(index, &candidate);
-                if (enumerated == DXGI_ERROR_NOT_FOUND) break;
-                if (FAILED(enumerated) || !candidate) {
-                    hr = enumerated;
-                    if (candidate) candidate->Release();
-                    break;
-                }
-                DXGI_ADAPTER_DESC1 description{};
-                const HRESULT described = candidate->GetDesc1(&description);
-                if (SUCCEEDED(described)
-                    && !(description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
-                    && description.AdapterLuid.LowPart
-                        == static_cast<LONG>(resolved_monitor_.adapter_luid.low_part)
-                    && description.AdapterLuid.HighPart
-                        == resolved_monitor_.adapter_luid.high_part) {
-                    window_adapter = candidate;
-                    break;
-                }
-                candidate->Release();
-            }
-        }
-        if (!window_adapter) {
-            if (window_factory) window_factory->Release();
-            const std::string failure = diagnostics::FormatHResultFailure(
-                "IDXGIFactory1::EnumAdapters1(window monitor adapter)",
-                FAILED(hr) ? hr : DXGI_ERROR_NOT_FOUND);
-            SetCaptureFailure(failure + " reason=window_monitor_adapter_not_found");
-            return false;
-        }
-        source_hdr_ = QueryHdrDisplay(resolved_monitor_, window_adapter).value_or(false);
-        sdr_reference_white_ = source_hdr_ ? QuerySdrReferenceWhite(resolved_monitor_) : 1.0f;
-        hr = D3D11CreateDevice(
-            window_adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
-            nullptr, 0, D3D11_SDK_VERSION,
-            &device_, &feature_level, &context_);
-        window_adapter->Release();
-        window_factory->Release();
-        if (FAILED(hr)) {
-            const std::string failure = diagnostics::FormatHResultFailure(
-                "D3D11CreateDevice(window capture)", hr);
-            SetCaptureFailure(failure);
-            std::cerr << "[WinCapture] " << failure << std::endl;
-            return false;
-        }
-        capture_adapter_vendor_ = QueryD3D11DeviceVendor(device_);
-        nvidia_device_ = capture_adapter_vendor_ == EncoderVendor::Nvidia;
-        std::string capture_luid_diagnostic;
-        capture_device_adapter_luid_available_ = QueryD3D11DeviceAdapterLuid(
-            device_, capture_device_adapter_luid_, capture_luid_diagnostic);
-        if (!capture_device_adapter_luid_available_) {
-            std::cerr << "[WinCapture] Could not resolve capture device adapter LUID: "
-                      << capture_luid_diagnostic << std::endl;
-        }
+        if (!InitializeWindowCaptureDevice(hwnd, true)) return false;
 
         // Steps 3-8: WinRT capture session (exception-safe)
         wgc_state_ = std::make_unique<WGCState>();

@@ -192,6 +192,22 @@ jobs:
       - name: Test uploader plugin boundary
         run: python -m pytest tests/test_uploader_plugin_boundary.py
 
+      - name: Build pinned Minecraft game capture provider
+        shell: pwsh
+        run: |
+          $obsZip = Join-Path $env:RUNNER_TEMP 'OBS-32.1.2.zip'
+          $obsDist = Join-Path $env:RUNNER_TEMP 'obs-32.1.2'
+          $obsSrc = Join-Path $env:RUNNER_TEMP 'obs-32.1.2-src'
+          Invoke-WebRequest 'https://github.com/obsproject/obs-studio/releases/download/32.1.2/OBS-Studio-32.1.2-Windows-x64.zip' -OutFile $obsZip
+          if ((Get-FileHash $obsZip).Hash -ne '8d97e4563bd8d22d03e63042aa7dccede1d555c9bd35ce8a9e5019b0d0201bf6') { throw 'Unexpected OBS archive hash' }
+          Expand-Archive -LiteralPath $obsZip -DestinationPath $obsDist
+          git clone --depth 1 --branch 32.1.2 https://github.com/obsproject/obs-studio $obsSrc
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $instance = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          & "$instance/Common7/Tools/Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $obsDll = Get-ChildItem $obsDist -Recurse -Filter obs.dll | Select-Object -First 1
+          python tools/build_minecraft_game_source.py --obs $obsDll.Directory.Parent.Parent.FullName --source $obsSrc --out FTHRcapture/x64/Release/game-source
+
       - name: Build and verify the Windows bundle
         shell: pwsh
         run: |

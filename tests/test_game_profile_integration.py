@@ -537,8 +537,9 @@ def test_failed_backend_restarts_identical_accepted_settings(monkeypatch, flags)
     assert len(host._display_mode_restart_times) == 1
 
 
+@pytest.mark.parametrize('waiting_for_post_roll', [False, True])
 def test_busy_profile_changes_coalesce_latest_B_or_C_without_native_restart(
-        monkeypatch):
+        monkeypatch, waiting_for_post_roll):
     import main
 
     request_a = _request(1, 'A')
@@ -550,7 +551,8 @@ def test_busy_profile_changes_coalesce_latest_B_or_C_without_native_restart(
     host.settings_manager = manager
     manager.catalogs = [catalog_b, catalog_c]
     manager.read_game_capture_profiles = lambda: manager.catalogs.pop(0)
-    host._save_state = SimpleNamespace(is_busy=lambda: True)
+    host._pending_post_roll = object() if waiting_for_post_roll else None
+    host._save_state = SimpleNamespace(is_busy=lambda: not waiting_for_post_roll)
     host._settings_page_widget = SimpleNamespace(
         set_profile_capture_status=lambda *_args: None)
     host.stop_calls = []
@@ -564,9 +566,11 @@ def test_busy_profile_changes_coalesce_latest_B_or_C_without_native_restart(
     assert host._desired_capture_request.profile_name == 'Gamma'
     assert host.stop_calls == []
     assert host.statuses == ['CAPTURE CHANGE PENDING', 'CAPTURE CHANGE PENDING']
+    assert host._apply_latest_desired_request_if_idle() is False
 
     # Once the real owner releases, idle flush applies exactly the newest C;
     # queued B is never handed to stop/start.
+    host._pending_post_roll = None
     host._save_state.is_busy = lambda: False
     apply_calls = []
     host._restart_capture_engine = lambda **kwargs: (
@@ -742,6 +746,79 @@ def test_save_capture_error_does_not_send_orphan_native_command(monkeypatch, tmp
 
     assert bridge.save_calls == []
     assert host._save_state.current is None
+
+
+def test_post_roll_keeps_first_press_start_when_repeated_and_dispatched_late(
+        monkeypatch, tmp_path):
+    import main
+
+    request = _request(1, 'A')
+    request = replace(
+        request,
+        capture_config=replace(request.capture_config, buffer_seconds=42,
+                               post_roll_seconds=5),
+    )
+    session = _session(request)
+    host, bridge = _save_host(main, session, tmp_path)
+    _bind(host, main, '_save_clip', '_arm_post_roll_timer',
+          '_extend_pending_post_roll', '_cancel_pending_post_roll')
+    timer_calls = []
+    host._post_roll_timer = SimpleNamespace(start=timer_calls.append)
+    bridge.supports_clip_boundary = lambda: True
+    bridge.save_clip = lambda *args, **kwargs: bridge.save_calls.append((args, kwargs)) or True
+    clock_ns = 100_000_000_000
+    monkeypatch.setattr(main.time, 'monotonic_ns', lambda: clock_ns)
+    monkeypatch.setattr(main, 'clips_directory_from', lambda _sm: tmp_path)
+    monkeypatch.setattr(main, 'emit_event', lambda *_args, **_kwargs: None)
+
+    host._save_clip(30, pressed_at_ns=99_100_000_000)
+    assert not bridge.save_calls
+    assert timer_calls == [4100]
+    first = host._pending_post_roll
+    assert first.end_ns == 104_100_000_000
+
+    clock_ns = 103_300_000_000
+    host._save_clip(60, pressed_at_ns=103_200_000_000)
+    assert host._pending_post_roll is first
+    assert first.duration_seconds == 40
+    assert first.end_ns == 109_100_000_000
+    assert timer_calls[-1] == 5800
+    assert not bridge.save_calls
+
+    clock_ns = 109_700_000_000
+    main.MainWindow._finish_pending_post_roll(host)
+    assert host._pending_post_roll is None
+    assert len(bridge.save_calls) == 1
+    args, kwargs = bridge.save_calls[0]
+    assert args[1] == 40
+    assert kwargs == {'end_monotonic_ns': 109_100_000_000}
+    assert host._save_state.current.context['mic_end_time'] == 109.1
+    assert host._save_state.current.context['session_snapshot'] is session
+
+
+def test_pending_post_roll_reports_capture_owner_loss(monkeypatch):
+    import main
+
+    owner = object()
+    pending = main._PendingPostRoll(owner, 100_000_000_000, 30, 5, 35, 40)
+    errors = []
+    timer = _Timer()
+    host = SimpleNamespace(
+        _pending_post_roll=pending, _post_roll_timer=timer,
+        _accepted_session_owner_is_current=lambda session: False,
+        capture_card=SimpleNamespace(show_error=lambda: None),
+        push_error=lambda *args, **_kwargs: errors.append(args),
+    )
+    _bind(host, main, '_cancel_pending_post_roll')
+    monkeypatch.setattr(main.time, 'monotonic_ns', lambda: pending.end_ns)
+    monkeypatch.setattr(main, 'emit_event', lambda *_args, **_kwargs: None)
+
+    main.MainWindow._finish_pending_post_roll(host)
+
+    assert host._pending_post_roll is None
+    assert timer.stops == 1
+    assert errors == [('CLIP NOT SAVED',
+                       'Capture changed before the additional seconds were ready.')]
 
 
 def test_normal_hotkey_uses_accepted_profile_duration_after_global_edits():

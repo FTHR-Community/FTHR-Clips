@@ -19,7 +19,11 @@ from core.camera_overlay import DEFAULT_IMAGE_OVERLAY_RECT
 from core.capture_settings import CaptureConfig
 from core.capture_settings import MAX_CLIP_SECONDS
 from core.capture_settings import validate_fps
-from core.capture_settings import validate_normal_clip_length
+from core.capture_settings import MAX_POST_ROLL_SECONDS, validate_normal_clip_length
+from core.third_party_keyboard import (
+    KEYBOARD_BROWSER_HEIGHT, KEYBOARD_BROWSER_MAX_SIZE, KEYBOARD_BROWSER_WIDTH,
+    normalize_keyboard_browser_url,
+)
 from core.replay_storage import ReplayStorageSettings
 from core.game_profiles import ProfileValidationError
 from core.game_profiles import canonical_exe_path
@@ -58,6 +62,7 @@ _EFFECT_FIT_KEYS = {'image_overlay_fit'}
 _IMAGE_LAYER_KEYS = {'path', 'enabled', 'opacity', 'fit', 'rect'}
 _KEYBOARD_KEYS = {
     'enabled', 'hwnd', 'window_name', 'color', 'intensity', 'rect',
+    'source_type', 'browser_url', 'browser_width', 'browser_height',
 }
 _COLOR_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
 _TRACK_NAME_RE = re.compile(r"^[A-Za-z0-9 ._+()'\-]{1,40}$")
@@ -374,6 +379,9 @@ def _validate_capture_config(config: object) -> CaptureConfig:
         if encoder not in _ENCODERS:
             raise ValueError('encoder is invalid')
         normal_seconds = validate_normal_clip_length(config.normal_clip_seconds)
+        post_roll_seconds = config.post_roll_seconds
+        if not _is_int(post_roll_seconds) or not 0 <= post_roll_seconds <= MAX_POST_ROLL_SECONDS:
+            raise ValueError('post_roll_seconds is outside the supported range')
         crop_values = (config.crop_x, config.crop_y, config.crop_w, config.crop_h)
         if not all(_is_number(value) for value in crop_values):
             raise ValueError('crop values must be finite numbers')
@@ -405,7 +413,8 @@ def _validate_capture_config(config: object) -> CaptureConfig:
         application_audio_tracks_enabled=config.application_audio_tracks_enabled,
         application_audio_exclusions=exclusions,
         keep_system_audio_backup=config.keep_system_audio_backup,
-        normal_clip_seconds=normal_seconds, crop_enabled=config.crop_enabled,
+        normal_clip_seconds=normal_seconds, post_roll_seconds=post_roll_seconds,
+        crop_enabled=config.crop_enabled,
         crop_x=float(config.crop_x), crop_y=float(config.crop_y),
         crop_w=float(config.crop_w), crop_h=float(config.crop_h),
         replay_storage=replay,
@@ -491,6 +500,10 @@ def _effects(value: object) -> MappingProxyType:
             color = item.get('color', '#00ff00')
             intensity = item.get('intensity', 58)
             rect = item.get('rect', _DEFAULT_KEYBOARD_RECT)
+            source_type = item.get('source_type', 'window')
+            browser_url = item.get('browser_url', '')
+            width = item.get('browser_width', KEYBOARD_BROWSER_WIDTH)
+            height = item.get('browser_height', KEYBOARD_BROWSER_HEIGHT)
             if not isinstance(enabled, bool):
                 raise CaptureSnapshotError('third_party_keyboard enabled must be boolean')
             if not _is_int(hwnd) or hwnd < 0:
@@ -503,6 +516,15 @@ def _effects(value: object) -> MappingProxyType:
                 raise CaptureSnapshotError('third_party_keyboard color is invalid')
             if not _is_int(intensity) or not 0 <= intensity <= 100:
                 raise CaptureSnapshotError('third_party_keyboard intensity is invalid')
+            if source_type not in ('window', 'browser'):
+                raise CaptureSnapshotError('third_party_keyboard source type is invalid')
+            if (not isinstance(browser_url, str)
+                    or browser_url != normalize_keyboard_browser_url(browser_url)
+                    or (source_type == 'browser' and enabled and not browser_url)):
+                raise CaptureSnapshotError('third_party_keyboard browser URL is invalid')
+            if any(not _is_int(size) or not 64 <= size <= KEYBOARD_BROWSER_MAX_SIZE
+                   for size in (width, height)):
+                raise CaptureSnapshotError('third_party_keyboard browser size is invalid')
             normalized[key] = {
                 'enabled': enabled,
                 'hwnd': hwnd,
@@ -510,6 +532,10 @@ def _effects(value: object) -> MappingProxyType:
                 'color': color,
                 'intensity': intensity,
                 'rect': _rect(rect),
+                'source_type': source_type,
+                'browser_url': browser_url,
+                'browser_width': width,
+                'browser_height': height,
             }
     return _freeze(normalized)
 
@@ -537,6 +563,7 @@ def _config_dict(config: CaptureConfig) -> dict[str, object]:
         'application_audio_exclusions': config.application_audio_exclusions,
         'keep_system_audio_backup': config.keep_system_audio_backup,
         'normal_clip_seconds': config.normal_clip_seconds,
+        'post_roll_seconds': config.post_roll_seconds,
         'crop_enabled': config.crop_enabled,
         'crop_x': config.crop_x,
         'crop_y': config.crop_y,

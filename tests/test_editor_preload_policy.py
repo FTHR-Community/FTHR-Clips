@@ -82,6 +82,38 @@ def test_unready_clip_is_not_preloaded(policy):
     assert calls == []
 
 
+def test_speculation_yields_to_cold_thumbnail_work(policy):
+    preload, owner, calls = policy
+    owner.clip_grid._thumbnail_jobs_inflight = {'clip.mp4'}
+    preload.request('clip.mp4')
+    preload._prepare_candidate()
+    assert calls == [] and preload._candidate == 'clip.mp4'
+    owner.clip_grid._thumbnail_jobs_inflight.clear()
+    preload._prepare_candidate()
+    assert calls == [('clip.mp4', {'preview_quality': 'auto'})]
+
+
+def test_scroll_defers_hover_and_resumes_the_visible_candidate(policy):
+    preload, owner, calls = policy
+    owner.clip_scroll_area = SimpleNamespace(
+        viewport=lambda: SimpleNamespace(rect=lambda: QRect(0, 0, 500, 500)))
+    owner.clip_grid._thumb_widgets = {'settled.mp4': SimpleNamespace(
+        is_video=True, ready=True, _mutation_busy=False, isVisible=lambda: True,
+        rect=lambda: QRect(0, 0, 100, 100), mapTo=lambda *args: QPoint(0, 0))}
+    preload._loader.cancel_unprepared = lambda: calls.append('cancel pending') or True
+    preload.request('old.mp4')
+    owner.clip_grid._scrolling = True
+    preload.scroll_activity_changed(True)
+    preload.request('passing.mp4')
+    preload._tick()
+    assert not preload._debounce.isActive()
+    assert calls == ['cancel pending']
+    owner.clip_grid._scrolling = False
+    preload.scroll_activity_changed(False)
+    preload._prepare_candidate()
+    assert calls[-1] == ('settled.mp4', {'preview_quality': 'auto'})
+
+
 def test_take_transfers_once_and_clears_other_work(policy):
     preload, owner, calls = policy
     assert preload.take('clip.mp4') == ('prepared', 'clip.mp4')

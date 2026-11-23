@@ -74,9 +74,9 @@ def test_cancelled_real_worker_recovers_on_reopen(qtbot, monkeypatch, tmp_path):
     delivered_on = []
     original = clip_grid.ClipThumbnail.set_video_thumbnail
 
-    def install(card, *args):
+    def install(card, *args, **kwargs):
         delivered_on.append(QThread.currentThread() == card.thread())
-        return original(card, *args)
+        return original(card, *args, **kwargs)
 
     monkeypatch.setattr(clip_grid.ClipThumbnail, 'set_video_thumbnail', install)
     settings = SimpleNamespace(get=lambda key, default=None: {

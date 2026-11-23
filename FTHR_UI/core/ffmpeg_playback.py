@@ -14,10 +14,13 @@ import subprocess
 import sys
 import threading
 import time
+from bisect import bisect_right
 from collections import OrderedDict
 from typing import Callable, Sequence
 
 import numpy as np
+
+from core.audio_timeline import ffmpeg_silence_filter, silence_pcm_intervals
 
 from PySide6.QtCore import QIODevice, QObject, QTimer, Signal
 from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
@@ -257,16 +260,34 @@ class InProcessFFmpegMixer:
             configure.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_char_p),
                                    ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
             configure.restype = ctypes.c_int
-            filters = (ctypes.c_char_p * len(self.sources))(*(
-                source.processing_filter.encode('utf-8')
-                for source in self.sources))
-            if not configure(self._handle, filters, len(self.sources),
-                             master_filter(limiter_enabled).encode('ascii'), error, len(error)):
+            self._configure_dsp = configure
+            self._output_filter = master_filter(limiter_enabled).encode('ascii')
+            try:
+                self.configure_source_silences({})
+            except PlaybackError:
                 self.close()
-                raise PlaybackError(error.value.decode(errors='replace') or 'Audio DSP unavailable')
+                raise
         else:
             self.close()
             raise PlaybackError('The playback mixer is outdated. Rebuild FTHRPlaybackMixer to edit audio.')
+
+    def configure_source_silences(self, cuts) -> None:
+        """Install source-time gates before native gain, summing, and tempo."""
+        chains = []
+        for source in self.sources:
+            processing = source.processing_filter
+            ranges = tuple((start / 1000, end / 1000)
+                           for start, end in cuts.get(source.source_id, ()))
+            if ranges and source.mix_role not in {'base', 'delta'}:
+                gate = ffmpeg_silence_filter(ranges, 0, ranges[-1][1] + 1)
+                if gate:
+                    processing = f'{processing},{gate}'
+            chains.append(processing.encode('utf-8'))
+        filters = (ctypes.c_char_p * len(chains))(*chains)
+        error = ctypes.create_string_buffer(512)
+        if not self._configure_dsp(self._handle, filters, len(chains),
+                                   self._output_filter, error, len(error)):
+            raise PlaybackError(error.value.decode(errors='replace') or 'Audio DSP unavailable')
 
     def _configure_signatures(self) -> None:
         library = self._library
@@ -542,6 +563,9 @@ class _DecodeWorker(threading.Thread):
         # could be appended after the UI cleared the queue and become the first
         # audible audio at the new playhead position.
         self._command_generation = 0
+        self._silent_ranges: tuple[tuple[int, int], ...] = ()
+        self._silent_range_ends: tuple[int, ...] = ()
+        self._source_silent_ranges: dict = {}
         self._reported_failed_sources: set[int] = set()
         self._meter = lambda _peak: None
         self.limiter_enabled = True
@@ -583,6 +607,27 @@ class _DecodeWorker(threading.Thread):
                 self._queue.clear()
                 self._condition.notify_all()
 
+    def set_silent_ranges(self, ranges, position_ms: int) -> bool:
+        frame_ranges = tuple(
+            (round(start * CANONICAL_SAMPLE_RATE / 1000),
+             round(end * CANONICAL_SAMPLE_RATE / 1000))
+            for start, end in ranges)
+        with self._condition:
+            if self._silent_ranges == frame_ranges:
+                return False
+            self._silent_ranges = frame_ranges
+            self._silent_range_ends = tuple(end for _, end in frame_ranges)
+            self.seek(position_ms)
+        return True
+
+    def set_source_silent_ranges(self, ranges, position_ms: int) -> bool:
+        with self._condition:
+            if self._source_silent_ranges == ranges:
+                return False
+            self._source_silent_ranges = dict(ranges)
+            self.seek(position_ms)
+        return True
+
     def stop(self) -> None:
         with self._condition:
             self._command_generation += 1
@@ -614,6 +659,8 @@ class _DecodeWorker(threading.Thread):
             configured_rate: float | None = None
             configured_preserve_pitch: bool | None = None
             native_pitch_compensation = False
+            configured_source_ranges = {}
+            legacy_cut_boundaries = ()
             last_meter_at = 0.0
             peak_window = 0.0
             while True:
@@ -627,6 +674,19 @@ class _DecodeWorker(threading.Thread):
                     generation = self._command_generation
                     playback_rate = self._playback_rate
                     preserve_pitch = self._preserve_pitch
+                    silent_ranges = self._silent_ranges
+                    silent_range_ends = self._silent_range_ends
+                    source_ranges = self._source_silent_ranges
+                if source_ranges != configured_source_ranges:
+                    mixer.configure_source_silences(source_ranges)
+                    configured_source_ranges = source_ranges
+                    configured_rate = None
+                    legacy_cut_boundaries = tuple(
+                        (index, tuple(boundary * CANONICAL_SAMPLE_RATE // 1000
+                                      for interval in source_ranges[source.source_id]
+                                      for boundary in interval))
+                        for index, source in enumerate(self._sources)
+                        if source.mix_role == 'delta' and source.source_id in source_ranges)
                 if (configured_rate != playback_rate
                         or configured_preserve_pitch != preserve_pitch):
                     configure = getattr(mixer, 'set_playback_rate', None)
@@ -645,6 +705,11 @@ class _DecodeWorker(threading.Thread):
                     time.sleep(0.005)
                     continue
                 gains, master = self._mix_values()
+                # A legacy application stem is a subtractive delta. Deleting
+                # it means subtracting the app from the hidden desktop base.
+                for index, boundaries in legacy_cut_boundaries:
+                    if bisect_right(boundaries, self._decoded_frames) % 2:
+                        gains[index] = -1.0
                 # Pitch-preserving atempo returns sink-rate PCM. Resampling without pitch
                 # preservation consumes source-rate PCM and changes pitch with speed.
                 requested_frames = (_FRAMES_PER_BLOCK if native_pitch_compensation
@@ -680,6 +745,11 @@ class _DecodeWorker(threading.Thread):
                                  if native_pitch_compensation else output_frames)
                 encoded = (block if native_pitch_compensation
                            else _resample_pcm(block, playback_rate)[0])
+                if silent_ranges:
+                    encoded = silence_pcm_intervals(
+                        encoded, frame_bytes=CANONICAL_CHANNELS * 4,
+                        first_source_frame=self._decoded_frames, speed=playback_rate,
+                        ranges=silent_ranges, range_ends=silent_range_ends)
                 encoded = self._encode_for_device(encoded)
                 wake_output = False
                 with self._condition:
@@ -815,6 +885,16 @@ class FFmpegPlaybackController(QObject):
     def set_master_percent(self, value: int) -> None:
         with self._mix_lock:
             self._master_gain = max(0, min(100, value)) / 100.0
+
+    def set_silent_ranges(self, ranges, position_ms: int) -> None:
+        if self._worker.set_silent_ranges(ranges, position_ms):
+            self._discard_output_buffer()
+            self._sync_guard_until = time.monotonic() + _SYNC_RECOVERY_SECONDS
+
+    def set_source_silent_ranges(self, ranges, position_ms: int) -> None:
+        if self._worker.set_source_silent_ranges(ranges, position_ms):
+            self._discard_output_buffer()
+            self._sync_guard_until = time.monotonic() + _SYNC_RECOVERY_SECONDS
 
     def set_source_state(self, source_id: str, gain_percent: int | None = None,
                          muted: bool | None = None) -> None:

@@ -15,6 +15,7 @@ from core.capture_settings import (
     CaptureConfig,
     audio_plan_from_settings,
     compute_buffer_seconds,
+    configured_post_roll_seconds,
     encode_audio_device_tracks,
     normalize_audio_capture_mode,
     validate_fps,
@@ -96,10 +97,11 @@ def build_capture_config(*, values: Mapping, global_values: Mapping,
         crop_w = crop_h = 1.0
     from core.replay_storage import REPLAY_STORAGE_KEY, ReplayStorageSettings
 
+    post_roll_seconds = configured_post_roll_seconds(global_values)
     return CaptureConfig(
         fps=fps,
         buffer_seconds=compute_buffer_seconds(
-            normal_seconds, custom_clip_lengths),
+            normal_seconds, custom_clip_lengths, post_roll_seconds),
         width=width,
         height=height,
         bitrate_kbps=bitrate,
@@ -128,6 +130,7 @@ def build_capture_config(*, values: Mapping, global_values: Mapping,
                 global_values.get('application_audio_exclusions', []))
             if global_values.get('platform') == 'win32' else ''),
         normal_clip_seconds=normal_seconds,
+        post_roll_seconds=post_roll_seconds,
         crop_enabled=crop_enabled,
         crop_x=crop_x,
         crop_y=crop_y,

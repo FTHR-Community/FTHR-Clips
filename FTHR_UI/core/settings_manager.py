@@ -207,6 +207,8 @@ class SettingsManager:
             'capture_cursor': True,
             'show_kofi_widget': True,
             'clip_length': 30,       # seconds
+            'clip_post_roll_enabled': False,
+            'clip_post_roll_seconds': 5,
             'framerate': 60,         # FPS
             'resolution': 'source',  # 480p/720p/1080p/1440p/source
             'bitrate_level': 'medium',  # low/medium/high/custom

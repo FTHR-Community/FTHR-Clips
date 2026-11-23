@@ -192,7 +192,8 @@ namespace fthr {
         // Called from the save thread, where blocking is permitted.
         EncodedRingSnapshot TakeSnapshotByTime(
             uint32_t duration_seconds, int64_t target_end_qpc,
-            EncodedSnapshotLockTiming* timing = nullptr) const;
+            EncodedSnapshotLockTiming* timing = nullptr,
+            bool anchor_to_wall_clock = false) const;
 
         bool WaitUntilPublished(
             int64_t target_qpc, std::chrono::milliseconds timeout) const;
@@ -226,7 +227,7 @@ namespace fthr {
 
         EncodedRingSnapshot TakeSnapshotByTimeImpl(
             uint32_t duration_seconds, int64_t target_end_qpc,
-            EncodedSnapshotLockTiming* timing) const;
+            EncodedSnapshotLockTiming* timing, bool anchor_to_wall_clock) const;
         std::shared_ptr<ReplayMemoryBudget> memory_budget_;
         ReplayMemoryReservation ring_memory_;
         std::shared_ptr<ReplayStorage> storage_;

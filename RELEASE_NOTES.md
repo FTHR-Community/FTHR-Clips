@@ -1,4 +1,8 @@
-# FTHR Clips 2.1.3
+# FTHR Clips 2.1.4
+
+## 23 November 2026 — Windows update
+
+- Adds Minecraft Java game capture and the Ultra Performance mode.
 
 ## 21 November 2026 — Windows update
 

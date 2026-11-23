@@ -96,19 +96,13 @@ class _EditorSkeleton(QWidget):
 
         # Match the real editor's toolbar, two inspectors, preview and timeline.
         # Static shapes need no animation timer or extra rendering under load.
-        for x, w in ((width - 390, 164), (width - 214, 88), (width - 114, 100)):
-            block(x, 50, w, 28)
-        heading(20, body_y, 'Video')
-        for row in range(2):
-            block(20, body_y + 40 + row * 42, (left - 52) / 2, 30)
-            block(32 + (left - 52) / 2, body_y + 40 + row * 42,
-                  (left - 52) / 2, 30)
-        heading(20, body_y + 142, 'Speed')
-        block(20, body_y + 182, left - 40, 30)
-        block(20, body_y + 226, left - 88, 12)
-        heading(20, body_y + 270, 'Color & effects')
-        if body_y + 322 < timeline_y - 8:
-            block(20, body_y + 310, left - 40, 12)
+        for x, w in ((width - 426, 166), (width - 252, 88), (width - 156, 144)):
+            block(x, 48, w, 38)
+        heading(20, body_y, 'Set crop')
+        heading(20, body_y + 42, 'Stretch video')
+        heading(20, body_y + 84, 'Speed')
+        block(20, body_y + 126, left - 88, 12)
+        heading(20, body_y + 164, 'Color & effects')
         block(center_x, body_y, center_w, timeline_y - body_y - 54, Colors.SURFACE_1)
         painter.setPen(QColor(Colors.TEXT))
         painter.drawText(QRect(center_x, body_y, center_w, timeline_y - body_y - 54),
@@ -116,13 +110,10 @@ class _EditorSkeleton(QWidget):
         block(center_x + 12, timeline_y - 42, 92, 28)
         block(center_x + 116, timeline_y - 34, 108, 12)
         rx = width - right + 16
-        heading(rx, body_y, 'Audio mix')
-        for row in range(3):
-            block(rx, body_y + 40 + row * 66, min(108, right - 40), 12)
-            block(rx, body_y + 64 + row * 66, right - 36, 8)
-        heading(rx, body_y + 264, 'Clip details')
-        if body_y + 330 < timeline_y - 8:
-            block(rx, body_y + 302, right - 36, 28)
+        heading(rx, body_y, 'Clip details')
+        block(rx, body_y + 40, right - 36, 28)
+        block(rx, body_y + 84, right - 64, 12)
+        heading(rx, body_y + 126, 'File details')
         painter.setPen(QColor(Colors.BORDER))
         painter.drawLine(0, timeline_y, width, timeline_y)
         block(20, timeline_y + 18, 56, 26)
@@ -131,8 +122,8 @@ class _EditorSkeleton(QWidget):
         tile_w = (width - 48) / 8
         for index in range(8):
             block(20 + index * (tile_w + 1), timeline_y + 64, tile_w - 5,
-                  max(28, strip - 30))
-        block(20, height - 20, width - 40, 6)
+                  max(28, strip - 42))
+        block(20, height - 38, width - 40, 20)
         painter.end()
         if not self._painted:
             self._painted = True
@@ -264,8 +255,7 @@ class ClipEditorWindow(QDialog):
             regions[name] = QRect(origin, widget.size()).intersected(self._poster.rect())
         if not frame_ready:
             region('video', page._video_clip_frame)
-        # Track discovery is enough to edit gains. Do not hide the panel while
-        # its decoder finishes preparing, or block it on video readiness.
+        # Leave the video timeline usable while the track inventory loads.
         if not (page._playback_sources or page._audio_preparation_ready):
             region('audio', page._audio_mix_panel)
         if regions:

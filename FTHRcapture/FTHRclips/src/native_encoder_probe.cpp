@@ -297,6 +297,7 @@ int RunNativeEncoderProbe(int argc, char* argv[]) {
     LARGE_INTEGER input_epoch{}, frequency{};
     QueryPerformanceCounter(&input_epoch);
     if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return 6;
+    std::array<int64_t, kFrames> submit_us{};
     const auto start = std::chrono::steady_clock::now();
     for (uint32_t index = 0; index < kFrames && ok; ++index) {
         // Qualify input at the configured rate, not an unbounded submission
@@ -319,6 +320,7 @@ int RunNativeEncoderProbe(int argc, char* argv[]) {
         // diagnostic must not fabricate missing PTS in an otherwise good encode.
         const int64_t qpc = input_epoch.QuadPart
             + static_cast<int64_t>(index) * frequency.QuadPart / config.fps;
+        const auto submit_start = std::chrono::steady_clock::now();
         if (cpu_input) {
             // Match the recorder's cross-adapter path: copy on the capture
             // adapter, block for readback, and submit to NVENC with its row pitch.
@@ -331,25 +333,27 @@ int RunNativeEncoderProbe(int argc, char* argv[]) {
                         mapped.RowPitch, qpc);
                 context->Unmap(staging.Get(), 0);
             }
-            continue;
+        } else {
+            if (hdr10 && encoder->RequiresBackendGpuPreparation()) {
+                ok = encoder->PrepareGpuFrame(encode_texture, 0);
+            } else if (hdr10) {
+                auto* input = encoder->GetCurrentInputTexture();
+                ok = input != nullptr;
+                if (ok) context->CopyResource(input, encode_texture);
+            } else if (encoder->RequiresBackendGpuPreparation()) ok = encoder->PrepareGpuFrame(texture.Get(), 0);
+            else {
+                auto* input = encoder->GetCurrentInputTexture();
+                D3D11_TEXTURE2D_DESC input_desc{};
+                if (input) input->GetDesc(&input_desc);
+                ok = input && detail::CanDirectCopyBgra(texture_desc, 0, input_desc,
+                    encoder->GetCurrentInputSubresource());
+                if (ok) context->CopySubresourceRegion(input, encoder->GetCurrentInputSubresource(),
+                    0, 0, 0, texture.Get(), 0, nullptr);
+            }
+            if (ok) ok = encoder->EncodeFrame(qpc);
         }
-        if (hdr10 && encoder->RequiresBackendGpuPreparation()) {
-            ok = encoder->PrepareGpuFrame(encode_texture, 0);
-        } else if (hdr10) {
-            auto* input = encoder->GetCurrentInputTexture();
-            ok = input != nullptr;
-            if (ok) context->CopyResource(input, encode_texture);
-        } else if (encoder->RequiresBackendGpuPreparation()) ok = encoder->PrepareGpuFrame(texture.Get(), 0);
-        else {
-            auto* input = encoder->GetCurrentInputTexture();
-            D3D11_TEXTURE2D_DESC input_desc{};
-            if (input) input->GetDesc(&input_desc);
-            ok = input && detail::CanDirectCopyBgra(texture_desc, 0, input_desc,
-                encoder->GetCurrentInputSubresource());
-            if (ok) context->CopySubresourceRegion(input, encoder->GetCurrentInputSubresource(),
-                0, 0, 0, texture.Get(), 0, nullptr);
-        }
-        if (ok) ok = encoder->EncodeFrame(qpc);
+        submit_us[index] = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - submit_start).count();
     }
     const auto active = encoder->GetActiveEncoderInfo();
     const auto video = encoder->GetVideoConfig();
@@ -381,6 +385,8 @@ int RunNativeEncoderProbe(int argc, char* argv[]) {
     }
     LARGE_INTEGER driver{};
     if (FAILED(encoder_adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driver))) return 7;
+    // Nearest-rank percentiles of host-side input transfer and encoder submission.
+    std::sort(submit_us.begin(), submit_us.end());
     std::cout << kEncoderProbeMarker << " {\"schema_version\":1,\"backend\":\"" << backend
         << "\",\"codec\":\"" << codec_name << "\",\"hardware\":true,\"gpu_input\":"
         << (cpu_input ? "false" : "true") << ",\"input_path\":\""
@@ -388,6 +394,8 @@ int RunNativeEncoderProbe(int argc, char* argv[]) {
         << "\"hdr10\":" << (hdr10 ? "true" : "false")
         << ",\"display_hdr\":" << (display_hdr ? "true" : "false")
         << ",\"frames_submitted\":" << kFrames << ",\"frames_decoded\":" << decoded
+        << ",\"submit_p50_us\":" << submit_us[(kFrames + 1) / 2 - 1]
+        << ",\"submit_p95_us\":" << submit_us[(95 * kFrames + 99) / 100 - 1]
         << ",\"source_width\":" << texture_desc.Width << ",\"source_height\":" << texture_desc.Height
         << ",\"width\":" << video.width << ",\"height\":" << video.height
         << ",\"fps\":" << config.fps << ",\"bitrate_kbps\":" << config.bitrate_kbps

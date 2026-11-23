@@ -346,12 +346,13 @@ def test_rapid_saved_clip_upserts_keep_existing_cards_and_order(
         get=lambda key, default=None: {
             'clips_directory': str(tmp_path), 'hotkeys': {},
         }.get(key, default))
-    grid = clip_grid.ClipGrid(settings)
+    grid = clip_grid.ClipGrid(settings, autostart=False)
+    started_workers: list[object] = []
+    monkeypatch.setattr(grid._thread_pool, 'start', started_workers.append)
+    grid.start_scanning()
     first_card = grid._thumb_widgets[str(first)]
     second.write_bytes(b'clip')
     third.write_bytes(b'clip')
-    started_workers: list[object] = []
-    monkeypatch.setattr(grid._thread_pool, 'start', started_workers.append)
 
     # Model two rapid native completions. Neither update may rescan or
     # recreate the card that was already visible when the saves arrived.
@@ -367,7 +368,11 @@ def test_rapid_saved_clip_upserts_keep_existing_cards_and_order(
     assert grid._thumb_widgets[str(third)] is third_card
     assert all(grid._thumb_widgets[str(path)].ready
                for path in (second, third))
-    assert len(started_workers) == 2
+    assert [worker.file_path for worker in started_workers] == [str(first), str(second)]
+    assert grid._deferred_thumbnail_paths == {str(third)}
+    started_workers[0].signals.diagnostic_finished.emit(0, 0, False)
+    assert [worker.file_path for worker in started_workers] == [str(first), str(second), str(third)]
+    grid.shutdown()
 
 
 def test_thumbnail_worker_rejects_partial_before_decoder(

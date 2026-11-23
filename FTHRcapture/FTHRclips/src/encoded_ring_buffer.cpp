@@ -346,9 +346,10 @@ bool EncodedRingBuffer::WaitForVideoConfig(
 
 EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTime(
     uint32_t duration_seconds, int64_t target_end_qpc,
-    EncodedSnapshotLockTiming* timing) const {
+    EncodedSnapshotLockTiming* timing, bool anchor_to_wall_clock) const {
     try {
-        return TakeSnapshotByTimeImpl(duration_seconds, target_end_qpc, timing);
+        return TakeSnapshotByTimeImpl(
+            duration_seconds, target_end_qpc, timing, anchor_to_wall_clock);
     } catch (const std::bad_alloc&) {
         EncodedRingSnapshot failed;
         failed.selection_outcome = replay_save::SnapshotOutcome::MemoryBudgetExceeded;
@@ -358,7 +359,7 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTime(
 
 EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTimeImpl(
     uint32_t duration_seconds, int64_t target_end_qpc,
-    EncodedSnapshotLockTiming* timing) const {
+    EncodedSnapshotLockTiming* timing, bool anchor_to_wall_clock) const {
     using replay_interval::Sample;
     if (duration_seconds == 0 || qpc_freq_ <= 0
         || static_cast<uint64_t>(duration_seconds)
@@ -540,7 +541,10 @@ EncodedRingSnapshot EncodedRingBuffer::TakeSnapshotByTimeImpl(
             requested_duration_ticks = static_cast<int64_t>(fps_)
                 * static_cast<int64_t>(duration_seconds);
         }
-        if (snapshot.full_history) {
+        if (anchor_to_wall_clock && snapshot.full_history) {
+            snapshot.presentation_start_pts =
+                snapshot.packets[selection.presentation_start - selection.decode_start].pts;
+        } else if (snapshot.full_history) {
             if (snapshot.packets.back().pts == std::numeric_limits<int64_t>::max()) {
                 snapshot.internal_consistency = false;
                 continue;

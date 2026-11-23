@@ -150,7 +150,7 @@ def test_plain_and_shift_clicks_open_outside_mode_and_control_selects_inside(
     assert clicked == [card.file_path, card.file_path]
     assert len(opened) == (2 if not image else 0)
     qtbot.mouseClick(state.grid.select_mode_btn, Qt.MouseButton.LeftButton)
-    assert state.grid.select_mode_btn.text() == 'Done selecting'
+    assert state.grid.select_mode_btn.text() == 'Done'
     qtbot.mouseClick(card.thumb_label, Qt.MouseButton.LeftButton,
                      Qt.KeyboardModifier.ControlModifier)
     assert [record.path for record in state.grid.selected_records] == [card.file_path]
@@ -171,7 +171,7 @@ def test_mode_checkbox_and_escape_use_model_count_without_opening(selection_libr
     opened = []
     card.opened.connect(lambda *args: opened.append(args))
     qtbot.mouseClick(grid.select_mode_btn, Qt.MouseButton.LeftButton)
-    assert grid.select_mode_btn.text() == 'Done selecting'
+    assert grid.select_mode_btn.text() == 'Done'
     assert card.selection_checkbox.isVisible()
     qtbot.mouseClick(card.selection_checkbox, Qt.MouseButton.LeftButton)
     assert card.selection_checkbox.isChecked() and len(grid.selected_records) == 1
@@ -272,7 +272,7 @@ def test_control_a_selects_all_filtered_results_without_materializing_all_cards(
     assert len(grid.selected_records) == 999
     assert grid.selection_count_label.text() == '999 selected'
     assert grid.select_mode_btn.isChecked()
-    assert grid.select_mode_btn.text() == 'Done selecting'
+    assert grid.select_mode_btn.text() == 'Done'
     assert len(grid._thumb_widgets) <= 96
     assert all(record.kind == 'video' for record in grid.selected_records)
     first = grid.selected_records[0]

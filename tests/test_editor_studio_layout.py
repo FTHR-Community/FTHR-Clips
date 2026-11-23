@@ -109,7 +109,36 @@ def test_narrow_clips_do_not_leave_large_gutters(studio, qtbot, width, height, s
     assert page._video_clip_frame.width() - fitted.width() <= 48
     assert page._video_tools_scroll.horizontalScrollBar().maximum() == 0
     assert page._sidebar_scroll.horizontalScrollBar().maximum() == 0
-    assert page.trim_slider.height() <= 145
+    from ui.editor_layout import AUDIO_LANE_HEIGHT
+    assert page.trim_slider.height() - AUDIO_LANE_HEIGHT <= 125
+
+
+def test_crop_preview_and_stretch_status_follow_the_edit(studio, qtbot):
+    page = studio.clip_page
+    page._thumb_pixmap = QPixmap(200, 100)
+    page._thumb_pixmap.fill(Qt.GlobalColor.white)
+    page._src_w, page._src_h = 200, 100
+    page._crop_rect = (50, 0, 100, 100)
+    page._update_crop_ui()
+    studio.show()
+    crop, stretch = page._studio_video_panels[:2]
+    for panel, title in ((crop, 'Set crop'), (stretch, 'Stretch video')):
+        button = panel.findChild(ThemedDropdownButton)
+        assert button.text() == title
+        if not button.isChecked():
+            button.click()
+    qtbot.wait(20)
+    preview = page.crop_thumbnail.grab().toImage()
+    center = preview.rect().center()
+    assert preview.pixelColor(center).lightness() > 230
+    assert preview.pixelColor(center.x() - 48, center.y()).lightness() < 150
+    page._stretch_size = (150, 100)
+    page._on_stretch_changed(1.5)
+    assert '150 × 100' in page.stretch_status.text()
+    assert page.reset_stretch_btn.isEnabled()
+    page._reset_stretch()
+    assert page.stretch_status.text() == 'Original proportions'
+    assert not page.reset_stretch_btn.isEnabled()
 
 
 def test_broad_tools_reflow_and_restore_without_losing_panels(studio, qtbot):
@@ -123,18 +152,19 @@ def test_broad_tools_reflow_and_restore_without_losing_panels(studio, qtbot):
     studio.resize(960, 600)
     qtbot.wait(20)
     assert page._studio_video_columns == 1
-    assert page._studio_video_grid.count() == 3
-    assert all(page._studio_video_grid.getItemPosition(i)[1] == 0 for i in range(3))
+    assert page._studio_video_grid.count() == 4
+    assert all(page._studio_video_grid.getItemPosition(i)[1] == 0 for i in range(4))
 
 
-def test_clip_and_file_details_follow_audio_in_the_right_sidebar(studio, qtbot):
+def test_sidebar_contains_metadata_and_audio_controls_live_in_timeline(studio, qtbot):
     studio.resize(960, 600)
     studio.show()
     page = studio.clip_page
     right = page._sidebar_scroll.widget()
     panels = [panel for panel in page._studio_panels if right.isAncestorOf(panel)]
     assert [panel.findChild(ThemedDropdownButton).text() for panel in panels] == [
-        'Audio mix', 'Clip details', 'File details']
+        'Clip details', 'File details']
+    assert page._studio_timeline.isAncestorOf(page._audio_mix_panel)
     assert [right.layout().indexOf(panel) for panel in panels] == sorted(
         right.layout().indexOf(panel) for panel in panels)
     assert right.isAncestorOf(page._tag_edit)
@@ -149,6 +179,22 @@ def test_clip_and_file_details_follow_audio_in_the_right_sidebar(studio, qtbot):
     assert page._studio_timeline.geometry().bottom() <= page.height()
 
 
+def test_details_title_and_button_request_the_same_rename(studio, qtbot, monkeypatch):
+    studio.show()
+    page = studio.clip_page
+    calls = []
+    page._rename_handler = lambda *args: calls.append(args)
+    page._rename_title_btn.setEnabled(True)
+    assert page._studio_details_panel.findChild(ThemedDropdownButton).isChecked()
+    monkeypatch.setattr('ui.clip_viewer.FthrInputDialog.get_text',
+                        lambda *args, **kwargs: ('Game night', True))
+    qtbot.mouseDClick(page._detail_title, Qt.MouseButton.LeftButton)
+    page._rename_title_btn.click()
+    from pathlib import Path
+    expected = (page.clip_path, str(Path(page.clip_path).with_stem('Game night')), False)
+    assert calls == [expected, expected]
+
+
 def test_crop_overlay_does_not_shrink_the_full_source_preview(studio, qtbot):
     page = studio.clip_page
     studio.resize(1920, 1032)
@@ -159,3 +205,20 @@ def test_crop_overlay_does_not_shrink_the_full_source_preview(studio, qtbot):
     page._refresh_live_preview(immediate=True)
     qtbot.wait(20)
     assert page._studio_video_sidebar.width() == before
+
+def test_track_percentage_accepts_typed_gain_and_tracks_slider(qtbot):
+    source = PlaybackSource('chat', 'Discord', 'application', 1, 0)
+    panel = AudioMixPanel(80, {}, {}, (source,), True, inline=True)
+    qtbot.addWidget(panel)
+    panel.position_lanes(('chat',), 34, 218, 34)
+    panel.show()
+    field = panel._values['chat']
+    assert field.isVisible()
+    spy = QSignalSpy(panel.source_changed)
+    qtbot.mouseClick(field.lineEdit(), Qt.MouseButton.LeftButton)
+    qtbot.keyClicks(field.lineEdit(), '37')
+    qtbot.keyClick(field.lineEdit(), Qt.Key.Key_Return)
+    assert panel._sliders['chat'].value() == 37
+    assert spy.at(0) == ['chat', 37]
+    panel._sliders['chat'].setValue(0)
+    assert field.text() == '0%'

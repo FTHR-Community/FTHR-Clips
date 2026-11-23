@@ -11,6 +11,7 @@ class EditorPreloadPolicy(QObject):
         self.owner = owner
         self._loader = None
         self._candidate = None
+        self._scroll_hover = None
         self._last_requested = None
         self._last_requested_at = 0.0
         self._suspended_until = 0.0
@@ -62,6 +63,9 @@ class EditorPreloadPolicy(QObject):
     def request(self, path):
         if not self._eligible():
             return
+        if getattr(self.owner.clip_grid, '_scrolling', False):
+            self._scroll_hover = path
+            return
         # A hover takes priority over the automatically chosen visible card.
         if (path == self._candidate or (path == self._last_requested
                 and time.monotonic() - self._last_requested_at < 5.0)):
@@ -69,11 +73,11 @@ class EditorPreloadPolicy(QObject):
         self._candidate = path
         self._debounce.start()
 
-    def _tick(self):
+    def _tick(self, preferred=None):
         if not self._eligible():
             self.clear()
             return
-        if self._candidate is not None:
+        if self._candidate is not None or getattr(self.owner.clip_grid, '_scrolling', False):
             return
         viewport = self.owner.clip_scroll_area.viewport()
         visible = []
@@ -86,7 +90,9 @@ class EditorPreloadPolicy(QObject):
         # Keep a visible candidate warm without reopening it every 30 seconds.
         # The loader still expires when library polling stops, and failed
         # preparation retries with a bounded backoff rather than staying stale.
-        if visible and self._last_requested not in visible:
+        if preferred is not None and preferred in visible and preferred != self._last_requested:
+            self.request(preferred)
+        elif visible and self._last_requested not in visible:
             self.request(visible[0])
         elif visible and self._loader is not None:
             if not self._loader.keep_alive(self._last_requested):
@@ -94,7 +100,14 @@ class EditorPreloadPolicy(QObject):
 
     def _prepare_candidate(self):
         path, self._candidate = self._candidate, None
-        if not path or not self._eligible():
+        if not path or getattr(self.owner.clip_grid, '_scrolling', False) or not self._eligible():
+            return
+        grid = self.owner.clip_grid
+        if getattr(grid, '_thumbnail_catchup', False) or getattr(grid, '_thumbnail_jobs_inflight', ()):
+            # Foreground thumbnail work wins the media tools after a cold
+            # stop. Keep the hover intent until that short-lived queue drains.
+            self._candidate = path
+            self._debounce.start()
             return
         if not self.owner._clip_readiness.can_access(path):
             return
@@ -105,6 +118,19 @@ class EditorPreloadPolicy(QObject):
         self._last_requested_at = time.monotonic()
         self._loader.request(path, preview_quality=self.owner.settings_manager.get(
             'editor_preview_quality', 'auto'))
+
+    def scroll_activity_changed(self, scrolling):
+        if not self._enabled():
+            return
+        if scrolling:
+            self._debounce.stop()
+            self._candidate = None
+            self._scroll_hover = None
+            if self._loader is not None and self._loader.cancel_unprepared():
+                self._last_requested = None
+        else:
+            preferred, self._scroll_hover = self._scroll_hover, None
+            self._tick(preferred)
 
     def take(self, path):
         self._debounce.stop()
@@ -118,6 +144,7 @@ class EditorPreloadPolicy(QObject):
     def clear(self, *, suspend=False):
         self._debounce.stop()
         self._candidate = None
+        self._scroll_hover = None
         self._last_requested = None
         if suspend:
             self._suspended_until = time.monotonic() + 3.0

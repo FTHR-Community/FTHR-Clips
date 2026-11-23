@@ -3,8 +3,9 @@
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QPoint, QTimer, Qt
 from PySide6.QtMultimedia import QMediaPlayer
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QWidget
 
 from ui import clip_grid, clip_viewer
@@ -452,3 +453,50 @@ def test_prepared_preview_is_applied_after_trim_handle_release(monkeypatch, qtbo
     page.trim_slider.dragging = None
     page.trim_slider.range_edit_finished.emit()
     qtbot.waitUntil(lambda: page._playback_path == 'preview.mp4')
+
+
+@pytest.mark.parametrize(('handle', 'opening_position', 'direction'), [
+    ('start', 0, 1), ('end', 9000, -1),
+])
+def test_trim_handles_work_on_first_playback_without_competing_seeks(
+        monkeypatch, qtbot, tmp_path, handle, opening_position, direction):
+    window = shell(monkeypatch, qtbot, tmp_path)
+    window.show()
+    page = window.clip_page
+    slider = page.trim_slider
+    page._media_ready = True
+    positions = []
+    current = [opening_position]
+
+    def seek(target):
+        positions.append(target)
+        current[0] = target
+
+    monkeypatch.setattr(page.player, 'position', lambda: current[0])
+    monkeypatch.setattr(page.player, 'setPosition', seek)
+    monkeypatch.setattr(page.player, 'playbackState',
+                        lambda: QMediaPlayer.PlaybackState.PlayingState)
+    page._on_state_changed(QMediaPlayer.PlaybackState.PlayingState)
+    rect = dict(slider._trim_grip_rects())[handle]
+    x = rect.x() + 4 - 3 * direction
+    y = rect.center().y()
+    span = slider._time_axis()[1]
+    midpoint = span // 8
+    final = span // 4
+
+    QTest.mousePress(slider, Qt.MouseButton.LeftButton, pos=QPoint(x, y))
+    assert slider.dragging == handle
+    QTest.mouseMove(slider, QPoint(x + direction * midpoint, y))
+    origin = 0 if handle == 'start' else 1
+    assert getattr(slider, f'{handle}_pct') == pytest.approx(origin + direction * midpoint / span)
+    page._update_playhead()
+    assert positions == []
+
+    QTest.mouseRelease(slider, Qt.MouseButton.LeftButton,
+                       pos=QPoint(x + direction * final, y))
+    expected = origin + direction * final / span
+    assert getattr(slider, f'{handle}_pct') == pytest.approx(expected)
+    assert slider.dragging is None
+    assert positions == [pytest.approx(expected * page.duration_ms, abs=1)
+                         if handle == 'start' else 0]
+    assert len(page._undo_stack) == 1

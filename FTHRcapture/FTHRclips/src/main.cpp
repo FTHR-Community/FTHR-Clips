@@ -536,7 +536,8 @@ int wmain(int argc, wchar_t* wide_argv[]) {
     layout->is_initialized = true;
     layout->nvenc_active = engine.IsNvencActive();
     layout->capture_health_flags = engine.GetCaptureHealthFlags()
-        | fthr::CAPTURE_HEALTH_HIGHLIGHTS;
+        | fthr::CAPTURE_HEALTH_HIGHLIGHTS
+        | (engine.IsNvencActive() ? fthr::CAPTURE_HEALTH_CLIP_BOUNDARY : 0u);
     layout->capture_generation = engine.GetCaptureGeneration();
 
     // Populate v2 fields so Python get_active_codec() returns a meaningful string.
@@ -585,6 +586,8 @@ int wmain(int argc, wchar_t* wide_argv[]) {
             wchar_t  cmd_string[256] = { 0 };
             wcsncpy_s(cmd_string, layout->ui_string, 255);
             uint32_t cmd_param1 = layout->ui_param1;
+            const uint64_t cmd_end_monotonic_ns =
+                (static_cast<uint64_t>(layout->ui_param3) << 32) | layout->ui_param2;
             // Copy payload fields before clearing ui_command. The UI may
             // immediately reuse ui_string after observing the cleared slot.
             layout->ui_command = fthr::CommandType::NONE;
@@ -629,6 +632,7 @@ int wmain(int argc, wchar_t* wide_argv[]) {
                 break;
 
             case fthr::CommandType::SAVE_CLIP:
+            case fthr::CommandType::SAVE_CLIP_AT: {
                 std::wcout << L"[Cmd] SAVE_CLIP -> " << cmd_string
                     << L" (" << cmd_param1 << L"s)" << std::endl;
                 // Publish acceptance before making work visible to the save
@@ -636,7 +640,13 @@ int wmain(int argc, wchar_t* wide_argv[]) {
                 // late SAVE_STARTED (or have its error payload cleared).
                 fthr::SetEngineString(layout, L"");
                 layout->engine_response = fthr::ResponseType::SAVE_STARTED;
-                if (engine.SaveClip(cmd_string, cmd_param1, layout)) {
+                const bool has_boundary = current_cmd == fthr::CommandType::SAVE_CLIP_AT;
+                if (has_boundary && cmd_end_monotonic_ns == 0) {
+                    fthr::SetEngineError(layout, L"The requested clip time is invalid.");
+                    break;
+                }
+                if (engine.SaveClip(cmd_string, cmd_param1, layout,
+                                    has_boundary ? cmd_end_monotonic_ns : 0)) {
                     std::wcout << L"[Cmd] SAVE_CLIP queued" << std::endl;
                 }
                 else {
@@ -652,6 +662,7 @@ int wmain(int argc, wchar_t* wide_argv[]) {
                     std::cerr << "[Cmd] SAVE_CLIP failed to queue" << std::endl;
                 }
                 break;
+            }
 
             case fthr::CommandType::MARK_HIGHLIGHT: {
                 const std::string marker_id = Utf8FromWide(cmd_string);
@@ -685,7 +696,8 @@ int wmain(int argc, wchar_t* wide_argv[]) {
         layout->is_recording = engine.IsRecording();
         layout->frames_captured = engine.GetFrameCount();
         layout->capture_health_flags = engine.GetCaptureHealthFlags()
-            | fthr::CAPTURE_HEALTH_HIGHLIGHTS;
+            | fthr::CAPTURE_HEALTH_HIGHLIGHTS
+            | (engine.IsNvencActive() ? fthr::CAPTURE_HEALTH_CLIP_BOUNDARY : 0u);
         layout->capture_generation = engine.GetCaptureGeneration();
         layout->content_sample_sequence = engine.GetContentSampleSequence();
         layout->content_suspicious_streak = engine.GetContentSuspiciousStreak();

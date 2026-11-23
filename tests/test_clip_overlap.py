@@ -1,6 +1,7 @@
 import hashlib
 import json
 from fractions import Fraction
+import os
 import subprocess
 import threading
 from uuid import uuid4
@@ -8,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from core import clip_overlap as overlap
+from core import clip_overlap_cache
 from core.export_lifecycle import ExportState
 
 
@@ -87,6 +89,102 @@ def test_probe_rejects_stale_duration_and_legacy():
     assert overlap._clip_from_probe('a', (), document) is None
     document['format']['tags'] = {}
     assert overlap._clip_from_probe('a', (), document) is None
+
+
+def _probe_document(provenance):
+    return {
+        'streams': [{'codec_type': 'video', 'width': 160, 'height': 120,
+                     'avg_frame_rate': '10/1', 'duration': '30'},
+                    {'codec_type': 'audio', 'index': 1, 'tags': {'title': 'System'}}],
+        'format': {'tags': {overlap.TIMELINE_TAG: timeline().to_json()} if provenance else {}},
+    }
+
+
+@pytest.mark.parametrize('provenance', [True, False])
+def test_inspection_persists_conclusive_result_and_refresh_reprobes(tmp_path, monkeypatch, provenance):
+    path = tmp_path / 'source.mp4'
+    path.touch()
+    calls = []
+
+    def probe(path, _cancel):
+        calls.append(path)
+        return _probe_document(provenance)
+
+    monkeypatch.setattr(overlap, '_probe', probe)
+    cache_path = tmp_path / 'overlap.sqlite3'
+    with clip_overlap_cache.open_overlap_probe_cache(cache_path) as cache:
+        cold = overlap.inspect_clip(path, threading.Event(), cache=cache)
+    assert cold.complete and cold.probed and (cold.info is not None) == provenance
+    with clip_overlap_cache.open_overlap_probe_cache(cache_path) as cache:
+        warm = overlap.inspect_clip(path, threading.Event(), cache=cache)
+        assert warm.complete and not warm.probed and warm.info == cold.info
+    assert calls == [str(path)]
+    assert overlap.probe_clip(path, refresh=True) == cold.info
+    assert calls == [str(path), str(path)]
+
+
+def test_failed_and_cancelled_inspections_do_not_store_negative(tmp_path, monkeypatch):
+    path = tmp_path / 'source.mp4'
+    path.touch()
+    calls = []
+
+    def probe(path, cancel):
+        calls.append(path)
+        if len(calls) == 1:
+            raise ValueError('timeout')
+        if len(calls) == 2:
+            cancel.set()
+        return _probe_document(True)
+
+    monkeypatch.setattr(overlap, '_probe', probe)
+    with clip_overlap_cache.open_overlap_probe_cache(tmp_path / 'overlap.sqlite3') as cache:
+        for _ in range(2):
+            assert not overlap.inspect_clip(path, threading.Event(), cache=cache).complete
+            assert cache.get(overlap.file_identity(path)) is clip_overlap_cache.CACHE_MISS
+        assert overlap.inspect_clip(path, threading.Event(), cache=cache).info is not None
+    assert len(calls) == 3
+
+
+def test_cached_result_excludes_replaced_same_size_same_mtime_file(tmp_path, monkeypatch):
+    path = tmp_path / 'source.mp4'
+    path.write_bytes(b'old')
+    calls = []
+
+    def probe(path, _cancel):
+        calls.append(path)
+        return _probe_document(len(calls) > 1)
+
+    monkeypatch.setattr(overlap, '_probe', probe)
+    old = path.stat()
+    with clip_overlap_cache.open_overlap_probe_cache(tmp_path / 'overlap.sqlite3') as cache:
+        assert overlap.inspect_clip(path, threading.Event(), cache=cache).complete
+        replacement = tmp_path / 'replacement.mp4'
+        replacement.write_bytes(b'new')
+        os.utime(replacement, ns=(old.st_atime_ns, old.st_mtime_ns))
+        replacement.replace(path)
+        new = path.stat()
+        assert (old.st_size, old.st_mtime_ns) == (new.st_size, new.st_mtime_ns)
+        outdated = (old.st_size, old.st_mtime_ns, old.st_ino, old.st_dev)
+        assert not overlap.inspect_clip(path, threading.Event(), cache=cache, expected=outdated).complete
+        assert overlap.inspect_clip(path, threading.Event(), cache=cache).info is not None
+    assert len(calls) == 2
+
+
+def test_probe_cache_entry_cap_and_unreadable_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(clip_overlap_cache, '_MAX_ENTRIES', 2)
+    cache_path = tmp_path / 'overlap.sqlite3'
+    with clip_overlap_cache.open_overlap_probe_cache(cache_path) as cache:
+        cache.put(('first',), None)
+        cache.put(('second',), b'positive')
+        cache.put(('third',), None)
+    with clip_overlap_cache.open_overlap_probe_cache(cache_path) as cache:
+        assert cache.get(('first',)) is clip_overlap_cache.CACHE_MISS
+        assert cache.get(('second',)) == b'positive'
+        assert cache.get(('third',)) is None
+    cache_path.write_bytes(b'invalid sqlite')
+    with clip_overlap_cache.open_overlap_probe_cache(cache_path) as cache:
+        cache.put(('fourth',), None)
+        assert cache.get(('fourth',)) is clip_overlap_cache.CACHE_MISS
 
 
 def test_audio_handler_identity_ignores_old_sample_bounds():

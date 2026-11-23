@@ -23,17 +23,24 @@ THUMB_CACHE_DIR = os.path.join(os.path.expanduser('~'), '.fthr', 'thumbnails')
 _NEGATIVE_CACHE_SECONDS = 30.0
 
 
-def _get_cached_thumb_path(file_path: str) -> str:
+def _get_cached_thumb_path(file_path: str, *, indexed=None, source_stat=None) -> str:
     """Return a cache path based on file path + mtime so stale caches auto-invalidate.
 
     Including mtime in the hash invalidates the cache automatically when a file
     is overwritten without requiring a separate cache index.
     """
-    info = os.stat(file_path)
+    info = os.stat(file_path) if source_stat is None else source_stat
+    identity = None
+    if indexed is not None and indexed.st_ino and indexed.st_dev is not None:
+        if ((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+                == (indexed.st_dev, indexed.st_ino, indexed.size, indexed.mtime_ns)):
+            identity = indexed.identity
+    if identity is None:
+        identity = canonical_media_path(file_path)
     # v4 caches preserve source aspect ratio through FFmpeg scaling. The format
     # here prevents an older, force-stretched 16:9 thumbnail from surviving an
     # application update.
-    key = f'{canonical_media_path(file_path)}|{info.st_size}|{info.st_mtime_ns}|aspect-v4'.encode(
+    key = f'{identity}|{info.st_size}|{info.st_mtime_ns}|aspect-v4'.encode(
         'utf-8', errors='surrogateescape')
     return os.path.join(THUMB_CACHE_DIR, hashlib.md5(key).hexdigest() + '.jpg')
 
@@ -59,12 +66,6 @@ def _has_recent_probe_failure(path: str) -> bool:
     except OSError:
         # A missing/unreadable optional marker must not suppress a fresh probe.
         return False
-
-
-def _read_cached_duration(dur_path: str) -> int:
-    """Backwards-compatible reader that returns just the duration."""
-    meta = read_cached_metadata(dur_path)
-    return int(meta[0]) if meta else 0
 
 
 def read_cached_metadata(dur_path: str):
@@ -123,19 +124,81 @@ def get_cached_clip_metadata(file_path: str):
 
 class _ThumbnailSignals(QObject):
     finished = Signal(str, str, int)  # file_path, cache_path, duration_sec
+    cached_ready = Signal(str, object, object)  # file_path, QImage, video metadata
     diagnostic_finished = Signal(int, int, bool)  # total_ms, metadata_ms, cache_hit
 
 
-def _valid_cached_thumbnail(path: str) -> bool:
-    """Validate a JPEG header/decode before treating a cache entry as a hit."""
+def _worker_thumb_path(worker, source_stat=None):
+    indexed = getattr(worker, '_indexed_record_snapshot', None)
+    if indexed is None and source_stat is None:
+        return _get_cached_thumb_path(worker.file_path)
+    return _get_cached_thumb_path(worker.file_path, indexed=indexed, source_stat=source_stat)
+
+
+def _same_thumbnail_source(path, snapshot):
+    try:
+        current = os.stat(path)
+    except OSError:
+        # A removed or unavailable clip cannot receive a published thumbnail.
+        return False
+    return ((current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+            == (snapshot.st_dev, snapshot.st_ino, snapshot.st_size, snapshot.st_mtime_ns,
+                snapshot.st_ctime_ns))
+
+
+def _read_cached_thumbnail(path: str) -> QImage | None:
+    """Load one validated cache image without opening the source media."""
     try:
         reader = QImageReader(path)
         reader.setAutoTransform(True)
         image = reader.read()
-        return not image.isNull() and image.width() > 0 and image.height() > 0
+        return image if not image.isNull() else None
     except (OSError, RuntimeError):
         # A damaged cached JPEG is a miss, never a reason to reject the clip.
-        return False
+        return None
+
+
+def _valid_cached_thumbnail(path: str) -> bool:
+    return _read_cached_thumbnail(path) is not None
+
+
+class _CachedThumbnailSignals(QObject):
+    finished = Signal(str, object, object)  # file_path, image, optional video metadata
+    diagnostic_finished = Signal(int, int, bool)
+
+
+class _CachedThumbnailWorker(QRunnable):
+    """Read an existing disk thumbnail while cards are moving through the grid."""
+
+    def __init__(self, file_path, is_video, cancel_event):
+        super().__init__()
+        self.file_path = file_path
+        self.is_video = is_video
+        self.cancel_event = cancel_event
+        self.signals = _CachedThumbnailSignals()
+
+    def run(self):
+        started = time.monotonic()
+        cache_hit = False
+        try:
+            if self.cancel_event.is_set():
+                return
+            cache_path = _worker_thumb_path(self)
+            if not os.path.isfile(cache_path) or self.cancel_event.is_set():
+                return
+            metadata = None
+            if self.is_video:
+                metadata = read_cached_metadata(_get_cached_duration_path(cache_path))
+            image = _read_cached_thumbnail(cache_path)
+            if image is not None and not self.cancel_event.is_set():
+                cache_hit = True
+                self.signals.finished.emit(self.file_path, image, metadata)
+        except OSError:
+            # Removal or an unavailable cache is a miss; the settled viewport can retry.
+            pass
+        finally:
+            self.signals.diagnostic_finished.emit(
+                round((time.monotonic() - started) * 1000), 0, cache_hit)
 
 
 def _probe_with_owned_process(
@@ -171,9 +234,9 @@ def _decode_thumbnail_with_owned_process(
         return None
     result = _run_owned_media_process(
         [ffmpeg, '-hide_banner', '-loglevel', 'error', '-ss', '0',
-         '-i', file_path, '-frames:v', '1', '-vf',
+         '-threads', '2', '-filter_threads', '1', '-i', file_path, '-frames:v', '1', '-vf',
          "scale=w='min(640,iw)':h='min(360,ih)':force_original_aspect_ratio=decrease",
-         '-f', 'image2pipe', '-vcodec', 'mjpeg', '-'],
+         '-threads:v', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-'],
         cancel_event)
     if result is None or result[0] != 0 or not result[1]:
         return None
@@ -199,25 +262,33 @@ class _ThumbnailWorker(QRunnable):
         cache_path = ''
         temp_path = ''
         try:
+            if self.cancel_event.is_set():
+                return
             if not is_completed_video_path(self.file_path):
                 self.signals.finished.emit(self.file_path, '', 0)
                 return
-            if self.cancel_event.is_set():
-                return
-            cache_path = _get_cached_thumb_path(self.file_path)
+            source_stat = os.stat(self.file_path)
+            cache_path = _worker_thumb_path(self, source_stat)
             dur_path   = _get_cached_duration_path(cache_path)
             failed_path = _get_negative_cache_path(cache_path)
+            preview_only = getattr(self, '_thumbnail_motion_preview', False)
 
             # Fingerprinting in _get_cached_thumb_path means mutations select a
             # new generation; corrupt entries never poison the next run.
-            if (os.path.exists(cache_path) and os.path.exists(dur_path)
-                    and read_cached_metadata(dur_path) is not None
-                    and _valid_cached_thumbnail(cache_path)):
+            exists = os.path.isfile(cache_path)
+            image = _read_cached_thumbnail(cache_path) if exists else None
+            metadata = read_cached_metadata(dur_path)
+            duration = metadata[0] if metadata is not None else 0.0
+            if image is not None and (metadata is not None or preview_only):
+                if self.cancel_event.is_set():
+                    return
                 cache_hit = True
-                duration = _read_cached_duration(dur_path)
-                self.signals.finished.emit(self.file_path, cache_path, duration)
+                if getattr(self, '_deliver_cached_image', False):
+                    self.signals.cached_ready.emit(self.file_path, image, metadata)
+                else:
+                    self.signals.finished.emit(self.file_path, cache_path, int(duration))
                 return
-            if os.path.exists(cache_path) and not _valid_cached_thumbnail(cache_path):
+            if exists and image is None:
                 # Never retain a corrupt generation just because its filename
                 # still matches the current source fingerprint.
                 try:
@@ -228,33 +299,26 @@ class _ThumbnailWorker(QRunnable):
                 # A decoder timeout or temporarily unavailable tool says
                 # nothing permanent about the media. Retry unchanged files
                 # after a short cooldown, including markers from older builds.
-                self.signals.finished.emit(
-                    self.file_path, '', _read_cached_duration(dur_path))
+                self.signals.finished.emit(self.file_path, '', int(duration))
                 return
-            metadata_started = time.monotonic()
-            probed = _probe_with_owned_process(
-                self.file_path, self.cancel_event)
-            metadata_ms = round((time.monotonic() - metadata_started) * 1000)
+            if metadata is None and not preview_only:
+                metadata_started = time.monotonic()
+                probed = _probe_with_owned_process(self.file_path, self.cancel_event)
+                metadata_ms = round((time.monotonic() - metadata_started) * 1000)
+                if self.cancel_event.is_set() or not _same_thumbnail_source(self.file_path, source_stat):
+                    return
+                if probed is not None:
+                    duration = probed.duration_seconds or 0.0
+                    os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
+                    _write_cached_duration(
+                        dur_path, duration, probed.width or 0, probed.height or 0,
+                        probed.average_fps or 0.0, probed.video_bitrate_bps or 0,
+                        probed.total_bitrate_bps or 0)
             if self.cancel_event.is_set():
                 return
-            duration = (probed.duration_seconds
-                        if probed and probed.duration_seconds is not None else 0.0)
-            width = probed.width if probed and probed.width else 0
-            height = probed.height if probed and probed.height else 0
-            fps = probed.average_fps if probed and probed.average_fps else 0.0
-            video_bitrate = (
-                probed.video_bitrate_bps if probed and probed.video_bitrate_bps else 0)
-            total_bitrate = (
-                probed.total_bitrate_bps if probed and probed.total_bitrate_bps else 0)
-
-            os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
-            if probed is not None:
-                _write_cached_duration(
-                    dur_path, duration, width, height, fps,
-                    video_bitrate, total_bitrate)
-
-            image = _decode_thumbnail_with_owned_process(
-                self.file_path, self.cancel_event)
+            cached_pixels = image is not None
+            if not cached_pixels:
+                image = _decode_thumbnail_with_owned_process(self.file_path, self.cancel_event)
             if image is None:
                 if self.cancel_event.is_set():
                     return
@@ -266,6 +330,8 @@ class _ThumbnailWorker(QRunnable):
                 self.signals.finished.emit(self.file_path, '', int(duration))
                 return
 
+            if self.cancel_event.is_set() or not _same_thumbnail_source(self.file_path, source_stat):
+                return
             os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
             if not os.path.exists(cache_path):
                 temp_path = cache_path + f'.tmp-{os.getpid()}-{threading.get_ident()}.jpg'
@@ -276,8 +342,10 @@ class _ThumbnailWorker(QRunnable):
                         os.unlink(temp_path)
                     except OSError:
                         pass
-            self.signals.finished.emit(
-                self.file_path, cache_path, int(duration))
+            if cached_pixels and getattr(self, '_deliver_cached_image', False):
+                self.signals.cached_ready.emit(self.file_path, image, read_cached_metadata(dur_path))
+            else:
+                self.signals.finished.emit(self.file_path, cache_path, int(duration))
         except Exception as error:
             # Thumbnail/metadata enrichment must never invalidate a clip that
             # was already transactionally published by the engine.
@@ -300,7 +368,8 @@ class _ThumbnailWorker(QRunnable):
                         os.unlink(temp_path)
                     except OSError:
                         pass
-                maybe_prune_thumbnail_cache(THUMB_CACHE_DIR)
+                if cache_path and not self.cancel_event.is_set():
+                    maybe_prune_thumbnail_cache(THUMB_CACHE_DIR)
             except Exception as error:
                 # Cache maintenance is optional; it must never prevent the
                 # terminal diagnostic signal that releases the job owner.
@@ -334,15 +403,15 @@ class _ImageThumbnailWorker(QRunnable):
         cache_path = ''
         temp_path = ''
         try:
-            cache_path = _get_cached_thumb_path(self.file_path)
-            failed_path = _get_negative_cache_path(cache_path)
             if self.cancel_event.is_set():
                 return
-            if os.path.exists(cache_path) and _valid_cached_thumbnail(cache_path):
+            cache_path = _worker_thumb_path(self)
+            failed_path = _get_negative_cache_path(cache_path)
+            image = _read_cached_thumbnail(cache_path) if os.path.exists(cache_path) else None
+            if image is not None:
+                if self.cancel_event.is_set():
+                    return
                 cache_hit = True
-                reader = QImageReader(cache_path)
-                reader.setAutoTransform(True)
-                image = reader.read()
                 self.signals.finished.emit(self.file_path, image)
                 return
             if os.path.exists(cache_path):
@@ -391,7 +460,7 @@ class _ImageThumbnailWorker(QRunnable):
                         os.unlink(temp_path)
                     except OSError:
                         pass
-                if cache_path:
+                if cache_path and not self.cancel_event.is_set():
                     maybe_prune_thumbnail_cache(THUMB_CACHE_DIR)
             except Exception as error:
                 # Cache maintenance is optional; it must not strand the

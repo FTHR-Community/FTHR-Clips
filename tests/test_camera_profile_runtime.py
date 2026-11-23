@@ -738,6 +738,8 @@ def test_settings_profiles_is_lazy_index_7_and_old_category_indices_remain(
         'Customize', 'Performance', 'Shortcuts',
     ]
     assert page._cat_titles[7] == 'Profiles'
+    page.show()
+    qtbot.waitUntil(lambda: bool(built))
     assert built == [0]
     page._ensure_category(7)
     assert built == [0, 1, 7]

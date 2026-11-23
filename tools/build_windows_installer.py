@@ -44,11 +44,12 @@ def find_iscc(value: str | None) -> Path:
         'Inno Setup 6 compiler was not found. Set INNO_SETUP_COMPILER or pass --iscc.')
 
 
-def signing_targets() -> tuple[Path, Path, Path]:
+def signing_targets() -> tuple[Path, ...]:
     return (
         DIST / 'FTHRClips.exe',
         DIST / '_internal' / 'engine' / 'FTHRClips.exe',
         DIST / '_internal' / 'engine' / 'FTHRPlaybackMixer.dll',
+        DIST / '_internal' / 'engine' / 'game-source' / 'FTHRGameSource.exe',
     )
 
 

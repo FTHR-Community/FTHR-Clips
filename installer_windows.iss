@@ -5,7 +5,7 @@
 
 #define MyAppName      "FTHRClips"
 #define MyAppLegacyName "FTHR Clips"
-#define MyAppVersion   "2.1.3"
+#define MyAppVersion   "2.1.4"
 #define MyAppPublisher "FTHR Community"
 #define MyAppExeName   "FTHRClips.exe"
 #define MyAppURL       "https://github.com/fthr/clips"
@@ -46,9 +46,9 @@ VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=FTHRClips Windows Setup
 VersionInfoProductName={#MyAppName}
 ; PE ProductVersion is numeric; keep the alpha suffix in the textual field.
-VersionInfoProductVersion=2.1.3.0
+VersionInfoProductVersion=2.1.4.0
 VersionInfoTextVersion={#MyAppVersion}
-VersionInfoVersion=2.1.3.0
+VersionInfoVersion=2.1.4.0
 
 ; Compression — maximum, solid
 Compression=lzma2/max
@@ -110,14 +110,16 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
-; Windows bundle — produced by: pyinstaller FTHR.spec --clean --noconfirm
-Source: "{#BundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Setup loads these assets before showing the wizard. Put them first so opening
+; the installer does not decompress the application bundle in the background.
 ; The installer uses the same Oswald face as the application while it is open.
 Source: "FTHR_UI\assets\fonts\Oswald-Bold.ttf"; Flags: dontcopy noencryption
 ; The title bar uses only the exact application favicon and existing close icon.
 Source: "FTHR_UI\assets\favicon.ico"; Flags: dontcopy noencryption
 Source: "installer_assets\polished\close-current.png"; Flags: dontcopy noencryption
 Source: "installer_assets\polished\step-*.png"; Flags: dontcopy noencryption
+; Windows bundle — produced by: pyinstaller FTHR.spec --clean --noconfirm
+Source: "{#BundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs solidbreak
 ; Licence paperwork (AUDIT-005/AUDIT-013). The installed app carries the
 ; project licence and all bundled third-party notices locally.
 Source: "LICENSE";                DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
@@ -1045,9 +1047,19 @@ begin
 end;
 
 procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
+var
+  FillWidth: Integer;
 begin
-  if (ProgressTrack <> nil) and (MaxProgress > 0) then
-    ProgressFill.Width := Round(ProgressTrack.Width * (CurProgress / MaxProgress));
+  if (ProgressFill = nil) or (MaxProgress <= 0) then
+    exit;
+
+  { Inno reports the native gauge's scaled progress during extraction. }
+  FillWidth := (CurProgress * ProgressTrack.Width + MaxProgress div 2) div MaxProgress;
+  if ProgressFill.Width <> FillWidth then begin
+    ProgressFill.Width := FillWidth;
+    ProgressTrack.Update;
+    ProgressFill.Update;
+  end;
 end;
 
 procedure CreateInstallingSurface;
@@ -1098,6 +1110,7 @@ begin
   ProgressFill.ParentBackground := False;
   ProgressFill.StyleElements := [];
   ProgressFill.Parent := ProgressTrack;
+  ProgressTrack.BringToFront;
 
   WizardForm.StatusLabel.Left := InstallingTitle.Left;
   WizardForm.StatusLabel.Top := ScaleY(170);
@@ -1123,7 +1136,8 @@ begin
   WizardForm.ProgressGauge.Parent := PreviewInstallingPage.Surface;
   WizardForm.ProgressGauge.Position := 65;
   ProgressTrack.Parent := PreviewInstallingPage.Surface;
-  ProgressFill.Width := Round(ProgressTrack.Width * 0.65);
+  ProgressTrack.BringToFront;
+  CurInstallProgressChanged(WizardForm.ProgressGauge.Position, WizardForm.ProgressGauge.Max);
   WizardForm.StatusLabel.Parent := PreviewInstallingPage.Surface;
   WizardForm.StatusLabel.Caption := 'Preview of installation progress';
   PreviewFinishedPage := CreateCustomPage(PreviewInstallingPage.ID, '', '');
@@ -1361,6 +1375,11 @@ begin
       Log('Preserved FTHRClips autostart with the current install path.');
     end;
     RemoveLegacyInstall;
+    { Inno's scaled progress may stop just below its maximum. The successful
+      post-install step confirms that the extraction and installation are done. }
+    WizardForm.ProgressGauge.Position := WizardForm.ProgressGauge.Max;
+    CurInstallProgressChanged(WizardForm.ProgressGauge.Position,
+      WizardForm.ProgressGauge.Max);
   end;
 end;
 

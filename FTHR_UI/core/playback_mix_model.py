@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 from core.audio_processing import SourceProcessing, master_filter
 from core.audio_effects import microphone_effect_filter
+from core.audio_timeline import ffmpeg_silence_filter
 
 
 CANONICAL_SAMPLE_RATE = 48_000
@@ -349,6 +350,8 @@ def ffmpeg_mix_filter(
     *,
     output_label: str = 'aout',
     limiter_enabled: bool = True,
+    source_silences: dict | None = None,
+    source_window: tuple[float, float] | None = None,
 ) -> tuple[list[str], str | None]:
     """Return the export filter chain implementing the viewer's mix policy.
 
@@ -365,13 +368,19 @@ def ffmpeg_mix_filter(
     imports = audio_input_paths(sources)
     for index, source in enumerate(selected):
         gain = source_gain(source, states, sources)
+        cuts = (source_silences or {}).get(source.source_id, ())
+        edited_gain = None
+        if cuts and source_window is not None and source.mix_role != 'base':
+            edited_gain = ffmpeg_silence_filter(
+                cuts, *source_window, normal_gain=gain,
+                cut_gain=-1.0 if source.mix_role == 'delta' else 0.0)
         label = f'src{index}'
         filters.append(
             f'[{imports.index(source.media_path) + 1 if source.media_path else 0}'
             f':a:{source.audio_index}]aresample=first_pts=0:async=0,'
             'aformat=sample_rates=48000:channel_layouts=stereo,'
             f'{source.processing_filter},'
-            f'volume={gain:.6f}[{label}]')
+            f'{edited_gain or f"volume={gain:.6f}"}[{label}]')
         input_labels.append(f'[{label}]')
     master = max(0, min(100, master_gain)) / 100.0
     filters.append(

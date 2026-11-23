@@ -229,6 +229,9 @@ class _RAWKEYBOARD(ctypes.Structure):
 
 _USER32 = (ctypes.WinDLL('user32', use_last_error=True)
            if sys.platform == 'win32' else None)
+_get_tick_count = ctypes.windll.kernel32.GetTickCount if _USER32 else None
+if _get_tick_count is not None:
+    _get_tick_count.restype = ctypes.c_uint32
 if _USER32 is not None:
     _USER32.RegisterHotKey.argtypes = (
         ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_uint)
@@ -437,8 +440,10 @@ class HotkeyManager(QObject):
 
     # Signals
     save_clip_triggered = Signal()
+    save_clip_pressed = Signal(object)
     mark_highlight_triggered = Signal()
     custom_clip_triggered = Signal(int)
+    custom_clip_pressed = Signal(int, object)
     save_screenshot_triggered = Signal()
     start_recording_triggered = Signal()
     stop_recording_triggered = Signal()
@@ -720,7 +725,11 @@ class HotkeyManager(QObject):
         if sys.platform == 'win32':
             return self._register_windows_hotkey(action, key)
         try:
-            keyboard.add_hotkey(key, lambda: signal.emit())
+            if action == 'save_clip' or custom_clip_seconds(action) is not None:
+                callback = lambda: self._emit_action(action, source='keyboard')
+            else:
+                callback = signal.emit
+            keyboard.add_hotkey(key, callback)
             if key not in self._registered_hotkeys:
                 self._registered_hotkeys.append(key)
             return True
@@ -1005,7 +1014,8 @@ class HotkeyManager(QObject):
                     mark_save_trace('ui_windows_hotkey_received')
                 key = self._windows_hotkey_combos.get(action, '?')
                 print(f'[Hotkey] Received native Windows hotkey {key} -> {action}')
-                self._emit_action(action, source='keyboard')
+                self._emit_action(action, source='keyboard',
+                                  message_time_ms=native_message.time)
         elif native_message.message == WM_POWERBROADCAST:
             if int(native_message.wParam) in (
                     PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC):
@@ -1024,12 +1034,14 @@ class HotkeyManager(QObject):
         elif (native_message.message == WM_INPUT
               and (self._raw_input_registered
                    or self._raw_keyboard_registered)):
-            self._handle_raw_input(native_message.lParam)
+            self._handle_raw_input(native_message.lParam, native_message.time)
         return False, 0
 
-    def _emit_action(self, action: str, *, source: str = 'controller'):
+    def _emit_action(self, action: str, *, source: str = 'controller',
+                     message_time_ms: int = 0):
         """Emit an action once when a registered chord is completed."""
-        now = time.monotonic()
+        pressed_at_ns = time.monotonic_ns()
+        now = pressed_at_ns / 1_000_000_000
         if (source != 'keyboard'
                 and now - getattr(self, '_last_emit_at', {}).get(action, 0.0) < 0.35):
             return
@@ -1037,7 +1049,15 @@ class HotkeyManager(QObject):
             self._last_emit_at = {}
         self._last_emit_at[action] = now
         seconds = custom_clip_seconds(action)
+        if ((action == 'save_clip' or seconds is not None)
+                and message_time_ms and _get_tick_count is not None):
+            # MSG.time is the input's enqueue time in the wrapping tick clock.
+            # Convert its age to the native replay clock before Qt dispatch.
+            age_ms = (_get_tick_count() - message_time_ms) & 0xFFFF_FFFF
+            if age_ms < 300_000:
+                pressed_at_ns -= age_ms * 1_000_000
         if seconds is not None and action in self.hotkeys:
+            self.custom_clip_pressed.emit(seconds, pressed_at_ns)
             self.custom_clip_triggered.emit(seconds)
             return
         signals = {
@@ -1053,6 +1073,7 @@ class HotkeyManager(QObject):
         if signal:
             if action == 'save_clip':
                 mark_save_trace('ui_save_hotkey_dispatched', source=source)
+                self.save_clip_pressed.emit(pressed_at_ns)
             print(f'[Hotkey] Dispatching {source} action={action}')
             signal.emit()
 
@@ -1141,7 +1162,7 @@ class HotkeyManager(QObject):
             print(f'[Hotkey] Raw keyboard input unavailable: {exc}')
             return False
 
-    def _handle_raw_input(self, raw_handle):
+    def _handle_raw_input(self, raw_handle, message_time_ms=0):
         raw_ptr = ctypes.c_void_p(int(raw_handle) & _POINTER_MASK)
         size = ctypes.c_uint(0)
         header_size = ctypes.sizeof(_RAWINPUTHEADER)
@@ -1161,7 +1182,8 @@ class HotkeyManager(QObject):
             if len(raw) >= header_size + keyboard_size:
                 keyboard_data = _RAWKEYBOARD.from_buffer_copy(
                     raw[header_size:header_size + keyboard_size])
-                self._process_raw_keyboard_input(keyboard_data, int(header.hDevice or 0))
+                self._process_raw_keyboard_input(
+                    keyboard_data, int(header.hDevice or 0), message_time_ms)
             return
         if header.dwType != RIM_TYPEHID or len(raw) < header_size + 8:
             return
@@ -1184,7 +1206,8 @@ class HotkeyManager(QObject):
             self._raw_keyboard_modifiers |= _WINDOWS_MODIFIER_VIRTUAL_KEYS.get(key, 0)
 
     def _process_raw_keyboard_input(
-            self, keyboard_data: _RAWKEYBOARD, device: int = 0) -> None:
+            self, keyboard_data: _RAWKEYBOARD, device: int = 0,
+            message_time_ms: int = 0) -> None:
         virtual_key = int(keyboard_data.VKey)
         flags = int(keyboard_data.Flags)
         if virtual_key in (0, 0xFF):  # fake keys / keyboard overrun
@@ -1212,7 +1235,8 @@ class HotkeyManager(QObject):
                 self._windows_raw_hotkey_actions.items()):
             if (required_key == virtual_key
                     and required_modifiers == self._raw_keyboard_modifiers):
-                self._emit_action(action, source='keyboard')
+                self._emit_action(action, source='keyboard',
+                                  message_time_ms=message_time_ms)
 
     def _raw_device_key(self, device_handle) -> str:
         handle = int(device_handle or 0) & _POINTER_MASK
@@ -1540,7 +1564,10 @@ class HotkeyManager(QObject):
                         data = connection.recv(256).decode().strip()
                         print(f'[Hotkey] Received: {data!r}')
                         signal = dispatch.get(data)
-                        if signal is not None:
+                        if data == 'save_clip' or (
+                                custom_clip_seconds(data) is not None and data in self.hotkeys):
+                            self._emit_action(data, source='keyboard')
+                        elif signal is not None:
                             signal.emit()
                         else:
                             print(f'[Hotkey] Unknown command: {data!r}')

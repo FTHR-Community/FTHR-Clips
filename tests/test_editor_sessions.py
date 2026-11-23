@@ -103,7 +103,7 @@ def editor_shell(qtbot, monkeypatch, tmp_path):
         '_set_main_page', '_toggle_settings_page', '_setup_keyboard_navigation',
         '_scroll_clip_library', '_restart_engine_shortcut',
         '_on_library_flags_changed',
-        '_editor_trash_pending', '_request_clip_trash',
+        '_editor_trash_pending', '_request_clip_trash', '_rename_from_editor',
     ):
         setattr(root, name, MethodType(getattr(MainWindow, name), root))
     root._setup_keyboard_navigation()

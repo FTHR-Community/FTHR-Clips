@@ -74,6 +74,23 @@ def test_enter_opens_control_and_reveals_it(settings_page, qtbot):
     assert scroll.viewport().rect().contains(center)
 
 
+def test_search_builds_and_highlights_only_the_selected_general_disclosure(settings_page, qtbot):
+    page = settings_page
+    assert 'export_presets_widget' not in page.__dict__
+    page.settings_search.setText('export presets')
+    assert 'export_presets_widget' not in page.__dict__
+
+    qtbot.keyClick(page.settings_search, Qt.Key.Key_Return)
+    qtbot.waitUntil(lambda: '_search_highlight' in page.__dict__)
+    export_presets = page.export_presets_widget
+
+    assert page.stack.currentIndex() == 0
+    assert export_presets.isVisible()
+    assert page._search_highlight.parentWidget() is export_presets
+    assert '_upload_settings_widget' not in page.__dict__
+    assert 'app_updates_widget' not in page.__dict__
+
+
 def test_profiles_live_under_clip_and_top_navigation_skips_them(settings_page, qtbot):
     page = settings_page
     page.settings_search.setText('game profiles')

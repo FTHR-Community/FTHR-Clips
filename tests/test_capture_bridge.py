@@ -107,6 +107,22 @@ def test_set_encoder_config_clamps_preset():
     assert layout.cfg_preset == 7
 
 
+def test_anchored_save_requires_native_capability_and_transmits_full_boundary():
+    layout, _ = _make_fake_layout()
+    bridge = _FakeBridge(layout)
+    deadline = 0x0123_4567_89AB_CDEF
+
+    assert not bridge.supports_clip_boundary()
+    assert not bridge.save_clip('clip.mp4', 35, end_monotonic_ns=deadline)
+    assert layout.ui_command == CommandType.NONE
+    layout.capture_health_flags = bridge.CLIP_BOUNDARY_CAPABILITY
+    assert bridge.supports_clip_boundary()
+    assert bridge.save_clip('clip.mp4', 35, end_monotonic_ns=deadline)
+    assert layout.ui_command == CommandType.SAVE_CLIP_AT
+    assert (layout.ui_param3 << 32) | layout.ui_param2 == deadline
+    assert layout.ui_param1 == 35
+
+
 def test_save_clip_submits_without_blocking():
     """AUDIT-011: save_clip() is a command submit and must return immediately.
 

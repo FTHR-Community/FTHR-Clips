@@ -181,4 +181,4 @@ All changes made by AI were reviewed/corrected by human contributors.
 
 ## Windows branch scope
 
-This branch contains the 2.1.3 Windows application source. Website files and standalone plugins are maintained separately. The Linux engine, AppImage packaging and Linux CI are excluded. Three Linux-named UI helper modules remain because the shared Windows UI imports them; they are not a Linux build.
+This branch contains the 2.1.4 Windows application source. Website files and standalone plugins are maintained separately. The Linux engine, AppImage packaging and Linux CI are excluded. Three Linux-named UI helper modules remain because the shared Windows UI imports them; they are not a Linux build.

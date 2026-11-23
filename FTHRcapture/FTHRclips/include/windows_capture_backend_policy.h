@@ -35,6 +35,7 @@ enum class WindowsCaptureBackend : uint32_t {
     DxgiDesktop,
     WgcMonitor,
     WgcWindow,
+    MinecraftJavaGame,
 };
 
 enum class WindowsCapturePolicyFailure : uint32_t {
@@ -292,7 +293,8 @@ constexpr WindowsCaptureStartupPlan PlanWindowsCaptureStartup(
     bool window_target_available,
     bool protected_window,
     WindowsCaptureBackendPreference preference,
-    bool capture_cursor = true) noexcept {
+    bool capture_cursor = true,
+    bool minecraft_java_window = false) noexcept {
     if (preference != WindowsCaptureBackendPreference::Auto
         && preference != WindowsCaptureBackendPreference::Dxgi
         && preference != WindowsCaptureBackendPreference::Wgc) {
@@ -307,8 +309,14 @@ constexpr WindowsCaptureStartupPlan PlanWindowsCaptureStartup(
                 WindowsCapturePolicyFailure::MissingWindowTarget};
     }
 
+    if (window_mode && minecraft_java_window && !protected_window
+        && preference == WindowsCaptureBackendPreference::Auto) {
+        return {true, WindowsCaptureBackend::MinecraftJavaGame,
+                WindowsCaptureBackend::None, false,
+                WindowsCapturePolicyFailure::None};
+    }
+
     // Duplication may already contain a software cursor in desktop pixels.
-    // Only WGC can guarantee exclusion of the system pointer.
     if (!capture_cursor) {
         if (preference == WindowsCaptureBackendPreference::Dxgi) {
             return {false, WindowsCaptureBackend::None,
@@ -356,6 +364,8 @@ constexpr const char* WindowsCaptureBackendName(
         return "WGC_MONITOR";
     case WindowsCaptureBackend::WgcWindow:
         return "WGC_WINDOW";
+    case WindowsCaptureBackend::MinecraftJavaGame:
+        return "OBS_GAME_CAPTURE";
     case WindowsCaptureBackend::None:
         return "unavailable:not_reached";
     }

@@ -128,6 +128,29 @@ def rename_ui(qapp, qtbot, tmp_path, monkeypatch):
     qapp.processEvents()
 
 
+def test_editing_after_rename_resumes_same_position_and_undo(rename_ui, qtbot):
+    ui = rename_ui
+    host = ui.controller
+    geometry = object()
+    snapshot = {'position_ms': 1810, 'undo': ('last cut',)}
+    host._active_clip_viewer = SimpleNamespace(
+        clip_path=str(ui.source), geometry=lambda: geometry, isMaximized=lambda: False,
+        capture_session_state=lambda: snapshot.copy(), close=lambda: True)
+    host._editor_trash_pending = lambda: False
+    host._add_editor_session = lambda path: SimpleNamespace(clip_path=path)
+    resumed = []
+    host._show_editor_session = lambda session, _, **options: resumed.append((session, options))
+    MainWindow._rename_from_editor(host, str(ui.source), str(ui.destination), False)
+    qtbot.waitUntil(lambda: bool(resumed), timeout=5000)
+    session, options = resumed[0]
+    assert session.clip_path == str(ui.destination)
+    assert session.state == {**snapshot, 'reopen_clip_details': True}
+    assert session.window_geometry is geometry and not session.window_maximized
+    assert options == {'restore_geometry': True}
+    assert not ui.source.exists() and ui.destination.read_bytes() == ui.original_bytes
+    assert _stored_path(ui.database, ui.binding.clip_id) == str(ui.destination)
+
+
 @pytest.mark.parametrize('failure', ['none', 'history', 'execute-after-commit'])
 def test_real_grid_main_worker_rename_emits_only_after_sql_commit(rename_ui, qtbot, monkeypatch, failure):
     ui = rename_ui

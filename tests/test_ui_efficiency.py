@@ -1,5 +1,6 @@
 """UI resource reductions must preserve navigation, pixels and edit state."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -32,14 +33,52 @@ def _capabilities():
                               (('h264', 'h264_nvenc'), ('hevc', 'hevc_nvenc')), True),)
 
 
-def test_settings_construct_only_general_and_pause_does_not_materialize_pages(settings_page):
+def test_settings_waits_for_first_show_and_only_builds_visible_general_controls(settings_page):
     page = settings_page
-    assert page._loaded_categories == {0}
-    assert 'mic_combo' not in page.__dict__
-    assert 'unified_overlay_editor' not in page.__dict__
+    assert not page._loaded_categories
     page.set_background_ui_paused(True)
     page.set_background_ui_paused(False)
+    assert not page._loaded_categories
+
+    page.show()
     assert page._loaded_categories == {0}
+    assert page.kofi_widget_check.isVisible()
+    for name in ('mic_combo', 'unified_overlay_editor', '_upload_settings_widget',
+                 'export_presets_widget', 'app_updates_widget'):
+        assert name not in page.__dict__
+
+
+def test_direct_general_control_access_delivers_signals_without_switching_page(settings_page):
+    page = settings_page
+    page.stack.setCurrentIndex(6)
+    errors = []
+    page.upload_connection_failed.connect(errors.append)
+
+    upload = page._upload_settings_widget
+    upload.connection_failed.emit('Test connection failed')
+
+    assert errors == ['Test connection failed']
+    assert page.stack.currentIndex() == 6
+    assert page._upload_settings_widget is upload
+    assert 'app_updates_widget' not in page.__dict__
+
+
+def test_general_disclosure_builds_its_body_once(settings_page):
+    page = settings_page
+    page.show()
+    section = page.updates_toggle.parentWidget()
+    assert not section.expanded
+    assert 'app_updates_widget' not in page.__dict__
+
+    section.expand()
+    updates = page.app_updates_widget
+    assert updates.isVisible()
+    section.collapse()
+    assert not updates.isVisible()
+    page.updates_toggle.click()
+    assert page.app_updates_widget is updates
+    assert updates.isVisible()
+    assert '_upload_settings_widget' not in page.__dict__
 
 
 def test_rapid_tab_navigation_builds_only_final_category(settings_page, qtbot):
@@ -57,7 +96,7 @@ def test_rapid_tab_navigation_builds_only_final_category(settings_page, qtbot):
 def test_settings_navigation_creates_one_category_and_preserves_its_controls(settings_page):
     page = settings_page
     page.stack.setCurrentIndex(1)
-    assert page._loaded_categories == {0, 1}
+    assert page._loaded_categories == {1}
     control = page.timeline_preview_strip_enabled_check
     control.setChecked(False)
     for index in (5, 3, 4, 6, 2, 0, 1):
@@ -74,11 +113,11 @@ def test_performance_first_encoder_apply_does_not_construct_clip(settings_page):
     page.sm.set('encoder_pref', 'nvenc')
     page._on_encoder_capabilities_ready(_capabilities())
     page.stack.setCurrentIndex(5)
-    assert page._loaded_categories == {0, 5}
+    assert page._loaded_categories == {5}
     page.performance_encoder_preset_combo.setCurrentIndex(5)
     page._on_encoder_apply()
     assert page.sm.get('encoder_preset') == 6
-    assert page._loaded_categories == {0, 5}
+    assert page._loaded_categories == {5}
     page.stack.setCurrentIndex(1)
     assert page.encoder_combo.currentData() == 'nvenc'
     assert page.encoder_preset_combo.currentData() == 6
@@ -102,7 +141,7 @@ def test_audio_toggle_in_performance_is_loaded_by_audio_later(settings_page):
     page = settings_page
     page.stack.setCurrentIndex(5)
     page.performance_audio_check.setChecked(False)
-    assert page._loaded_categories == {0, 5}
+    assert page._loaded_categories == {5}
     page.stack.setCurrentIndex(2)
     assert not page.audio_capture_check.isChecked()
     assert not page.separate_audio_check.isEnabled()
@@ -181,7 +220,7 @@ def test_background_is_bounded_released_restored_and_resized(qtbot, tmp_path):
     preview.hide()
     preview._release_hidden_previews()
     assert preview._background.isNull()
-    assert not any(key[0].endswith('large.png') for key in _IMAGE_PREVIEW_CACHE)
+    assert not any(Path(key[0]) == path.resolve() for key in _IMAGE_PREVIEW_CACHE)
     preview.resize(1600, 900)
     preview.show()
     preview._refresh_image_previews()
@@ -284,3 +323,19 @@ def test_playhead_seek_requests_two_small_regions_instead_of_whole_strip(qtbot, 
     timeline.set_playhead(.9)
     assert len(regions) == 2
     assert all(rect.width() == 15 for rect in regions)
+
+def test_keyboard_browser_dimension_sliders_sync_and_apply(settings_page, monkeypatch):
+    page = settings_page
+    monkeypatch.setattr(page, '_populate_camera_devices', lambda: None)
+    page._ensure_category(3)
+    combo = page.keyboard_source_type
+    combo.setCurrentIndex(combo.findData('browser'))
+    assert combo.currentText() == 'Browser Source'
+    page.keyboard_browser_width_slider.setValue(640)
+    page.keyboard_browser_height.setValue(360)
+    assert page.keyboard_browser_width.value() == 640
+    assert page.keyboard_browser_height_slider.value() == 360
+    page.keyboard_browser_url.setText('http://localhost:9876/')
+    page._apply_keyboard_browser_source()
+    config = page.sm.get('third_party_keyboard')
+    assert (config['browser_width'], config['browser_height']) == (640, 360)

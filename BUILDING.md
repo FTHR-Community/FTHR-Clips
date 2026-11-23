@@ -146,6 +146,20 @@ It strictly decodes the saved files and records the actual durations in
 `--encoder nvidia` explicitly for NVIDIA regression testing; those results do
 not qualify AMD. These checks do not measure audio sync or game performance.
 
+### Windows Minecraft Java capture provider
+
+Use an x64 Visual Studio developer prompt and the project Python environment.
+The provider build reads the installed [OBS Studio 32.1.2 x64 binaries](https://github.com/obsproject/obs-studio/releases/tag/32.1.2)
+and the matching source headers. It checks the runtime hashes and stages the
+provider beside the selected native engine. End users receive these files in
+the installer.
+
+```bat
+git clone --branch 32.1.2 --depth 1 https://github.com/obsproject/obs-studio ..\obs-32.1.2-src
+.venv\Scripts\python tools\build_minecraft_game_source.py --source ..\obs-32.1.2-src --out FTHRcapture\x64\Release\game-source
+set "FTHR_GAME_SOURCE_DIR=%CD%\FTHRcapture\x64\Release\game-source"
+```
+
 ### 2. Bundle with PyInstaller
 
 ```powershell
@@ -190,7 +204,7 @@ python tools/build_windows_installer.py
 
 It verifies the Microsoft VC++ redistributable, the bundle licence manifest,
 and the Windows lifecycle contract before invoking Inno Setup. Output:
-`Output\FTHRClips-Setup-2.1.3-x64.exe` for the current version.
+`Output\FTHRClips-Setup-2.1.4-x64.exe` for the current version.
 
 The frameless, app-style setup starts with a required Privacy Policy checkbox
 linking to `https://policies.fthrclips.com`, then presents the application and

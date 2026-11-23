@@ -67,6 +67,33 @@ class _FailingSettingsStub(_SettingsStub):
         return False
 
 
+def test_post_roll_defaults_to_off_and_persists_seconds(qtbot):
+    from main import CaptureSettingsPopup
+
+    settings = _SettingsStub()
+    popup = CaptureSettingsPopup(settings)
+    qtbot.addWidget(popup)
+    assert not popup.post_roll_switch.isChecked()
+    assert not popup.post_roll_combo.isEnabled()
+    assert popup.post_roll_combo.currentText() == '5 s'
+
+    with qtbot.waitSignal(popup.restart_needed):
+        popup.post_roll_switch.click()
+    with qtbot.waitSignal(popup.restart_needed):
+        popup.post_roll_combo.setCurrentIndex(8)
+    assert settings.get('clip_post_roll_enabled') is True
+    assert settings.get('clip_post_roll_seconds') == 9
+
+    restored = CaptureSettingsPopup(settings)
+    qtbot.addWidget(restored)
+    assert restored.post_roll_switch.isChecked()
+    assert restored.post_roll_combo.isEnabled()
+    assert restored.post_roll_combo.currentText() == '9 s'
+    restored.post_roll_switch.click()
+    assert settings.get('clip_post_roll_enabled') is False
+    assert settings.get('clip_post_roll_seconds') == 9
+
+
 def test_custom_clip_length_is_independent_saved_and_emitted(qtbot, monkeypatch):
     from main import CaptureSettingsPopup, CustomClipLengthDialog
     from PySide6.QtWidgets import QDialog
@@ -203,6 +230,67 @@ def test_custom_bitrate_is_clamped_to_supported_range(qtbot):
     popup._set_custom_bitrate(-1)
     assert popup.get_bitrate() == 500
     assert not popup.bitrate_minus_btn.isEnabled()
+
+
+@pytest.mark.parametrize('profile', ['clips', 'recording'])
+@pytest.mark.parametrize('dismissal', ['hide', 'close', 'click-away'])
+def test_popup_dismissal_commits_bitrate_and_reopens_with_neutral_focus(
+        qtbot, profile, dismissal):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtWidgets import QPushButton
+    from main import CaptureSettingsPopup
+
+    settings = _SettingsStub()
+    anchor = QPushButton('Capture')
+    popup = CaptureSettingsPopup(settings, anchor)
+    qtbot.addWidget(anchor)
+    qtbot.addWidget(popup)
+    anchor.show()
+    if profile == 'recording':
+        popup.recording_profile_btn.click()
+        popup.recording_qual_combo.setCurrentText('Custom')
+        spin = popup.recording_custom_bitrate_spin
+        key = 'recording_custom_bitrate_kbps'
+    else:
+        popup.qual_combo.setCurrentText('Custom')
+        spin = popup.custom_bitrate_spin
+        key = 'custom_bitrate_kbps'
+
+    popup.show_below(anchor)
+    assert popup.hasFocus()
+    spin.setFocus()
+    spin.selectAll()
+    before = settings.save_calls
+    qtbot.keyClicks(spin.lineEdit(), '42500')
+    assert spin.cleanText() == '42500'
+    assert settings.save_calls == before
+    spin.selectAll()
+
+    if dismissal == 'hide':
+        popup.hide()
+    elif dismissal == 'close':
+        popup.close()
+    else:
+        qtbot.mouseClick(
+            popup, Qt.MouseButton.LeftButton,
+            pos=QPoint(popup.width() + 12, 20))
+
+    assert not popup.isVisible()
+    assert settings.get(key) == 42_500
+    assert settings.save_calls == before + 1
+    assert not spin.lineEdit().hasSelectedText()
+    popup.show_below(anchor)
+    assert popup.hasFocus()
+    assert not spin.lineEdit().hasSelectedText()
+
+    # The panel's neutral first focus still permits ordinary Tab and arrow use.
+    for _ in range(20):
+        if spin.hasFocus():
+            break
+        qtbot.keyClick(popup.focusWidget(), Qt.Key.Key_Tab)
+    assert spin.hasFocus()
+    qtbot.keyClick(spin, Qt.Key.Key_Up)
+    assert settings.get(key) == 43_000
 
 
 def test_recording_profile_is_independent_and_needs_no_manual_apply(qtbot):

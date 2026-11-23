@@ -47,6 +47,9 @@ namespace fthr {
         // Fire-and-forget marker request. The UUID is copied from ui_string
         // before the command slot is cleared.
         MARK_HIGHLIGHT = 12,
+        // ui_param2 and ui_param3 carry the low and high words of the
+        // monotonic nanosecond boundary. ui_param1 remains the duration.
+        SAVE_CLIP_AT = 13,
     };
 
 
@@ -76,6 +79,7 @@ namespace fthr {
         CAPTURE_HEALTH_RECONFIGURE_REQUIRED = 1u << 5,
         // Capability publication bit; native health atomics never store it.
         CAPTURE_HEALTH_HIGHLIGHTS        = 1u << 16,
+        CAPTURE_HEALTH_CLIP_BOUNDARY     = 1u << 17,
     };
 
 

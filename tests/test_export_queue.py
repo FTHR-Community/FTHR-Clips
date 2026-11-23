@@ -783,3 +783,51 @@ def test_share_uses_selected_quality_and_preserves_frame_edits(
     media = probe_media(str(output))
     assert (media.width, media.height) == (stretch_size or (160, 120))
     assert media.duration_s == pytest.approx(1.0)
+
+
+
+
+@pytest.mark.parametrize('quality', ['fast', 'quality'])
+@pytest.mark.parametrize('oversized_attempts', [1, 2])
+def test_discord_share_retries_measured_oversize_once(
+        qtbot, monkeypatch, tmp_path, oversized_attempts, quality):
+    from ui import clip_viewer
+    ffmpeg = get_ffmpeg_exe()
+    source = tmp_path / 'share.mkv'
+    subprocess.run([ffmpeg, '-v', 'error', '-f', 'lavfi', '-i',
+                    'testsrc2=size=320x240:rate=30:duration=2',
+                    '-c:v', 'ffv1', str(source)], check=True)
+    monkeypatch.setattr(clip_viewer.ShareWindow, '_make_thumbnail', lambda self: None)
+    settings = {'clips_directory': str(tmp_path), 'export_quality': quality}
+    dialog = clip_viewer.ShareWindow(str(source), 0, 2, None, settings, discord_mode=True)
+    qtbot.addWidget(dialog)
+    limit = int(dialog._export_preset.target_size_mb * 1024**2)
+    rates = []
+
+    def encoder(ffmpeg, mode, bitrate, **kwargs):
+        rates.append(bitrate)
+        return encoding.software_args(mode, ffmpeg, bitrate)
+
+    monkeypatch.setattr(queue, 'choose_video_args', encoder)
+    validate = clip_viewer._validate_export_output
+
+    def simulate_encoder_overshoot(path, ffmpeg, cancel):
+        validate(path, ffmpeg, cancel)
+        if len(rates) <= oversized_attempts:
+            # Simulate a variable-rate overshoot after a real, decodable encode.
+            extra = int(limit * 1.155) - path.stat().st_size
+            with path.open('ab') as stream:
+                stream.write(extra.to_bytes(4, 'big') + b'free')
+                stream.truncate(stream.tell() + extra - 8)
+
+    monkeypatch.setattr(clip_viewer, '_validate_export_output', simulate_encoder_overshoot)
+    results = []
+    dialog._export_sig.connect(lambda ok, detail: results.append((ok, detail)))
+    dialog._export_worker_impl()
+    assert len(rates) == 2 and 0 < rates[1] < rates[0], results
+    ok, detail = results.pop()
+    if oversized_attempts == 1:
+        assert ok and Path(detail).stat().st_size <= limit
+    else:
+        assert not ok and 'above the' in detail and 'target' in detail
+        assert not list((tmp_path / 'Shared').iterdir())

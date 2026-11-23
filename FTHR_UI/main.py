@@ -29,7 +29,7 @@ import shutil
 import tempfile
 import threading
 from html import escape
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from datetime import datetime
 from uuid import uuid4
@@ -87,6 +87,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QScrollArea, QStackedWidget, QFrame, QComboBox,
     QSizePolicy,
     QCheckBox,
+    QSpinBox,
     QToolButton, QButtonGroup, QFileDialog, QLineEdit, QMenu,
     QSystemTrayIcon, QLayout, QDialog, QMessageBox,
 )
@@ -117,6 +118,11 @@ from core.capture_settings import (
     CaptureConfig,
     CaptureConfigTracker,
     compute_buffer_seconds,
+    configured_post_roll_seconds,
+    DEFAULT_POST_ROLL_SECONDS,
+    MAX_CLIP_SECONDS,
+    MAX_POST_ROLL_SECONDS,
+    selected_post_roll_seconds,
     AUDIO_CAPTURE_MODE_COMBINED,
     AUDIO_CAPTURE_MODE_SEPARATED,
     normalize_audio_capture_mode,
@@ -265,10 +271,13 @@ from core.third_party_keyboard import (
     DEFAULT_KEYBOARD_COLOR,
     DEFAULT_KEYBOARD_INTENSITY,
     DEFAULT_KEYBOARD_OVERLAY_RECT,
+    KEYBOARD_BROWSER_MAX_SIZE,
     KEYBOARD_COMPOSITE_FPS,
     ThirdPartyKeyboardCapture,
     chroma_key_rgba,
     enumerate_keyboard_windows,
+    keyboard_source_available,
+    normalize_keyboard_browser_url,
     third_party_keyboard_settings,
 )
 from core.windows_microphone_devices import (
@@ -771,6 +780,7 @@ class CaptureSettingsPopup(_PopupPanel):
     """Dropdown panel for independent replay-clip and recording profiles."""
 
     clip_length_changed   = Signal(int)
+    post_roll_changed     = Signal()
     custom_lengths_changed = Signal()
     framerate_changed     = Signal(int)
     resolution_changed  = Signal(int, int)
@@ -793,6 +803,7 @@ class CaptureSettingsPopup(_PopupPanel):
         super().__init__(parent)
         self.sm = settings_manager
         self.setMinimumWidth(460)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
         self.cur_clip   = self.sm.get('clip_length',    30)
         self.cur_fps    = self.sm.get('framerate',       60)
@@ -812,6 +823,16 @@ class CaptureSettingsPopup(_PopupPanel):
         self._settings_profile = 'clips'
 
         self._setup_ui()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def hideEvent(self, event):
+        for spin in (self.custom_bitrate_spin, self.recording_custom_bitrate_spin):
+            spin.interpretText()
+            spin.lineEdit().deselect()
+        super().hideEvent(event)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -858,6 +879,28 @@ class CaptureSettingsPopup(_PopupPanel):
         self.clip_combo = self._make_combo([], -1, self._on_clip_changed)
         self._reload_clip_choices()
         clip_fields_layout.addLayout(_row('Clip length', self.clip_combo))
+
+        post_roll_row = QHBoxLayout()
+        post_roll_row.setSpacing(8)
+        post_roll_label = QLabel('Add additional seconds after pressing')
+        set_theme_style(post_roll_label, lambda: (_LABEL_STYLE))
+        self.post_roll_switch = _ToggleSwitch()
+        self.post_roll_switch.setAccessibleName(post_roll_label.text())
+        post_roll_label.setBuddy(self.post_roll_switch)
+        self.post_roll_switch.setToolTip(
+            'Keep the selected clip length before the shortcut and add footage after it.')
+        self.post_roll_combo = self._make_combo(
+            [f'{seconds} s' for seconds in range(1, MAX_POST_ROLL_SECONDS + 1)],
+            DEFAULT_POST_ROLL_SECONDS - 1, self._on_post_roll_duration_changed)
+        self.post_roll_combo.setAccessibleName('Additional seconds after pressing')
+        self.post_roll_combo.setMinimumWidth(75)
+        post_roll_row.addWidget(post_roll_label, stretch=1)
+        post_roll_row.addWidget(self.post_roll_switch)
+        post_roll_row.addWidget(self.post_roll_combo)
+        clip_fields_layout.addLayout(post_roll_row)
+        self._reload_post_roll()
+        self.post_roll_switch.toggled.connect(self._on_post_roll_toggled)
+
         self.add_custom_length_btn = QPushButton('Add custom clip length…')
         set_theme_style(self.add_custom_length_btn, lambda: (button_outline_qss()))
         self.add_custom_length_btn.clicked.connect(self._add_custom_length)
@@ -1034,7 +1077,8 @@ class CaptureSettingsPopup(_PopupPanel):
         for label in self.findChildren(QLabel):
             if label.text() in {
                     'Global defaults',
-                    'Clip length', 'Framerate', 'Resolution',
+                    'Clip length', 'Add additional seconds after pressing',
+                    'Framerate', 'Resolution',
                     'Quality', 'Custom bitrate'}:
                 set_theme_style(label, lambda: (_LABEL_STYLE))
         for button in (self.clips_profile_btn, self.recording_profile_btn):
@@ -1102,6 +1146,25 @@ class CaptureSettingsPopup(_PopupPanel):
         self.clip_length_changed.emit(self.cur_clip)
         self._update_summary()
 
+    def _reload_post_roll(self):
+        enabled = self.sm.get('clip_post_roll_enabled', False) is True
+        with QSignalBlocker(self.post_roll_switch), QSignalBlocker(self.post_roll_combo):
+            self.post_roll_switch.setChecked(enabled)
+            self.post_roll_combo.setCurrentIndex(selected_post_roll_seconds(self.sm) - 1)
+            self.post_roll_combo.setEnabled(enabled)
+
+    def _on_post_roll_toggled(self, enabled):
+        if self._save_preferences(clip_post_roll_enabled=enabled):
+            self.post_roll_combo.setEnabled(enabled)
+            self.post_roll_changed.emit()
+            self._mark_restart()
+
+    def _on_post_roll_duration_changed(self, index):
+        if index >= 0 and self._save_preferences(clip_post_roll_seconds=index + 1):
+            if self.post_roll_switch.isChecked():
+                self.post_roll_changed.emit()
+                self._mark_restart()
+
     def _add_custom_length(self):
         dialog = CustomClipLengthDialog(self.cur_clip, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1165,6 +1228,7 @@ class CaptureSettingsPopup(_PopupPanel):
 
     def reload_from_settings(self):
         self.cur_clip = self.sm.get('clip_length', 30)
+        self._reload_post_roll()
         self._reload_custom_lengths()
         self.cur_fps  = self.sm.get('framerate', 60)
         self.cur_res  = self.sm.get('resolution', 'source')
@@ -1329,11 +1393,13 @@ class CaptureSettingsPopup(_PopupPanel):
     def _set_recording_custom_bitrate(self, value: int):
         bitrate = self._valid_custom_bitrate(
             value, self.recording_custom_bitrate)
+        changed = bitrate != self.recording_custom_bitrate
         self.recording_custom_bitrate = bitrate
         self.recording_custom_bitrate_spin.blockSignals(True)
         self.recording_custom_bitrate_spin.setValue(bitrate)
         self.recording_custom_bitrate_spin.blockSignals(False)
-        self._save_preferences(recording_custom_bitrate_kbps=bitrate)
+        if changed:
+            self._save_preferences(recording_custom_bitrate_kbps=bitrate)
 
     def _mark_restart(self):
         self.restart_needed.emit()
@@ -2510,6 +2576,21 @@ class _StatsStrip(QFrame):
 
 
 
+@dataclass
+class _PendingPostRoll:
+    session: object
+    pressed_at_ns: int
+    pre_roll_seconds: int
+    post_roll_seconds: int
+    duration_seconds: int
+    max_duration_seconds: int
+
+    @property
+    def end_ns(self) -> int:
+        return self.pressed_at_ns + (
+            self.duration_seconds - self.pre_roll_seconds) * 1_000_000_000
+
+
 class MainWindow(QMainWindow):
 
     clip_saved = Signal(str)
@@ -2694,7 +2775,8 @@ class MainWindow(QMainWindow):
 
         self.capture_width, self.capture_height = _resolution_to_dims(saved_res)
         self.buffer_seconds = compute_buffer_seconds(
-            self.clip_duration, self.settings_manager.get('custom_clip_lengths', []))
+            self.clip_duration, self.settings_manager.get('custom_clip_lengths', []),
+            configured_post_roll_seconds(self.settings_manager))
         self._capture_config = CaptureConfigTracker()
         self._capture_request_token = 0
         self._source_intent_revision = 0
@@ -2900,6 +2982,11 @@ class MainWindow(QMainWindow):
         # timer is too coarse for the one-second acknowledgement deadline. Each
         # tick reads shared memory without blocking Qt.
         self._save_state = SaveStateMachine()
+        self._pending_post_roll = None
+        self._post_roll_timer = QTimer(self)
+        self._post_roll_timer.setSingleShot(True)
+        self._post_roll_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._post_roll_timer.timeout.connect(self._finish_pending_post_roll)
         self._save_poll_timer = QTimer(self)
         self._save_poll_timer.setInterval(50)
         self._save_poll_timer.timeout.connect(self._on_save_poll_tick)
@@ -3001,10 +3088,17 @@ class MainWindow(QMainWindow):
                 runtime.refresh()
         else:
             runtime.attach_surfaces()
+        page = getattr(self, '_settings_page_widget', None)
+        if page is not None:
+            page.plugin_runtime = runtime
+            plugin_page = page.__dict__.get('plugin_settings_widget')
+            if plugin_page is not None:
+                plugin_page.runtime = runtime
+                plugin_page.refresh()
         return runtime
 
     def ensure_main_ui(self) -> None:
-        """Build library and settings widgets on first window use.
+        """Build the main window on first use.
 
         Capture, hotkeys, uploads, and the tray run independently during
         a --background launch.
@@ -3014,11 +3108,6 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         MainWindow._publish_replay_duration_warning(self)
         self._ensure_plugin_runtime()
-        self._settings_page_widget.plugin_runtime = self._plugin_runtime
-        plugin_page = self._settings_page_widget.__dict__.get('plugin_settings_widget')
-        if plugin_page is not None:
-            plugin_page.runtime = self._plugin_runtime
-            plugin_page.refresh()
         self._load_saved_theme()
         self._apply_styles()
         self._ui_ready = True
@@ -3028,9 +3117,9 @@ class MainWindow(QMainWindow):
         self._apply_background_ui_paused(
             self._background_ui_paused, force=True)
         is_connected = getattr(self.bridge, 'is_connected', lambda: False)
-        if not self._ultra_performance and self.bridge and is_connected():
-            QTimer.singleShot(
-                0, self._settings_page_widget._populate_mic_devices)
+        page = getattr(self, '_settings_page_widget', None)
+        if page is not None and self.bridge and is_connected():
+            QTimer.singleShot(0, page, page._populate_mic_devices)
 
     def _start_background_services(self) -> None:
         """Start services that must survive hiding or deferred UI creation."""
@@ -3156,7 +3245,10 @@ class MainWindow(QMainWindow):
                 f'folder and try again.\n\n{type(error).__name__}: {error}')
             return
         from ui.diagnostic_report import DiagnosticReportDialog
-        self._settings_page_widget.diagnostic_report_file.set_file(exported)
+        self._last_exported_diagnostic_report = exported
+        page = getattr(self, '_settings_page_widget', None)
+        if page is not None:
+            page.diagnostic_report_file.set_file(exported)
         DiagnosticReportDialog(exported, self).exec()
 
     def _current_capture_source_label(self) -> str:
@@ -3359,6 +3451,8 @@ class MainWindow(QMainWindow):
 
         self.cap_settings_popup = CaptureSettingsPopup(self.settings_manager, self)
         self.cap_settings_popup.clip_length_changed.connect(self._on_clip_length_changed)
+        self.cap_settings_popup.post_roll_changed.connect(
+            lambda: self._on_clip_length_changed(self.clip_duration))
         self.cap_settings_popup.custom_lengths_changed.connect(self._on_custom_lengths_changed)
         self.cap_settings_popup.framerate_changed.connect(self._on_framerate_changed)
         self.cap_settings_popup.resolution_changed.connect(self._on_resolution_changed)
@@ -3592,6 +3686,7 @@ class MainWindow(QMainWindow):
         from ui.editor_preload_policy import EditorPreloadPolicy
         self._editor_preload = EditorPreloadPolicy(self)
         self.clip_grid.clip_preload_requested.connect(self._editor_preload.request)
+        self.clip_grid.scroll_activity_changed.connect(self._editor_preload.scroll_activity_changed)
         self.clip_grid.overlap_merge_requested.connect(self._on_overlap_merge_requested)
         self.clip_grid.screenshot_clicked.connect(_show_in_file_manager)
         self.clip_grid.bulk_export_requested.connect(self._export_library_originals)
@@ -3607,75 +3702,12 @@ class MainWindow(QMainWindow):
         self.library_storage_controller.set_scan_suspended(self._ultra_performance)
         self.library_backup_controller = LibraryBackupController(self)
 
-        self._settings_page_widget = _SettingsPage(
-            self.settings_manager,
-            keyboard_capture=self._keyboard_overlay_capture,
-            storage_controller=self.library_storage_controller,
-            backup_controller=self.library_backup_controller,
-            update_controller=self.app_update_controller,
-        )
-        # The Settings shell may exist before lazy category 8 is materialized;
-        # carry the authoritative Main cache into that shell immediately.
-        self._settings_page_widget.set_capture_admission_status(
-            getattr(self, '_capture_admission_status_text', ''))
-        self._settings_page_widget.set_capture_admission_windows(
-            getattr(self, '_capture_admission_windows_cache', ()))
-        self._settings_page_widget.camera_unavailable.connect(
-            self._show_camera_unavailable)
-        self._settings_page_widget.camera_settings_requested.connect(
-            self._on_camera_settings_requested)
-        effects_changed = getattr(
-            self._settings_page_widget, 'capture_effects_changed', None)
-        if effects_changed is not None:
-            effects_changed.connect(self._on_capture_effects_changed)
-        self._settings_page_widget.profile_apply_requested.connect(
-            self._on_profile_apply_requested)
-        self._settings_page_widget.profile_refresh_devices_requested.connect(
-            self._on_profile_refresh_devices_requested)
-        self._settings_page_widget.close_requested.connect(
-            self._toggle_settings_page)
-        self._settings_page_widget.clips_directory_changed.connect(
-            lambda path: (self.clip_grid.set_clips_directory(path, prepared=True),
-                          self.library_storage_controller.root_changed(path),
-                          self.library_backup_controller.root_changed(path)))
-        self._settings_page_widget.connect_import_grid(self.clip_grid)
+        if self._ultra_performance:
+            # Keep the page indexes stable while Settings is deferred.
+            self.main_stack.addWidget(QWidget())
+        else:
+            self._build_settings_page()
         self.clip_grid.manage_import_folders_requested.connect(self._open_import_settings)
-        self._settings_page_widget.view_imported_requested.connect(self._open_imported_clips)
-        self._settings_page_widget.imported_folders_changed.connect(
-            lambda: self.library_backup_controller.root_changed())
-        self._settings_page_widget.notification_monitor_changed.connect(
-            self.capture_card.restart)
-        self._settings_page_widget.error_notifications_changed.connect(
-            self._on_error_notifications_changed)
-        self._settings_page_widget.upload_connection_failed.connect(
-            self._on_upload_connection_failed)
-        self._settings_page_widget.close_to_tray_changed.connect(
-            self._on_close_to_tray_changed)
-        self._settings_page_widget.diagnostic_export_requested.connect(
-            self._export_diagnostic_report)
-        self._settings_page_widget.encoder_config_changed.connect(
-            self._on_encoder_config_changed)
-        self._settings_page_widget.replay_storage_changed.connect(
-            self._queue_capture_settings_restart)
-        self._settings_page_widget.replay_gap_policy_changed.connect(
-            self._queue_capture_settings_restart)
-        self._settings_page_widget.capture_cursor_changed.connect(
-            self._queue_capture_settings_restart)
-        self._settings_page_widget.audio_capture_changed.connect(
-            self._on_audio_capture_changed)
-        self._settings_page_widget.audio_capture_mode_changed.connect(
-            self._on_audio_capture_mode_changed)
-        self._settings_page_widget.capture_card_changed.connect(
-            self._on_capture_card_changed)
-        self._settings_page_widget.background_ui_pause_changed.connect(
-            self._on_background_ui_pause_changed)
-        self._settings_page_widget.ultra_performance_mode_changed.connect(
-            self._set_ultra_performance_mode)
-        self._settings_page_widget.capture_admission_policy_changed.connect(
-            self._on_capture_admission_policy_changed)
-        self._settings_page_widget.capture_admission_refresh_windows_requested.connect(
-            self._request_capture_admission_windows)
-        self.main_stack.addWidget(self._settings_page_widget)
 
         # Trash is a persistent shell page, rather than a top-level dialog.
         # Keeping it instantiated avoids losing an in-flight recovery result
@@ -3783,7 +3815,6 @@ class MainWindow(QMainWindow):
             self.trash_sidebar_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._navigation_group.addButton(self.trash_sidebar_btn, 2)
         nav.addWidget(bottom_content)
-        self._settings_page_widget.kofi_widget_changed.connect(self.kofi_widget.setVisible)
         shell_layout.addWidget(self.nav_panel)
         shell_layout.addWidget(self.main_stack, 1)
         self._full_app_shell = shell
@@ -3828,6 +3859,89 @@ class MainWindow(QMainWindow):
         self.error_bar = ErrorBar()
         root.addWidget(self.error_bar)
 
+    def _build_settings_page(self) -> None:
+        page = _SettingsPage(
+            self.settings_manager,
+            keyboard_capture=self._keyboard_overlay_capture,
+            storage_controller=self.library_storage_controller,
+            backup_controller=self.library_backup_controller,
+            update_controller=self.app_update_controller,
+        )
+        # The Settings shell may exist before lazy category 8 is materialized;
+        # carry the authoritative Main cache into that shell immediately.
+        page.set_capture_admission_status(
+            getattr(self, '_capture_admission_status_text', ''))
+        page.set_capture_admission_windows(
+            getattr(self, '_capture_admission_windows_cache', ()))
+        page.camera_unavailable.connect(
+            self._show_camera_unavailable)
+        page.camera_settings_requested.connect(
+            self._on_camera_settings_requested)
+        effects_changed = getattr(
+            page, 'capture_effects_changed', None)
+        if effects_changed is not None:
+            effects_changed.connect(self._on_capture_effects_changed)
+        page.profile_apply_requested.connect(
+            self._on_profile_apply_requested)
+        page.profile_refresh_devices_requested.connect(
+            self._on_profile_refresh_devices_requested)
+        page.close_requested.connect(
+            self._toggle_settings_page)
+        page.clips_directory_changed.connect(
+            lambda path: (self.clip_grid.set_clips_directory(path, prepared=True),
+                          self.library_storage_controller.root_changed(path),
+                          self.library_backup_controller.root_changed(path)))
+        page.connect_import_grid(self.clip_grid)
+        page.view_imported_requested.connect(self._open_imported_clips)
+        page.imported_folders_changed.connect(
+            lambda: self.library_backup_controller.root_changed())
+        page.notification_monitor_changed.connect(
+            self.capture_card.restart)
+        page.error_notifications_changed.connect(
+            self._on_error_notifications_changed)
+        page.upload_connection_failed.connect(
+            self._on_upload_connection_failed)
+        page.close_to_tray_changed.connect(
+            self._on_close_to_tray_changed)
+        page.diagnostic_export_requested.connect(
+            self._export_diagnostic_report)
+        page.encoder_config_changed.connect(
+            self._on_encoder_config_changed)
+        page.replay_storage_changed.connect(
+            self._queue_capture_settings_restart)
+        page.replay_gap_policy_changed.connect(
+            self._queue_capture_settings_restart)
+        page.capture_cursor_changed.connect(
+            self._queue_capture_settings_restart)
+        page.audio_capture_changed.connect(
+            self._on_audio_capture_changed)
+        page.audio_capture_mode_changed.connect(
+            self._on_audio_capture_mode_changed)
+        page.capture_card_changed.connect(
+            self._on_capture_card_changed)
+        page.background_ui_pause_changed.connect(
+            self._on_background_ui_pause_changed)
+        page.ultra_performance_mode_changed.connect(
+            self._set_ultra_performance_mode)
+        page.capture_admission_policy_changed.connect(
+            self._on_capture_admission_policy_changed)
+        page.capture_admission_refresh_windows_requested.connect(
+            self._request_capture_admission_windows)
+        page.kofi_widget_changed.connect(self.kofi_widget.setVisible)
+        page.set_profile_camera_devices(getattr(self, '_camera_inventory_cache', ()))
+        profile_status = getattr(self, '_capture_profile_status', None)
+        if profile_status is not None:
+            page.set_profile_capture_status(*profile_status)
+        self._settings_page_widget = page
+        if self._ultra_performance:
+            placeholder = self.main_stack.widget(1)
+            self.main_stack.removeWidget(placeholder)
+            placeholder.deleteLater()
+        self.main_stack.insertWidget(1, page)
+        diagnostic_report = getattr(self, '_last_exported_diagnostic_report', None)
+        if diagnostic_report is not None:
+            page.diagnostic_report_file.set_file(diagnostic_report)
+
     def _apply_ultra_presentation(self) -> None:
         enabled = self._ultra_performance
         self._full_app_shell.setVisible(not enabled)
@@ -3835,24 +3949,28 @@ class MainWindow(QMainWindow):
         self.capture_toolbar_scroll.setVisible(not enabled)
         self._ultra_page.setVisible(enabled)
         self.clip_grid.set_scan_suspended(enabled)
-        self._settings_page_widget.set_background_ui_paused(
-            enabled or self._background_ui_paused
-            or self.main_stack.currentIndex() != 1)
+        page = getattr(self, '_settings_page_widget', None)
+        if page is not None:
+            page.set_background_ui_paused(
+                enabled or self._background_ui_paused
+                or self.main_stack.currentIndex() != 1)
         self._refresh_ultra_details()
         if self._pending_status_display is not None:
             self._set_status(*self._pending_status_display)
 
     def _set_ultra_performance_mode(self, enabled: bool) -> None:
         enabled = bool(enabled)
+        page = getattr(self, '_settings_page_widget', None)
         if enabled == self._ultra_performance or self._shutdown_requested:
-            self._settings_page_widget.set_ultra_performance_mode(
-                self._ultra_performance)
+            if page is not None:
+                page.set_ultra_performance_mode(self._ultra_performance)
             return
         from core.export_queue import tasks
         if enabled and (self.library_backup_controller.busy
                         or any(not task.done for task in tasks())
                         or not self._set_main_page(self.main_stack.currentIndex())):
-            self._settings_page_widget.set_ultra_performance_mode(False)
+            if page is not None:
+                page.set_ultra_performance_mode(False)
             FthrMessageDialog.warning(
                 self, 'Library work in progress',
                 'Finish the current library operation before enabling Ultra Performance Mode.')
@@ -3860,7 +3978,8 @@ class MainWindow(QMainWindow):
         self.settings_manager.set('ultra_performance_mode', enabled)
         if self.settings_manager.save_settings() is False:
             self.settings_manager.set('ultra_performance_mode', not enabled)
-            self._settings_page_widget.set_ultra_performance_mode(not enabled)
+            if page is not None:
+                page.set_ultra_performance_mode(not enabled)
             FthrMessageDialog.warning(
                 self, 'Could not change performance mode',
                 'The performance mode preference could not be saved.')
@@ -3869,6 +3988,10 @@ class MainWindow(QMainWindow):
         for popup in (self.cap_settings_popup, self.source_popup,
                       self.hotkey_popup, self.game_detection_popup):
             popup.hide()
+        if not enabled and page is None:
+            self._build_settings_page()
+            page = self._settings_page_widget
+            self._ensure_plugin_runtime()
         self._ultra_performance = enabled
         self._ultra_effects_pending = True
         if not enabled:
@@ -3876,7 +3999,8 @@ class MainWindow(QMainWindow):
         self.upload_manager.set_suspended(enabled)
         self.capture_card.set_visuals_suspended(enabled)
         self.library_storage_controller.set_scan_suspended(enabled)
-        self._settings_page_widget.set_ultra_performance_mode(enabled)
+        if page is not None:
+            page.set_ultra_performance_mode(enabled)
         self._apply_ultra_presentation()
         if enabled:
             self._plugin_runtime.close()
@@ -4033,31 +4157,11 @@ class MainWindow(QMainWindow):
             # into nativeEvent while Qt is mid-show, causing a crash.
             if sys.platform == 'win32':
                 QTimer.singleShot(0, self._apply_native_style)
-            # Pre-realize the settings page so the first time the user clicks
-            # the gear button it doesn't pay for layout, font resolution, and
-            # stylesheet compilation. The page is already constructed; we just
-            # need Qt to do its first-show work for it.
-            QTimer.singleShot(0, self._prerealize_settings_page)
 
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
             QTimer.singleShot(0, self._refresh_background_ui_pause_state)
-
-    def _prerealize_settings_page(self):
-        """Polish and lay out settings pages before their first visible show.
-
-        Apply ensurePolished/adjustSize to descendants too, since nested pages
-        otherwise defer this work until the user opens them.
-        """
-        page = self._settings_page_widget
-        try:
-            page.ensurePolished()
-            page.adjustSize()
-            for child in page.findChildren(QWidget):
-                child.ensurePolished()
-        except Exception as e:
-            print(f'[Prerealize] settings page warm-up failed: {e}')
 
     def _apply_native_style(self):
         """Apply WS_THICKFRAME so native resize/Aero-snap work on the frameless window."""
@@ -4191,7 +4295,7 @@ class MainWindow(QMainWindow):
             return
         self._update_notice_version = release.version
         page = getattr(self, '_settings_page_widget', None)
-        updates = getattr(page, 'app_updates_widget', None)
+        updates = page.__dict__.get('app_updates_widget') if page is not None else None
         if updates is not None and updates.isVisible():
             return
         from ui.app_updates import UpdateDialog
@@ -5420,6 +5524,41 @@ class MainWindow(QMainWindow):
             release()
             done(MutationResult('', FileOperationState.ROLLED_BACK, source, source, str(error)))
 
+    def _rename_from_editor(self, old_path, new_path, allow_linked):
+        viewer = self._active_clip_viewer
+        if viewer is None or viewer.clip_path != old_path:
+            return
+        try:
+            state = viewer.capture_session_state()
+        except (OSError, ValueError, RuntimeError) as error:
+            self.push_error('Rename failed', str(error), level='warning')
+            return
+        if state is None:
+            return
+        state['reopen_clip_details'] = True
+        geometry, maximized = viewer.geometry(), viewer.isMaximized()
+
+        def completed(result):
+            if getattr(self, '_shutdown_requested', False):
+                return
+            if not result.succeeded:
+                self.push_error('Rename failed', result.error or 'The clip could not be renamed.', level='warning')
+            # A preflight rejection leaves the original editor open. A committed
+            # rename releases its media handles first, then resumes the saved edit.
+            target = result.new_path if result.succeeded else old_path
+            if (self._active_clip_viewer is not None or self._editor_trash_pending()
+                    or not self._clip_readiness.can_access(target) or not os.path.isfile(target)):
+                return
+            from ui.editor_sessions import MAX_EDITOR_SESSIONS
+            if len(self._editor_sessions) >= MAX_EDITOR_SESSIONS:
+                return
+            session = self._add_editor_session(target)
+            session.state = state
+            session.window_geometry, session.window_maximized = geometry, maximized
+            self._show_editor_session(session, QPixmap(), restore_geometry=True)
+
+        self.clip_grid._dispatch_rename(old_path, new_path, allow_linked, completed)
+
     def _request_clip_rename(self, old_path, new_path, allow_linked, completed):
         paths = (old_path, new_path)
         finished = False
@@ -5624,10 +5763,10 @@ class MainWindow(QMainWindow):
         )
 
     def _setup_hotkeys(self):
-        self.hotkey_manager.save_clip_triggered.connect(self._on_hotkey_save_clip)
+        self.hotkey_manager.save_clip_pressed.connect(self._on_hotkey_save_clip)
         self.hotkey_manager.mark_highlight_triggered.connect(
             self._on_hotkey_mark_highlight)
-        self.hotkey_manager.custom_clip_triggered.connect(self._save_clip)
+        self.hotkey_manager.custom_clip_pressed.connect(self._on_custom_hotkey_save_clip)
         self.hotkey_manager.save_screenshot_triggered.connect(
             self._on_hotkey_save_screenshot)
         self.hotkey_manager.start_recording_triggered.connect(
@@ -6160,6 +6299,9 @@ class MainWindow(QMainWindow):
             if not self._capture_owner_snapshot_is_current(owner_snapshot):
                 return
             self._accepted_capture_session = bound_session
+            pending = getattr(self, '_pending_post_roll', None)
+            if pending is not None and pending.session is session:
+                pending.session = bound_session
             return
         if not self._capture_owner_snapshot_is_current(owner_snapshot):
             return
@@ -6672,6 +6814,7 @@ class MainWindow(QMainWindow):
                     latch, require_slot=False)):
             return True
         self._admission_transition_latch = latch
+        MainWindow._cancel_pending_post_roll(self, str(reason))
         # Focus resume/recovery can advance the backend generation within the
         # same owned process. Teardown owns its current mapping, even if the
         # accepted save session still describes the previous generation.
@@ -7406,15 +7549,22 @@ class MainWindow(QMainWindow):
                     expected_recording=manual_path, expected_session=manual_session)
 
 
-    def _on_hotkey_save_clip(self):
+    def _on_hotkey_save_clip(self, pressed_at_ns=None):
         mark_save_trace('ui_save_hotkey_slot')
         session = getattr(self, '_accepted_capture_session', None)
         config = getattr(session, 'request', None)
         if config is not None:
-            self._save_clip(config.capture_config.normal_clip_seconds)
-            return
-        active = self._capture_config.active
-        self._save_clip(active.normal_clip_seconds if active else self.clip_duration)
+            duration = config.capture_config.normal_clip_seconds
+        else:
+            active = self._capture_config.active
+            duration = active.normal_clip_seconds if active else self.clip_duration
+        if type(pressed_at_ns) is int:
+            self._save_clip(duration, pressed_at_ns=pressed_at_ns)
+        else:
+            self._save_clip(duration)
+
+    def _on_custom_hotkey_save_clip(self, duration, pressed_at_ns):
+        self._save_clip(duration, pressed_at_ns=pressed_at_ns)
 
     def _on_hotkey_mark_highlight(self):
         """Request a native ring mark without consuming save responses."""
@@ -8523,7 +8673,8 @@ class MainWindow(QMainWindow):
     def _on_clip_length_changed(self, duration: int):
         self.clip_duration  = duration
         self.buffer_seconds = compute_buffer_seconds(
-            duration, self.settings_manager.get('custom_clip_lengths', []))
+            duration, self.settings_manager.get('custom_clip_lengths', []),
+            configured_post_roll_seconds(self.settings_manager))
 
 
     def _on_custom_lengths_changed(self):
@@ -8695,7 +8846,9 @@ class MainWindow(QMainWindow):
             self.capture_bitrate = max(500, min(200_000, custom_bitrate))
         else:
             self.capture_bitrate = BITRATE_PRESETS[resolution][quality]
-        self.buffer_seconds = compute_buffer_seconds(clip, self.settings_manager.get('custom_clip_lengths', []))
+        self.buffer_seconds = compute_buffer_seconds(
+            clip, self.settings_manager.get('custom_clip_lengths', []),
+            configured_post_roll_seconds(self.settings_manager))
         return True
 
     def _capture_global_defaults_snapshot(self) -> dict[str, object]:
@@ -8737,6 +8890,8 @@ class MainWindow(QMainWindow):
                 'target_clip_group': '', 'target_window_identity': None,
                 'capture_source_authority': 'manual',
                 'custom_clip_lengths': [], 'platform': sys.platform,
+                'clip_post_roll_enabled': False,
+                'clip_post_roll_seconds': DEFAULT_POST_ROLL_SECONDS,
                 REPLAY_STORAGE_KEY: None,
                 'allow_replay_gaps': True,
                 'allow_low_fps_clips': True,
@@ -9506,6 +9661,7 @@ class MainWindow(QMainWindow):
                 or 'Global defaults',
                 'exe_path': self._desired_capture_request.source.exe_path or '',
             } if pending else None)
+        self._capture_profile_status = (active, pending_value, message)
         if callable(page_setter):
             page_setter(active, pending_value, message)
             self._refresh_capture_summary()
@@ -9545,6 +9701,8 @@ class MainWindow(QMainWindow):
                 path=manual_path))
         if (getattr(self, '_manual_record_state', 'idle') != 'idle'
                 and not manual_owned):
+            return True
+        if getattr(self, '_pending_post_roll', None) is not None:
             return True
         save_state = getattr(self, '_save_state', None)
         if save_state is not None and save_state.is_busy():
@@ -10901,10 +11059,12 @@ class MainWindow(QMainWindow):
                               == AUDIO_CAPTURE_MODE_SEPARATED)
             application_audio = False
             audio_device_tracks = []
+        post_roll_seconds = configured_post_roll_seconds(self.settings_manager)
         return CaptureConfig(
             fps=fps,
             buffer_seconds=compute_buffer_seconds(
-                self.clip_duration, self.settings_manager.get('custom_clip_lengths', [])),
+                self.clip_duration, self.settings_manager.get('custom_clip_lengths', []),
+                post_roll_seconds),
             width=width,
             height=height,
             bitrate_kbps=bitrate,
@@ -10934,6 +11094,7 @@ class MainWindow(QMainWindow):
             playback_endpoint_id=str(self.settings_manager.get('playback_device_id') or '') if sys.platform == 'win32' else '',
             microphone_mono=bool(self.settings_manager.get('mic_downmix_mono', False)) if sys.platform == 'win32' else False,
             normal_clip_seconds=self.clip_duration,
+            post_roll_seconds=post_roll_seconds,
             crop_enabled=crop_enabled,
             crop_x=float(crop.get('x', 0.0)) if crop_enabled else 0.0,
             crop_y=float(crop.get('y', 0.0)) if crop_enabled else 0.0,
@@ -12202,6 +12363,7 @@ class MainWindow(QMainWindow):
     def stop_engine(self):
         if _admission_call(self, '_admission_transition_active'):
             return
+        MainWindow._cancel_pending_post_roll(self, 'Capture stopped.')
         # Invalidate queued handshake work before shutdown can block.
         self._clear_focus_action()
         self._capture_config.cancel_apply()
@@ -12357,8 +12519,12 @@ class MainWindow(QMainWindow):
                 allow_manual_prepare=manual_owned, manual_request=request,
                 manual_path=(getattr(self, '_pending_manual_record_path', None)
                              if manual_owned else None)):
+            wait_reason = (
+                'Finishing the pending clip before applying capture changes'
+                if getattr(self, '_pending_post_roll', None) is not None
+                else 'Capture resources are busy; change queued')
             self._queue_latest_desired_request(
-                request, reason='Capture resources are busy; change queued')
+                request, reason=wait_reason)
             return False
         active = getattr(self, '_accepted_capture_session', None)
         # The process and IPC can remain alive after the capture thread exits.
@@ -13310,6 +13476,8 @@ class MainWindow(QMainWindow):
             return
         self._clear_manual_stop_request()
         self._manual_record_state = 'stopping'
+        MainWindow._cancel_pending_post_roll(
+            self, 'Recording stopped before the additional seconds were ready.')
         self._manual_record_requested_at = now
         self.record_btn.setEnabled(False)
         self.record_btn.setText('Finalizing…')
@@ -13878,7 +14046,59 @@ class MainWindow(QMainWindow):
 
     # Save clip
 
-    def _save_clip(self, duration_seconds: int = 30):
+    def _cancel_pending_post_roll(self, reason: str):
+        if getattr(self, '_pending_post_roll', None) is None:
+            return
+        self._pending_post_roll = None
+        self._post_roll_timer.stop()
+        self.capture_card.show_error()
+        self.push_error('CLIP NOT SAVED', reason, level='warning')
+        emit_event('clip_save', 'post_roll_cancelled', state='CANCELLED',
+                   reason=reason)
+
+    def _arm_post_roll_timer(self, pending):
+        remaining_ns = max(0, pending.end_ns - time.monotonic_ns())
+        self._post_roll_timer.start((remaining_ns + 999_999) // 1_000_000)
+        self._set_status('CAPTURING ADDITIONAL SECONDS', status_idle_qss())
+
+    def _extend_pending_post_roll(self, pending, pressed_at_ns):
+        # Keep the first press's start. Round up to the encoder's whole-second
+        # duration so a repeat doesn't shorten the requested post-roll.
+        elapsed_ns = pressed_at_ns - pending.pressed_at_ns
+        elapsed_seconds = (elapsed_ns + 999_999_999) // 1_000_000_000
+        requested = min(pending.max_duration_seconds,
+                        pending.pre_roll_seconds + pending.post_roll_seconds
+                        + elapsed_seconds)
+        if (pressed_at_ns >= pending.end_ns or requested <= pending.duration_seconds
+                or getattr(self, '_replay_duration_warning', None) is not None):
+            self.push_error(
+                'CLIP ALREADY PENDING',
+                'The earlier clip will save with the footage already requested.',
+                level='warning', key='clip-post-roll-pending')
+            return
+        pending.duration_seconds = requested
+        self._arm_post_roll_timer(pending)
+
+    def _finish_pending_post_roll(self):
+        pending = self._pending_post_roll
+        if pending is None:
+            return
+        if time.monotonic_ns() < pending.end_ns:
+            self._arm_post_roll_timer(pending)
+            return
+        if (getattr(self, '_shutdown_requested', False)
+                or _admission_call(self, '_admission_transition_active')
+                or not self._accepted_session_owner_is_current(pending.session)):
+            self._cancel_pending_post_roll(
+                'Capture changed before the additional seconds were ready.')
+            return
+        self._pending_post_roll = None
+        self._save_clip(pending.duration_seconds, post_roll=pending)
+
+    def _save_clip(self, duration_seconds: int = 30, *, pressed_at_ns=None,
+                   post_roll=None):
+        if type(pressed_at_ns) is not int:
+            pressed_at_ns = time.monotonic_ns()
         preload = getattr(self, '_editor_preload', None)
         if preload is not None:
             preload.clear(suspend=True)
@@ -13913,6 +14133,13 @@ class MainWindow(QMainWindow):
                 accepted_session = self._accepted_capture_session
                 accepted_request = accepted_session.request
                 owner_current = self._accepted_session_owner_is_current(accepted_session)
+        if post_roll is not None and accepted_session is not post_roll.session:
+            self.capture_card.show_error()
+            self.push_error(
+                'CLIP NOT SAVED',
+                'Capture changed before the additional seconds could be saved.',
+                level='warning')
+            return
         if not owner_current:
             self._show_save_busy_feedback()
             self.push_error(
@@ -13931,6 +14158,14 @@ class MainWindow(QMainWindow):
                 level='error',
             )
             return
+
+        pending = getattr(self, '_pending_post_roll', None)
+        if pending is not None:
+            if pending.session is accepted_session:
+                self._extend_pending_post_roll(pending, pressed_at_ns)
+                return
+            self._cancel_pending_post_roll(
+                'Capture changed before the additional seconds were ready.')
 
         admission = evaluate_save_admission(
             self._capture_health_snapshot, duration_seconds)
@@ -13963,6 +14198,32 @@ class MainWindow(QMainWindow):
             print(f'[Save] Ignored — engine save still in flight '
                   f'({self._save_state.state.value})')
             self._show_save_busy_feedback()
+            return
+
+        config = accepted_request.capture_config
+        extra_seconds = getattr(config, 'post_roll_seconds', 0)
+        if extra_seconds and post_roll is None:
+            if not self.bridge.supports_clip_boundary():
+                self.push_error(
+                    'CLIP NOT SAVED',
+                    'Additional seconds require a compatible capture engine.',
+                    level='warning')
+                return
+            max_duration = min(config.buffer_seconds,
+                               MAX_CLIP_SECONDS if sys.platform == 'win32' else 300,
+                               duration_seconds + 2 * extra_seconds)
+            if duration_seconds + extra_seconds > max_duration:
+                self.push_error(
+                    'CLIP NOT SAVED',
+                    f'The clip length plus additional seconds exceeds the '
+                    f'{max_duration}-second replay limit. Choose a shorter clip.',
+                    level='warning')
+                return
+            pending = _PendingPostRoll(
+                accepted_session, pressed_at_ns, duration_seconds, extra_seconds,
+                duration_seconds + extra_seconds, max_duration)
+            self._pending_post_roll = pending
+            self._arm_post_roll_timer(pending)
             return
         self._last_save_request = now
 
@@ -14028,9 +14289,9 @@ class MainWindow(QMainWindow):
 
         # Use the accepted save instant as the shared end boundary for engine
         # and microphone rings, so post-processing extracts the matching interval.
-        mic_end_time = time.monotonic()
+        mic_end_time = (post_roll.end_ns / 1_000_000_000
+                        if post_roll is not None else time.monotonic())
         crop_profile = None
-        config = accepted_request.capture_config
         if config.crop_enabled:
             crop_profile = {
                 'enabled': True, 'x': config.crop_x, 'y': config.crop_y,
@@ -14052,6 +14313,7 @@ class MainWindow(QMainWindow):
         save_context = {
             'skip_clip_effects': skip_clip_effects,
             'mic_end_time': mic_end_time,
+            'post_roll': post_roll is not None,
             'crop_profile': crop_profile,
             'session_snapshot': accepted_session,
             'process_generation': accepted_session.process_generation,
@@ -14091,10 +14353,17 @@ class MainWindow(QMainWindow):
                     or self.bridge is not owner_bridge
                     or self._save_state.is_busy()):
                 self._show_save_busy_feedback()
+                if post_roll is not None:
+                    self.push_error(
+                        'CLIP NOT SAVED',
+                        'Capture changed before the additional seconds could be saved.',
+                        level='warning')
                 return
 
             mark_save_trace('ui_save_command_begin')
-            if not owner_bridge.save_clip(str(output_path), duration_seconds):
+            timing = ({'end_monotonic_ns': post_roll.end_ns}
+                      if post_roll is not None else {})
+            if not owner_bridge.save_clip(str(output_path), duration_seconds, **timing):
                 mark_save_trace('ui_save_command_rejected')
                 emit_event(
                     'clip_save', 'command_rejected', state='FAILED',
@@ -14683,6 +14952,7 @@ class MainWindow(QMainWindow):
                 op.context.get('camera_runtime_receipt')),
             'effects': copy.deepcopy(retained_effects),
             'skip_clip_effects': bool(op.context.get('skip_clip_effects', False)),
+            'post_roll': bool(op.context.get('post_roll')),
             'audio_mode': audio_mode,
             'audio_enabled': bool(audio_enabled),
             'allow_replay_gaps': bool(
@@ -16284,6 +16554,9 @@ class MainWindow(QMainWindow):
         the base clip and produces a finalization warning.
         """
         effects = self._captured_effects()
+        job = getattr(_FINALIZATION_CONTEXT, 'capture_job', None)
+        timing = ({'require_coverage': True}
+                  if isinstance(job, dict) and job.get('post_roll') else {})
         config = (
             dict(effects.get('third_party_keyboard', {}))
             if effects is not None else
@@ -16348,7 +16621,7 @@ class MainWindow(QMainWindow):
                                 clip_end_time, duration_sec,
                                 (keyboard_w, keyboard_h),
                                 config['color'], config['intensity'],
-                                KEYBOARD_COMPOSITE_FPS):
+                                KEYBOARD_COMPOSITE_FPS, **timing):
                             if process.stdin is None:
                                 break
                             process.stdin.write(memoryview(frame).cast('B'))
@@ -16508,10 +16781,13 @@ class MainWindow(QMainWindow):
             prefix='.fthr-finalize-', dir=os.path.dirname(clip_path))
         cam_path = os.path.join(tmp_dir, 'camera.mp4')
 
+        timing = ({'align_to_clock': True}
+                  if isinstance(capture_job, dict) and capture_job.get('post_roll')
+                  else {})
         if not recorder.write_segment(
                 cam_path, clip_end_time, duration_sec, 30.0,
                 expected_generation=expected_generation,
-                expected_device_index=expected_device_index):
+                expected_device_index=expected_device_index, **timing):
             self._record_finalization_warning(
                 clip_path, 'Camera overlay could not be rendered; the base clip was retained.')
             try:
@@ -16769,6 +17045,8 @@ class MainWindow(QMainWindow):
         self._pending_launch_admission_epoch = None
         self._restart_pending = False
         self._set_capture_apply_state(False)
+        MainWindow._cancel_pending_post_roll(
+            self, 'Capture stopped before the additional seconds were ready.')
         if bridge_owner and not owner_already_drained:
             bridge_owner.shutdown()
         if getattr(self, '_engine_bridge_owner', None) is bridge_owner:
@@ -17035,8 +17313,9 @@ class MainWindow(QMainWindow):
                 new_enc_text = f'{codec} — P{preset}'
             else:
                 new_enc_text = codec
-            if self._ui_ready and not self._background_ui_paused:
-                lbl = self._settings_page_widget.__dict__.get('active_encoder_lbl')
+            page = getattr(self, '_settings_page_widget', None)
+            if page is not None and self._ui_ready and not self._background_ui_paused:
+                lbl = page.__dict__.get('active_encoder_lbl')
                 if lbl is not None and lbl.text() != new_enc_text:
                     lbl.setText(new_enc_text)
         if self.is_capturing:
@@ -17449,6 +17728,9 @@ class MainWindow(QMainWindow):
                     'engine-owned and a manual process restart is available')
 
     def _set_status(self, text: str, style: str):
+        if (getattr(self, '_pending_post_roll', None) is not None
+                and text.startswith(('CAPTURING', 'CAPTURE DEGRADED'))):
+            text, style = 'CAPTURING ADDITIONAL SECONDS', status_idle_qss()
         waiting_reason = getattr(self, '_manual_prepare_wait_reason', '')
         if getattr(self, '_manual_record_state', 'idle') == 'preparing' and waiting_reason:
             text, style = waiting_reason, status_idle_qss()
@@ -17515,9 +17797,11 @@ class MainWindow(QMainWindow):
         stack = getattr(self, "main_stack", None)
         self.clip_grid.set_background_paused(
             paused or (stack is not None and stack.currentIndex() != 0) or editor_active)
-        self._settings_page_widget.set_background_ui_paused(
-            paused or (stack is not None and stack.currentIndex() != 1) or editor_active
-            or getattr(self, '_ultra_performance', False))
+        page = getattr(self, '_settings_page_widget', None)
+        if page is not None:
+            page.set_background_ui_paused(
+                paused or (stack is not None and stack.currentIndex() != 1) or editor_active
+                or getattr(self, '_ultra_performance', False))
         if not paused:
             if self._pending_status_display is not None:
                 text, style = self._pending_status_display
@@ -18569,7 +18853,8 @@ class MainWindow(QMainWindow):
         options = dict(thumb_pixmap=thumb_pixmap, settings_manager=self.settings_manager,
                        upload_enabled=upload_on, metadata_manager=self.clip_metadata_manager,
                        linked_import=self.clip_grid.is_linked_import(clip_path),
-                       upload_coordinator=upload_coordinator, trash_handler=self._request_clip_trash)
+                       upload_coordinator=upload_coordinator, trash_handler=self._request_clip_trash,
+                       rename_handler=self._rename_from_editor)
         preload = getattr(self, '_editor_preload', None)
         if preload is not None:
             options['preloaded_media'] = preload.take(clip_path)
@@ -18833,6 +19118,9 @@ class SlidingStackedWidget(QWidget):
 
     def currentWidget(self):
         if 0 <= self._current < len(self._pages):
+            ensure = self.__dict__.get('_ensure_page')
+            if ensure is not None:
+                ensure(self._current)
             return self._pages[self._current]
         return None
 
@@ -18841,6 +19129,9 @@ class SlidingStackedWidget(QWidget):
             ensure = self.__dict__.get('_ensure_page')
             if ensure is not None:
                 ensure(idx)
+            inspect_page = self.__dict__.get('_ensure_inspected_page')
+            if inspect_page is not None:
+                inspect_page(idx)
             return self._pages[idx]
         return None
 
@@ -18909,7 +19200,6 @@ class _SettingsPage(QWidget):
     _top_categories = (0, 1, 10, 2, 3, 4, 5, 6, 9)
     _clip_categories = ((1, 'Capture && editing'), (7, 'Game Profiles'), (8, 'Allowed games'))
     _clip_subcategories = frozenset(index for index, _ in _clip_categories if index != 1)
-
     _lazy_control_categories = {
         '_camera_preview_timer': 3,
         '_customize_page': 4,
@@ -18921,19 +19211,30 @@ class _SettingsPage(QWidget):
         '_scan_pending': 1,
         '_scan_results_container': 1,
         '_scan_results_layout': 1,
+        '_upload_settings_widget': 0,
         'active_encoder_lbl': 1,
+        'anticheat_check': 0,
+        'app_updates_widget': 0,
         'audio_capture_check': 2,
         'audio_separation_check': 2,
+        'autostart_check': 0,
         'camera_check': 3,
         'camera_device_combo': 3,
+        'capture_card_mode_combo': 0,
         'clear_image_overlays_btn': 3,
         'clips_directory_edit': 10,
+        'close_to_tray_check': 0,
         'codec_combo': 1,
+        'credits_toggle': 0,
+        'diagnostic_report_file': 0,
         'encoder_combo': 1,
         'encoder_detection_lbl': 1,
         'encoder_preset_combo': 1,
         'encoder_preset_row': 1,
         'encoder_refresh_btn': 1,
+        'error_notifications_check': 0,
+        'export_diagnostic_btn': 0,
+        'export_presets_widget': 0,
         'hide_deleted_timeline_segments_check': 1,
         'grid_show_edited_duration_check': 1,
         'image_overlay_check': 3,
@@ -18952,6 +19253,7 @@ class _SettingsPage(QWidget):
         'keyboard_pick_color': 3,
         'keyboard_source_preview': 3,
         'keyboard_window_combo': 3,
+        'kofi_widget_check': 0,
         'mic_combo': 2,
         'mic_gain_label': 2,
         'mic_gain_warning': 2,
@@ -18972,6 +19274,7 @@ class _SettingsPage(QWidget):
         'capture_admission_widget': 8,
         'plugin_settings_widget': 9,
         'playback_combo': 2,
+        'preset_combo': 0,
         'audio_exclusions_group': 2,
         'audio_exclusions_widget': 2,
         'keep_system_audio_backup_check': 2,
@@ -18989,6 +19292,7 @@ class _SettingsPage(QWidget):
         'sound_value_labels': 2,
         'timeline_preview_strip_enabled_check': 1,
         'unified_overlay_editor': 3,
+        'updates_toggle': 0,
         'watermark_check': 1,
     }
 
@@ -18997,9 +19301,11 @@ class _SettingsPage(QWidget):
         # Internal lifecycle guards must use __dict__ to remain non-creating.
         index = self._lazy_control_categories.get(name)
         if (index is not None and '_loaded_categories' in self.__dict__
-                and index not in self._loaded_categories
                 and index not in self._building_categories):
             self._ensure_category(index)
+            build = self._general_section_builders.get(name)
+            if build is not None:
+                build()
             if name in self.__dict__:
                 return self.__dict__[name]
         raise AttributeError(name)
@@ -19097,8 +19403,13 @@ class _SettingsPage(QWidget):
         self.plugin_settings_widget = PluginSettingsWidget(
             self, runtime=self.__dict__.get('plugin_runtime'))
         self.plugin_settings_widget.theme_applied.connect(self._on_theme_applied)
-        self.plugin_settings_widget.presets_changed.connect(self.export_presets_widget.refresh)
+        self.plugin_settings_widget.presets_changed.connect(self._refresh_built_export_presets)
         return self.plugin_settings_widget
+
+    def _refresh_built_export_presets(self):
+        widget = self.__dict__.get('export_presets_widget')
+        if widget is not None:
+            widget.refresh()
 
     def get_plugin_surfaces(self):
         if '_plugin_surfaces' not in self.__dict__:
@@ -19284,6 +19595,7 @@ class _SettingsPage(QWidget):
             self._on_profile_playback_inventory_ready)
         self._loaded_categories = set()
         self._building_categories = set()
+        self._general_section_builders = {}
         self._pending_encoder_preset = None
         self._setup_ui()
         self._apply_styles()
@@ -19400,9 +19712,9 @@ class _SettingsPage(QWidget):
 
         self.stack = SlidingStackedWidget()
         self.stack._ensure_page = self._ensure_category
+        self.stack._ensure_inspected_page = self._ensure_inspected_category
         for _ in self._cat_titles:
             self.stack.addWidget(QWidget())
-        self._ensure_category(0)
         content_layout.addWidget(self.stack, stretch=1)
         self.stack.currentChanged.connect(self._sync_settings_navigation)
         self.settings_search.textChanged.connect(self._search_settings)
@@ -19479,6 +19791,8 @@ class _SettingsPage(QWidget):
             return
         parts = destination.target.split('.')
         target = self.__dict__.get(parts[0])
+        if target is None and parts[0] in self._general_section_builders:
+            target = getattr(self, parts[0])
         for part in parts[1:]:
             target = getattr(target, part, None)
         expand = getattr(target, 'expand', None)
@@ -19607,9 +19921,46 @@ class _SettingsPage(QWidget):
         set_theme_style(self._settings_content,
             lambda: (f'QWidget#settingsContent {{ background-color: {Colors.BG}; }}'))
 
-    def _make_general_page(self):
+    def _defer_general_section(self, section, layout, name, factory):
+        def build():
+            if name in self.__dict__:
+                return
+            control = factory()
+            self.__dict__[name] = control
+            layout.addWidget(control)
+            from ui.settings_layout import standardize_settings_spacing
+            standardize_settings_spacing(layout.parentWidget())
+
+        self._general_section_builders[name] = build
+        section._header.toggled.connect(lambda expanded: build() if expanded else None)
+
+    def _ensure_inspected_category(self, index):
+        # The Interface Editor catalogs real controls even in folded sections.
+        # Navigation only builds the content the user can see.
+        if index == 0:
+            for build in self._general_section_builders.values():
+                build()
+
+    def _make_upload_settings_widget(self):
         from ui.upload_settings_widget import UploadSettingsWidget
 
+        widget = UploadSettingsWidget(
+            getattr(self.sm, '_upload_manager_ref', self.sm), no_scroll=True, show_title=False,
+        )
+        widget.connection_failed.connect(self.upload_connection_failed.emit)
+        return widget
+
+    def _make_export_presets_widget(self):
+        from ui.export_presets_widget import ExportPresetsWidget
+        return ExportPresetsWidget()
+
+    def _make_app_updates_widget(self):
+        from ui.app_updates import AppUpdateController, AppUpdatesWidget
+        if self._update_controller is None:
+            self._update_controller = AppUpdateController(self.sm, self)
+        return AppUpdatesWidget(self._update_controller)
+
+    def _make_general_page(self):
         page = QWidget()
         page.setStyleSheet('background: transparent;')
         layout = QVBoxLayout(page)
@@ -19624,7 +19975,6 @@ class _SettingsPage(QWidget):
         # System --
         layout.addSpacing(8)
         self.autostart_check = QCheckBox('Start with Windows')
-        pass
         layout.addWidget(self.autostart_check)
         self._init_autostart_checkbox()
         self.autostart_check.stateChanged.connect(self._on_autostart_changed)
@@ -19689,15 +20039,8 @@ class _SettingsPage(QWidget):
         layout.addLayout(capture_card_row)
 
         upload_section, layout = folded_settings_section('Uploads')
-        # Upload --
-        self._upload_settings_widget = UploadSettingsWidget(
-            getattr(self.sm, '_upload_manager_ref', self.sm),
-            no_scroll=True,
-            show_title=False,
-        )
-        self._upload_settings_widget.connection_failed.connect(
-            self.upload_connection_failed.emit)
-        layout.addWidget(self._upload_settings_widget)
+        self._defer_general_section(
+            upload_section, layout, '_upload_settings_widget', self._make_upload_settings_widget)
 
         presets_section, layout = folded_settings_section('Settings presets')
         # Settings Presets --
@@ -19733,11 +20076,9 @@ class _SettingsPage(QWidget):
         layout.addLayout(preset_row)
 
         export_section, layout = folded_settings_section('Export presets')
-        # Export presets --
         layout.addSpacing(6)
-        from ui.export_presets_widget import ExportPresetsWidget
-        self.export_presets_widget = ExportPresetsWidget(parent=page)
-        layout.addWidget(self.export_presets_widget)
+        self._defer_general_section(
+            export_section, layout, 'export_presets_widget', self._make_export_presets_widget)
 
         support_section, layout = folded_settings_section('Troubleshooting')
         # Troubleshooting --
@@ -19779,11 +20120,8 @@ class _SettingsPage(QWidget):
 
         updates_section, layout = folded_settings_section('Updates')
         self.updates_toggle = updates_section._header
-        from ui.app_updates import AppUpdateController, AppUpdatesWidget
-        if self._update_controller is None:
-            self._update_controller = AppUpdateController(self.sm, self)
-        self.app_updates_widget = AppUpdatesWidget(self._update_controller, page)
-        layout.addWidget(self.app_updates_widget)
+        self._defer_general_section(
+            updates_section, layout, 'app_updates_widget', self._make_app_updates_widget)
 
         credits_section, layout = folded_settings_section('About FTHRClips')
         self.credits_toggle = credits_section._header
@@ -21934,28 +22272,53 @@ class _SettingsPage(QWidget):
     def _keyboard_config_for_write(self) -> dict:
         return third_party_keyboard_settings(self.sm)
 
-    def _save_keyboard_config(self, config: dict) -> None:
-        self.sm.set('third_party_keyboard', {
-            'enabled': bool(config.get('enabled', False)),
-            'hwnd': max(0, int(config.get('hwnd', 0) or 0)),
-            'window_name': str(config.get('window_name', '') or ''),
-            'color': str(config.get('color', DEFAULT_KEYBOARD_COLOR)),
-            'intensity': int(config.get('intensity', DEFAULT_KEYBOARD_INTENSITY)),
-            'rect': clamp_overlay_rect(
-                config.get('rect'), DEFAULT_KEYBOARD_OVERLAY_RECT),
-        })
-        self.sm.save_settings()
+    def _save_keyboard_config(self, config: dict) -> bool:
+        if not _persist_setting_changes(self.sm, {'third_party_keyboard': config}):
+            return False
         # Main owns the captured provider.  Persist and debounce the desired
         # effect only; no settings-page edit may mutate an admitted A ring.
         self._queue_capture_effects_changed()
+        return True
+
+    def _on_keyboard_source_type_changed(self, index):
+        mode = self.keyboard_source_type.itemData(index)
+        previous = self._keyboard_config_for_write()
+        config = dict(previous, source_type=mode)
+        config['enabled'] = config['enabled'] and keyboard_source_available(config)
+        if not self._save_keyboard_config(config):
+            with QSignalBlocker(self.keyboard_source_type):
+                self.keyboard_source_type.setCurrentIndex(
+                    self.keyboard_source_type.findData(previous['source_type']))
+        if mode == 'window':
+            self._refresh_keyboard_windows()
+        self._sync_keyboard_overlay_controls()
+
+    def _apply_keyboard_browser_source(self):
+        url = normalize_keyboard_browser_url(self.keyboard_browser_url.text())
+        if not url:
+            self.keyboard_browser_error.setText(
+                'Enter an HTTPS URL or an HTTP URL for a local overlay server.')
+            self.keyboard_browser_error.show()
+            return
+        config = dict(
+            self._keyboard_config_for_write(),
+            source_type='browser', browser_url=url,
+            browser_width=self.keyboard_browser_width.value(),
+            browser_height=self.keyboard_browser_height.value(), enabled=True)
+        if not self._save_keyboard_config(config):
+            self.keyboard_browser_error.setText('The browser source could not be saved.')
+            self.keyboard_browser_error.show()
+            return
+        self.keyboard_browser_error.hide()
+        self._sync_keyboard_overlay_controls()
 
     def _refresh_keyboard_windows(self) -> None:
         if 'keyboard_window_combo' not in self.__dict__:
             return
-        pass
-
-        self._keyboard_windows = enumerate_keyboard_windows()
         config = third_party_keyboard_settings(self.sm)
+        if config['source_type'] != 'window':
+            return
+        self._keyboard_windows = enumerate_keyboard_windows()
         saved_hwnd = config['hwnd']
         if saved_hwnd and not any(
                 int(item.get('hwnd', 0) or 0) == saved_hwnd
@@ -22018,14 +22381,13 @@ class _SettingsPage(QWidget):
 
     def _on_keyboard_overlay_toggled(self, checked: bool) -> None:
         config = self._keyboard_config_for_write()
-        if checked and not config['hwnd']:
-            self.keyboard_overlay_check.blockSignals(True)
-            self.keyboard_overlay_check.setChecked(False)
-            self.keyboard_overlay_check.blockSignals(False)
+        if checked and not keyboard_source_available(config):
             self._sync_keyboard_overlay_controls()
             return
         config['enabled'] = bool(checked)
-        self._save_keyboard_config(config)
+        if not self._save_keyboard_config(config):
+            self._sync_keyboard_overlay_controls()
+            return
         if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_overlay_enabled(
                 'keyboard', bool(checked))
@@ -22069,13 +22431,23 @@ class _SettingsPage(QWidget):
         if 'keyboard_overlay_check' not in self.__dict__:
             return
         config = third_party_keyboard_settings(self.sm)
-        has_source = bool(config['hwnd'])
+        browser = config['source_type'] == 'browser'
+        has_source = keyboard_source_available(config)
         windows = sys.platform == 'win32'
+        with QSignalBlocker(self.keyboard_overlay_check):
+            self.keyboard_overlay_check.setChecked(config['enabled'])
         self.keyboard_overlay_check.setEnabled(windows and has_source)
-        self.keyboard_intensity.setEnabled(windows and has_source)
-        self.keyboard_pick_color.setEnabled(windows and has_source)
-        self.keyboard_color_swatch.setEnabled(windows and has_source)
+        self.keyboard_source_type.setEnabled(windows)
+        self.keyboard_window_controls.setVisible(not browser)
+        self.keyboard_browser_controls.setVisible(browser)
+        self.keyboard_color_controls.setVisible(not browser)
+        self.keyboard_intensity_controls.setVisible(not browser)
+        self.keyboard_intensity.setEnabled(windows and has_source and not browser)
+        self.keyboard_pick_color.setEnabled(windows and has_source and not browser)
+        self.keyboard_color_swatch.setEnabled(windows and has_source and not browser)
         self.keyboard_source_preview.setEnabled(windows and has_source)
+        if browser:
+            self.keyboard_source_preview.set_pick_mode(False)
         self._sync_keyboard_color_swatch(config['color'])
         if 'unified_overlay_editor' in self.__dict__:
             self.unified_overlay_editor.set_overlay_enabled(
@@ -22098,7 +22470,11 @@ class _SettingsPage(QWidget):
             return
         frame, timestamp = self._keyboard_capture.latest_frame()
         config = third_party_keyboard_settings(self.sm)
-        key = (timestamp, config['hwnd'], config['color'], config['intensity'])
+        browser = config['source_type'] == 'browser'
+        if browser and (not config['enabled'] or frame is not None and frame.shape[2] != 4):
+            frame = None
+        key = (timestamp, config['hwnd'], config['browser_url'],
+               config['color'], config['intensity'])
         if (frame is not None and key == getattr(self, '_keyboard_preview_key', None)
                 and not source_preview._image.isNull()
                 and not preview._keyboard_pixmap.isNull()):
@@ -22107,7 +22483,8 @@ class _SettingsPage(QWidget):
         if frame is None:
             error = self._keyboard_capture.last_error
             source_preview.set_empty_text(
-                error or 'WAITING FOR KEYBOARD WINDOW')
+                error or ('WAITING FOR BROWSER SOURCE' if browser
+                          else 'WAITING FOR KEYBOARD WINDOW'))
             source_preview.set_image(QImage())
             preview.set_keyboard_pixmap(QPixmap())
             return
@@ -22121,22 +22498,25 @@ class _SettingsPage(QWidget):
                 (max(2, int(source_w * scale)), max(2, int(source_h * scale))),
                 interpolation=_cv2.INTER_AREA,
             )
-        rgb = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        raw_image = QImage(
-            rgb.tobytes(), w, h, ch * w,
-            QImage.Format.Format_RGB888).copy()
-        source_preview.set_image(raw_image, share_owned=True)
-
-        rgba = chroma_key_rgba(
-            frame, config['color'], config['intensity'])
+        if frame.shape[2] == 4:
+            rgba = _cv2.cvtColor(frame, _cv2.COLOR_BGRA2RGBA)
+        else:
+            rgb = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            raw_image = QImage(rgb.tobytes(), w, h, ch * w,
+                               QImage.Format.Format_RGB888).copy()
+            source_preview.set_image(raw_image, share_owned=True)
+            rgba = chroma_key_rgba(frame, config['color'], config['intensity'])
         if rgba is None:
             preview.set_keyboard_pixmap(QPixmap())
             return
+        h, w = rgba.shape[:2]
         keyed_image = QImage(
             rgba.tobytes(), w, h, 4 * w,
             QImage.Format.Format_RGBA8888).copy()
         preview.set_keyboard_pixmap(QPixmap.fromImage(keyed_image))
+        if frame.shape[2] == 4:
+            source_preview.set_image(keyed_image, share_owned=True)
         self._keyboard_preview_key = key
 
     def _refresh_preset_combo(self):
@@ -22782,6 +23162,7 @@ class _SettingsPage(QWidget):
         super().showEvent(event)
         if self.settings_search.text().strip():
             return
+        self._ensure_category(self.stack.currentIndex())
         if (hasattr(self, '_category_switch_timer')
                 and self._pending_category_index != self.stack.currentIndex()
                 and not getattr(self, '_background_ui_paused', False)):
@@ -23019,10 +23400,23 @@ class _SettingsPage(QWidget):
         self.keyboard_overlay_check.toggled.connect(
             self._on_keyboard_overlay_toggled)
         options_layout.addWidget(SettingHelp(self.keyboard_overlay_check,
-            'Show a keyboard visualizer in your clips. Select its window below, then pick its background color to hide it.'))
+            'Show a keyboard visualizer in saved clips using its window or its browser source URL.'))
         options_layout.addSpacing(8)
 
-        keyboard_window_row = QHBoxLayout()
+        self.keyboard_source_type = _DropdownCombo()
+        self.keyboard_source_type.setAccessibleName('Keyboard overlay source')
+        self.keyboard_source_type.addItem('Window', 'window')
+        self.keyboard_source_type.addItem('Browser Source', 'browser')
+        self.keyboard_source_type.setCurrentIndex(
+            self.keyboard_source_type.findData(keyboard_config['source_type']))
+        set_theme_style(self.keyboard_source_type, combo_qss)
+        self.keyboard_source_type.currentIndexChanged.connect(
+            self._on_keyboard_source_type_changed)
+        options_layout.addWidget(self.keyboard_source_type)
+
+        self.keyboard_window_controls = QWidget()
+        keyboard_window_row = QHBoxLayout(self.keyboard_window_controls)
+        keyboard_window_row.setContentsMargins(0, 0, 0, 0)
         keyboard_window_row.setSpacing(Sizes.SPACE_3)
         keyboard_window_label = QLabel('Window')
         set_theme_style(keyboard_window_label,
@@ -23040,19 +23434,67 @@ class _SettingsPage(QWidget):
         keyboard_refresh.setToolTip('Re-scan external keyboard windows')
         keyboard_refresh.clicked.connect(self._refresh_keyboard_windows)
         keyboard_window_row.addWidget(keyboard_refresh)
-        options_layout.addLayout(keyboard_window_row)
+        options_layout.addWidget(self.keyboard_window_controls)
+
+        self.keyboard_browser_controls = QWidget()
+        browser_layout = QVBoxLayout(self.keyboard_browser_controls)
+        browser_layout.setContentsMargins(0, 0, 0, 0)
+        self.keyboard_browser_url = QLineEdit(keyboard_config['browser_url'])
+        self.keyboard_browser_url.setAccessibleName('Browser source URL')
+        self.keyboard_browser_url.setPlaceholderText('http://localhost:5001/default-keyboard.html')
+        self.keyboard_browser_url.setMaxLength(2048)
+        self.keyboard_browser_url.returnPressed.connect(self._apply_keyboard_browser_source)
+        set_theme_style(self.keyboard_browser_url, lineedit_qss)
+        browser_layout.addWidget(self.keyboard_browser_url)
+
+        for label, key in (('Width', 'browser_width'), ('Height', 'browser_height')):
+            browser_size = QHBoxLayout()
+            size_label = QLabel(label)
+            size_label.setFixedWidth(48)
+            set_theme_style(size_label, lambda: label_body(Colors.TEXT, Fonts.SIZE_BODY))
+            browser_size.addWidget(size_label)
+            spin = QSpinBox()
+            spin.setRange(64, KEYBOARD_BROWSER_MAX_SIZE)
+            spin.setValue(keyboard_config[key])
+            spin.setAccessibleName(f'Browser source {label.lower()}')
+            size_label.setBuddy(spin)
+            slider = ClickToSeekSlider(Qt.Orientation.Horizontal)
+            slider.setRange(spin.minimum(), spin.maximum())
+            slider.setValue(spin.value())
+            slider.setAccessibleName(f'Browser source {label.lower()} slider')
+            set_theme_style(slider, slider_qss)
+            slider.valueChanged.connect(spin.setValue)
+            spin.valueChanged.connect(slider.setValue)
+            browser_size.addWidget(slider, 1)
+            browser_size.addWidget(spin)
+            browser_layout.addLayout(browser_size)
+            setattr(self, f'keyboard_{key}_slider', slider)
+            setattr(self, f'keyboard_{key}', spin)
+        browser_apply = QPushButton('Apply')
+        set_theme_style(browser_apply, button_outline_qss)
+        browser_apply.clicked.connect(self._apply_keyboard_browser_source)
+        browser_layout.addWidget(browser_apply, 0, Qt.AlignmentFlag.AlignRight)
+        self.keyboard_browser_error = QLabel()
+        self.keyboard_browser_error.setWordWrap(True)
+        set_theme_style(self.keyboard_browser_error,
+                        lambda: label_body(Colors.ERROR, Fonts.SIZE_BODY))
+        self.keyboard_browser_error.hide()
+        browser_layout.addWidget(self.keyboard_browser_error)
+        options_layout.addWidget(self.keyboard_browser_controls)
         options_layout.addSpacing(8)
 
         self.keyboard_source_preview = KeyboardSourcePreview()
         self.keyboard_source_preview.set_empty_text(
-            'SELECT A WINDOW TO PREVIEW')
+            'SELECT A KEYBOARD SOURCE TO PREVIEW')
         self.keyboard_source_preview.setFixedHeight(132)
         self.keyboard_source_preview.color_picked.connect(
             self._on_keyboard_color_picked)
         options_layout.addWidget(self.keyboard_source_preview)
         options_layout.addSpacing(8)
 
-        keyboard_color_row = QHBoxLayout()
+        self.keyboard_color_controls = QWidget()
+        keyboard_color_row = QHBoxLayout(self.keyboard_color_controls)
+        keyboard_color_row.setContentsMargins(0, 0, 0, 0)
         keyboard_color_row.setSpacing(Sizes.SPACE_3)
         keyboard_color_label = QLabel('Key color')
         set_theme_style(keyboard_color_label,
@@ -23075,10 +23517,12 @@ class _SettingsPage(QWidget):
         self.keyboard_pick_color.clicked.connect(
             self._start_keyboard_color_picker)
         keyboard_color_row.addWidget(self.keyboard_pick_color)
-        options_layout.addLayout(keyboard_color_row)
+        options_layout.addWidget(self.keyboard_color_controls)
         options_layout.addSpacing(8)
 
-        keyboard_intensity_row = QHBoxLayout()
+        self.keyboard_intensity_controls = QWidget()
+        keyboard_intensity_row = QHBoxLayout(self.keyboard_intensity_controls)
+        keyboard_intensity_row.setContentsMargins(0, 0, 0, 0)
         keyboard_intensity_row.setSpacing(Sizes.SPACE_3)
         keyboard_intensity_label = QLabel('Intensity')
         set_theme_style(keyboard_intensity_label,
@@ -23098,7 +23542,7 @@ class _SettingsPage(QWidget):
         set_theme_style(self.keyboard_intensity_value,
             lambda: (label_body(Colors.TEXT_DIM, Fonts.SIZE_BODY)))
         keyboard_intensity_row.addWidget(self.keyboard_intensity_value)
-        options_layout.addLayout(keyboard_intensity_row)
+        options_layout.addWidget(self.keyboard_intensity_controls)
         options_layout.addSpacing(6)
 
         pass

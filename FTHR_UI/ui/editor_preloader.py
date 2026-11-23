@@ -65,31 +65,22 @@ def _inspect(request):
     if cancelled.is_set():
         return None
     clip_identity = _clip_identity(path)
-    audio_sources = None
-
-    def inspect_audio():
-        nonlocal audio_sources
-        try:
-            audio_sources = discover_playback_sources(path, cancelled)
-        except PlaybackError:
-            # Let the foreground audio probe retry/report the error normally.
-            pass
-        except Exception:
-            _LOG.debug('Optional editor audio inspection failed', exc_info=True)
-
-    audio_worker = threading.Thread(target=inspect_audio, name='FTHR-editor-preload-audio',
-                                    daemon=True)
-    audio_worker.start()
+    # Keep speculative media tools serial. Starting both inspections when the
+    # pointer settles competes with the library's final paint.
+    playback_path = cached_playback_path(path, request.quality)
+    if playback_path == path:
+        playback_path = prepare_compatibility_path(path, cancelled)
+    if cancelled.is_set():
+        return None
+    playback_identity = file_identity(playback_path)
     try:
-        playback_path = cached_playback_path(path, request.quality)
-        if playback_path == path:
-            playback_path = prepare_compatibility_path(path, cancelled)
-        if cancelled.is_set():
-            return None
-        playback_identity = file_identity(playback_path)
-    finally:
-        # Do not release the slot while its audio helper is still reading.
-        audio_worker.join()
+        audio_sources = discover_playback_sources(path, cancelled)
+    except PlaybackError:
+        # Foreground audio inspection can retry when the user opens the editor.
+        audio_sources = None
+    except Exception:
+        _LOG.debug('Optional editor audio inspection failed', exc_info=True)
+        audio_sources = None
     result = _Inspection(clip_identity, playback_path, playback_identity, audio_sources)
     if not cancelled.is_set() and result.matches_files(path):
         return result
@@ -318,6 +309,13 @@ class EditorPreloader(QObject):
         self.clear()
         emit_event('playback', 'preload_taken', hit=False)
         return None
+
+    def cancel_unprepared(self):
+        """Yield speculative inspection during a scroll, retaining a usable warm player."""
+        if self._desired is None or self._ready is not None:
+            return False
+        self.clear()
+        return True
 
     @Slot()
     def clear(self):

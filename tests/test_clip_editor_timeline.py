@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QPushButton, QSizePolicy
 from core.ffmpeg_tools import (
     FFmpegUnavailable, get_ffmpeg_exe, get_ffprobe_exe, maximum_quality_video_args,
 )
+from core.playback_mix_model import PlaybackSource
 from ui.clip_viewer import (
     ClipViewer,
     EditorSnapshot,
@@ -171,6 +172,177 @@ def test_hidden_segments_seek_zoom_and_restore_in_source_time(qtbot):
     timeline.selected_segment = 1
     assert timeline.toggle_selected_deleted()
     assert timeline.kept_ranges() == [(0, .2), (.2, .6), (.6, 1)]
+
+
+def test_audio_lane_shares_video_geometry_but_preserves_video_duration(qtbot):
+    timeline = TrimSlider(10_000, audio_lane=True)
+    qtbot.addWidget(timeline)
+    timeline.resize(828, 150)
+    timeline.show()
+    seeks = []
+    timeline.seek_requested.connect(seeks.append)
+    audio_y = timeline._audio_lane_top() + 6
+    QTest.mouseClick(timeline, Qt.MouseButton.LeftButton, pos=QPoint(214, audio_y))
+    assert timeline.editing_audio
+    assert seeks[-1] == pytest.approx(.25)
+    assert timeline.split_audio_at(timeline.playhead_pct)
+    menu = timeline._context_menu_for_pct(.5, audio=True)
+    assert menu.actions()[0].isEnabled()
+    timeline.audio_context_toggle_requested.connect(timeline.toggle_audio_segment)
+    menu.actions()[1].trigger()
+    assert timeline.audio_cut_ranges() == ((.25, 1.0),)
+    assert timeline.kept_ranges() == [(0.0, 1.0)]
+
+    QTest.mouseClick(timeline, Qt.MouseButton.LeftButton, pos=QPoint(614, 56))
+    assert not timeline.editing_audio
+    assert timeline.split_at_playhead()
+    assert timeline.toggle_selected_deleted()
+    assert timeline.kept_ranges() == [(0.0, .75)]
+    assert timeline._audio_intervals()[-1] == (.75, 1.0, 1, True, True)
+    timeline.set_hide_deleted_segments(True)
+    assert timeline._pct_from_x(414) == pytest.approx(.375)
+    assert not timeline.grab().isNull()
+
+
+def test_audio_delete_is_scoped_to_selected_retained_video_interval(qtbot):
+    timeline = TrimSlider(10_000, audio_lane=True)
+    qtbot.addWidget(timeline)
+    timeline.segments = [TimelineSegment(0, .25), TimelineSegment(.25, .75, True),
+                         TimelineSegment(.75, 1)]
+    timeline.start_pct = .10
+    assert not timeline.toggle_audio_segment(timeline._audio_index_at(.5))
+    assert timeline.toggle_audio_segment(timeline._audio_index_at(.15))
+    assert timeline.audio_cut_ranges() == ((.10, .25),)
+    assert timeline.kept_ranges() == [(.10, .25), (.75, 1)]
+    assert timeline.toggle_audio_segment(timeline._audio_index_at(.15))
+    assert not timeline.audio_cut_ranges()
+
+
+def test_individual_audio_lanes_share_playhead_and_scroll_independently(qtbot):
+    timeline = TrimSlider(10_000, audio_lane=True, source_lanes=True)
+    qtbot.addWidget(timeline)
+    timeline.configure_lane_height(148, 2)
+    timeline.resize(928, 148)
+    timeline.set_audio_sources(('game', 'chat', 'microphone'))
+    timeline.show()
+    left, width = timeline._time_axis()
+    chat_y = timeline._audio_lane_top() + 34 + 10
+    QTest.mouseClick(timeline, Qt.MouseButton.LeftButton,
+                     pos=QPoint(left + width // 2, chat_y))
+    assert timeline.active_audio_source == 'chat'
+    assert timeline.playhead_pct == pytest.approx(.5, abs=.002)
+    assert timeline.split_audio_at(.5, 'chat')
+    assert timeline.toggle_audio_segment(timeline.selected_audio_index(), 'chat')
+    assert timeline.audio_cut_ranges('chat') == ((.5, 1.0),)
+    assert not timeline.audio_cut_ranges('game')
+    assert timeline.kept_ranges() == [(0.0, 1.0)]
+    timeline._audio_scrollbar.setValue(1)
+    assert timeline.visible_audio_sources() == ('chat', 'microphone')
+    assert timeline._time_axis() == (left, width)
+    assert not timeline.grab().isNull()
+
+
+def test_waveform_detects_real_audio_peaks_and_renders_on_the_lane(qtbot, tmp_path):
+    import math
+    import struct
+    import wave
+
+    try:
+        get_ffmpeg_exe()
+    except FFmpegUnavailable as error:
+        pytest.skip(str(error))
+    source = tmp_path / 'waveform-source.wav'
+    sample_rate = 6000
+    samples = [
+        0 if index < sample_rate else round(12_000 * math.sin(index / 13))
+        for index in range(2 * sample_rate)
+    ]
+    with wave.open(str(source), 'wb') as audio_file:
+        audio_file.setparams((1, 2, sample_rate, len(samples), 'NONE', 'not compressed'))
+        audio_file.writeframes(struct.pack(f'<{len(samples)}h', *samples))
+
+    timeline = TrimSlider(2000, audio_lane=True)
+    qtbot.addWidget(timeline)
+    timeline.resize(828, 150)
+    timeline.show()
+    timeline.load_waveform(str(source), (0,))
+    qtbot.waitUntil(lambda: timeline._waveform_complete, timeout=3000)
+    peaks = timeline._waveform_peaks
+    assert len(peaks) == 720
+    assert max(peaks[:350]) == 0
+    assert max(peaks[370:]) >= 11_000
+
+    menu = timeline._context_menu_for_pct(.7, audio=True)
+    waveform_action = menu.actions()[-1]
+    assert waveform_action.text() == 'Show waveform' and waveform_action.isChecked()
+    with_waveform = timeline.grab().toImage()
+    waveform_action.trigger()
+    assert not timeline.waveform_enabled
+    assert with_waveform != timeline.grab().toImage()
+
+
+def test_waveform_decode_skips_long_clips_without_starting_a_media_process(monkeypatch):
+    import threading
+    from core import audio_timeline
+
+    def unexpectedly_decoded(*_args, **_kwargs):
+        pytest.fail('waveform decode should never launch for a long recording')
+
+    monkeypatch.setattr(audio_timeline, 'run_media_process', unexpectedly_decoded)
+    assert audio_timeline.decode_waveform(
+        'not-opened.mp4', (0,), audio_timeline.MAX_WAVEFORM_MS + 1, threading.Event()) == ()
+
+
+@pytest.mark.parametrize('segments,speed', [
+    ([(.5, 4.5)], 1.0),
+    ([(.5, 1.5), (2.5, 4.5)], 1.25),
+])
+def test_export_audio_silence_preserves_sync_after_video_cuts(tmp_path, segments, speed):
+    from array import array
+
+    try:
+        ffmpeg = get_ffmpeg_exe()
+    except FFmpegUnavailable as error:
+        pytest.skip(str(error))
+    source = tmp_path / 'source.mp4'
+    output = tmp_path / 'edit.mp4'
+    subprocess.run([
+        ffmpeg, '-y', '-f', 'lavfi', '-i', 'testsrc=size=64x64:rate=30',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+        '-t', '5', '-c:v', 'mpeg4', '-g', '1', '-c:a', 'aac', str(source),
+    ], check=True, capture_output=True, timeout=20)
+    viewer = SimpleNamespace(
+        clip_path=str(source), _speed_rate=speed,
+        _playback_sources=(PlaybackSource('tone', 'Tone', 'track', 1, 0),),
+        _audio_tracks=(('tone', 0),), _source_volumes={}, _source_mutes={},
+        _master_volume=100, _audio_silences=((1.0, 2.0), (3.0, 3.5)),
+    )
+    command = ClipViewer._build_export_cmd(
+        viewer, ffmpeg, segments[0][0], 4.0, str(output), None,
+        ['-c:v', 'mpeg4', '-q:v', '3'], segments=segments)
+    subprocess.run(command, check=True, capture_output=True, timeout=40)
+    decoded = subprocess.run([
+        ffmpeg, '-v', 'error', '-i', str(output), '-vn', '-ac', '1', '-ar', '48000',
+        '-f', 's16le', '-',
+    ], check=True, capture_output=True, timeout=20).stdout
+    samples = array('h', decoded)
+
+    def peak(start, end):
+        return max(abs(sample) for sample in samples[
+            int(start / speed * 48000):int(end / speed * 48000)])
+
+    assert peak(.15, .35) > 1000
+    assert peak(.65, .90) < 20
+    if len(segments) > 1:
+        assert peak(1.15, 1.35) > 1000
+        assert peak(1.65, 1.90) < 20
+        assert peak(2.25, 2.75) > 1000
+    else:
+        assert peak(1.75, 2.25) > 1000
+        assert peak(2.60, 2.90) < 20
+        assert peak(3.30, 3.70) > 1000
+    expected = sum(end - start for start, end in segments) / speed
+    assert len(samples) / 48000 == pytest.approx(expected, abs=.08)
 
 
 def test_hidden_leading_and_trailing_segments_leave_endpoints_selectable(qtbot):
@@ -465,6 +637,15 @@ def test_editor_history_undoes_and_redoes_segment_edits(qtbot):
     assert undo_btn.isEnabled() is True
 
     before = viewer._capture_editor_state()
+    assert timeline.split_audio_at(.65)
+    assert timeline.toggle_audio_segment(timeline._audio_index_at(.8))
+    viewer._commit_editor_change(before)
+    viewer._undo()
+    assert not timeline.audio_cut_ranges()
+    viewer._redo()
+    assert timeline.audio_cut_ranges() == ((.65, 1.0),)
+
+    before = viewer._capture_editor_state()
     viewer._stretch_size = (960, 540)
     viewer._commit_editor_change(before)
     viewer._undo()
@@ -484,6 +665,8 @@ def test_editor_draft_snapshot_roundtrips_and_rejects_broken_timelines():
         stretch_size=(720, 1280),
         effects=(('contrast', 25), ('exposure', -10)),
         preserve_pitch=False,
+        audio_segments=((0.0, 0.25, True), (0.25, 1.0, False)),
+        source_audio_segments=(('discord', ((0.0, 0.3, False), (.3, 1.0, True))),),
     )
 
     restored = _editor_snapshot_from_draft(_editor_snapshot_to_draft(state))
@@ -492,6 +675,8 @@ def test_editor_draft_snapshot_roundtrips_and_rejects_broken_timelines():
     assert restored.trim_start == state.trim_start
     assert restored.trim_end == state.trim_end
     assert restored.segments == state.segments
+    assert restored.audio_segments == state.audio_segments
+    assert restored.source_audio_segments == state.source_audio_segments
     assert restored.crop_rect == state.crop_rect
     assert restored.stretch_ratio == state.stretch_ratio
     assert restored.stretch_size == state.stretch_size
@@ -504,7 +689,12 @@ def test_editor_draft_snapshot_roundtrips_and_rejects_broken_timelines():
 
     legacy = _editor_snapshot_to_draft(state)
     del legacy['stretch_size']
-    assert _editor_snapshot_from_draft(legacy).stretch_size is None
+    del legacy['audio_segments']
+    del legacy['source_audio_segments']
+    restored_legacy = _editor_snapshot_from_draft(legacy)
+    assert restored_legacy.stretch_size is None
+    assert restored_legacy.audio_segments == ((0.0, 1.0, False),)
+    assert restored_legacy.source_audio_segments == ()
 
     invalid_size = _editor_snapshot_to_draft(state)
     invalid_size['stretch_size'] = [721, 1280]

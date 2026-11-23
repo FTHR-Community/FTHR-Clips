@@ -9,7 +9,7 @@ from PySide6.QtGui import QContextMenuEvent, QPixmap
 from PySide6.QtWidgets import QMenu, QWidget, QMessageBox
 
 from ui.clip_grid import ClipGrid, ClipThumbnail
-from ui.clip_overlap import OverlapDiscovery, _Discovery
+from ui.clip_overlap import OverlapDiscovery
 
 
 def card_for(qtbot, path='first.mp4'):
@@ -71,53 +71,76 @@ def test_context_action_only_for_proven_overlap(qtbot, monkeypatch):
     assert labels == []
 
 
-def test_discovery_rejects_stale_and_coalesces(qapp, monkeypatch):
-    discovery = OverlapDiscovery()
+def _record(path, size=10, inode=1):
+    return SimpleNamespace(kind='video', path=path, st_dev=1, st_ino=inode,
+                           size=size, mtime_ns=20)
+
+
+def test_discovery_rejects_stale_and_coalesces(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr('ui.clip_overlap._RESUME_DELAY_MS', 1)
+    discovery = OverlapDiscovery(cache_path=tmp_path / 'overlap.sqlite3')
     starts, results = [], []
     monkeypatch.setattr(discovery.pool, 'start', starts.append)
     discovery.changed.connect(results.append)
-    records = [SimpleNamespace(kind='video', path='a')]
+    records = [_record('a.mp4')]
     discovery.update(records)
+    qtbot.waitUntil(lambda: len(starts) == 1)
     first = discovery.active
     discovery.update(records)
-    discovery.update(records)
+    assert not first.cancel.is_set() and discovery.active is first
+    discovery.update([_record('a.mp4', size=11), _record('b.mp4')])
+    discovery.update([_record('c.mp4'), _record('d.mp4')])
     assert first.cancel.is_set()
     assert len(starts) == 1
-    discovery._finished(first.generation, {'stale': ('b',)}, {})
-    assert len(starts) == 2
+    discovery._finished(first.generation, {'a.mp4': None}, [], {'stale': ('b',)})
+    qtbot.waitUntil(lambda: len(starts) == 2)
     assert discovery.active.generation == discovery.generation
-    assert all('stale' not in result for result in results)
-    discovery._finished(discovery.generation, {'a': ('b',)}, {'identity': None})
-    assert results[-1] == {'a': ('b',)}
+    assert [path for path, _ in discovery.active.records] == ['c.mp4', 'd.mp4']
+    assert not results and not discovery.cache
+    discovery._finished(discovery.generation, {'c.mp4': None, 'd.mp4': None}, [], None)
+    assert set(discovery.cache) == {'c.mp4', 'd.mp4'}
     discovery.shutdown()
 
 
-def test_worker_probes_all_videos_off_thread_and_reuses_identity(qapp, monkeypatch):
+def test_discovery_prioritizes_visible_work_and_resumes_after_cancellation(qtbot, tmp_path, monkeypatch):
     import core.clip_overlap as core
-    calls = []
-    monkeypatch.setattr(core, 'probe_clip', lambda path, cancel=None: calls.append((path, threading.get_ident())) or path)
-    monkeypatch.setattr(core, 'find_overlaps', lambda infos: {'all': tuple(infos)})
-    discovery = OverlapDiscovery()
-    results = []
-    discovery.changed.connect(results.append)
-    records = [SimpleNamespace(kind='video', path=str(i), st_dev=1, st_ino=i,
-                               size=10, mtime_ns=20) for i in range(3)]
-    worker = _Discovery(1, records, {}, discovery.signals)
-    captured = []
-    worker.signals.finished.connect(lambda *args: captured.append(args))
-    thread = threading.Thread(target=worker.run)
-    thread.start(); thread.join(5)
-    qapp.processEvents()
-    assert len(calls) == 3
-    assert all(ident != threading.get_ident() for _, ident in calls)
-    assert captured[0][1] == {'all': ('0', '1', '2')}
-    second = _Discovery(2, records, captured[0][2], discovery.signals)
-    second.run()
-    assert len(calls) == 3
-    records[0].size = 11
-    _Discovery(3, records, captured[0][2], discovery.signals).run()
-    assert len(calls) == 4
-    discovery.shutdown()
+    monkeypatch.setattr('ui.clip_overlap._RESUME_DELAY_MS', 1)
+    monkeypatch.setattr('ui.clip_overlap._PROBE_SPACING_MS', 1)
+    calls, worker_ids = [], []
+
+    def inspect(path, cancel, **_options):
+        calls.append(path)
+        worker_ids.append(threading.get_ident())
+        if len(calls) == 1:
+            assert cancel.wait(5)
+            return core.ClipInspection(probed=True)
+        return core.ClipInspection(complete=True, probed=True)
+
+    monkeypatch.setattr(core, 'inspect_clip', inspect)
+    discovery = OverlapDiscovery(cache_path=tmp_path / 'overlap.sqlite3')
+    records = [_record(f'{index}.mp4', inode=index) for index in range(3)]
+    discovery.set_paused(True)
+    discovery.update(records)
+    discovery.prioritize(['2.mp4'])
+    try:
+        qtbot.wait(20)
+        assert not calls
+        discovery.set_paused(False)
+        qtbot.waitUntil(lambda: len(calls) == 1)
+        recovery = discovery.active
+        discovery.set_scrolling(True)
+        qtbot.waitUntil(lambda: discovery.active is None)
+        assert recovery.cancel.is_set() and calls == ['2.mp4'] and not discovery.cache
+        discovery.set_scrolling(False)
+        qtbot.waitUntil(lambda: len(discovery.cache) == 3)
+        assert calls == ['2.mp4', '2.mp4', '0.mp4', '1.mp4']
+        assert all(ident != threading.get_ident() for ident in worker_ids)
+        discovery.update(records)
+        qtbot.wait(20)
+        assert len(calls) == 4
+    finally:
+        discovery.shutdown()
+        discovery.pool.waitForDone(1000)
 
 
 def main_method(name):
@@ -210,18 +233,36 @@ def test_partner_picker_and_readiness(qapp, qtbot, tmp_path, monkeypatch):
     grid.shutdown()
 
 
-def test_new_scan_invalidates_discovery_without_publishing_stale(qapp, monkeypatch):
-    discovery = OverlapDiscovery()
-    starts, results = [], []
-    monkeypatch.setattr(discovery.pool, 'start', starts.append)
+def test_changed_identity_clears_badges_and_failed_inspection_retries(qtbot, tmp_path, monkeypatch):
+    import core.clip_overlap as core
+    monkeypatch.setattr('ui.clip_overlap._RESUME_DELAY_MS', 1)
+    monkeypatch.setattr('ui.clip_overlap._PROBE_SPACING_MS', 1)
+    monkeypatch.setattr('ui.clip_overlap._RETRY_SECONDS', .05)
+    calls, results = [], []
+
+    def inspect(path, _cancel, **_options):
+        calls.append(path)
+        if calls == ['first.mp4']:
+            return core.ClipInspection(probed=True)
+        info = test_clip_overlap.clip(path, 0, 10) if calls.count(path) <= 2 else None
+        return core.ClipInspection(info, complete=True, probed=True)
+
+    monkeypatch.setattr(core, 'inspect_clip', inspect)
+    discovery = OverlapDiscovery(cache_path=tmp_path / 'overlap.sqlite3')
     discovery.changed.connect(results.append)
-    discovery.update([])
-    worker = discovery.active
-    discovery.invalidate()
-    discovery._finished(worker.generation, {'stale': ('other',)}, {})
-    assert worker.cancel.is_set()
-    assert results == [{}]
-    discovery.shutdown()
+    try:
+        discovery.update([_record('first.mp4'), _record('second.mp4')])
+        qtbot.waitUntil(lambda: len(discovery.cache) == 2)
+        assert calls == ['first.mp4', 'second.mp4', 'first.mp4']
+        assert results[-1] == {'first.mp4': ('second.mp4',), 'second.mp4': ('first.mp4',)}
+        discovery.update([_record('first.mp4', inode=2), _record('second.mp4')])
+        assert results[-1] == {}
+        qtbot.waitUntil(lambda: len(discovery.cache) == 2)
+        assert discovery.cache['first.mp4'] is None
+        assert calls == ['first.mp4', 'second.mp4', 'first.mp4', 'first.mp4']
+    finally:
+        discovery.shutdown()
+        discovery.pool.waitForDone(1000)
 
 
 # Reuse synthetic tagged source generation, never the user's library.

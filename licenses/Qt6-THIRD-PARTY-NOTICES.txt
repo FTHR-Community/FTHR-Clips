@@ -6,6 +6,14 @@ third-party components under their own open-source licences. The actual
 runtime includes Qt Core, GUI/platform plugins, Widgets, Network, Multimedia,
 PDF, SVG, OpenGL, Concurrent, and the Wayland client integration.
 
+On Windows, the optional OBS browser source uses Qt WebEngine 6.11.1.
+Qt WebEngine's Qt code is distributed under LGPLv3. Its integrated Chromium
+runtime also contains BSD, LGPLv2.1 and other separately licensed code.
+See QtWebEngine-CHROMIUM-NOTICES.txt for the component licence texts and
+the module's component and licence inventory at:
+
+https://doc.qt.io/qt-6.11/qtwebengine-licensing.html
+
 The Qt Company publishes the authoritative component-by-component inventory
 and licence links for Qt 6.11.1 at:
 

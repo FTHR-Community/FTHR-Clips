@@ -11,6 +11,8 @@ from core.replay_storage import ReplayStorageSettings
 
 NORMAL_CLIP_VALUES = (5, 10, 15, 30, 45, 60, 90, 120, 180, 240, 300)
 MAX_CLIP_SECONDS = 900
+DEFAULT_POST_ROLL_SECONDS = 5
+MAX_POST_ROLL_SECONDS = 30
 FPS_VALUES = (30, 60, 90, 120, 144, 165, 180, 240)
 AUDIO_CAPTURE_MODE_COMBINED = 'combined'
 AUDIO_CAPTURE_MODE_SEPARATED = 'separated'
@@ -150,6 +152,17 @@ def validate_normal_clip_length(value: int) -> int:
     return _validate_int(value, name='normal clip length', minimum=5, maximum=MAX_CLIP_SECONDS)
 
 
+def configured_post_roll_seconds(settings) -> int:
+    if settings.get('clip_post_roll_enabled', False) is not True:
+        return 0
+    return selected_post_roll_seconds(settings)
+
+
+def selected_post_roll_seconds(settings) -> int:
+    value = settings.get('clip_post_roll_seconds', DEFAULT_POST_ROLL_SECONDS)
+    if type(value) is int and 1 <= value <= MAX_POST_ROLL_SECONDS:
+        return value
+    return DEFAULT_POST_ROLL_SECONDS
 
 
 def validate_fps(value: int) -> int:
@@ -194,6 +207,7 @@ class CaptureConfig:
     capture_cursor: bool = True
     # Frozen launch policy, separate from persisted source/cursor preferences.
     capture_backend: str = 'auto'
+    post_roll_seconds: int = 0
 
 
 def custom_clip_lengths(values) -> list[int]:
@@ -209,11 +223,13 @@ def custom_clip_lengths(values) -> list[int]:
     return sorted(result)
 
 
-def compute_buffer_seconds(normal_seconds: int, custom_lengths=None) -> int:
+def compute_buffer_seconds(normal_seconds: int, custom_lengths=None,
+                           post_roll_seconds: int = 0) -> int:
     """Retain the longest configured clip with a native-safe safety margin."""
     normal = max([validate_normal_clip_length(normal_seconds)]
                  + custom_clip_lengths(custom_lengths))
-    return min(MAX_CLIP_SECONDS, normal + 2)
+    # A second press can add at most one more post-roll window.
+    return min(MAX_CLIP_SECONDS, normal + 2 * post_roll_seconds + 2)
 
 
 class ApplyStatus(Enum):

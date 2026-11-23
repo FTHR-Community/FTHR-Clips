@@ -82,6 +82,8 @@ def test_thumbnail_switch_cancels_and_releases_and_requeues(qtbot):
         _recent_thumbnails={'old': object()}, _thumb_widgets={'sample.mp4': card},
         _recycled_cards=[], _deferred_thumbnail_paths={'sample.mp4'})
     grid._thumbnails_enabled = lambda: ClipGrid._thumbnails_enabled(grid)
+    grid._thumbnail_result_card = lambda *args: ClipGrid._thumbnail_result_card(grid, *args)
+    grid._finish_thumbnail_catchup_if_idle = lambda: ClipGrid._finish_thumbnail_catchup_if_idle(grid)
     ClipGrid.apply_thumbnail_preference(grid)
     assert worker.cancel_event.is_set()
     assert card._thumb_pixmap.isNull() and not card._thumbnail_ready

@@ -62,6 +62,17 @@ def test_windows_installer_lifecycle_source_contract_passes():
     assert 'installer never names the user clip root as a deletion target' in completed.stdout
 
 
+def test_wizard_assets_precede_the_solid_application_bundle():
+    script = (ROOT / 'installer_windows.iss').read_text(encoding='utf-8')
+    files = script.split('[Files]\n', 1)[1].split('\n[Icons]', 1)[0]
+    entries = [line for line in files.splitlines() if line.startswith('Source: ')]
+    bundle = next(line for line in entries if '{#BundleDir}' in line)
+    assets = [line for line in entries if 'dontcopy' in line]
+    assert assets
+    assert all(entries.index(asset) < entries.index(bundle) for asset in assets)
+    assert 'solidbreak' in bundle
+
+
 def test_drag_hooks_only_attach_to_noninteractive_headers_and_detach_at_shutdown():
     script = (ROOT / 'installer_windows.iss').read_text(encoding='utf-8')
     calls = [

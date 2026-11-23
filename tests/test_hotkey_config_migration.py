@@ -11,7 +11,7 @@ def test_save_clip_keyboard_hotkey_still_registers_and_dispatches():
     setup_source = inspect.getsource(MainWindow._setup_hotkeys)
     dispatch_source = inspect.getsource(MainWindow._on_hotkey_save_clip)
 
-    assert 'save_clip_triggered.connect(self._on_hotkey_save_clip)' in setup_source
+    assert 'save_clip_pressed.connect(self._on_hotkey_save_clip)' in setup_source
     assert 'self.hotkey_manager.register_all()' in setup_source
     assert 'self._save_clip(' in dispatch_source
 

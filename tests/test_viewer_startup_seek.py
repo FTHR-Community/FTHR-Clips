@@ -473,10 +473,12 @@ def test_paused_drag_samples_during_motion_and_only_seeks_on_release(
     viewer._playback_source_worker = object()
     proxy_token = viewer._proxy_cancel = threading.Event()
     timeline = viewer.trim_slider
-    start = QPoint(timeline.width() // 5, 48)
-    middle = QPoint(timeline.width() // 2, 48)
-    forward = QPoint(timeline.width() * 3 // 4, 48)
-    released = QPoint(timeline.width() * 7 // 10, 48)
+    left, width = timeline._time_axis()
+    y = 22 + timeline._video_strip_height() // 2
+    start = QPoint(left + width // 5, y)
+    middle = QPoint(left + width // 2, y)
+    forward = QPoint(left + width * 3 // 4, y)
+    released = QPoint(left + width * 7 // 10, y)
     image = QImage(16, 9, QImage.Format.Format_RGB32)
     image.fill(Qt.GlobalColor.red)
 

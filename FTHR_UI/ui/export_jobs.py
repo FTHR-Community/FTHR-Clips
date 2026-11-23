@@ -71,7 +71,8 @@ class ExportJobsDialog(FthrDialog):
     def __init__(self):
         super().__init__('Exports', width=620)
         self.setModal(False)
-        self.resize(720, 400)
+        available = self.screen().availableGeometry()
+        self.resize(min(880, available.width() - 32), min(520, available.height() - 48))
         self.setMinimumHeight(280)
         layout = self.body_layout
         hint = QLabel('Keep browsing while your clips export. Closing this window keeps exports running.')

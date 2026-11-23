@@ -34,6 +34,7 @@ class CommandType(IntEnum):
     RECONFIGURE_ENCODER = 10
     SHUTDOWN = 11
     MARK_HIGHLIGHT = 12
+    SAVE_CLIP_AT = 13
 
 
 class ResponseType(IntEnum):
@@ -170,6 +171,7 @@ class CaptureBridge:
     # layouts cannot attach to one another.
     SHARED_MEM_NAME = 'FTHR_SharedMemory_v4'
     HIGHLIGHT_CAPABILITY = 1 << 16
+    CLIP_BOUNDARY_CAPABILITY = 1 << 17
 
     # Singleton. There is exactly one engine and one mapping, so one bridge.
     # Anything else just hands you back the same object.
@@ -562,7 +564,13 @@ class CaptureBridge:
             return False
 
 
-    def save_clip(self, output_path: str, duration: int = 30) -> bool:
+    def supports_clip_boundary(self) -> bool:
+        with self._mapping_lock:
+            return bool(self.is_connected() and
+                        self._layout.capture_health_flags & self.CLIP_BOUNDARY_CAPABILITY)
+
+    def save_clip(self, output_path: str, duration: int = 30, *,
+                  end_monotonic_ns: int | None = None) -> bool:
         """Submit SaveClip without blocking the Qt thread.
 
         True means submission succeeded; it doesn't confirm a saved file.
@@ -570,7 +578,19 @@ class CaptureBridge:
         owns responses and must process any pending result before submission.
         Never clear engine_response here: it may hold the previous save result.
         """
+        command = CommandType.SAVE_CLIP
+        if end_monotonic_ns is not None:
+            if (type(end_monotonic_ns) is not int
+                    or not 0 < end_monotonic_ns <= 0x7FFF_FFFF_FFFF_FFFF):
+                return False
+            command = CommandType.SAVE_CLIP_AT
+
         def write_payload():
+            if end_monotonic_ns is not None:
+                if not self._layout.capture_health_flags & self.CLIP_BOUNDARY_CAPABILITY:
+                    return False
+                self._layout.ui_param2 = end_monotonic_ns & 0xFFFF_FFFF
+                self._layout.ui_param3 = end_monotonic_ns >> 32
             if sys.platform != 'win32':
                 encoded = output_path.encode('utf-8')
                 if len(encoded) > 1023:
@@ -585,7 +605,7 @@ class CaptureBridge:
             self._layout.ui_param1 = duration
             self._save_acknowledged_layout = None
             return True
-        return self._submit_command(CommandType.SAVE_CLIP, write_payload)
+        return self._submit_command(command, write_payload)
 
     def mark_highlight(self, marker_id: str) -> bool:
         """Submit one bounded highlight request through the existing ABI.

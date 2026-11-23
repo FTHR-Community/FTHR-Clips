@@ -178,7 +178,7 @@ namespace fthr {
             int64_t out_point_qpc = 0);
 
         bool SaveClip(const wchar_t* path, uint32_t duration_seconds,
-            SharedMemoryLayout* shared_memory);
+            SharedMemoryLayout* shared_memory, uint64_t end_monotonic_ns = 0);
 
         bool     IsRecording()   const;
         std::string GetLastRecordingError() const;
@@ -238,6 +238,7 @@ namespace fthr {
         // Thread entry points
         void CaptureThread();       // dispatches to WGC or DXGI
         void CaptureThreadWGC();    // WGC fixed-cadence image sampler
+        void CaptureThreadMinecraftJava();
         void ReplayStallWatchdogThread();
         void SaveClipThread();
 
@@ -255,6 +256,8 @@ namespace fthr {
         // D3D11 / DXGI / WGC helpers
         bool InitializeWGC();             // WGC capture of the resolved desktop monitor
         bool InitializeWindowCapture();   // WGC window/game capture
+        bool InitializeWindowCaptureDevice(HWND hwnd, bool observe_display_hdr);
+        bool InitializeMinecraftJavaCapture();
         // Returns true when the required WGC session is usable. Borderless is
         // best effort; callers retain the requested WGC target when its optional
         // opt-out is unavailable or denied.
@@ -328,6 +331,8 @@ namespace fthr {
         float             sdr_reference_white_ = 1.0f;
         struct WGCState;                        // defined in capture_engine.cpp
         std::unique_ptr<WGCState> wgc_state_;
+        struct MinecraftJavaState;
+        std::unique_ptr<MinecraftJavaState> minecraft_java_state_;
         std::mutex              wgc_frame_mutex_;
         std::condition_variable wgc_frame_cv_;
         std::atomic<bool>       monitor_source_invalidated_{false};

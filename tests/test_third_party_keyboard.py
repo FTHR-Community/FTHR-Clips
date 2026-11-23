@@ -39,6 +39,44 @@ def test_keyboard_settings_are_nested_and_safe():
     assert config['rect']['y'] == 0.0
 
 
+def test_browser_keyboard_source_accepts_https_and_lan_companion_urls():
+    urls = (
+        'https://overlays.example/keyboard?theme=blue',
+        'http://localhost:5001/default-keyboard.html',
+        'http://127.0.0.1:9876/',
+        'http://192.168.1.23:5001/default-keyboard.html',
+        'http://overlay.local:5001/',
+        'http://[::1]:5001/',
+    )
+    for url in urls:
+        config = third_party_keyboard_settings({'third_party_keyboard': {
+            'source_type': 'browser', 'browser_url': url, 'enabled': True,
+        }})
+        assert config['enabled']
+        assert config['browser_url'] == url
+        assert config['hwnd'] == 0
+    for url in ('http://overlays.example/keyboard', 'javascript:alert(1)',
+                'file:///C:/overlay.html', 'http://localhost@overlays.example/',
+                'https://user:secret@overlays.example/'):
+        assert keyboard.normalize_keyboard_browser_url(url) == ''
+
+
+def test_browser_source_alpha_survives_recording_and_ignores_chroma_key(monkeypatch):
+    monkeypatch.setattr(keyboard.sys, 'platform', 'win32')
+    capture = ThirdPartyKeyboardCapture(capture_fps=2)
+    idle = np.zeros((16, 16, 4), dtype=np.uint8)
+    active = idle.copy()
+    active[2:8, 2:8] = [0, 255, 0, 255]
+    capture._store_ring_frame_if_changed(9.0, idle)
+    capture._store_ring_frame_if_changed(9.5, active)
+
+    rendered = list(capture.iter_segment_rgba(10.0, 1, (16, 16), output_fps=2))
+
+    assert np.all(rendered[0] == 0)
+    assert np.all(rendered[1][4, 4] == [0, 255, 0, 255])
+    assert np.all(rendered[1][0, 0] == 0)
+
+
 def test_chroma_key_makes_selected_color_transparent():
     # BGR input: green is the keyed background, red is the visible keycap.
     frame = np.array([

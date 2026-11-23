@@ -131,6 +131,22 @@ def test_taken_media_rejects_files_changed_during_hover(monkeypatch, qtbot, vide
     warmed.dispose()
 
 
+def test_cancelled_compatibility_inspection_does_not_start_audio(monkeypatch, tmp_path):
+    clip = tmp_path / 'clip.mp4'
+    clip.write_bytes(b'media')
+    request = editor_preloader._Request(str(clip), 'auto', 0.0)
+    monkeypatch.setattr(editor_preloader, 'cached_playback_path', lambda path, quality: path)
+
+    def cancel_during_inspection(path, cancelled):
+        cancelled.set()
+        return path
+
+    monkeypatch.setattr(editor_preloader, 'prepare_compatibility_path', cancel_during_inspection)
+    monkeypatch.setattr(editor_preloader, 'discover_playback_sources',
+                        lambda *_: pytest.fail('Cancelled preload started another probe'))
+    assert editor_preloader._inspect(request) is None
+
+
 def test_only_latest_queued_probe_is_started(monkeypatch, qtbot, tmp_path):
     started = []
     first_started = threading.Event()

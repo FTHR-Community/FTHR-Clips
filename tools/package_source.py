@@ -122,7 +122,7 @@ def main():
     args = parser.parse_args()
     destination = args.output.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    prefix = 'FTHRClips-2.1.3-Windows/'
+    prefix = 'FTHRClips-2.1.4-Windows/'
     manifest = []
     with zipfile.ZipFile(destination, 'w', compression=zipfile.ZIP_DEFLATED,
                          compresslevel=9) as archive:
@@ -134,7 +134,7 @@ def main():
             manifest.append({'path': name, 'bytes': len(data),
                              'sha256': hashlib.sha256(data).hexdigest()})
         archive.writestr(prefix + 'SOURCE_MANIFEST.json', json.dumps(
-            {'format': 1, 'version': '2.1.3',
+            {'format': 1, 'version': '2.1.4',
              'snapshot_date': date.today().isoformat(),
              'compression': 'ZIP Deflate level 9', 'files': manifest},
             indent=2).encode('utf-8'))

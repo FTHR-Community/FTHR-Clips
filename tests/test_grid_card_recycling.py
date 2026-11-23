@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import os
 import time
 
+import pytest
+
 from ui.clip_grid import ClipGrid
 
 
@@ -157,35 +159,264 @@ def test_composed_thumbnail_cache_survives_recycling_and_tracks_theme(qapp, qtbo
     grid.shutdown()
 
 
-def test_scroll_defers_decode_and_offscreen_cancel_keeps_owner(qapp, tmp_path, monkeypatch):
+def test_scroll_cancels_full_decode_and_checks_cache_once_per_path(qapp, tmp_path, monkeypatch):
     grid = make_grid(tmp_path, monkeypatch)
     path = str(tmp_path / 'clip.mp4')
     grid._create_thumbnail(path, 240, ready_override=True)
     submitted = []
+    transitions = []
+    grid.scroll_activity_changed.connect(transitions.append)
     monkeypatch.setattr(grid._thread_pool, 'start', submitted.append)
+    grid._start_thumbnail_worker(path)
+    full = submitted[0]
     grid._on_library_scrolled()
     grid._start_thumbnail_worker(path)
-    assert submitted == []
-    assert path in grid._deferred_thumbnail_paths
+    assert transitions == [True]
+    assert full.cancel_event.is_set() and len(submitted) == 1
+    assert grid._thumbnail_workers[path] is full
+    full.signals.diagnostic_finished.emit(0, 0, False)
+    assert len(submitted) == 2 and submitted[-1]._thumbnail_cache_only
+    submitted[-1].signals.diagnostic_finished.emit(0, 0, False)
+    grid._start_thumbnail_worker(path)
+    assert len(submitted) == 2 and path in grid._scroll_thumbnail_misses
     grid._scroll_settle_timer.stop()
     grid._resume_scroll_thumbnails()
-    assert len(submitted) == 1
-    worker = submitted[0]
+    assert transitions == [True, False]
+    assert len(submitted) == 3 and not submitted[-1]._thumbnail_cache_only
+    worker = submitted[-1]
+    full.signals.diagnostic_finished.emit(0, 0, False)
+    assert grid._thumbnail_workers[path] is worker
     grid._release_virtual_card(path)
     assert worker.cancel_event.is_set()
     assert path in grid._thumbnail_jobs_inflight
     grid._create_thumbnail(path, 240, ready_override=True)
     grid._start_thumbnail_worker(path)
-    assert len(submitted) == 1
-    owner_generation, fingerprint = grid._thumbnail_job_owners[path]
-    grid._on_thumb_diagnostic(0, 0, False, path, owner_generation, fingerprint)
-    assert len(submitted) == 2
-    assert grid._thumbnail_workers[path] is submitted[1]
+    assert len(submitted) == 3
+    worker.signals.diagnostic_finished.emit(0, 0, False)
+    assert len(submitted) == 4
+    assert grid._thumbnail_workers[path] is submitted[-1]
     # No QRunnable was actually started; complete its terminal ownership.
-    generation, fingerprint = grid._thumbnail_job_owners[path]
-    grid._on_thumb_diagnostic(0, 0, False, path, generation, fingerprint)
+    submitted[-1].signals.diagnostic_finished.emit(0, 0, False)
     grid.shutdown()
     grid.deleteLater()
+
+
+@pytest.mark.parametrize('extension', ['mp4', 'png'])
+def test_warm_disk_thumbnail_displays_before_scroll_settles(qtbot, tmp_path, monkeypatch, extension):
+    from PySide6.QtGui import QColor, QImage
+    from ui import library_thumbnails as thumbs
+
+    media = tmp_path / f'clip.{extension}'
+    media.touch()
+    monkeypatch.setattr(thumbs, 'THUMB_CACHE_DIR', str(tmp_path))
+    cache_path = thumbs._get_cached_thumb_path(str(media))
+    image = QImage(32, 18, QImage.Format.Format_RGB32)
+    image.fill(QColor('red'))
+    assert image.save(cache_path)
+    if extension == 'mp4':
+        thumbs._write_cached_duration(thumbs._get_cached_duration_path(cache_path), 10, 1920, 1080, 60)
+    subprocess_calls = []
+    monkeypatch.setattr(thumbs, '_run_owned_media_process', lambda *args: subprocess_calls.append(args))
+    grid = make_grid(tmp_path, monkeypatch)
+    qtbot.addWidget(grid)
+    try:
+        card = grid._create_thumbnail(str(media), 300, ready_override=True)
+        grid._on_library_scrolled()
+        grid._scroll_settle_timer.stop()
+        grid._start_thumbnail_worker(str(media))
+        qtbot.waitUntil(lambda: card._thumbnail_ready and not grid._thumbnail_jobs_inflight)
+        assert grid._scrolling and not subprocess_calls
+        assert not card._thumb_pixmap.isNull() and grid._thumbnail_cache_hits == 1
+        assert card.metadata_label.text() == ('1080p · 60 FPS' if extension == 'mp4' else 'Screenshot')
+    finally:
+        grid.shutdown()
+
+
+def test_scroll_cancels_cover_owner_and_requeues_cover_on_settle(qapp, tmp_path, monkeypatch):
+    from core.library_index import LibraryRecord, canonical_media_path
+
+    file = tmp_path / 'clip.mp4'
+    file.touch()
+    media = str(file)
+    stat = file.stat()
+    record = LibraryRecord(media, canonical_media_path(media), (), False, 'video',
+                           stat.st_size, stat.st_mtime_ns, stat.st_dev, stat.st_ino)
+    grid = make_grid(tmp_path, monkeypatch)
+    sources, workers = [], []
+    grid._records_by_path[media] = record
+    grid._cover_bindings_snapshot[record.identity] = {
+        'identity': record.file_identity,
+        'reference': {'revision': 'one'}, 'clip_id': 'clip',
+    }
+    asset = str(tmp_path / 'cover.png')
+    grid._metadata_manager = SimpleNamespace(
+        cover_asset_path_for_read=lambda *_: sources.append(asset) or asset)
+    monkeypatch.setattr(grid._cover_decode_pool, 'start', workers.append)
+    monkeypatch.setattr(grid, '_start_thumbnail_worker', lambda *_: None)
+    try:
+        card = grid._create_thumbnail(media, 300, ready_override=True)
+        original = workers[0]
+        grid._on_library_scrolled()
+        assert original.cancel_event.is_set()
+        grid._apply_cover_to_card(card)
+        assert len(sources) == len(workers) == 1
+        grid._on_cover_decoded(asset, original.cache_key, None, 'cancelled', original.job_id)
+        assert not grid._cover_decode_jobs
+        grid._scroll_settle_timer.stop()
+        grid._resume_scroll_thumbnails()
+        grid._virtual_update_timer.stop()
+        grid._update_virtualized_cards()
+        assert len(sources) == len(workers) == 2
+        assert workers[-1].job_id != original.job_id
+    finally:
+        grid.shutdown()
+
+
+def test_cold_catchup_serializes_source_workers_and_keeps_one_cache_slot(qapp, tmp_path, monkeypatch):
+    grid = make_grid(tmp_path, monkeypatch)
+    sources = [str(tmp_path / f'clip-{index}.mp4') for index in range(3)]
+    workers = []
+    monkeypatch.setattr(grid._thread_pool, 'start', workers.append)
+    try:
+        for path in sources:
+            grid._create_thumbnail(path, 300, ready_override=True)
+        grid._on_library_scrolled()
+        assert grid._scroll_settle_timer.interval() == 240
+        for path in sources[:2]:
+            grid._start_thumbnail_worker(path)
+            assert workers[-1]._thumbnail_cache_only
+            workers[-1].signals.diagnostic_finished.emit(0, 0, False)
+        grid._start_thumbnail_worker(sources[2])
+        queued_cache = workers[-1]
+        grid._scroll_settle_timer.stop()
+        grid._resume_scroll_thumbnails()
+        first_full = workers[-1]
+        assert grid._thumbnail_catchup and grid._overlap_discovery._scrolling
+        assert not first_full._thumbnail_cache_only and first_full.file_path == sources[0]
+        assert grid._thumbnail_workers == {sources[2]: queued_cache, sources[0]: first_full}
+        assert grid._deferred_thumbnail_paths == {sources[1]}
+        queued_cache.signals.diagnostic_finished.emit(0, 0, False)
+        assert grid._thumbnail_workers == {sources[0]: first_full}
+        assert grid._deferred_thumbnail_paths == set(sources[1:])
+        for path in sources:
+            worker = grid._thumbnail_workers[path]
+            assert not worker._thumbnail_cache_only and len(grid._thumbnail_workers) == 1
+            worker.signals.diagnostic_finished.emit(0, 0, False)
+        assert grid._thumbnail_catchup and not grid._thumbnail_jobs_inflight
+        grid._virtual_update_timer.stop()
+        grid._update_virtualized_cards()
+        assert not grid._thumbnail_catchup and not grid._overlap_discovery._scrolling
+        for path in sources[:2]:
+            grid._start_thumbnail_worker(path)
+        assert len(grid._thumbnail_workers) == 2
+    finally:
+        grid.shutdown()
+        assert not grid._thumbnail_catchup
+
+
+def test_slow_scroll_previews_visible_then_ahead_and_fast_scroll_cancels(qtbot, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QWidget
+
+    viewport = QWidget()
+    viewport.resize(1000, 620)
+    qtbot.addWidget(viewport)
+    viewport.show()
+    grid = make_grid(tmp_path, monkeypatch)
+    workers = []
+    monkeypatch.setattr(grid._thread_pool, 'start', workers.append)
+    monkeypatch.setattr(grid, '_scroll_viewport', lambda: viewport)
+    paths = [str(tmp_path / f'clip-{index}.mp4') for index in range(3)]
+    try:
+        grid._on_library_scrolled()
+        grid._scroll_settle_timer.stop()
+        for path, y in zip(paths, (120, 640, 1000), strict=True):
+            card = grid._create_thumbnail(path, 320, ready_override=True, parent=viewport)
+            card.move(0, y)
+            card.show()
+            grid._scroll_thumbnail_misses[path] = False
+        grid._scroll_thumbnail_samples.extend([(1.0, 0), (1.16, 60), (1.32, 120)])
+        grid._run_scroll_thumbnail_preview()
+        assert len(workers) == 1 and workers[0].file_path == paths[0]
+        assert workers[0]._thumbnail_motion_preview
+        workers[0].signals.diagnostic_finished.emit(0, 0, False)
+        assert len(workers) == 2 and workers[1].file_path == paths[1]
+        assert workers[1]._thumbnail_motion_preview
+        grid._scroll_thumbnail_samples.clear()
+        grid._scroll_thumbnail_samples.extend([(2.0, 0), (2.05, 60), (2.11, 120)])
+        grid._run_scroll_thumbnail_preview()
+        assert workers[1].cancel_event.is_set()
+        workers[1].signals.diagnostic_finished.emit(0, 0, False)
+        assert len(workers) == 2 and not grid._thumbnail_jobs_inflight
+    finally:
+        grid.shutdown()
+
+
+def test_provisional_thumbnail_state_survives_own_cover_and_resets_on_rebind(qapp, tmp_path, monkeypatch):
+    from PySide6.QtGui import QColor, QImage, QPixmap
+
+    grid = make_grid(tmp_path, monkeypatch)
+    path = str(tmp_path / 'clip.mp4')
+    other_path = str(tmp_path / 'other.mp4')
+    image = QImage(32, 18, QImage.Format.Format_RGB32)
+    image.fill(QColor('red'))
+    cover = QPixmap(32, 18)
+    cover.fill(QColor('blue'))
+    try:
+        card = grid._create_thumbnail(path, 320, ready_override=True)
+        card.set_video_thumbnail('', 0, cached_image=image, provisional=True)
+        card.set_custom_cover(cover, 'cover')
+        card.clear_custom_cover()
+        card._render_thumbnail()
+        assert card._thumbnail_ready and card._thumbnail_metadata_pending
+        assert card._thumb_pixmap.toImage().pixelColor(0, 0) == QColor('red')
+        grid._release_virtual_card(path)
+        assert grid._create_thumbnail(other_path, 320, ready_override=True) is card
+        assert not card._thumbnail_ready and not card._thumbnail_metadata_pending
+        assert card._thumb_pixmap.isNull()
+        grid._release_virtual_card(other_path)
+        assert grid._create_thumbnail(path, 320, ready_override=True) is card
+        grid._on_library_scrolled()
+        grid._start_thumbnail_worker(path)
+        assert card._thumbnail_ready and card._thumbnail_metadata_pending
+        assert not grid._thumbnail_jobs_inflight
+    finally:
+        grid.shutdown()
+
+
+@pytest.mark.parametrize('emit_failure_result', [False, True])
+def test_failed_authoritative_probe_leaves_preview_without_immediate_retry(
+        qapp, tmp_path, monkeypatch, emit_failure_result):
+    from PySide6.QtGui import QColor, QImage
+
+    grid = make_grid(tmp_path, monkeypatch)
+    path = str(tmp_path / 'clip.mp4')
+    image = QImage(32, 18, QImage.Format.Format_RGB32)
+    image.fill(QColor('red'))
+    workers = []
+    monkeypatch.setattr(grid._thread_pool, 'start', workers.append)
+    try:
+        card = grid._create_thumbnail(path, 320, ready_override=True)
+        card.set_video_thumbnail('', 0, cached_image=image, provisional=True)
+        grid._thumbnail_catchup = True
+        grid._virtual_initialized = True
+        grid._virtual_update_timer.stop()
+        grid._overlap_discovery.set_scrolling(True)
+        grid._start_thumbnail_worker(path)
+        assert len(workers) == 1 and not workers[0]._thumbnail_cache_only
+        if emit_failure_result:
+            workers[0].signals.finished.emit(path, '', 0)
+        workers[0].signals.diagnostic_finished.emit(0, 1, False)
+        assert len(workers) == 1 and not grid._thumbnail_jobs_inflight
+        assert not grid._thumbnail_catchup and not grid._overlap_discovery._scrolling
+        assert card._thumbnail_ready and card._thumbnail_metadata_pending
+        assert card._thumb_pixmap.toImage().pixelColor(0, 0) == QColor('red')
+        grid._requeue_visible_thumbnail_jobs()
+        assert len(workers) == 2
+        workers[-1].signals.cached_ready.emit(path, image, (10, 1920, 1080, 60, 1, 1))
+        workers[-1].signals.diagnostic_finished.emit(0, 1, True)
+        assert not card._thumbnail_metadata_pending and card.duration_label.text() == '0:10'
+    finally:
+        grid.shutdown()
 
 
 def test_scroll_card_creation_yields_and_completes_next_frame(qapp, qtbot, tmp_path, monkeypatch):
@@ -364,12 +595,13 @@ def test_virtual_target_budget_prioritizes_visible_paths_globally(
     positioned = []
     released = []
 
-    def plan(key, _viewport, *, include_overscan=True):
-        return (visible if not include_overscan else overscan)[key]
+    def plan(key, _viewport, _row_height):
+        return visible[key], overscan[key]
 
-    monkeypatch.setattr(grid, '_virtual_section_plan', plan)
+    monkeypatch.setattr(grid, '_virtual_section_plans', plan)
     monkeypatch.setattr(grid, '_set_virtual_canvas_height', lambda *_: None)
-    def release(path):
+    def release(path, *, for_reuse):
+        assert for_reuse
         released.append(path)
         grid._thumb_widgets.pop(path, None)
         grid._card_virtual_sections.pop(path, None)
@@ -394,8 +626,7 @@ def test_virtual_target_budget_prioritizes_visible_paths_globally(
     grid._update_virtualized_cards()
 
     expected_visible = [item[0] for key in ('old', 'new') for item in visible[key]]
-    assert [path for _key, path in scheduled[:4]] == expected_visible
-    assert len(scheduled) == clip_grid._MAX_MATERIALIZED_CARDS
+    assert [path for _key, path in scheduled] == expected_visible
     assert [path for _key, path in materialized] == expected_visible
     positioned_paths = [path for _key, path in positioned]
     assert len(positioned_paths) == clip_grid._MAX_MATERIALIZED_CARDS
@@ -404,4 +635,24 @@ def test_virtual_target_budget_prioritizes_visible_paths_globally(
     assert released == stale[92:]
     assert not any(path.startswith('new-overscan') for _key, path in materialized[:4])
 
+    grid.shutdown()
+
+
+def test_scroll_reuses_complete_overscan_but_layout_changes_invalidate_it(
+        qapp, tmp_path, monkeypatch):
+    grid = make_grid(tmp_path, monkeypatch)
+    value = 240
+    grid._scroll_bar = SimpleNamespace(value=lambda: value)
+    grid._scroll_plan = (200, 100)
+    grid._virtual_update_timer.stop()
+    grid._request_virtual_update(scroll_only=True)
+    assert not grid._virtual_update_timer.isActive()
+    value = 300
+    grid._request_virtual_update(scroll_only=True)
+    assert grid._virtual_update_timer.isActive() and grid._scroll_plan is None
+    grid._virtual_update_timer.stop()
+    grid._scroll_plan = (value, 100)
+    grid._request_virtual_update()
+    assert grid._virtual_update_timer.isActive() and grid._scroll_plan is None
+    grid._scroll_bar = None
     grid.shutdown()

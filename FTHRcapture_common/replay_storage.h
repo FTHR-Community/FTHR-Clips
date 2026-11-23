@@ -180,12 +180,17 @@ public:
 
     bool Read(uint64_t offset, uint8_t* data, size_t size) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!Seek(offset)) return false;
 #ifdef _WIN32
+        if (!valid() || size > MAXDWORD) return false;
+        // An explicit offset on this synchronous handle avoids a separate
+        // SetFilePointerEx call for each replay packet.
+        OVERLAPPED position{};
+        position.Offset = static_cast<DWORD>(offset);
+        position.OffsetHigh = static_cast<DWORD>(offset >> 32);
         DWORD read = 0;
-        return ReadFile(file_, data, static_cast<DWORD>(size), &read, nullptr) && read == size;
+        return ReadFile(file_, data, static_cast<DWORD>(size), &read, &position) && read == size;
 #else
-        return std::fread(data, 1, size, file_) == size;
+        return Seek(offset) && std::fread(data, 1, size, file_) == size;
 #endif
     }
 

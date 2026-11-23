@@ -93,6 +93,15 @@ if _os.environ.get('FTHR_NATIVE_BUILD_DIR'):
         if not _native_file.is_file():
             raise FileNotFoundError(f'Missing explicitly selected native artifact: {_native_file}')
 
+# Stage the separately loaded libobs runtime as data. Running dependency
+# discovery on these DLLs can flatten them into the main engine's DLL path.
+GAME_SOURCE = Path(_os.environ.get('FTHR_GAME_SOURCE_DIR')
+                   or ENGINE_EXE.parent / 'game-source')
+if not (GAME_SOURCE / 'FTHRGameSource.exe').is_file():
+    raise FileNotFoundError(
+        f'Missing Minecraft Java capture provider at {GAME_SOURCE}. '
+        'Build it with tools/build_minecraft_game_source.py first.')
+
 # FFmpeg DLLs the C++ engine links against on Windows
 _FFMPEG_BIN  = ROOT / 'FTHRcapture' / 'FTHRclips' / 'third_party' / 'ffmpeg' / 'bin'
 _FFMPEG_DLLS = _glob.glob(str(_FFMPEG_BIN / '*.dll'))
@@ -113,6 +122,7 @@ a = Analysis(
         *[(exe, 'engine') for exe in _FFMPEG_TOOLS],
     ],
     datas=[
+        (str(GAME_SOURCE), 'engine/game-source'),
         (str(ASSETS_DIR / 'favicon.ico'),     'assets'),
         (str(ASSETS_DIR / 'fthr_logo.png'),   'assets'),
         (str(ASSETS_DIR / 'preview_desktop.png'), 'assets'),
@@ -144,6 +154,7 @@ a = Analysis(
         'PySide6.QtQuickWidgets',
         'PySide6.QtQml',
         'PySide6.QtNetwork',
+        'PySide6.QtWebEngineWidgets',
         'sounddevice',
         'numpy',
         'cv2',
@@ -188,7 +199,7 @@ a = Analysis(
         'imageio_ffmpeg',
         # Qt modules unused on Windows. Quick/QML power video and snapshots.
         'PySide6.QtWebEngine',
-        'PySide6.QtWebEngineCore', 'PySide6.QtBluetooth', 'PySide6.QtPositioning',
+        'PySide6.QtWebEngineQuick', 'PySide6.QtBluetooth',
         'PySide6.QtSensors', 'PySide6.QtLocation', 'PySide6.Qt3D',
         'PySide6.QtPdf', 'PySide6.QtPdfWidgets', 'PySide6.QtNfc',
         # GPL-only Qt modules are outside the reviewed LGPL runtime.
@@ -229,8 +240,11 @@ def _keep_reviewed_qt_runtime(entry):
     # Qt on supported Windows versions resolves the operating system ICU.
     # Never collect unrelated ICU copies which happen to be on PATH: a newer
     # Poppler/Codex ICU beside Qt6Core makes QtWidgets fail during import.
-    foreign_icu = (name == 'icuuc.dll'
-                   or name.startswith(('icudt', 'icuin')))
+    foreign_icu = (
+        name == 'icuuc.dll'
+        or (name.startswith(('icudt', 'icuin'))
+            and dest != 'pyside6/resources/icudtl.dat')
+    )
     return ('virtualkeyboard' not in dest
             and '/qml/qtquick3d/' not in dest
             and '/qml/qtquick/timeline/' not in dest

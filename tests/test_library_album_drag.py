@@ -20,7 +20,7 @@ def test_control_click_enters_selection_without_opening(selection_library, qtbot
     qtbot.mouseClick(card._thumb_frame, Qt.MouseButton.LeftButton,
                      Qt.KeyboardModifier.ControlModifier)
     assert grid.selected_records == (grid._record_for_path(card.file_path),)
-    assert grid.select_mode_btn.text() == 'Done selecting'
+    assert grid.select_mode_btn.text() == 'Done'
     assert clicked == []
 
 

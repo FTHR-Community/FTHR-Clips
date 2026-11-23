@@ -92,6 +92,30 @@ void ProtectedWindowsPauseWithoutChangingTheCaptureSource() {
         "protected targets retain the supported WGC monitor backend");
 }
 
+void MinecraftJavaAutomaticModeKeepsCaptureInsideTheGame() {
+    using Backend = fthr::WindowsCaptureBackend;
+    using Preference = fthr::WindowsCaptureBackendPreference;
+    for (bool cursor : {false, true}) {
+        const auto plan = fthr::PlanWindowsCaptureStartup(
+            true, true, false, Preference::Auto, cursor, true);
+        CheckBackendPolicy(plan.supported && plan.primary == Backend::MinecraftJavaGame
+                && plan.fallback == Backend::None && !plan.focus_gated,
+            "Minecraft Java Auto selects only Game Capture for either cursor setting");
+    }
+    const auto forced_wgc = fthr::PlanWindowsCaptureStartup(
+        true, true, false, Preference::Wgc, true, true);
+    const auto forced_dxgi = fthr::PlanWindowsCaptureStartup(
+        true, true, false, Preference::Dxgi, true, true);
+    const auto missing = fthr::PlanWindowsCaptureStartup(
+        true, false, false, Preference::Auto, true, true);
+    const auto protected_target = fthr::PlanWindowsCaptureStartup(
+        true, true, true, Preference::Auto, true, true);
+    CheckBackendPolicy(forced_wgc.supported && forced_wgc.primary == Backend::WgcWindow
+            && !forced_dxgi.supported && !missing.supported
+            && protected_target.primary == Backend::WgcMonitor,
+        "Game Capture only applies to a recognized, unprotected Minecraft Java HWND in Auto");
+}
+
 void MissingCaptureTargetsHaveStableStartupErrorIdentity() {
     CheckBackendPolicy(
         std::strcmp(fthr::ReplayStartupErrorName(
@@ -347,6 +371,7 @@ int RunWindowsCaptureBackendPolicyTests() {
     ExplicitDesktopBackendNeverFallsBack();
     WindowModeRequiresAnExactWindowCaptureTarget();
     ProtectedWindowsPauseWithoutChangingTheCaptureSource();
+    MinecraftJavaAutomaticModeKeepsCaptureInsideTheGame();
     MissingCaptureTargetsHaveStableStartupErrorIdentity();
     WgcSizeMismatchPreservesSourceSpecificRecoveryPolicy();
     WgcMonitorGeometryDebouncesFocusTransitions();

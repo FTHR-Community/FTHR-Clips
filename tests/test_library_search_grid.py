@@ -76,10 +76,8 @@ def test_pending_text_debounces_and_new_matching_index_entry_appears(
     grid, manager = state.grid, state.manager
     grid.start_scanning()
     qtbot.waitUntil(lambda: grid._active_scan_worker is None, timeout=10000)
-    qtbot.wait(250)
-    assert not grid._resize_timer.isActive()
-    assert not grid._virtual_update_timer.isActive()
-    assert grid._thumb_widgets
+    qtbot.waitUntil(lambda: bool(grid._thumb_widgets) and not grid._resize_timer.isActive()
+                    and not grid._virtual_update_timer.isActive(), timeout=3000)
 
     apply_count = 0
     original_clear = grid._clear_sections

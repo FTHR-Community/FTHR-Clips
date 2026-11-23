@@ -207,6 +207,129 @@ def test_corrupt_thumbnail_is_not_a_cache_hit(tmp_path: Path) -> None:
     assert _valid_cached_thumbnail(str(corrupt)) is False
 
 
+def test_thumbnail_cache_uses_valid_indexed_identity_and_rechecks_replacement(tmp_path, monkeypatch):
+    from core.library_index import LibraryRecord, canonical_media_path
+    from ui import library_thumbnails
+
+    media = tmp_path / 'clip.mp4'
+    media.write_bytes(b'original')
+    stat = media.stat()
+    record = LibraryRecord(str(media), canonical_media_path(media), (), False, 'video',
+                           stat.st_size, stat.st_mtime_ns, stat.st_dev, stat.st_ino)
+    expected = library_thumbnails._get_cached_thumb_path(str(media))
+    resolves = []
+
+    def resolve(path):
+        resolves.append(path)
+        return canonical_media_path(path)
+
+    monkeypatch.setattr(library_thumbnails, 'canonical_media_path', resolve)
+    assert library_thumbnails._get_cached_thumb_path(str(media), indexed=record) == expected
+    assert not resolves
+    media.write_bytes(b'replacement payload')
+    assert library_thumbnails._get_cached_thumb_path(str(media), indexed=record) != expected
+    assert resolves == [str(media)]
+
+
+def test_thumbnail_uses_existing_sidecar_after_cancelled_jpeg(tmp_path, monkeypatch):
+    from PySide6.QtGui import QImage
+    from ui import library_thumbnails
+
+    media = tmp_path / 'clip.mp4'
+    media.touch()
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path))
+    cache_path = library_thumbnails._get_cached_thumb_path(str(media))
+    library_thumbnails._write_cached_duration(
+        library_thumbnails._get_cached_duration_path(cache_path), 13.25, 1920, 1080, 60)
+    probes = []
+    monkeypatch.setattr(library_thumbnails, '_probe_with_owned_process', lambda *_: probes.append(True))
+    image = QImage(8, 8, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFFFF)
+    monkeypatch.setattr(library_thumbnails, '_decode_thumbnail_with_owned_process', lambda *_: image)
+    worker = library_thumbnails._ThumbnailWorker(str(media))
+    results = []
+    worker.signals.finished.connect(lambda *args: results.append(args))
+    worker.run()
+    assert not probes
+    assert results == [(str(media), cache_path, 13)]
+    assert library_thumbnails.get_cached_clip_metadata(str(media))[0] == 13.25
+
+
+def test_motion_pixels_then_authoritative_sidecar_only_with_interruption(tmp_path, monkeypatch):
+    from PySide6.QtGui import QImage
+    from ui import library_thumbnails
+
+    media = tmp_path / 'clip.mp4'
+    media.touch()
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path))
+    image = QImage(8, 8, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFFFF)
+    decodes = []
+    monkeypatch.setattr(library_thumbnails, '_decode_thumbnail_with_owned_process',
+                        lambda *_: decodes.append(True) or image)
+    info = SimpleNamespace(duration_seconds=13.25, width=1920, height=1080,
+                           average_fps=60, video_bitrate_bps=1, total_bitrate_bps=1)
+    probes = []
+
+    def probe(_source, cancel):
+        probes.append(True)
+        if len(probes) == 1:
+            cancel.set()
+        return info
+
+    monkeypatch.setattr(library_thumbnails, '_probe_with_owned_process', probe)
+    cache_path = library_thumbnails._get_cached_thumb_path(str(media))
+    preview = library_thumbnails._ThumbnailWorker(str(media))
+    preview._thumbnail_motion_preview = True
+    preview.run()
+    jpeg = Path(cache_path).read_bytes()
+    assert len(decodes) == 1 and not probes
+    assert library_thumbnails.get_cached_clip_metadata(str(media)) is None
+    disk_result = []
+    cache_reader = library_thumbnails._CachedThumbnailWorker(str(media), True, threading.Event())
+    cache_reader.signals.finished.connect(lambda *args: disk_result.append(args))
+    cache_reader.run()
+    assert len(disk_result) == 1 and disk_result[0][2] is None
+    interrupted = library_thumbnails._ThumbnailWorker(str(media))
+    interrupted.run()
+    assert library_thumbnails.get_cached_clip_metadata(str(media)) is None
+    completed = library_thumbnails._ThumbnailWorker(str(media))
+    completed.run()
+    assert len(probes) == 2 and len(decodes) == 1 and Path(cache_path).read_bytes() == jpeg
+    assert library_thumbnails.get_cached_clip_metadata(str(media))[0] == 13.25
+
+
+def test_motion_preview_does_not_publish_if_source_is_replaced(tmp_path, monkeypatch):
+    from PySide6.QtGui import QImage
+    from ui import library_thumbnails
+
+    media = tmp_path / 'clip.mp4'
+    media.write_bytes(b'old')
+    monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path))
+    old_cache = library_thumbnails._get_cached_thumb_path(str(media))
+    old_stat = media.stat()
+
+    def decode(*_args):
+        replacement = tmp_path / 'replacement.mp4'
+        replacement.write_bytes(b'new')
+        os.utime(replacement, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+        replacement.replace(media)
+        image = QImage(8, 8, QImage.Format.Format_RGB32)
+        image.fill(0xFFFFFFFF)
+        return image
+
+    monkeypatch.setattr(library_thumbnails, '_decode_thumbnail_with_owned_process', decode)
+    worker = library_thumbnails._ThumbnailWorker(str(media))
+    worker._thumbnail_motion_preview = True
+    results, terminals = [], []
+    worker.signals.finished.connect(lambda *args: results.append(args))
+    worker.signals.diagnostic_finished.connect(lambda *args: terminals.append(args))
+    worker.run()
+    assert len(terminals) == 1 and not results
+    assert not Path(old_cache).exists()
+    assert library_thumbnails._get_cached_thumb_path(str(media)) == old_cache
+
+
 def test_safe_tree_honours_cancellation(tmp_path: Path) -> None:
     from core.clip_files import iter_safe_tree
 
@@ -283,7 +406,7 @@ def test_cancelled_thumbnail_worker_does_not_publish_failure_generation(
     cancelled = threading.Event()
     monkeypatch.setattr(library_thumbnails, "THUMB_CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(library_thumbnails, "_get_cached_thumb_path",
-                        lambda _path: str(cache))
+                        lambda _path, **_kwargs: str(cache))
     monkeypatch.setattr(library_thumbnails, "is_completed_video_path", lambda _path: True)
     monkeypatch.setattr(
         library_thumbnails, "_probe_with_owned_process",
@@ -323,7 +446,7 @@ def test_thumbnail_cache_prune_failure_still_releases_terminal_owner(
     cache = tmp_path / 'thumb.jpg'
     monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path))
     monkeypatch.setattr(library_thumbnails, '_get_cached_thumb_path',
-                        lambda _path: str(cache))
+                        lambda _path, **_kwargs: str(cache))
     monkeypatch.setattr(library_thumbnails, 'is_completed_video_path', lambda _path: True)
     monkeypatch.setattr(
         library_thumbnails, '_probe_with_owned_process',

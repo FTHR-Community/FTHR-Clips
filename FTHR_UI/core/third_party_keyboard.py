@@ -1,4 +1,4 @@
-"""Capture Windows keyboard visualizers into a timestamped JPEG ring.
+"""Capture keyboard visualizers into a timestamped frame ring.
 
 Win32/GDI capture runs outside the GUI thread; the latest raw frame serves
 the settings preview. This source is independent of native screen capture.
@@ -7,12 +7,15 @@ the settings preview. This source is independent of native screen capture.
 from __future__ import annotations
 
 import ctypes
+from ipaddress import ip_address
+from queue import Empty, Full, Queue
 import re
 import sys
 import threading
 import time
 from collections import deque
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from core.camera_overlay import clamp_overlay_rect
 
@@ -33,6 +36,10 @@ KEYBOARD_CAPTURE_FPS = 15
 KEYBOARD_COMPOSITE_FPS = 15
 KEYBOARD_RING_MAX_WIDTH = 960
 KEYBOARD_JPEG_QUALITY = 88
+KEYBOARD_BROWSER_WIDTH = 600
+KEYBOARD_BROWSER_HEIGHT = 360
+KEYBOARD_BROWSER_MAX_SIZE = 1080
+KEYBOARD_BROWSER_RING_MAX_BYTES = 48 * 1024 * 1024
 
 _HEX_COLOR = re.compile(r'^#[0-9a-fA-F]{6}$')
 _KEYBOARD_HINTS = (
@@ -71,6 +78,51 @@ def chroma_similarity_for_intensity(value: object) -> float:
     return 0.06 + (0.54 * intensity / 100.0)
 
 
+def keyboard_browser_host_allowed(scheme: str, host: str) -> bool:
+    if not host or any(char.isspace() or char in '%\\' for char in host):
+        return False
+    if scheme in {'https', 'wss'}:
+        return True
+    if scheme not in {'http', 'ws'}:
+        return False
+    if host == 'localhost' or host.endswith('.local'):
+        return True
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    return address.is_private and not address.is_unspecified
+
+
+def normalize_keyboard_browser_url(value: object) -> str:
+    if (not isinstance(value, str) or len(value) > 2048
+            or any(ord(char) < 32 or char in '\\' for char in value)):
+        return ''
+    text = value.strip()
+    try:
+        url = urlsplit(text)
+        if (url.scheme in {'http', 'https'}
+                and keyboard_browser_host_allowed(url.scheme, url.hostname or '')
+                and url.username is None and url.password is None
+                and (url.port is None or url.port > 0)):
+            return text
+    except ValueError:
+        pass
+    return ''
+
+
+def keyboard_source_available(config: dict) -> bool:
+    if config.get('source_type') == 'browser':
+        return bool(normalize_keyboard_browser_url(config.get('browser_url')))
+    return bool(config.get('hwnd'))
+
+
+def keyboard_browser_size(value, default: int) -> int:
+    if type(value) is int and 64 <= value <= KEYBOARD_BROWSER_MAX_SIZE:
+        return value
+    return default
+
+
 def third_party_keyboard_settings(settings) -> dict:
     """Read and sanitize the nested third-party keyboard settings object."""
     getter = settings.get
@@ -80,8 +132,13 @@ def third_party_keyboard_settings(settings) -> dict:
         hwnd = max(0, int(raw.get('hwnd', 0) or 0))
     except (TypeError, ValueError):
         hwnd = 0
-    return {
-        'enabled': bool(raw.get('enabled', False)) and hwnd != 0,
+    source_type = 'browser' if raw.get('source_type') == 'browser' else 'window'
+    config = {
+        'enabled': bool(raw.get('enabled', False)),
+        'source_type': source_type,
+        'browser_url': normalize_keyboard_browser_url(raw.get('browser_url')),
+        'browser_width': keyboard_browser_size(raw.get('browser_width'), KEYBOARD_BROWSER_WIDTH),
+        'browser_height': keyboard_browser_size(raw.get('browser_height'), KEYBOARD_BROWSER_HEIGHT),
         'hwnd': hwnd,
         'window_name': str(raw.get('window_name', '') or ''),
         'color': normalize_keyboard_color(raw.get(
@@ -91,6 +148,8 @@ def third_party_keyboard_settings(settings) -> dict:
         'rect': clamp_overlay_rect(
             raw.get('rect'), DEFAULT_KEYBOARD_OVERLAY_RECT),
     }
+    config['enabled'] = config['enabled'] and keyboard_source_available(config)
+    return config
 
 
 def is_windows_keyboard_source() -> bool:
@@ -398,6 +457,9 @@ class ThirdPartyKeyboardCapture:
         self._stop_event: threading.Event | None = None
         self._thread: threading.Thread | None = None
         self._hwnd = 0
+        self._browser = None
+        self._browser_identity = None
+        self._frame_bytes = 0
         self._latest_frame = None
         self._latest_timestamp = 0.0
         self._last_ring_frame = None
@@ -424,21 +486,38 @@ class ThirdPartyKeyboardCapture:
             hwnd = max(0, int(config.get('hwnd', 0) or 0))
         except (TypeError, ValueError):
             hwnd = 0
-        if sys.platform != 'win32' or not enabled or not hwnd:
+        browser_identity = None
+        if config.get('source_type') == 'browser':
+            url = normalize_keyboard_browser_url(config.get('browser_url'))
+            if url:
+                browser_identity = (
+                    url,
+                    keyboard_browser_size(config.get('browser_width'), KEYBOARD_BROWSER_WIDTH),
+                    keyboard_browser_size(config.get('browser_height'), KEYBOARD_BROWSER_HEIGHT),
+                )
+            hwnd = 0
+        if sys.platform != 'win32' or not enabled or not (hwnd or browser_identity):
             self.stop()
             return
-        if self.hwnd == hwnd and self.is_running():
+        if (self.hwnd == hwnd and self._browser_identity == browser_identity
+                and self.is_running()):
             return
         self.stop()
         with self._lock:
             self._hwnd = hwnd
+            self._browser_identity = browser_identity
             self._frames.clear()
+            self._frame_bytes = 0
             self._latest_frame = None
             self._latest_timestamp = 0.0
             self._last_ring_frame = None
             self._last_error = ''
             self._stop_event = threading.Event()
             event = self._stop_event
+        if browser_identity is not None:
+            self._start_browser(browser_identity, event)
+            return
+        with self._lock:
             self._thread = threading.Thread(
                 target=self._capture_loop,
                 args=(hwnd, event),
@@ -446,6 +525,45 @@ class ThirdPartyKeyboardCapture:
                 daemon=True,
             )
             self._thread.start()
+
+    def _start_browser(self, identity, event):
+        pending = Queue(maxsize=1)
+
+        def submit(image):
+            try:
+                pending.put_nowait((image, time.monotonic()))
+            except Full:
+                pass
+
+        def report(message):
+            with self._lock:
+                if self._stop_event is event:
+                    self._last_error = message
+
+        try:
+            from core.keyboard_browser_source import KeyboardBrowserSource
+            self._browser = KeyboardBrowserSource(
+                *identity, self.capture_fps, submit, report)
+        except (ImportError, OSError, RuntimeError):
+            report('The browser overlay renderer is unavailable.')
+            return
+        self._thread = threading.Thread(
+            target=self._capture_browser_loop,
+            args=(pending, event), name='FTHR-KeyboardBrowserOverlay', daemon=True)
+        self._thread.start()
+
+    def _capture_browser_loop(self, pending, event):
+        import numpy as np
+
+        while not event.is_set():
+            try:
+                image, stamp = pending.get(timeout=0.1)
+            except Empty:
+                continue
+            width, height = image.width(), image.height()
+            pixels = np.frombuffer(image.constBits(), dtype=np.uint8)
+            frame = pixels.reshape(height, image.bytesPerLine())[:, :width * 4]
+            self._accept_frame(stamp, frame.reshape(height, width, 4).copy(), event)
 
     def apply_settings(self, settings) -> dict:
         config = third_party_keyboard_settings(settings)
@@ -463,13 +581,23 @@ class ThirdPartyKeyboardCapture:
             self._stop_event = None
             self._thread = None
             self._hwnd = 0
+            browser, self._browser = self._browser, None
+            if self._browser_identity is not None:
+                self._frames.clear()
+                self._frame_bytes = 0
+                self._latest_frame = None
+                self._last_ring_frame = None
+                self._latest_timestamp = 0.0
+            self._browser_identity = None
         if event is not None:
             event.set()
+        if browser is not None:
+            browser.close()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1.0)
 
     def latest_frame(self):
-        """Return ``(bgr_frame, monotonic_timestamp)`` for the live preview."""
+        """Return a BGR or BGRA frame and a monotonic timestamp for preview."""
         with self._lock:
             if self._latest_frame is None:
                 return None, self._latest_timestamp
@@ -485,20 +613,7 @@ class ThirdPartyKeyboardCapture:
                 with self._lock:
                     self._last_error = 'The keyboard window could not be captured.'
             else:
-                ring_frame = frame
-                if frame.shape[1] > KEYBOARD_RING_MAX_WIDTH:
-                    import cv2
-                    ring_width = KEYBOARD_RING_MAX_WIDTH
-                    ring_height = max(
-                        2, int(round(frame.shape[0] * ring_width / frame.shape[1])))
-                    ring_frame = cv2.resize(
-                        frame, (ring_width, ring_height),
-                        interpolation=cv2.INTER_AREA)
-                with self._lock:
-                    self._latest_frame = frame
-                    self._latest_timestamp = stamp
-                    self._last_error = ''
-                self._store_ring_frame_if_changed(stamp, ring_frame)
+                self._accept_frame(stamp, frame, stop_event)
             next_tick += period
             wait_for = max(0.0, next_tick - time.monotonic())
             if wait_for > 0:
@@ -506,8 +621,24 @@ class ThirdPartyKeyboardCapture:
             else:
                 next_tick = time.monotonic()
 
-    def _store_ring_frame_if_changed(self, stamp: float, frame) -> bool:
-        """JPEG-encode only changed keyboard states to retain timing without
+    def _accept_frame(self, stamp, frame, event):
+        ring_frame = frame
+        if frame.shape[1] > KEYBOARD_RING_MAX_WIDTH:
+            import cv2
+            ring_width = KEYBOARD_RING_MAX_WIDTH
+            ring_height = max(2, round(frame.shape[0] * ring_width / frame.shape[1]))
+            ring_frame = cv2.resize(
+                frame, (ring_width, ring_height), interpolation=cv2.INTER_AREA)
+        with self._lock:
+            if self._stop_event is not event:
+                return
+            self._latest_frame = frame
+            self._latest_timestamp = stamp
+            self._last_error = ''
+        self._store_ring_frame_if_changed(stamp, ring_frame, event=event)
+
+    def _store_ring_frame_if_changed(self, stamp: float, frame, *, event=None) -> bool:
+        """Encode only changed keyboard states to retain timing without
         repeatedly encoding identical frames.
         """
         try:
@@ -523,18 +654,30 @@ class ThirdPartyKeyboardCapture:
             if unchanged:
                 return False
 
-            encoded = _encode_jpeg(frame)
+            alpha = frame.shape[2] == 4
+            if alpha:
+                import cv2
+                ok, result = cv2.imencode('.webp', frame, [cv2.IMWRITE_WEBP_QUALITY, 101])
+                encoded = result.tobytes() if ok else None
+            else:
+                encoded = _encode_jpeg(frame)
             if not encoded:
                 return False
             with self._lock:
+                if event is not None and self._stop_event is not event:
+                    return False
                 self._last_ring_frame = frame.copy()
+                if len(self._frames) == self._frames.maxlen:
+                    self._frame_bytes -= len(self._frames.popleft()[1])
                 self._frames.append((float(stamp), encoded))
+                self._frame_bytes += len(encoded)
                 # Retain one state immediately before the replay horizon so a
                 # long-held key/background can seed the first output frame.
                 cutoff = float(stamp) - self._buffer_seconds
-                while (len(self._frames) > 1
-                       and float(self._frames[1][0]) < cutoff):
-                    self._frames.popleft()
+                while len(self._frames) > 1 and (
+                        float(self._frames[1][0]) < cutoff
+                        or (alpha and self._frame_bytes > KEYBOARD_BROWSER_RING_MAX_BYTES)):
+                    self._frame_bytes -= len(self._frames.popleft()[1])
             return True
         except Exception as error:
             print(f'[KeyboardOverlay] Could not stage changed source frame: {error}')
@@ -545,8 +688,9 @@ class ThirdPartyKeyboardCapture:
 
     def iter_segment_frames(self, end_time: float,
                             duration_seconds: int,
-                            output_fps: int = 30):
-        """Yield timestamp-matched BGR frames with one decoded hold-last frame.
+                            output_fps: int = 30, *,
+                            require_coverage: bool = False):
+        """Yield timestamp-matched BGR or BGRA frames with one decoded hold-last frame.
 
         Decode on demand to avoid expanding a full replay window of JPEGs in memory.
         """
@@ -562,6 +706,7 @@ class ThirdPartyKeyboardCapture:
             start_time = end_time - duration
             with self._lock:
                 stored = tuple(self._frames)
+                latest = self._latest_timestamp
             prior = None
             entries = []
             for stamp, encoded in stored:
@@ -574,11 +719,16 @@ class ThirdPartyKeyboardCapture:
                 entries.insert(0, prior)
             if not entries:
                 return
+            if require_coverage:
+                tolerance = max(0.25, 2.0 / output_fps)
+                if (entries[0][0] > start_time + tolerance
+                        or latest < end_time - tolerance):
+                    return
 
             def decode(encoded):
                 return cv2.imdecode(
                     np.frombuffer(encoded, dtype=np.uint8),
-                    cv2.IMREAD_COLOR)
+                    cv2.IMREAD_UNCHANGED)
 
             frame_count = max(1, duration * output_fps)
             cursor = 0
@@ -607,7 +757,8 @@ class ThirdPartyKeyboardCapture:
     def iter_segment_rgba(self, end_time: float, duration_seconds: int,
                           target_size: tuple[int, int], color=DEFAULT_KEYBOARD_COLOR,
                           intensity=DEFAULT_KEYBOARD_INTENSITY,
-                          output_fps: int = 30):
+                          output_fps: int = 30, *,
+                          require_coverage: bool = False):
         """Yield target-sized RGBA frames keyed with the live-preview math."""
         if sys.platform != 'win32':
             return
@@ -619,7 +770,8 @@ class ThirdPartyKeyboardCapture:
             previous_source = None
             previous_rgba = None
             for frame in self.iter_segment_frames(
-                    end_time, duration_seconds, output_fps):
+                    end_time, duration_seconds, output_fps,
+                    require_coverage=require_coverage):
                 source_frame = frame
                 if source_frame is previous_source and previous_rgba is not None:
                     yield previous_rgba
@@ -628,7 +780,8 @@ class ThirdPartyKeyboardCapture:
                     frame = cv2.resize(
                         frame, (target_w, target_h),
                         interpolation=cv2.INTER_AREA)
-                rgba = chroma_key_rgba(frame, color, intensity)
+                rgba = (cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
+                        if frame.shape[2] == 4 else chroma_key_rgba(frame, color, intensity))
                 if rgba is not None:
                     previous_source = source_frame
                     previous_rgba = rgba
@@ -659,6 +812,8 @@ class ThirdPartyKeyboardCapture:
             try:
                 for image in self.iter_segment_frames(
                         end_time, duration_seconds, output_fps):
+                    if image.shape[2] == 4:
+                        image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
                     if writer is None:
                         source_h, source_w = image.shape[:2]
                         target_w = min(960, max(2, int(source_w))) & ~1

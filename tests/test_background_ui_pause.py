@@ -335,10 +335,14 @@ def test_background_pause_waits_for_the_first_painted_frame(qtbot, monkeypatch):
     assert len(scheduled) == 1
 
 
-def _initialize_empty_cover_lane(grid):
-    """Mirror the constructor's empty cover state without starting workers."""
+def _initialize_empty_discovery_lanes(grid):
+    """Mirror the constructor's empty thumbnail, cover and overlap lanes."""
     from collections import OrderedDict
+    from ui.clip_overlap import OverlapDiscovery
 
+    grid._overlap_discovery = OverlapDiscovery()
+    grid._deferred_thumbnail_paths = set()
+    grid._scroll_thumbnail_misses = OrderedDict()
     grid._cover_decode_jobs = {}
     grid._cover_decode_inflight = grid._cover_decode_jobs
     grid._cover_decode_pending = OrderedDict()
@@ -428,7 +432,7 @@ def test_thumbnail_cancel_resume_re_enriches_card_and_allows_open(
             media_path, canonical_media_path(media_path), (), False, 'video',
             media.stat().st_size, media.stat().st_mtime_ns)
     }
-    _initialize_empty_cover_lane(grid)
+    _initialize_empty_discovery_lanes(grid)
     grid._imported_files = set()
     grid.refresh_timer = QTimer()
     grid._debounce_timer = QTimer()
@@ -510,7 +514,7 @@ def test_thumbnail_worker_emits_terminal_diagnostic_for_every_exit_path(
     cache = tmp_path / f'{terminal_state}.jpg'
     monkeypatch.setattr(library_thumbnails, 'THUMB_CACHE_DIR', str(tmp_path))
     monkeypatch.setattr(library_thumbnails, '_get_cached_thumb_path',
-                        lambda _path: str(cache))
+                        lambda _path, **_kwargs: str(cache))
     monkeypatch.setattr(library_thumbnails, 'is_completed_video_path', lambda _path: True)
 
     cancel_event = threading.Event()
@@ -688,7 +692,7 @@ def test_repeated_pause_resume_does_not_strand_thumbnail_ownership(
             media_path, canonical_media_path(media_path), (), False, 'video',
             media.stat().st_size, media.stat().st_mtime_ns)
     }
-    _initialize_empty_cover_lane(grid)
+    _initialize_empty_discovery_lanes(grid)
     grid._imported_files = set()
     grid.refresh_timer = QTimer()
     grid._debounce_timer = QTimer()

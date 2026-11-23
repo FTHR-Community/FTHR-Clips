@@ -4,6 +4,8 @@ Enable Ultra Performance Mode under Settings → Performance. The app remembers 
 
 ## Capture and saves
 
+On Windows, the **Automatic (recommended)** encoder uses the GPU that captures the selected source. On a hybrid laptop, an explicit NVIDIA selection can require reading every frame back through system memory. Ultra uses your existing encoder selection. To try the same-GPU route, choose Automatic in the full app's encoder settings and let the capture change take effect before comparing gameplay.
+
 Entering or leaving the mode keeps the native capture session and its replay buffer. Source changes and other edits still use the app’s normal apply and restart rules. Capture admission, hotkeys, manual recording, audio, storage quota checks, crash recovery, and save diagnostics stay active.
 
 New replay saves skip image, camera, and keyboard overlays and other cosmetic effects. Source crop remains in effect. Audio muxing, required timing repairs and validation, duration checks, metadata, and safe publication continue. A save already admitted uses its original settings. Its camera and keyboard providers are released after existing work and any late engine response settle, then restored from the current capture request when returning to the full app.

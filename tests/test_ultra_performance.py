@@ -36,6 +36,15 @@ def test_compact_shell_suspends_and_restores_runtime(
     try:
         window.show()
         qtbot.waitUntil(lambda: window._file_operations_ready)
+        original_settings_page = getattr(window, '_settings_page_widget', None)
+        trash_page = window.main_stack.widget(2)
+        if initially_enabled:
+            assert original_settings_page is None
+            assert window.findChild(main._SettingsPage) is None
+            assert window._plugin_runtime.surfaces is None
+            window.set_capture_admission_status('Capture admission status during startup')
+        else:
+            assert window.main_stack.widget(1) is original_settings_page
         if not initially_enabled:
             window._set_ultra_performance_mode(True)
 
@@ -53,6 +62,19 @@ def test_compact_shell_suspends_and_restores_runtime(
         window._ultra_page.exit_requested.emit()
         assert window._ultra_page.isHidden()
         assert window._full_app_shell.isVisible()
+        settings_page = window._settings_page_widget
+        assert window.main_stack.widget(1) is settings_page
+        assert window.main_stack.widget(2) is trash_page
+        assert settings_page.plugin_runtime is window._plugin_runtime
+        assert settings_page.get_plugin_surfaces() is window._plugin_runtime.surfaces
+        if initially_enabled:
+            assert settings_page._capture_admission_status == (
+                'Capture admission status during startup')
+        else:
+            assert settings_page is original_settings_page
+        assert window._set_main_page(1)
+        assert settings_page.isVisible()
+        assert window._set_main_page(0)
         window.resize(1280, 720)
         assert window.width() == 1280
         window.main_mode_cluster.setMinimumWidth(1800)

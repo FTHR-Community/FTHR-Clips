@@ -6,7 +6,7 @@ capture-generation tag whose interval agrees with playback is accepted.
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass, replace
 from fractions import Fraction
 import heapq
 from itertools import islice
@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 
 from core.ffmpeg_tools import get_ffmpeg_exe, get_ffprobe_exe
 from core.ffmpeg_tools import _NO_WINDOW
+from core.clip_overlap_cache import CACHE_MISS
 from core.media_identity import file_identity
 from core.media_process import run_media_process
 
@@ -75,6 +76,7 @@ def parse_timeline(value) -> CaptureTimeline | None:
             return None
         return CaptureTimeline(**{key: value for key, value in data.items() if key != 'version'})
     except (ValueError, TypeError, OverflowError):
+        # A malformed tag provides no evidence of a capture generation.
         return None
 
 
@@ -109,7 +111,11 @@ def _probe(path, cancel):
          '-of', 'json', str(path)], cancel, timeout_seconds=8, background=True)
     if result is None or result[0] or len(result[1]) > 1024 * 1024:
         raise ValueError('Could not read clip timing. Refresh the library and try again.')
-    return json.loads(result[1])
+    document = json.loads(result[1])
+    if (not isinstance(document, dict) or not isinstance(document.get('format'), dict)
+            or not isinstance(document.get('streams'), list)):
+        raise ValueError('Incomplete clip timing probe')
+    return document
 
 
 def _clip_from_probe(path, identity, document):
@@ -159,29 +165,96 @@ def _clip_from_probe(path, identity, document):
     return ClipInfo(str(path), identity, timeline, width, height, fps, tuple(audio), color)
 
 
-def probe_clip(path, cancel=None, *, refresh=False) -> ClipInfo | None:
-    """Background-only probe; negative results are cached by file identity."""
-    cancel = cancel or threading.Event()
+@dataclass(frozen=True)
+class ClipInspection:
+    info: ClipInfo | None = None
+    complete: bool = False
+    probed: bool = False
+
+
+def _encode_inspection(info: ClipInfo | None) -> bytes | None:
+    if info is None:
+        return None
+    return json.dumps([info.timeline.to_json(), info.width, info.height, str(info.fps),
+                       [astuple(track) for track in info.audio], info.color],
+                      separators=(',', ':')).encode('utf-8', errors='surrogatepass')
+
+
+def _decode_inspection(payload, path, identity) -> ClipInfo | None:
+    if payload is None:
+        return None
+    data, width, height, fps, audio, color = json.loads(payload)
+    timeline, fps = parse_timeline(data), Fraction(fps)
+    if (timeline is None or type(width) is not int or type(height) is not int
+            or not 0 < width <= 16384 or not 0 < height <= 16384 or not 0 < fps <= 1000
+            or not isinstance(audio, list) or len(audio) > 38 or not isinstance(color, list)
+            or len(color) != 4 or any(not isinstance(value, str) for value in color)):
+        raise ValueError('Invalid overlap cache entry')
+    tracks = []
+    for index, key, handler, title in audio:
+        if type(index) is not int or any(not isinstance(value, str) for value in (key, handler, title)):
+            raise ValueError('Invalid overlap cache audio track')
+        tracks.append(AudioTrack(index, key, handler, title))
+    return ClipInfo(path, identity, timeline, width, height, fps, tuple(tracks), tuple(color))
+
+
+def inspect_clip(path, cancel, *, cache=None, refresh=False, expected=None) -> ClipInspection:
+    """Distinguish a conclusive negative result from a failed or cancelled read."""
+    probed = False
     try:
         path = str(Path(path).absolute())
-        if Path(path).suffix.lower() != '.mp4' or cancel.is_set():
-            return None
+        if cancel.is_set():
+            return ClipInspection()
+        if Path(path).suffix.lower() != '.mp4':
+            return ClipInspection(complete=True)
         identity = file_identity(path)
-        with _cache_lock:
-            if not refresh and identity in _cache:
-                _cache.move_to_end(identity)
-                return _cache[identity]
+        cache_identity = identity
+        if expected is not None:
+            size, mtime_ns, inode, device = expected
+            if identity[1:3] != (size, mtime_ns) or (inode and identity[4] != inode):
+                return ClipInspection()
+            cache_identity = (*identity, device)
+        if not refresh:
+            if cache is None:
+                with _cache_lock:
+                    if identity in _cache:
+                        _cache.move_to_end(identity)
+                        info = _cache[identity]
+                        if info is not None and info.path != path:
+                            info = replace(info, path=path)
+                        return ClipInspection(info, complete=True)
+            else:
+                payload = cache.get(cache_identity)
+                if payload is not CACHE_MISS:
+                    try:
+                        info = _decode_inspection(payload, path, identity)
+                    except (ValueError, TypeError, OverflowError, ZeroDivisionError):
+                        pass  # A malformed disposable entry gets a fresh probe.
+                    else:
+                        return ClipInspection(info, complete=True)
+        if cancel.is_set():
+            return ClipInspection()
+        probed = True
         info = _clip_from_probe(path, identity, _probe(path, cancel))
         if cancel.is_set() or file_identity(path) != identity:
-            return None
-        with _cache_lock:
-            _cache[identity] = info
-            _cache.move_to_end(identity)
-            while len(_cache) > 4096:
-                _cache.popitem(last=False)
-        return info
-    except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError, RuntimeError):
-        return None
+            return ClipInspection(probed=True)
+        if cache is None:
+            with _cache_lock:
+                _cache[identity] = info
+                _cache.move_to_end(identity)
+                while len(_cache) > 4096:
+                    _cache.popitem(last=False)
+        else:
+            cache.put(cache_identity, _encode_inspection(info))
+        return ClipInspection(info, complete=True, probed=True)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError,
+            ZeroDivisionError, RuntimeError, OverflowError):
+        return ClipInspection(probed=probed)
+
+
+def probe_clip(path, cancel=None, *, refresh=False) -> ClipInfo | None:
+    """Background-only probe; merge refresh always revalidates the source."""
+    return inspect_clip(path, cancel or threading.Event(), refresh=refresh).info
 
 
 def find_overlaps(infos) -> dict[str, tuple[str, ...]]:

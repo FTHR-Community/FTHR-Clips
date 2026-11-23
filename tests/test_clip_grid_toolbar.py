@@ -76,7 +76,7 @@ def test_single_row_fits_and_done_exits(toolbar_grid, qtbot, width):
     toolbar_grid.page.resize(width, 720)
     qtbot.wait(100)
     grid._set_selection_mode(True)
-    assert grid.select_mode_btn.text() == 'Done selecting'
+    assert grid.select_mode_btn.text() == 'Done'
     controls = (grid._all_count_label, grid.search_edit, grid.reset_search_btn,
                 grid.filter_combo, grid.sort_combo, grid.select_mode_btn)
     header = grid._library_toolbar

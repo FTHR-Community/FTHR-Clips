@@ -81,6 +81,59 @@ def _run(command):
     return result.stdout
 
 
+def test_source_cut_only_silences_that_source_in_preview_and_export(tmp_path):
+    ffmpeg = get_ffmpeg_exe()
+    game, chat, video = [tmp_path / name for name in ('game.wav', 'chat.wav', 'recording.mp4')]
+    _wave(game, duration=2, frequency=220)
+    _wave(chat, duration=2, frequency=660)
+    _run([ffmpeg, '-v', 'error', '-f', 'lavfi', '-i', 'color=s=64x48:r=30:d=2',
+          '-i', str(game), '-i', str(chat), '-map', '0:v:0', '-map', '1:a:0',
+          '-map', '2:a:0', '-c:v', 'mpeg4', '-c:a', 'aac', '-y', str(video)])
+    sources = (PlaybackSource('game', 'Game', 'application', 1, 0),
+               PlaybackSource('chat', 'Discord', 'application', 2, 1))
+
+    def amplitude(data, start_s, frequency):
+        offset = round(start_s * 48000)
+        samples = np.frombuffer(data, '<f4')[::2][offset:offset + 4800]
+        phase = np.arange(len(samples)) * np.pi * 2 * frequency / 48000
+        return abs(np.sum(samples * np.exp(phase * 1j))) * 2 / len(samples)
+
+    def verify(data, quiet_interval):
+        assert amplitude(data, .1, 220) > .09
+        assert amplitude(data, quiet_interval, 220) < .001
+        assert amplitude(data, quiet_interval, 660) > .08
+
+    mixer = InProcessFFmpegMixer(str(video), sources)
+    try:
+        mixer.configure_source_silences({'game': ((500, 1100),)})
+        mixer.seek(0)
+        pcm = b''.join(mixer.pull(480, [1, 1], 1) for _ in range(140))
+        verify(pcm, .7)
+        mixer.seek(700)
+        seek_pcm = b''.join(mixer.pull(480, [1, 1], 1) for _ in range(15))
+        assert amplitude(seek_pcm, .01, 220) < .001
+        assert amplitude(seek_pcm, .01, 660) > .08
+        mixer.configure_source_silences({})
+        mixer.seek(700)
+        restored = b''.join(mixer.pull(480, [1, 1], 1) for _ in range(15))
+        assert amplitude(restored, .01, 220) > .09
+    finally:
+        mixer.close()
+
+    out = tmp_path / 'edit.mp4'
+    viewer = SimpleNamespace(
+        clip_path=str(video), _audio_tracks=(('game', 0), ('chat', 1)),
+        _playback_sources=sources, _source_volumes={}, _source_mutes={}, _master_volume=100,
+        _source_audio_silences={'game': ((.5, 1.1),)})
+    _run(ClipViewer._build_export_cmd(
+        viewer, ffmpeg, .2, 1.4, str(out), None, ['-c:v', 'mpeg4'],
+        segments=[(.2, .8), (1.0, 1.6)]))
+    audio = _run([ffmpeg, '-v', 'error', '-i', str(out), '-map', '0:a:0',
+                  '-f', 'f32le', '-ac', '2', '-ar', '48000', '-'])
+    verify(audio, .4)
+    assert amplitude(audio, .85, 220) > .09
+
+
 def test_external_mix_matches_native_preview_with_short_44100_track(tmp_path):
     base = tmp_path / 'game.wav'
     imported = tmp_path / 'Musik ä.wav'
