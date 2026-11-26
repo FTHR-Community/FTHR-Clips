@@ -30,7 +30,7 @@ PUBLISHER = 'FTHR Community'
 
 
 def version_string() -> str:
-    """The canonical human-facing version, e.g. '1.0.0-alpha'."""
+    """The canonical human-facing version, e.g. '1.1.0-alpha'."""
     return __version__
 
 
